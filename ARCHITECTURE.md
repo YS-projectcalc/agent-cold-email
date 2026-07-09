@@ -1,13 +1,55 @@
 # ColdStart — ARCHITECTURE
 
-> **Status: PROPOSAL** — adversarial panel #1 running against this proposal; this doc becomes the settled record once amended. `ARCHITECTURE.md` is the living doc; `SPEC.md` is the canonical design record (§4 holds the full facade-spine diagram — referenced, not duplicated, below).
+> **Status: SETTLED** (amended by adversarial panel #1, 2026-07-09). `ARCHITECTURE.md` is the living architecture record; `SPEC.md` is the canonical *design* record (§4 holds the facade-spine diagram — referenced, not duplicated). Panel amendments traced in `docs/adversarial/panel-01/SYNTHESIS.md`.
 
-## Current proposal (A2.5, from ROADMAP.md — pending adversarial panel #1)
+## Topology — HYBRID (Cloudflare control plane + external engine)
 
-Cloudflare-first (wrangler already authed; deployable with zero new accounts): Workers + Hono facade, Durable Objects for tenant state + provisioning jobs (DO alarms natively model weeks-long resumable warmup), D1 for the control-plane ledger, Queues where fan-out needs it, Pages for the sites, Workers Cron for ops loops. The forked Go engine (cold-cli) needs long-lived IMAP/SMTP — that cannot run on Workers; proposal: design the engine contract-first with a native sandbox implementation in the Worker, and treat the Go fork + container host as a real-adapter concern at activation. Panel #1 attacks this before it's final.
+The panel killed the "pure Cloudflare-first" proposal: a cold-email product's core act is long-lived IMAP/SMTP, which serverless cannot host. Settled split:
 
-## Facade spine / 3 planes (summary — full diagram in SPEC.md §4)
+```
+                 customer's Claude Code / Codex
+                          │  one MCP line + token   |   npx agent-cold-email ...
+                          ▼
+   ┌─────────────────── CLOUDFLARE (control plane, sagas, surfaces) ───────────────────┐
+   │  Pages          public sites + AEO content + docs (crawlable, authority-accruing)  │
+   │  Worker (Hono)  Plane C facade: ~12 curated intents, guardrails, metering, audit   │
+   │  McpAgent       hosted MCP (Agents SDK, streamable HTTP, per-token scoped)         │
+   │  TenantDO       per-tenant state + MONEY LEDGER (SQLite, integer cents, txns)       │
+   │  ProvisioningDO resumable saga: buy domain→DNS→mailbox→warmup ramp (alarm-driven)   │
+   │  Queues         fan-out (send batches, provisioning steps) — at-least-once          │
+   │  D1             control-plane index + read-model for cross-tenant reporting         │
+   │                 AND the abuse-aggregation loop (master-account protection)          │
+   │  Cron           ops loops: deliverability monitor, digests, dunning sweeps          │
+   └───────────────────────────────────┬───────────────────────────────────────────────┘
+                                        │  Worker↔engine boundary contract (designed now)
+                                        ▼
+   ┌──────────── EXTERNAL ENGINE (activation-hosted; sandbox = native in-Worker) ────────┐
+   │  Go daemon (forked cold-cli) on a VM/container: 24/7 SMTP send + IMAP poll,          │
+   │  bounce/reply/thread/unsub detection, per-mailbox caps, rotation, A/B.               │
+   │  Host decided at activation (Cloudflare Containers vs small VPS); real-adapter only. │
+   └─────────────────────────────────────────────────────────────────────────────────────┘
+                                        │
+                    registrar API (Porkbun) · mailbox vendor API (Inboxkit primary)
+                    · Stripe (source of truth for billing) · Claude (ops AI)
+```
 
-Customer's agent → **Surface** (curated ~8–12 tool MCP + CLI twin + discovery skill) → **Plane C** (Facade/Orchestration API: intents, guardrails, metering, audit) → **Plane B** (Provisioning service: async resumable jobs — domains, DNS, mailboxes, warmup) → **Plane A** (Identity & Billing: signup, Stripe, quotas, tenant↔vendor mapping) → underneath: registrar API, mailbox-vendor API, forked cold-cli, Claude ops AI.
+## Load-bearing decisions (settled)
 
-Design rule: few, high-level intents that hide vendor complexity — the simplicity wedge and what keeps MCP token cost negligible.
+1. **Vendor adapter layer (`VendorPort`).** Every external dependency (domains, mailboxes, warmup, metrics, email-send/read, payments) sits behind a typed port with two implementations: `sandbox` (active in test mode) and `real` (coded to vendor docs, unactivated). **One contract-test suite runs against both** — the real-adapter swap must be a provable no-op. Ports are frozen only after the local-mailserver engine spike.
+
+2. **Sandbox = fault-injecting, clock-aware simulator**, never a happy-path mock. It injects rate limits, 5xx, timeouts, async bounces, provisioning failures, partial batches, and duplicate deliveries. This is a first-class product surface (free tier + no-signup demo), not scaffolding.
+
+3. **Money ledger in TenantDO SQLite** (integer cents, real transactions). Stripe is the source of truth; per-tenant webhook handling is idempotent. D1 is NOT the ledger — it is the control-plane index + a Queues-fed read-model for cross-tenant reporting and abuse aggregation (which has no home in a pure per-tenant-DO design). Keeps the eventual D1→Postgres swap trivial.
+
+4. **Single injected Clock.** No direct wall-clock reads anywhere (CI lint gate). Warmup ramp + send scheduling run on a DO-alarm scheduler driven by the injected clock — so weeks-long warmup is testable in minutes AND stays honest. NOT Cloudflare Workflows (can't be virtual-clocked).
+
+5. **Idempotency keys on every side-effecting `VendorPort` op.** At-least-once Queues + retried DO alarms on money/provisioning ops is a correctness trap otherwise. The sandbox simulates duplicate delivery + mid-step crash so idempotency is exercised in test mode.
+
+6. **Engine is out of Worker scope.** IMAP/SMTP long-lived connections belong to the Go daemon. Build phase implements the engine natively in-Worker against the boundary contract; the Go fork + host is an activation concern. cold-cli is MIT (verified 2026-07-09) — clean to fork.
+
+7. **MCP via Agents SDK `McpAgent`** (streamable HTTP, per-token auth). The paste-one-token remote-MCP config must be verified to actually connect in both Claude Code and Codex (distribution-critical; screenshot gate in Phase C).
+
+8. **Compliance is enforced in code, not documented.** Per-tenant physical address + verified sender identity injected into every footer (sandbox exercises the real render path so a gap fails a test); subject-line honesty + lookalike third-party-brand hard-reject validators in the engine; full CAN-SPAM opt-out flow; OFAC screen + onboarding friction ladder before uncapped real sends; free/demo tenants structurally incapable of a real adapter (type guard + failing-if-violated test).
+
+## Facade spine / 3 planes (summary — full diagram SPEC.md §4)
+Customer's agent → **Surface** (~12-tool MCP + CLI twin + discovery skill) → **Plane C** (facade: intents, guardrails, metering, audit) → **Plane B** (provisioning sagas) → **Plane A** (identity & billing) → vendors. Design rule: few high-level intents that hide vendor complexity — the simplicity wedge and negligible MCP token cost.
