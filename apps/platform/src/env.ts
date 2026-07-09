@@ -19,6 +19,14 @@ declare global {
       // to the simulated checkout / accept-without-verification webhook mode.
       STRIPE_SECRET_KEY?: string;
       STRIPE_WEBHOOK_SECRET?: string;
+      // D1/D2/D6 admin surface (apps/platform/src/admin/README.md) — bearer
+      // secret gating every /admin/* route (cross-tenant data, never the
+      // per-tenant token from require-auth.ts). Optional binding: unset ->
+      // requireAdminAuth fails closed (401 on every /admin/* call, never an
+      // open-by-default bypass). Set via `wrangler secret put ADMIN_TOKEN`
+      // for a deployed environment, or `.dev.vars` locally (see
+      // .dev.vars.example) — CLAUDE.md rule g: never in code or git.
+      ADMIN_TOKEN?: string;
     }
   }
 }

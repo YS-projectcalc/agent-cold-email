@@ -16,9 +16,11 @@ import { runDemo, type DemoRunSummary } from "./engine/demo.js";
 import { getInfrastructureStatus, runSetupInfrastructure } from "./engine/provisioning.js";
 import { launchCampaign, pauseAllCampaigns, pauseCampaign } from "./engine/campaigns.js";
 import { runTick } from "./engine/tick.js";
+import { runDeliverabilitySweep } from "./engine/deliverability-actions.js";
 import { runPollInbox } from "./engine/reply-processor.js";
 import { getThread, listInbox, markThread, replyToThread } from "./engine/threads.js";
 import { getAccount, getCampaignResults, getMetrics } from "./engine/reporting.js";
+import { getOpsSummary, suspendTenant, type TenantOpsSummary } from "./engine/ops-summary.js";
 import { newId, TENANT_DO_SCHEMA } from "./schema.js";
 import type { TenantContext } from "./tenant-context.js";
 import { createVendorAdapters, type VendorAdapterBundle } from "./vendors/factory.js";
@@ -230,6 +232,27 @@ export class TenantDO extends DurableObject<Env> {
 
   async pollInbox() {
     return runPollInbox(this.requireContext());
+  }
+
+  // --- D2/D6 admin surface RPCs (src/admin/README.md) — called ONLY from
+  // src/routes/admin-*.ts (never a tenant facade route: these read/mutate
+  // state an authed TENANT must never trigger for itself). Cross-tenant
+  // aggregation reads the D1 tenants_index for the id list, then calls
+  // opsSummary() on each tenant's own DO stub — never touches another
+  // tenant's SqlStorage directly (ARCHITECTURE.md #3 + CLAUDE.md rule h). ---
+
+  opsSummary(sinceMs: number): TenantOpsSummary {
+    return getOpsSummary(this.requireContext(), sinceMs);
+  }
+
+  /** Cron-triggerable: runs just the monitor->decide->act loop (no send scheduling — that's tick()/B2). */
+  async deliverabilitySweep() {
+    return runDeliverabilitySweep(this.requireContext());
+  }
+
+  /** D2 dunning sweep's "suspend after grace" action — a real local state transition (not a vendor call), armed now. */
+  suspendForDunning(): void {
+    suspendTenant(this.requireContext());
   }
 
   // --- POST /demo/run (B5) — sandbox-only, structurally gated to demo/free plans ---

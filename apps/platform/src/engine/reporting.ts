@@ -93,7 +93,10 @@ export interface AccountSummary {
   deliverability: DeliverabilitySummary;
 }
 
-function getDeliverabilitySummary(ctx: TenantContext): DeliverabilitySummary {
+// Exported (not just used by getAccount below) so engine/ops-summary.ts
+// (the D6 owner digest) can reuse the exact same per-tenant deliverability
+// rollup instead of re-deriving it (CLAUDE.md rule c).
+export function getDeliverabilitySummary(ctx: TenantContext): DeliverabilitySummary {
   const countMailbox = (delivStatus: string): number =>
     ctx.sql
       .exec<{ n: number }>(

@@ -33,6 +33,70 @@ export function tenantStub(tenantId: string): DurableObjectStub<TenantDO> {
   return env.TENANT.get(env.TENANT.idFromName(tenantId));
 }
 
+// D1/D2/D6 admin-surface tests (test/admin-*.test.ts) all present this same
+// fixed bearer — see test/setup.ts, which sets `env.ADMIN_TOKEN` to this
+// exact value once before every test file's DB migrations run.
+export const TEST_ADMIN_TOKEN = "test-admin-token-for-vitest";
+
+export async function adminApi<T = unknown>(
+  path: string,
+  init: (RequestInit & { adminToken?: string }) | undefined = {},
+): Promise<ApiResult<T>> {
+  const { adminToken, headers, ...rest } = init;
+  const finalHeaders: Record<string, string> = { "content-type": "application/json", ...(headers as Record<string, string> | undefined) };
+  finalHeaders.authorization = `Bearer ${adminToken ?? TEST_ADMIN_TOKEN}`;
+  const res = await SELF.fetch(`https://example.com${path}`, { ...rest, headers: finalHeaders });
+  const text = await res.text();
+  let body: unknown;
+  try {
+    body = text ? JSON.parse(text) : undefined;
+  } catch {
+    body = text;
+  }
+  return { status: res.status, body: body as T };
+}
+
+/**
+ * Drives a tenant's billing_state to 'past_due' via the SAME
+ * `invoice.payment_failed` Stripe webhook path B1 exercises
+ * (test/webhook.test.ts) — each call is one more recorded failure (the
+ * dunning "cycle", src/admin/dunning.ts), matching how a real Stripe account
+ * would redeliver a fresh event id per failed invoice attempt.
+ */
+export async function failPayment(tenantId: string): Promise<void> {
+  const event = {
+    id: `evt_${crypto.randomUUID()}`,
+    type: "invoice.payment_failed",
+    data: { object: { metadata: { tenantId } } },
+  };
+  const res = await api("/webhooks/stripe", { method: "POST", body: JSON.stringify(event) });
+  if (res.status !== 200) throw new Error(`failPayment webhook failed: ${JSON.stringify(res)}`);
+}
+
+/**
+ * Drives a tenant to an active paid plan via the SAME
+ * `checkout.session.completed` Stripe webhook path B1 exercises
+ * (test/webhook.test.ts) — the real path a Stripe checkout success uses to
+ * set `plan` + `billing_state = 'active'` together, which is what
+ * MRR (src/engine/ops-summary.ts) requires.
+ */
+export async function activatePaidPlan(tenantId: string, plan: TenantPlan): Promise<void> {
+  const event = {
+    id: `evt_${crypto.randomUUID()}`,
+    type: "checkout.session.completed",
+    data: {
+      object: {
+        customer: "cus_test_admin",
+        subscription: "sub_test_admin",
+        client_reference_id: tenantId,
+        metadata: { tenantId, plan },
+      },
+    },
+  };
+  const res = await api("/webhooks/stripe", { method: "POST", body: JSON.stringify(event) });
+  if (res.status !== 200) throw new Error(`activatePaidPlan webhook failed: ${JSON.stringify(res)}`);
+}
+
 export async function signup(brand: string, contactEmail: string): Promise<{ tenantId: string; token: string }> {
   // Each signup uses a unique synthetic source IP so it lands in its own
   // per-IP RateLimiterDO bucket instead of self-throttling the suite under the

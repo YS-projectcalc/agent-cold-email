@@ -4,6 +4,7 @@
 // event safely off the wire and figures out which TenantDO it belongs to.
 
 import { z } from "zod";
+import { timingSafeEqual } from "../timing-safe-equal.js";
 
 // Deliberately loose (Stripe's real event payloads carry far more fields) —
 // we only need enough structure to route + dedupe + read metadata. Anything
@@ -43,13 +44,6 @@ export async function verifyStripeSignature(payload: string, header: string, sec
   const sigBuf = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${timestamp}.${payload}`));
   const expected = [...new Uint8Array(sigBuf)].map((b) => b.toString(16).padStart(2, "0")).join("");
   return timingSafeEqual(expected, v1);
-}
-
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
 }
 
 /**

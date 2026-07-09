@@ -28,3 +28,12 @@ new_sqlite_classes = ["TenantDO"]
 [[migrations]]
 tag = "v2"
 new_classes = ["RateLimiterDO"]
+
+# D2 (ROADMAP.md) — the ops-sweep Cron Trigger, calling the `scheduled()`
+# export in src/index.ts (src/scheduled.ts: deliverability sweep -> dunning
+# sweep -> owner digest, for every tenant). Commented-out on purpose: ARMED
+# AT ACTIVATION (ACTIVATION.md), not deployed yet. `scheduled()` itself is
+# fully built and independently callable (`wrangler dev --test-scheduled`) —
+# uncommenting this block is the only step activation needs for the cron lane.
+# [triggers]
+# crons = ["0 13 * * *"] # once/day, 13:00 UTC — the owner's daily digest cadence

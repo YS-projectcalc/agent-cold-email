@@ -52,7 +52,13 @@ into a god file:
   `mark(thread, status)`.
 - `reporting.ts` — `campaign_results()` / `metrics()` / `account()`. Opens
   are never tracked anywhere in the schema (SPEC.md §6: opens OFF by
-  default), so there is nothing to leak.
+  default), so there is nothing to leak. Also exports
+  `getDeliverabilitySummary` for reuse by `ops-summary.ts`.
+- `ops-summary.ts` — D2/D6 admin surface: `getOpsSummary(ctx, sinceMs)`
+  returns one tenant's plan/billing/usage/deliverability rollup +
+  windowed deliverability-action counts. Dispatched via
+  `TenantDO.opsSummary()`, called ONLY from `../admin/*` (never a tenant
+  facade route) — see `../admin/README.md`.
 
 Every function here takes a `TenantContext` (`../tenant-context.ts`): the
 DO's own `SqlStorage` handle, tenant id, injected `Clock`, and the tenant's

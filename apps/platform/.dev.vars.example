@@ -13,3 +13,10 @@ TOKEN_HASH_PEPPER=dev-only-pepper-change-me
 # key) is an ACTIVATION.md step, done via `wrangler secret put`, not here.
 # STRIPE_SECRET_KEY=sk_test_...
 # STRIPE_WEBHOOK_SECRET=whsec_...
+
+# D1/D2/D6 admin surface (see src/admin/README.md) — bearer secret required
+# on every /admin/* route (cross-tenant billing/support/ops data). Unset ->
+# every /admin/* call 401s (fails closed, never open-by-default). Any random
+# string works for local dev; rotate via `wrangler secret put ADMIN_TOKEN`
+# for a deployed environment. Never a real production secret in this file.
+ADMIN_TOKEN=dev-only-admin-token-change-me
