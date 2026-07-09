@@ -5,3 +5,11 @@
 # stored in D1 (tenants_index.api_token_hash). Any random string works for
 # local dev; rotate via `wrangler secret put` for deployed environments.
 TOKEN_HASH_PEPPER=dev-only-pepper-change-me
+
+# B1 money path — OPTIONAL. Leave BOTH unset for local dev/test: POST
+# /checkout then returns a simulated (own-API) checkout session instead of a
+# real Stripe one, and POST /webhooks/stripe accepts events without signature
+# verification ("test-sim mode"). Wiring a REAL Stripe TEST key (never a live
+# key) is an ACTIVATION.md step, done via `wrangler secret put`, not here.
+# STRIPE_SECRET_KEY=sk_test_...
+# STRIPE_WEBHOOK_SECRET=whsec_...

@@ -1,9 +1,17 @@
-import type { SetupInfrastructureInput } from "@coldstart/shared";
+import { isPaidPlanTier, type SetupInfrastructureInput } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
+import { reportUsageToStripeIfConfigured } from "./billing.js";
 import { assertBrandOwnership } from "./brand-guard.js";
 import { refreshMailboxWarmupState } from "./mailbox-state.js";
+import { assertWithinProvisioningCap } from "./quota.js";
 import { computeWarmupDay, epochDay, isSendReady, warmupDailyCap, warmupStatus } from "./warmup.js";
+
+// Per-mailbox/mo metering fee (SPEC.md §18 ballpark fully-loaded cost) —
+// paid tiers only. Demo/free is structurally 0-real-spend (ARCHITECTURE.md
+// #8); sandbox mailboxes are still provisioned there for exploration, but no
+// fee accrues (see e2e.test.ts's demo-tenant usageCents assertion).
+const MAILBOX_MONTHLY_FEE_CENTS = 600;
 
 function slugify(input: string): string {
   return input.toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 20) || "hello";
@@ -24,6 +32,9 @@ export async function runSetupInfrastructure(
   // Lookalike third-party-brand hard-reject — BEFORE any searchLookalikes/buy
   // (ARCHITECTURE.md #8 "enforced in code"). Throws ValidationError -> HTTP 400.
   assertBrandOwnership({ brand: input.brand, primaryDomain: input.primaryDomain });
+
+  // Plan quota / provisioning-cap guard (B1 brief) — BEFORE any spend.
+  assertWithinProvisioningCap(ctx, { domains: input.domains, mailboxes: input.domains * input.inboxesEach });
 
   const now = ctx.clock.now();
 
@@ -57,11 +68,8 @@ export async function runSetupInfrastructure(
 
     for (let mailboxIndex = 0; mailboxIndex < input.inboxesEach; mailboxIndex++) {
       const localPart = `${personaSlug}${domainIndex + 1}${mailboxIndex + 1}`;
-      const provisioned = await ctx.adapters.mailbox.provision(
-        purchased.domain,
-        localPart,
-        `mbx:${ctx.tenantId}:${domainKey}:${localPart}`,
-      );
+      const provisionIdempotencyKey = `mbx:${ctx.tenantId}:${domainKey}:${localPart}`;
+      const provisioned = await ctx.adapters.mailbox.provision(purchased.domain, localPart, provisionIdempotencyKey);
       const warmup = await ctx.adapters.mailbox.startWarmup(
         provisioned.email,
         `warmup:${ctx.tenantId}:${provisioned.email}`,
@@ -83,6 +91,30 @@ export async function runSetupInfrastructure(
         warmup.startedAt,
         now,
       );
+
+      // Per-mailbox/mo metering — paid tiers only (see MAILBOX_MONTHLY_FEE_CENTS
+      // comment above). Reuses the SAME idempotency key as mailbox.provision()
+      // as the ledger's source_send_id (a generic idempotency anchor, not
+      // send-specific — see schema.ts), so a retried/duplicated
+      // setup_infrastructure call can never double-charge this mailbox.
+      if (isPaidPlanTier(ctx.plan)) {
+        await ctx.adapters.billing.recordUsage(
+          ctx.tenantId,
+          "mailbox provisioned (mo)",
+          MAILBOX_MONTHLY_FEE_CENTS,
+          provisionIdempotencyKey,
+        );
+        ctx.sql.exec(
+          `INSERT OR IGNORE INTO ledger_entries (id, tenant_id, kind, amount_cents, description, ts, source_send_id)
+           VALUES (?, ?, 'usage', ?, 'mailbox provisioned (mo)', ?, ?)`,
+          newId("ledg"),
+          ctx.tenantId,
+          MAILBOX_MONTHLY_FEE_CENTS,
+          now,
+          provisionIdempotencyKey,
+        );
+        await reportUsageToStripeIfConfigured(ctx, 1);
+      }
     }
   }
 

@@ -14,6 +14,16 @@ through the DO.
 - `inbox.ts` — `GET /inbox`, `GET /threads/:id`, `POST /threads/:id/reply`,
   `POST /threads/:id/mark`.
 - `account.ts` — `GET /account`.
+- `checkout.ts` — `POST /checkout` (B1, authed): demo/free -> paid upgrade.
+  Real Stripe TEST-mode Checkout Session if `env.STRIPE_SECRET_KEY` is set,
+  else a simulated session. `GET /checkout/simulate` (UNAUTHENTICATED — the
+  session id is the credential, mirroring Stripe's own hosted checkout
+  return page not being bearer-gated either) completes the simulated
+  upgrade.
+- `webhooks.ts` — `POST /webhooks/stripe` (B1, UNAUTHENTICATED — Stripe
+  can't present our bearer token; authenticated instead by
+  `Stripe-Signature` HMAC verification when `env.STRIPE_WEBHOOK_SECRET` is
+  set). Idempotent per Stripe event id.
 - `demo.ts` — `POST /demo/run` (B5): authed, sandbox-only accelerated
   pipeline run for demo/free tenants. The plan guard lives in
   `TenantDO.demoRun()`, not here (structural, not an HTTP-layer policy).
@@ -23,11 +33,14 @@ through the DO.
 - `waitlist.ts` — `POST|OPTIONS /api/waitlist`, the public marketing-site
   waitlist form (KV-backed, unauthenticated, CORS for the Pages origin).
 
-All routes except `signup.ts`, `mcp.ts`, and `waitlist.ts` are mounted
-behind `../require-auth.ts` (`requireAuth` middleware), which resolves the
-bearer token to exactly one tenant and hands the handler that tenant's DO
-stub — there is no code path in this directory that can reach a DO stub for
-any tenant other than the one the token authenticated as.
+Most routes are mounted behind `../require-auth.ts` (`requireAuth`
+middleware), which resolves the bearer token to exactly one tenant and hands
+the handler that tenant's DO stub. Exceptions (unauthenticated by design,
+each with its own credential/tenant-routing — see index.ts's mount comment):
+`signup.ts`, `mcp.ts` (per-method auth), `waitlist.ts`, `checkout.ts`'s
+`GET /checkout/simulate` (session id), `webhooks.ts` (Stripe signature).
+There is no code path in this directory that can reach a DO stub for any
+tenant other than the one the caller's credential authenticated as.
 
 ## How to run
 

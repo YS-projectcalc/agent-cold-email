@@ -22,12 +22,12 @@ describe("vendor adapter factory — demo/free tenants cannot reach a real adapt
   });
 
   it("keeps a paid-plan tenant on sandbox too while the global activation flag is false (current build reality)", () => {
-    const bundle = createVendorAdapters("paid", clock, /* realAdaptersActivated */ false);
+    const bundle = createVendorAdapters("launch", clock, /* realAdaptersActivated */ false);
     expect(bundle.kind).toBe("sandbox");
   });
 
   it("even a genuinely 'real' bundle (paid + activated) throws NotActivatedError on first use — defense in depth", async () => {
-    const bundle = createVendorAdapters("paid", clock, /* realAdaptersActivated */ true);
+    const bundle = createVendorAdapters("launch", clock, /* realAdaptersActivated */ true);
     expect(bundle.kind).toBe("real");
     await expect(bundle.domain.buy("evil.com", "idem-1")).rejects.toThrow(NotActivatedError);
   });

@@ -57,3 +57,21 @@ export const MarkInput = z.object({
   status: z.enum(["read", "unread", "archived"]),
 });
 export type MarkInput = z.infer<typeof MarkInput>;
+
+// B1 money path — plan literals kept in sync with PLAN_QUOTAS' keys in
+// pricing.ts by convention (only 3 tiers; a zod-level derivation would add
+// more indirection than it saves here).
+export const CheckoutInput = z.object({
+  plan: z.enum(["launch", "growth", "scale"]),
+});
+export type CheckoutInput = z.infer<typeof CheckoutInput>;
+
+// Query params for the unauthenticated GET /checkout/simulate landing route
+// (test-mode-only simulated Stripe Checkout return). The session id is
+// itself the credential (unguessable, single-use, re-validated tenant-scoped
+// inside the target TenantDO) — see apps/platform/src/routes/checkout.ts.
+export const CheckoutSimulateQuery = z.object({
+  tenant: z.string().min(1).max(200),
+  session: z.string().min(1).max(200),
+});
+export type CheckoutSimulateQuery = z.infer<typeof CheckoutSimulateQuery>;

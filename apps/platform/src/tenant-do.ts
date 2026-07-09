@@ -1,8 +1,17 @@
 import { DurableObject } from "cloudflare:workers";
-import type { LaunchCampaignInput, SetupInfrastructureInput, TenantPlan } from "@coldstart/shared";
+import type { CheckoutInput, LaunchCampaignInput, SetupInfrastructureInput, TenantPlan } from "@coldstart/shared";
 import { RateLimitError, TenantIsolationError } from "@coldstart/shared";
 import { RealClock, VirtualClock } from "./clock.js";
+import type { StripeEventInput } from "./billing/stripe-webhook.js";
 import type { Env } from "./env.js";
+import {
+  applyStripeWebhookEvent,
+  completeSimulatedCheckout,
+  startCheckout,
+  type CheckoutResult,
+  type CompleteCheckoutResult,
+  type WebhookApplyResult,
+} from "./engine/billing.js";
 import { runDemo, type DemoRunSummary } from "./engine/demo.js";
 import { getInfrastructureStatus, runSetupInfrastructure } from "./engine/provisioning.js";
 import { launchCampaign, pauseAllCampaigns, pauseCampaign } from "./engine/campaigns.js";
@@ -63,6 +72,9 @@ export class TenantDO extends DurableObject<Env> {
   private ensureColumnMigrations(): void {
     this.addColumnIfMissing("campaigns", "is_demo", "INTEGER NOT NULL DEFAULT 0");
     this.addColumnIfMissing("ledger_entries", "source_send_id", "TEXT");
+    this.addColumnIfMissing("tenant_profile", "billing_state", "TEXT NOT NULL DEFAULT 'none'");
+    this.addColumnIfMissing("tenant_profile", "stripe_customer_id", "TEXT");
+    this.addColumnIfMissing("tenant_profile", "stripe_subscription_id", "TEXT");
     // Created here, not in TENANT_DO_SCHEMA, so it runs only after the column
     // above is guaranteed to exist (safe for DOs that predate the column).
     this.ctx.storage.sql.exec(
@@ -129,6 +141,7 @@ export class TenantDO extends DurableObject<Env> {
       plan: this.plan,
       clock: this.clock,
       adapters: this.buildAdapters(),
+      env: this.env,
     };
   }
 
@@ -180,6 +193,29 @@ export class TenantDO extends DurableObject<Env> {
 
   account() {
     return getAccount(this.requireContext());
+  }
+
+  // --- B1 money path: checkout + Stripe webhook (bearer-token-authed except
+  // the simulate-landing/webhook routes, which are keyed by the session id /
+  // signature instead — see routes/checkout.ts + routes/webhooks.ts) ---
+
+  async checkout(input: CheckoutInput, origin: string): Promise<CheckoutResult> {
+    return startCheckout(this.requireContext(), input, origin);
+  }
+
+  completeCheckoutSimulated(sessionId: string): CompleteCheckoutResult {
+    const result = completeSimulatedCheckout(this.requireContext(), sessionId);
+    // Keep the in-memory plan in sync for the REST of this DO instance's
+    // lifetime (quota checks + the demo/free-only sandbox guards below both
+    // read `this.plan`, not a fresh SQL read, on every call).
+    if (result.upgraded) this.plan = result.plan;
+    return result;
+  }
+
+  handleStripeWebhook(event: StripeEventInput): WebhookApplyResult {
+    const result = applyStripeWebhookEvent(this.requireContext(), event);
+    if (result.plan) this.plan = result.plan;
+    return result;
   }
 
   // --- Engine tick / poll — see engine/README.md for why these are directly-callable, not alarms ---

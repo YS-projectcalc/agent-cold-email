@@ -2,7 +2,9 @@
 // list: these shapes are stored in D1 (control-plane index) and mirrored /
 // owned per-tenant inside TenantDO SQLite (the runtime source of truth).
 
-export type TenantPlan = "demo" | "free" | "paid";
+// "paid" was the pre-B1 placeholder; the concrete paid tiers are named
+// (SPEC.md §18) so quota/checkout logic can index PLAN_QUOTAS directly.
+export type TenantPlan = "demo" | "free" | "launch" | "growth" | "scale";
 export type TenantStatus = "active" | "suspended" | "closed";
 
 export interface TenantProfile {

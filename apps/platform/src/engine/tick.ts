@@ -1,6 +1,7 @@
 import type { SequenceStep } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
+import { reportUsageToStripeIfConfigured } from "./billing.js";
 import { refreshMailboxWarmupState } from "./mailbox-state.js";
 import { isWithinSendWindow, pickMailboxWithCapacity, type SendWindow } from "./scheduler.js";
 
@@ -179,6 +180,7 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
       result.sentAt,
       row.id,
     );
+    await reportUsageToStripeIfConfigured(ctx, 1); // inert without env.STRIPE_SECRET_KEY — see engine/billing.ts
 
     sent++;
   }

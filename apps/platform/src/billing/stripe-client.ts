@@ -1,0 +1,108 @@
+// Outbound Stripe REST calls (api.stripe.com) — checkout session creation +
+// metered-usage reporting. Only ever invoked when `env.STRIPE_SECRET_KEY` is
+// set (checked by the caller, src/engine/billing.ts), which is never true in
+// this build (CLAUDE.md rule g: no real vendor secret in the repo; wiring a
+// real Stripe TEST key is an ACTIVATION.md step). Coded fully against
+// Stripe's documented REST shape so the swap is a provable no-op at
+// activation (ARCHITECTURE.md #1), same spirit as src/vendors/real/*.
+
+const STRIPE_API_BASE = "https://api.stripe.com/v1";
+// Pinned explicitly so a future Stripe API change can't silently alter this
+// request's shape; bump deliberately (with a re-read of the relevant docs).
+const STRIPE_API_VERSION = "2024-06-20";
+
+function stripeHeaders(secretKey: string): Record<string, string> {
+  return {
+    Authorization: `Bearer ${secretKey}`,
+    "Content-Type": "application/x-www-form-urlencoded",
+    "Stripe-Version": STRIPE_API_VERSION,
+  };
+}
+
+export interface CreateCheckoutSessionParams {
+  tenantId: string;
+  plan: string;
+  priceCents: number;
+  label: string;
+  successUrl: string;
+  cancelUrl: string;
+}
+
+export interface StripeCheckoutSessionResult {
+  id: string;
+  url: string;
+}
+
+/**
+ * Creates a real Stripe TEST-mode Checkout Session (subscription mode, one
+ * inline price per SPEC.md §18 — no pre-created Stripe Price object needed,
+ * so this works the moment a test secret key is wired without any extra
+ * Stripe-dashboard setup step). `client_reference_id` + metadata carry the
+ * tenantId so the webhook handler can route back to the right TenantDO
+ * without a separate customer->tenant index; `subscription_data.metadata`
+ * copies the same onto the subscription so later subscription-level events
+ * (customer.subscription.updated/deleted) carry it too.
+ */
+export async function createStripeCheckoutSession(
+  secretKey: string,
+  params: CreateCheckoutSessionParams,
+): Promise<StripeCheckoutSessionResult> {
+  const body = new URLSearchParams();
+  body.set("mode", "subscription");
+  body.set("client_reference_id", params.tenantId);
+  body.set("success_url", params.successUrl);
+  body.set("cancel_url", params.cancelUrl);
+  body.set("metadata[tenantId]", params.tenantId);
+  body.set("metadata[plan]", params.plan);
+  body.set("subscription_data[metadata][tenantId]", params.tenantId);
+  body.set("subscription_data[metadata][plan]", params.plan);
+  body.set("line_items[0][quantity]", "1");
+  body.set("line_items[0][price_data][currency]", "usd");
+  body.set("line_items[0][price_data][unit_amount]", String(params.priceCents));
+  body.set("line_items[0][price_data][recurring][interval]", "month");
+  body.set("line_items[0][price_data][product_data][name]", `ColdStart ${params.label} (test mode)`);
+
+  const res = await fetch(`${STRIPE_API_BASE}/checkout/sessions`, {
+    method: "POST",
+    headers: stripeHeaders(secretKey),
+    body: body.toString(),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`stripe checkout session create failed: ${res.status} ${text}`);
+  }
+  const json = (await res.json()) as { id: string; url: string | null };
+  if (!json.url) throw new Error("stripe checkout session created without a url");
+  return { id: json.id, url: json.url };
+}
+
+/**
+ * Reports one metered-usage increment. NOTE: Stripe's usage-records endpoint
+ * is keyed by SUBSCRIPTION ITEM id, not subscription id — resolving the
+ * correct line-item id from a subscription (a GET /v1/subscriptions/{id}
+ * round trip) is an activation-time detail (ACTIVATION.md), since it's
+ * unreachable without a real key regardless. Callers pass whatever
+ * identifier they have; this function's job is only the documented call
+ * shape, not the lookup.
+ */
+export async function reportUsageRecord(
+  secretKey: string,
+  subscriptionItemId: string,
+  quantity: number,
+  timestampMs: number,
+): Promise<void> {
+  const body = new URLSearchParams();
+  body.set("quantity", String(quantity));
+  body.set("timestamp", String(Math.floor(timestampMs / 1000)));
+  body.set("action", "increment");
+
+  const res = await fetch(`${STRIPE_API_BASE}/subscription_items/${subscriptionItemId}/usage_records`, {
+    method: "POST",
+    headers: stripeHeaders(secretKey),
+    body: body.toString(),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`stripe usage record report failed: ${res.status} ${text}`);
+  }
+}

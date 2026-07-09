@@ -16,8 +16,11 @@ Phases done: A (foundation+panel#1), B0/B4/B5, C0/C1/C2/C3/C6. Architecture SETT
 After both: verify → commit → redeploy Worker + Pages → push repo.
 Panel #2 verdicts + records: `docs/adversarial/panel-02/`. security-isolation = CLEAN (no cross-tenant leak).
 
+## In flight (2026-07-09, cont'd)
+**B1 money path built, NOT yet deployed.** `POST /checkout` (real Stripe test-mode Checkout Session when `STRIPE_SECRET_KEY` is set, else a fully-exercisable simulated session/landing route), plan quotas + a distinct sandbox/paid provisioning-cap runaway guard enforced in `setup_infrastructure`, per-mailbox/mo + per-send metering aggregating into `account().usageCents` (+ inert Stripe usage-report call), idempotent `POST /webhooks/stripe` (signature-verified when `STRIPE_WEBHOOK_SECRET` is set). 65/65 tests green, typecheck clean (3 workspaces), `wrangler deploy --dry-run` clean. Real-Stripe code paths are coded-to-docs but UNVERIFIED (no key anywhere) — that's the activation gate. Left uncommitted (shared worktree, git-guard) — orchestrator to review + commit + redeploy.
+
 ## Next lanes (ROADMAP)
-B1 (paid plans + Stripe test-mode billing/metering + spend caps), B2 (resumable alarm-driven provisioning sagas — B0's are synchronous), B6 (deliverability control loop), B7 done-ish; D1-D6 (support/ops/legal/lifecycle/health); A5 (local-mailserver engine spike, Docker present); C4 (deep comparison content), C5 (registry submissions — activation); E (final panels + report). Then ACTIVATION.md (all owner-hands steps).
+B2 (resumable alarm-driven provisioning sagas — B0's are synchronous), B6 (deliverability control loop), B7 done-ish; D1-D6 (support/ops/legal/lifecycle/health); A5 (local-mailserver engine spike, Docker present); C4 (deep comparison content), C5 (registry submissions — activation); E (final panels + report). Then ACTIVATION.md (all owner-hands steps, +wiring a real Stripe TEST key + `STRIPE_WEBHOOK_SECRET`).
 
 ## Locked constraints (SPEC §0)
 Sandbox-first (no vendor spend till activation); test-mode go-live + ACTIVATION.md; NO owner questions till final report; full adversarial regime.

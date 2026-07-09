@@ -1,5 +1,6 @@
 import { NotFoundError } from "@coldstart/shared";
 import type { TenantContext } from "../tenant-context.js";
+import { capFor } from "./quota.js";
 
 // campaign_results() / metrics() — SPEC.md §6: "replies, bounces,
 // complaints... (opens OFF by default)". Opens are never tracked anywhere
@@ -59,23 +60,31 @@ export interface AccountSummary {
   brand: string;
   plan: string;
   status: string;
+  billingState: string;
   domains: number;
   mailboxes: number;
   campaigns: number;
   leads: number;
+  sends: number;
   usageCents: number;
+  /** The domains/mailboxes cap governing this tenant's current plan — see engine/quota.ts. */
+  quota: { domains: number; mailboxes: number };
 }
 
 export function getAccount(ctx: TenantContext): AccountSummary {
   const profile = ctx.sql
-    .exec<{ brand: string; plan: string; status: string }>(
-      `SELECT brand, plan, status FROM tenant_profile WHERE id = ?`,
+    .exec<{ brand: string; plan: string; status: string; billing_state: string }>(
+      `SELECT brand, plan, status, billing_state FROM tenant_profile WHERE id = ?`,
       ctx.tenantId,
     )
     .one();
 
   const count = (table: string): number =>
     ctx.sql.exec<{ n: number }>(`SELECT COUNT(*) as n FROM ${table} WHERE tenant_id = ?`, ctx.tenantId).one().n;
+
+  const sends = ctx.sql
+    .exec<{ n: number }>(`SELECT COUNT(*) as n FROM events WHERE tenant_id = ? AND type = 'sent'`, ctx.tenantId)
+    .one().n;
 
   const usageCents = ctx.sql
     .exec<{ total: number | null }>(
@@ -89,10 +98,13 @@ export function getAccount(ctx: TenantContext): AccountSummary {
     brand: profile.brand,
     plan: profile.plan,
     status: profile.status,
+    billingState: profile.billing_state,
     domains: count("domains"),
     mailboxes: count("mailboxes"),
     campaigns: count("campaigns"),
     leads: count("leads"),
+    sends,
     usageCents,
+    quota: capFor(ctx.plan),
   };
 }

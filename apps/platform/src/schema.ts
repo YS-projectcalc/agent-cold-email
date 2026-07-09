@@ -10,6 +10,13 @@ CREATE TABLE IF NOT EXISTS tenant_profile (
   physical_address TEXT NOT NULL DEFAULT '',
   sender_identity TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'active',
+  -- B1 money path: 'none' (never checked out) | 'active' | 'past_due' |
+  -- 'canceled'. Set by the simulated-checkout / Stripe-webhook paths in
+  -- src/engine/billing.ts — Stripe is the source of truth (ARCHITECTURE.md
+  -- #3); these columns mirror it.
+  billing_state TEXT NOT NULL DEFAULT 'none',
+  stripe_customer_id TEXT,
+  stripe_subscription_id TEXT,
   created_at INTEGER NOT NULL,
   clock_base INTEGER NOT NULL,
   clock_offset INTEGER NOT NULL DEFAULT 0,
@@ -119,6 +126,29 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
 CREATE TABLE IF NOT EXISTS thread_marks (
   thread_id TEXT PRIMARY KEY,
   status TEXT NOT NULL
+);
+
+-- B1 money path: simulated (no Stripe key) checkout sessions. A REAL Stripe
+-- Checkout Session never touches this table — that state lives at Stripe;
+-- this exists purely so the paid-upgrade path is fully exercisable before a
+-- real key is wired (ACTIVATION.md). See src/engine/billing.ts.
+CREATE TABLE IF NOT EXISTS checkout_sessions (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  plan TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at INTEGER NOT NULL,
+  completed_at INTEGER
+);
+
+-- Stripe webhook idempotency anchor (ARCHITECTURE.md #3: "per-tenant webhook
+-- handling is idempotent"). A redelivered event id is a no-op. Scoped inside
+-- the target tenant's own DO, not globally — POST /webhooks/stripe already
+-- routes the event to exactly one tenant's DO before this table is touched.
+CREATE TABLE IF NOT EXISTS webhook_events (
+  event_id TEXT PRIMARY KEY,
+  type TEXT NOT NULL,
+  ts INTEGER NOT NULL
 );
 
 -- Per-tenant demo-run throttle state (single-row). Bounds /demo/run abuse:
