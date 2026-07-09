@@ -1,0 +1,3 @@
+# Cloudflare Pages redirects. Docs: https://developers.cloudflare.com/pages/configuration/redirects/
+# Keep the well-known MCP path discoverable even if someone types the plain path.
+/mcp-server-card  /.well-known/mcp/server-card.json  200

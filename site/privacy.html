@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy — {{BRAND}}</title>
+<meta name="description" content="Privacy policy for agent-cold-email, operated by EpiphanyMade.">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/brand.js" defer></script>
+</head>
+<body>
+<nav class="site-nav">
+  <div class="wrap">
+    <a class="logo" href="index.html"><span data-brand></span><span class="tag">agent-native cold email</span></a>
+    <ul>
+      <li><a href="index.html">Home</a></li>
+      <li><a href="docs.html">Docs</a></li>
+      <li><a href="pricing.html">Pricing</a></li>
+      <li><a href="compare.html">Compare</a></li>
+    </ul>
+  </div>
+</nav>
+
+<main class="wrap legal">
+  <span class="draft-stamp">DRAFT — pending attorney review. Last updated 2026-07-09.</span>
+  <h1>Privacy Policy</h1>
+  <p>This Privacy Policy describes how EpiphanyMade ("EpiphanyMade," "we," "us") collects, uses, and discloses information in connection with <strong>agent-cold-email</strong> (the "Service"), including this waitlist and marketing site and, once live, the platform API/MCP/CLI surface.</p>
+
+  <h2>1. Who this covers</h2>
+  <p>This policy covers (a) visitors to this site, including waitlist signups, and (b) customers and their end users once the Service is live. It does not cover the third parties your own cold-email recipients interact with independently.</p>
+
+  <h2>2. What we collect</h2>
+  <ul>
+    <li><strong>Waitlist / early-access signup:</strong> the email address you submit, and the timestamp/source of submission.</li>
+    <li><strong>Account signup (once live):</strong> brand name, contact email, and — for paid tiers — billing information processed by Stripe (we do not store full payment card numbers ourselves).</li>
+    <li><strong>Tenant configuration:</strong> the physical postal address and sender identity you provide for use in your own outbound email footers (required for CAN-SPAM compliance), your persona/offer text, and your lead lists, to the extent you provide them to the Service to run campaigns.</li>
+    <li><strong>Operational data:</strong> API usage, tool calls, and platform logs needed to operate, secure, meter, and bill the Service.</li>
+    <li><strong>Site analytics:</strong> we do not load third-party analytics or ad trackers on this site as of this writing; if that changes, this policy will be updated first.</li>
+  </ul>
+
+  <h2>3. How we use it</h2>
+  <ul>
+    <li>To operate the Service: provisioning, sequencing, reply handling, billing, and support.</li>
+    <li>To send you early-access and product emails if you join the waitlist or become a customer — always CAN-SPAM compliant, always with a working unsubscribe.</li>
+    <li>To monitor for abuse and enforce the <a href="aup.html">Acceptable Use Policy</a> — see "Monitoring" below.</li>
+    <li>We do not sell your personal information.</li>
+  </ul>
+
+  <h2>4. Your data as a customer — you are the sender</h2>
+  <p>If you are a customer, you (not EpiphanyMade) are the sender of record for outreach you run through the Service — see the customer-is-sender designation in the <a href="terms.html">Terms of Service</a>. Lead lists and recipient data you provide are processed by the Service on your behalf to deliver the outreach you configure; we do not use your lead data for our own marketing purposes and do not sell it.</p>
+
+  <h2>5. Monitoring consent</h2>
+  <p>By using the Service, you consent to automated monitoring of send volume, bounce rate, spam-complaint rate, and warmup/placement signals for the purposes of guardrail enforcement (suppression, per-mailbox caps, auto-pause on complaint thresholds) and abuse prevention protecting the shared vendor infrastructure underlying the Service. This monitoring is operational and automated, not manual review of your message content except where necessary to investigate a specific abuse report or legal obligation.</p>
+
+  <h2>6. Data sharing</h2>
+  <p>We share data with the vendors and processors necessary to run the Service: Stripe (billing), our domain registrar and mailbox/warmup vendor(s) (to provision and operate your infrastructure), and Cloudflare (hosting/infrastructure). We do not sell personal information to third parties, and we do not share your lead lists or recipient data outside of what's required to deliver the Service you configured.</p>
+
+  <h2>7. Data retention</h2>
+  <p>We retain account and operational data for as long as your account is active plus a reasonable period for legal, tax, and dispute-handling purposes. Waitlist emails are retained until you unsubscribe or the Service reaches general availability and you're converted or removed. You may request deletion — see Contact below.</p>
+
+  <h2>8. Your rights</h2>
+  <p>Depending on your jurisdiction, you may have rights to access, correct, delete, or export your personal information, and to opt out of certain processing. EU/UK/GDPR-scoped processing is currently out of scope for this Service (US-first at this stage — see the <a href="terms.html">Terms</a>); this section will be expanded with a full CCPA/CPRA and, if applicable, DPA-backed rights process before general availability.</p>
+
+  <h2>9. Security</h2>
+  <p>We use industry-standard safeguards for data in transit and at rest. No system is perfectly secure; see <a href="https://github.com/YS-projectcalc/agent-cold-email/blob/main/SECURITY.md">SECURITY.md</a> in the repository for how to report a vulnerability.</p>
+
+  <h2>10. Children</h2>
+  <p>The Service is a business tool not directed at children, and we do not knowingly collect personal information from anyone under 16.</p>
+
+  <h2>11. Changes to this policy</h2>
+  <p>We'll update the "Last updated" date above and, for material changes affecting waitlist or customer emails, notify affected users by email before the change takes effect.</p>
+
+  <h2>12. Contact</h2>
+  <p>Questions or requests: <strong>privacy@epiphanymade.com</strong>. EpiphanyMade is the operating entity for this Service; a full physical business address will be published here prior to general availability.</p>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p><span data-brand></span> is operated by EpiphanyMade. Early access — no deliverability or inbox-placement guarantees.</p>
+    <ul>
+      <li><a href="privacy.html">Privacy</a></li>
+      <li><a href="terms.html">Terms</a></li>
+      <li><a href="aup.html">Acceptable Use</a></li>
+      <li><a href="docs.html">Docs</a></li>
+    </ul>
+  </div>
+</footer>
+</body>
+</html>

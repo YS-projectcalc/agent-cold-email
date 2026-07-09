@@ -1,0 +1,430 @@
+openapi: 3.1.0
+info:
+  title: agent-cold-email API
+  version: "0.1.0"
+  description: >
+    Agent-native cold-email infrastructure. ~12 curated intents behind one
+    bearer token per tenant. Content generation is the caller's job; this
+    API owns infrastructure provisioning, sequencing, isolation, and
+    compliance guardrails. Early access — this spec documents the intended
+    contract; see the repository ROADMAP.md for what is live vs. in build.
+    No deliverability or inbox-placement guarantees are made by this API.
+  contact:
+    name: EpiphanyMade
+    email: support@epiphanymade.com
+  license:
+    name: MIT
+servers:
+  - url: __API_BASE__
+    description: Placeholder — substituted with the deployed API host post-deploy.
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: bootstrap
+  - name: infrastructure
+  - name: campaigns
+  - name: inbox
+  - name: account
+
+paths:
+  /signup:
+    post:
+      operationId: signup
+      tags: [bootstrap]
+      summary: Create a tenant and mint a bearer token.
+      description: >
+        Unauthenticated bootstrap call. Always mints a demo-plan tenant in
+        the current build (no live paid/Stripe checkout path yet) — a demo
+        tenant is structurally incapable of reaching a real vendor adapter.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignupInput'
+      responses:
+        '201':
+          description: Tenant created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenantId: { type: string, example: "ten_a1b2c3" }
+                  token: { type: string, description: "Bearer token — store securely, shown once." }
+                required: [tenantId, token]
+        '400':
+          $ref: '#/components/responses/ValidationError'
+
+  /setup-infrastructure:
+    post:
+      operationId: setup_infrastructure
+      tags: [infrastructure]
+      summary: Provision branded lookalike domains and mailboxes; start warmup.
+      description: >
+        Asynchronous: returns 202 immediately. Poll GET /infrastructure-status
+        for progress. In demo/free plans this runs entirely against a
+        fault-injecting sandbox — no real domain purchase or mailbox
+        provisioning occurs.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetupInfrastructureInput'
+      responses:
+        '202':
+          description: Provisioning started.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /infrastructure-status:
+    get:
+      operationId: infrastructure_status
+      tags: [infrastructure]
+      summary: Provisioning + warmup progress, per-mailbox health, send-readiness.
+      responses:
+        '200':
+          description: Current infrastructure status.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /campaigns:
+    post:
+      operationId: launch_campaign
+      tags: [campaigns]
+      summary: Create and activate a campaign against a lead list.
+      description: >
+        The caller supplies the offer and sequence content — this API does
+        not generate outreach copy.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LaunchCampaignInput'
+      responses:
+        '201':
+          description: Campaign created.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /campaigns/{id}/results:
+    get:
+      operationId: campaign_results
+      tags: [campaigns]
+      summary: Sends, replies, bounces, and complaints for one campaign.
+      parameters:
+        - $ref: '#/components/parameters/CampaignId'
+      responses:
+        '200':
+          description: Campaign results.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /campaigns/{id}/pause:
+    post:
+      operationId: pause
+      tags: [campaigns]
+      summary: Pause one campaign.
+      parameters:
+        - $ref: '#/components/parameters/CampaignId'
+      responses:
+        '200':
+          description: Paused.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { paused: { type: boolean } }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /campaigns/pause-all:
+    post:
+      operationId: pause_all
+      tags: [campaigns]
+      summary: Pause every campaign for the authenticated tenant.
+      responses:
+        '200':
+          description: All paused.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { pausedAll: { type: boolean } }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /metrics:
+    get:
+      operationId: metrics
+      tags: [account]
+      summary: Account-wide deliverability + warmup health.
+      responses:
+        '200':
+          description: Metrics snapshot.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /inbox:
+    get:
+      operationId: inbox
+      tags: [inbox]
+      summary: Unified reply inbox across all mailboxes for the tenant.
+      responses:
+        '200':
+          description: Inbox listing.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /threads/{id}:
+    get:
+      operationId: thread
+      tags: [inbox]
+      summary: Full message history for one thread.
+      parameters:
+        - $ref: '#/components/parameters/ThreadId'
+      responses:
+        '200':
+          description: Thread detail.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /threads/{id}/reply:
+    post:
+      operationId: reply
+      tags: [inbox]
+      summary: Send a reply on an existing thread.
+      parameters:
+        - $ref: '#/components/parameters/ThreadId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplyInput'
+      responses:
+        '201':
+          description: Reply sent.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /threads/{id}/mark:
+    post:
+      operationId: mark
+      tags: [inbox]
+      summary: Mark a thread read, unread, or archived.
+      parameters:
+        - $ref: '#/components/parameters/ThreadId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MarkInput'
+      responses:
+        '200':
+          description: Marked.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { marked: { type: boolean } }
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /account:
+    get:
+      operationId: account
+      tags: [account]
+      summary: Usage, billing state, and quota for the tenant.
+      responses:
+        '200':
+          description: Account snapshot.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Token returned by POST /signup. One token = one isolated tenant.
+
+  parameters:
+    CampaignId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    ThreadId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+
+  responses:
+    ValidationError:
+      description: Request body failed schema validation.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties: { error: { type: string } }
+    Unauthorized:
+      description: Missing, invalid, or inactive bearer token.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties: { error: { type: string } }
+    NotFound:
+      description: Resource not found, or not owned by the authenticated tenant.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties: { error: { type: string } }
+
+  schemas:
+    SignupInput:
+      type: object
+      required: [brand, contactEmail]
+      properties:
+        brand: { type: string, minLength: 1, maxLength: 200 }
+        contactEmail: { type: string, format: email }
+
+    SetupInfrastructureInput:
+      type: object
+      required: [brand, primaryDomain, domains, inboxesEach, persona, physicalAddress, senderIdentity]
+      properties:
+        brand: { type: string, minLength: 1, maxLength: 200 }
+        primaryDomain: { type: string, minLength: 3, maxLength: 253, example: "acme.com" }
+        domains: { type: integer, minimum: 1, maximum: 20, description: "Number of lookalike domains to provision." }
+        inboxesEach: { type: integer, minimum: 1, maximum: 10, description: "Mailboxes to provision per domain." }
+        persona: { type: string, minLength: 1, maxLength: 200 }
+        physicalAddress:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: CAN-SPAM-required physical postal address, injected into every message footer.
+        senderIdentity:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Verified legal sender identity, injected into every message footer.
+
+    SequenceStepInput:
+      type: object
+      required: [step, subject, body, delayDays]
+      properties:
+        step: { type: integer, minimum: 1 }
+        subject: { type: string, minLength: 1, maxLength: 300 }
+        body: { type: string, minLength: 1, maxLength: 20000 }
+        delayDays: { type: integer, minimum: 0, maximum: 60 }
+
+    LeadInput:
+      type: object
+      required: [email, firstName]
+      properties:
+        email: { type: string, format: email }
+        firstName: { type: string, minLength: 1, maxLength: 200 }
+        company: { type: string, maxLength: 200, default: "" }
+
+    LaunchCampaignInput:
+      type: object
+      required: [name, offer, leads, sequence]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        offer: { type: string, minLength: 1, maxLength: 2000 }
+        leads:
+          type: array
+          minItems: 1
+          maxItems: 5000
+          items: { $ref: '#/components/schemas/LeadInput' }
+        sequence:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items: { $ref: '#/components/schemas/SequenceStepInput' }
+        timezone: { type: string, default: "UTC" }
+        sendWindow:
+          type: object
+          properties:
+            startHour: { type: integer, minimum: 0, maximum: 23 }
+            endHour: { type: integer, minimum: 0, maximum: 23 }
+          default: { startHour: 0, endHour: 23 }
+        stopOnReply: { type: boolean, default: true }
+
+    ReplyInput:
+      type: object
+      required: [body]
+      properties:
+        body: { type: string, minLength: 1, maxLength: 20000 }
+
+    MarkInput:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [read, unread, archived] }
