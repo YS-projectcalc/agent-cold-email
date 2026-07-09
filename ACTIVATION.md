@@ -15,6 +15,7 @@
 
 ## Gate 2 — Live keys & accounts (identity/KYC-gated)
 - [ ] **Stripe live KYC** — swap test keys for live; the billing/metering/dunning/dispute lanes are built against the real Stripe API in test mode, so this is a key swap + business verification.
+- [ ] **Set `STRIPE_WEBHOOK_SECRET`** (wrangler secret) — the `/webhooks/stripe` endpoint now **fails closed (503) until this is set** (a panel #3 security fix: without it, unsigned events could forge any tenant's plan/billing). Setting it enables the real webhook lane. Set the matching endpoint secret in the Stripe dashboard.
 - [ ] **Mailbox vendor account + card** (Inboxkit primary / Mailforge fallback) — real `MailboxPort` adapter is coded, throws `NotActivatedError` until wired.
 - [ ] **Registrar account + card** — Namecheap (confirmed buy-domain API) or Porkbun (confirm purchase endpoint w/ support); real `DomainPort` adapter coded, unactivated.
 - [ ] **Go-engine host** — stand up the forked cold-cli Go daemon (24/7 SMTP/IMAP) on Cloudflare Containers or a small VPS; wire the Worker↔engine boundary contract (already designed). This is the real `EmailPort`.

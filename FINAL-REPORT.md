@@ -1,7 +1,7 @@
 # ColdStart — Final Report (for Yaakov)
 
 > The whole business, built and live in **test mode**. This report is the "what I built, what's yours to decide, how to go live." Step-by-step go-live list is `ACTIVATION.md`. Canonical design is `SPEC.md`; build history is `ROADMAP.md`.
-> Written 2026-07-09. (Test/build counts finalized at program close — see ROADMAP session log for the authoritative latest.)
+> Written 2026-07-09. Program complete (test-mode CORE): **130/130 automated tests green**, every lane deployed + live-smoked, hardened through **3 multi-lens opus adversarial panels** (all remediated + re-verified).
 
 ## TL;DR
 An all-in-one cold-email platform that a customer's own coding agent (Claude Code / Codex) operates end-to-end via one token — plus the full zero-effort discovery machine so agents find and recommend it themselves. It is **deployed and working right now in test mode** (sandbox vendors, Stripe test keys, no real spend). Everything that needs your identity, a card, or a human decision is collected in `ACTIVATION.md`. I asked 10 questions up front and nothing since; the open decisions are listed below, held for you.
@@ -13,7 +13,12 @@ An all-in-one cold-email platform that a customer's own coding agent (Claude Cod
 - **Legal** — ToS / Privacy / AUP drafted to a full compliance clause inventory (customer-is-sender, indemnification, no-deliverability-warranty, monitoring consent, ROSCA, controller/processor + DPA, CCPA/CPRA, filter-evasion + sanctioned-party prohibitions, enforcement ladder). DRAFT — pending your attorney.
 
 ## How it was built (the discipline)
-Sandbox-first behind a `VendorPort` facade (real Inboxkit/Porkbun/Stripe adapters coded but inert until activation — the swap is a provable no-op). Every real part was attacked by **multi-lens opus adversarial panels** before it counted as done: panel #1 (the plan) and panel #2 (the live surfaces) each found real issues that were fixed and re-verified — e.g. panel #2 caught that the "never impersonate a third-party brand" guardrail was *advertised but not actually in the code* (a setup with brand "Google" was provisioning trygoogle.com mailboxes); it's now enforced with a denylist + ownership check and a test. The security-isolation lens came back CLEAN (no cross-tenant leak). A final panel runs before this report closes.
+Sandbox-first behind a `VendorPort` facade (real Inboxkit/Porkbun/Stripe adapters coded but inert until activation — the swap is a provable no-op). Every real part was attacked by **multi-lens opus adversarial panels** before it counted as done — three in total, each remediated and re-verified:
+- **Panel #1 (the plan)** reshaped the architecture (the pure-serverless design couldn't host the always-on IMAP engine → hybrid), moved the money ledger into per-tenant storage, and made compliance a code requirement.
+- **Panel #2 (live surfaces)** caught that the "never impersonate a third-party brand" guardrail was *advertised but not in the code* (brand "Google" was provisioning trygoogle.com mailboxes) — now enforced with a denylist + ownership check and a test — plus signup rate-limiting and a double-send race. Its security-isolation lens came back CLEAN (no cross-tenant leak).
+- **Panel #3 (final, whole-system)** live-proved that the Stripe webhook failed *open* when no secret was set (anyone could forge a free plan upgrade) and that dispute/cancel freezes weren't sticky — both now fixed (webhook fails closed; freeze states are a proper sticky state machine).
+
+No panel returned a blocker; each round's findings were fixed, tested (fail-on-old-code), redeployed, and re-verified live.
 
 ## Decisions held for you (nothing blocks the test-mode build)
 1. **Brand name.** I built everything under the rename-proof keyword identity `agent-cold-email` (repo/npm/registry), so the brand name is only the display name + domain — cheap to pick late. Verified-available candidates (npm + GitHub + `.dev` all free, 2026-07-09):
