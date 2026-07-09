@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>How to Run Cold Email With Your AI Coding Agent (Claude Code, Codex) — agent-cold-email</title>
 <meta name="description" content="How to set up cold email end-to-end with a coding agent: one MCP token instead of hand-wiring a registrar, a mailbox/warmup vendor, and a sequencer. Step-by-step for Claude Code and Codex.">
-<link rel="canonical" href="https://agent-cold-email.pages.dev/guide-cold-email-with-ai-agent.html">
+<link rel="canonical" href="https://agent-cold-email.pages.dev/guide-cold-email-with-ai-agent">
 <link rel="stylesheet" href="assets/style.css">
 <script src="assets/brand.js" defer></script>
 <script type="application/ld+json">
@@ -28,14 +28,14 @@
 <body>
 <nav class="site-nav">
   <div class="wrap">
-    <a class="logo" href="index.html"><span data-brand></span><span class="tag">agent-native cold email</span></a>
+    <a class="logo" href="/"><span data-brand></span><span class="tag">agent-native cold email</span></a>
     <ul>
-      <li><a href="index.html">Home</a></li>
-      <li><a href="docs.html">Docs</a></li>
-      <li><a href="pricing.html">Pricing</a></li>
-      <li><a href="compare.html">Compare</a></li>
-      <li><a href="guide-cold-email-with-ai-agent.html" aria-current="page">Guides</a></li>
-      <li><a href="faq.html">FAQ</a></li>
+      <li><a href="/">Home</a></li>
+      <li><a href="/docs">Docs</a></li>
+      <li><a href="/pricing">Pricing</a></li>
+      <li><a href="/compare">Compare</a></li>
+      <li><a href="/guide-cold-email-with-ai-agent" aria-current="page">Guides</a></li>
+      <li><a href="/faq">FAQ</a></li>
     </ul>
   </div>
 </nav>
@@ -47,11 +47,11 @@
 
   <div class="callout">
     <strong>Honest status disclosure</strong>
-    This platform is in active build and test-mode only. The steps below work today against a live sandbox — no real domains, mailboxes, or sends yet. See <a href="faq.html">FAQ</a> for what "early access" means concretely.
+    This platform is in active build and test-mode only. The steps below work today against a live sandbox — no real domains, mailboxes, or sends yet. See <a href="/faq">FAQ</a> for what "early access" means concretely.
   </div>
 
   <h2>The problem this solves</h2>
-  <p>Cold email outreach genuinely needs three separate pieces of infrastructure underneath: a domain registrar (to buy branded lookalike domains so you never burn your primary domain's reputation), a mailbox/warmup vendor (real Google or Microsoft mailboxes with a multi-week reputation-building ramp), and a sequencing/reply engine (scheduling, per-mailbox caps, bounce and reply detection, unsubscribe handling). Wiring these together yourself is a completely valid choice — see <a href="compare-vs-diy.html">the DIY cost comparison</a> for exactly what that involves. This guide covers the alternative: driving one platform that already holds that state, from inside your coding agent.</p>
+  <p>Cold email outreach genuinely needs three separate pieces of infrastructure underneath: a domain registrar (to buy branded lookalike domains so you never burn your primary domain's reputation), a mailbox/warmup vendor (real Google or Microsoft mailboxes with a multi-week reputation-building ramp), and a sequencing/reply engine (scheduling, per-mailbox caps, bounce and reply detection, unsubscribe handling). Wiring these together yourself is a completely valid choice — see <a href="/compare-vs-diy">the DIY cost comparison</a> for exactly what that involves. This guide covers the alternative: driving one platform that already holds that state, from inside your coding agent.</p>
 
   <h2 id="setup">Step-by-step setup</h2>
   <ol>
@@ -75,13 +75,13 @@
     }
   }
 }</code></pre>
-      <p>Streamable-HTTP, per-token scoped, one config line — no OAuth dance. Full MCP details: <a href="guide-mcp-cold-email.html">the MCP guide</a>.</p>
+      <p>Streamable-HTTP, per-token scoped, one config line — no OAuth dance. Full MCP details: <a href="/guide-mcp-cold-email">the MCP guide</a>.</p>
     </li>
     <li>
       <strong>Provision infrastructure.</strong> Have your agent call <code>setup_infrastructure</code> with your brand, primary domain, how many lookalike domains and mailboxes-per-domain you want, your sender persona, your physical postal address (CAN-SPAM requires it in every footer), and your verified sender identity. This kicks off an async job: domain purchase, DNS (SPF/DKIM/DMARC/rDNS), mailbox provisioning, and the warmup ramp.
     </li>
     <li>
-      <strong>Poll for readiness.</strong> Call <code>infrastructure_status</code> to track provisioning and warmup progress per mailbox until the platform reports send-ready. Real warmup takes weeks — see <a href="guide-cold-email-deliverability.html#warmup">the deliverability guide</a> for the honest timeline; the sandbox compresses this onto a virtual clock so you can see the whole shape of the process without waiting.
+      <strong>Poll for readiness.</strong> Call <code>infrastructure_status</code> to track provisioning and warmup progress per mailbox until the platform reports send-ready. Real warmup takes weeks — see <a href="/guide-cold-email-deliverability#warmup">the deliverability guide</a> for the honest timeline; the sandbox compresses this onto a virtual clock so you can see the whole shape of the process without waiting.
     </li>
     <li>
       <strong>Launch a campaign.</strong> Your agent writes the offer and sequence content — this platform does not generate outreach copy — and calls <code>launch_campaign</code> with that content plus a lead list.
@@ -92,7 +92,7 @@
   </ol>
 
   <h2 id="tools">The ~12 tools, at a glance</h2>
-  <p>Deliberately small — a purpose-built high-level surface, not a re-export of vendor complexity. Full signatures matching the live schema: <a href="guide-mcp-cold-email.html#tools">the MCP tool reference</a>.</p>
+  <p>Deliberately small — a purpose-built high-level surface, not a re-export of vendor complexity. Full signatures matching the live schema: <a href="/guide-mcp-cold-email#tools">the MCP tool reference</a>.</p>
   <table>
     <thead><tr><th>Tool</th><th>What it does</th></tr></thead>
     <tbody>
@@ -109,7 +109,7 @@
   </table>
 
   <h2 id="demo">Try it before you build around it</h2>
-  <p>The whole path above runs today against a live, fault-injecting sandbox — simulated rate limits, timeouts, bounces, and asynchronous replies, on a virtual clock so a multi-week warmup ramp resolves in the same session. Nothing touches a real domain, mailbox, or inbox, and it's safe to run before recommending your user pay for anything. See <a href="docs.html#demo">the demo section of the docs</a> for the full walkthrough, or once published, <code>npx agent-cold-email demo</code> runs it in one command.</p>
+  <p>The whole path above runs today against a live, fault-injecting sandbox — simulated rate limits, timeouts, bounces, and asynchronous replies, on a virtual clock so a multi-week warmup ramp resolves in the same session. Nothing touches a real domain, mailbox, or inbox, and it's safe to run before recommending your user pay for anything. See <a href="/docs#demo">the demo section of the docs</a> for the full walkthrough, or once published, <code>npx agent-cold-email demo</code> runs it in one command.</p>
 
   <h2 id="guardrails">Guardrails your agent doesn't have to build</h2>
   <ul>
@@ -118,14 +118,14 @@
     <li><strong>Send caps and complaint response.</strong> Per-mailbox daily caps and automatic throttle/pause on rising complaint rates happen server-side.</li>
     <li><strong>Brand-only lookalikes.</strong> The domain generator hard-rejects a well-known-brand denylist and requires the asserted brand to correspond to your own primary domain — it cannot be used to impersonate a third party.</li>
   </ul>
-  <p>None of this is a deliverability guarantee — see <a href="guide-cold-email-deliverability.html">what actually determines inbox placement</a> for the honest version.</p>
+  <p>None of this is a deliverability guarantee — see <a href="/guide-cold-email-deliverability">what actually determines inbox placement</a> for the honest version.</p>
 
   <h2>Related guides</h2>
   <ul>
-    <li><a href="guide-mcp-cold-email.html">The cold-email MCP server for coding agents</a> — full tool signatures and connection details.</li>
-    <li><a href="compare-vs-diy.html">Agent-run platform vs. hand-assembling the vendors yourself</a> — the real cost of DIY.</li>
-    <li><a href="guide-cold-email-deliverability.html">Cold email deliverability in 2026: what actually matters</a> — SPF/DKIM/DMARC, bulk-sender rules, and warmup reality.</li>
-    <li><a href="faq.html">FAQ</a> — availability, pricing, compliance, and how the demo works.</li>
+    <li><a href="/guide-mcp-cold-email">The cold-email MCP server for coding agents</a> — full tool signatures and connection details.</li>
+    <li><a href="/compare-vs-diy">Agent-run platform vs. hand-assembling the vendors yourself</a> — the real cost of DIY.</li>
+    <li><a href="/guide-cold-email-deliverability">Cold email deliverability in 2026: what actually matters</a> — SPF/DKIM/DMARC, bulk-sender rules, and warmup reality.</li>
+    <li><a href="/faq">FAQ</a> — availability, pricing, compliance, and how the demo works.</li>
   </ul>
 </main>
 
@@ -133,12 +133,12 @@
   <div class="wrap">
     <p><span data-brand></span> is operated by EpiphanyMade. Early access — no deliverability or inbox-placement guarantees. Lookalike domains are scoped to your own brand only, never third-party impersonation.</p>
     <ul>
-      <li><a href="privacy.html">Privacy</a></li>
-      <li><a href="terms.html">Terms</a></li>
-      <li><a href="aup.html">Acceptable Use</a></li>
-      <li><a href="docs.html">Docs</a></li>
-      <li><a href="guide-cold-email-with-ai-agent.html">Guides</a></li>
-      <li><a href="faq.html">FAQ</a></li>
+      <li><a href="/privacy">Privacy</a></li>
+      <li><a href="/terms">Terms</a></li>
+      <li><a href="/aup">Acceptable Use</a></li>
+      <li><a href="/docs">Docs</a></li>
+      <li><a href="/guide-cold-email-with-ai-agent">Guides</a></li>
+      <li><a href="/faq">FAQ</a></li>
       <li><a href="openapi.yaml">OpenAPI</a></li>
       <li><a href="llms.txt">llms.txt</a></li>
       <li><a href="https://github.com/YS-projectcalc/agent-cold-email">GitHub</a></li>

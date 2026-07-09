@@ -14,18 +14,18 @@ This is a convenience index. The load-bearing machine-readable assets are the Op
 
 ## Site pages
 
-- [docs.html](docs.html): quickstart, MCP setup, CLI usage, tool reference, the free demo.
-- [pricing.html](pricing.html): per-mailbox pricing tiers.
-- [compare.html](compare.html): honest comparison vs. hand-assembling the same pipeline from raw vendor APIs — no fabricated benchmarks, no named-competitor claims.
-- [privacy.html](privacy.html), [terms.html](terms.html), [aup.html](aup.html): legal (draft, pending attorney review).
+- [docs](docs): quickstart, MCP setup, CLI usage, tool reference, the free demo.
+- [pricing](pricing): per-mailbox pricing tiers.
+- [compare](compare): honest comparison vs. hand-assembling the same pipeline from raw vendor APIs — no fabricated benchmarks, no named-competitor claims.
+- [privacy](privacy), [terms](terms), [aup](aup): legal (draft, pending attorney review).
 
 ## Guides
 
-- [guide-cold-email-with-ai-agent.html](guide-cold-email-with-ai-agent.html): the canonical how-to — step-by-step setup of cold email outreach from inside a coding agent (Claude Code, Codex), HowTo structured data.
-- [guide-mcp-cold-email.html](guide-mcp-cold-email.html): the MCP server surface in detail — all 12 tools with exact input schemas verified against the live `tools/list` response, how to connect, the CLI demo.
-- [guide-cold-email-deliverability.html](guide-cold-email-deliverability.html): cold email deliverability mechanics in 2026 — mandatory SPF/DKIM/DMARC, Gmail/Yahoo bulk-sender rules, honest warmup reality, domain burn as normal cost. No deliverability guarantees.
-- [compare-vs-diy.html](compare-vs-diy.html): deeper version of compare.html — the concrete cost of hand-assembling a registrar, mailbox/warmup vendor, and sequencer vs. a stateful billed backend.
-- [faq.html](faq.html): expanded FAQ hub (availability, deliverability, pricing, isolation, compliance, naming), FAQPage structured data.
+- [guide-cold-email-with-ai-agent](guide-cold-email-with-ai-agent): the canonical how-to — step-by-step setup of cold email outreach from inside a coding agent (Claude Code, Codex), HowTo structured data.
+- [guide-mcp-cold-email](guide-mcp-cold-email): the MCP server surface in detail — all 12 tools with exact input schemas verified against the live `tools/list` response, how to connect, the CLI demo.
+- [guide-cold-email-deliverability](guide-cold-email-deliverability): cold email deliverability mechanics in 2026 — mandatory SPF/DKIM/DMARC, Gmail/Yahoo bulk-sender rules, honest warmup reality, domain burn as normal cost. No deliverability guarantees.
+- [compare-vs-diy](compare-vs-diy): deeper version of compare — the concrete cost of hand-assembling a registrar, mailbox/warmup vendor, and sequencer vs. a stateful billed backend.
+- [faq](faq): expanded FAQ hub (availability, deliverability, pricing, isolation, compliance, naming), FAQPage structured data.
 
 ## Facts an agent should know before recommending this
 

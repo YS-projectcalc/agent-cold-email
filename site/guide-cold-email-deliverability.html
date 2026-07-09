@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cold Email Deliverability in 2026: What Actually Matters — agent-cold-email</title>
 <meta name="description" content="What determines cold email deliverability in 2026: mandatory SPF/DKIM/DMARC, the Gmail and Yahoo bulk-sender rules, honest warmup reality, and domain burn as a normal cost — no fabricated benchmarks, no guarantees.">
-<link rel="canonical" href="https://agent-cold-email.pages.dev/guide-cold-email-deliverability.html">
+<link rel="canonical" href="https://agent-cold-email.pages.dev/guide-cold-email-deliverability">
 <link rel="stylesheet" href="assets/style.css">
 <script src="assets/brand.js" defer></script>
 <script type="application/ld+json">
@@ -50,14 +50,14 @@
 <body>
 <nav class="site-nav">
   <div class="wrap">
-    <a class="logo" href="index.html"><span data-brand></span><span class="tag">agent-native cold email</span></a>
+    <a class="logo" href="/"><span data-brand></span><span class="tag">agent-native cold email</span></a>
     <ul>
-      <li><a href="index.html">Home</a></li>
-      <li><a href="docs.html">Docs</a></li>
-      <li><a href="pricing.html">Pricing</a></li>
-      <li><a href="compare.html">Compare</a></li>
-      <li><a href="guide-cold-email-with-ai-agent.html" aria-current="page">Guides</a></li>
-      <li><a href="faq.html">FAQ</a></li>
+      <li><a href="/">Home</a></li>
+      <li><a href="/docs">Docs</a></li>
+      <li><a href="/pricing">Pricing</a></li>
+      <li><a href="/compare">Compare</a></li>
+      <li><a href="/guide-cold-email-with-ai-agent" aria-current="page">Guides</a></li>
+      <li><a href="/faq">FAQ</a></li>
     </ul>
   </div>
 </nav>
@@ -74,7 +74,7 @@
 
   <h2 id="auth">SPF, DKIM, and DMARC are mandatory, not best-practice</h2>
   <p>As of Gmail and Yahoo's 2024 bulk-sender requirements (still in force through 2026), a sending domain missing or misconfigured SPF, DKIM, or DMARC is commonly <strong>rejected at the SMTP level</strong> for bulk senders — not delivered to spam, not filtered, simply refused before a placement decision is ever made. This changes the failure mode from "landed in spam" to "never sent." Any cold-email setup needs all three configured correctly per sending domain, plus valid reverse DNS (rDNS/PTR records), before a single message goes out.</p>
-  <p>This platform's <code>setup_infrastructure</code> tool automates SPF/DKIM/DMARC/rDNS configuration for every lookalike domain it provisions and verifies the DNS before a mailbox on that domain is used — see <a href="guide-cold-email-with-ai-agent.html">the setup guide</a>.</p>
+  <p>This platform's <code>setup_infrastructure</code> tool automates SPF/DKIM/DMARC/rDNS configuration for every lookalike domain it provisions and verifies the DNS before a mailbox on that domain is used — see <a href="/guide-cold-email-with-ai-agent">the setup guide</a>.</p>
 
   <h2 id="bulk-rules">The Gmail/Yahoo bulk-sender rules</h2>
   <p>For senders delivering roughly 5,000+ messages per day to Gmail addresses, Google's bulk-sender guidelines require, in addition to authentication:</p>
@@ -105,9 +105,9 @@
 
   <h2>Related</h2>
   <ul>
-    <li><a href="guide-cold-email-with-ai-agent.html">How to run cold email with your AI coding agent</a> — where these guardrails plug into the setup flow.</li>
-    <li><a href="compare-vs-diy.html">Agent-run platform vs. hand-assembling the vendors yourself</a>.</li>
-    <li><a href="faq.html">FAQ</a> — including "does this guarantee deliverability?" (no).</li>
+    <li><a href="/guide-cold-email-with-ai-agent">How to run cold email with your AI coding agent</a> — where these guardrails plug into the setup flow.</li>
+    <li><a href="/compare-vs-diy">Agent-run platform vs. hand-assembling the vendors yourself</a>.</li>
+    <li><a href="/faq">FAQ</a> — including "does this guarantee deliverability?" (no).</li>
   </ul>
 </main>
 
@@ -115,12 +115,12 @@
   <div class="wrap">
     <p><span data-brand></span> is operated by EpiphanyMade. Early access — no deliverability or inbox-placement guarantees. Lookalike domains are scoped to your own brand only, never third-party impersonation.</p>
     <ul>
-      <li><a href="privacy.html">Privacy</a></li>
-      <li><a href="terms.html">Terms</a></li>
-      <li><a href="aup.html">Acceptable Use</a></li>
-      <li><a href="docs.html">Docs</a></li>
-      <li><a href="guide-cold-email-with-ai-agent.html">Guides</a></li>
-      <li><a href="faq.html">FAQ</a></li>
+      <li><a href="/privacy">Privacy</a></li>
+      <li><a href="/terms">Terms</a></li>
+      <li><a href="/aup">Acceptable Use</a></li>
+      <li><a href="/docs">Docs</a></li>
+      <li><a href="/guide-cold-email-with-ai-agent">Guides</a></li>
+      <li><a href="/faq">FAQ</a></li>
       <li><a href="openapi.yaml">OpenAPI</a></li>
       <li><a href="llms.txt">llms.txt</a></li>
       <li><a href="https://github.com/YS-projectcalc/agent-cold-email">GitHub</a></li>

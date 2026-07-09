@@ -20,7 +20,7 @@
   "operatingSystem": "Any (hosted API, MCP server, CLI)",
   "description": "Multi-tenant cold-email infrastructure platform operated by the customer's own coding agent (Claude Code, Codex) via ~12 curated MCP/HTTP tools. Provisions isolated branded domains and mailboxes, runs sequences, manages replies. Early access; not yet available for real sending; no deliverability guarantees.",
   "url": "https://agent-cold-email.pages.dev/",
-  "softwareHelp": "https://agent-cold-email.pages.dev/docs.html",
+  "softwareHelp": "https://agent-cold-email.pages.dev/docs",
   "offers": [
     { "@type": "Offer", "name": "Free / Demo", "price": "0", "priceCurrency": "USD", "description": "Sandboxed dry-run, no real sends." },
     { "@type": "Offer", "name": "Launch", "price": "99", "priceCurrency": "USD", "description": "5 mailboxes, 2 domains, ~1,000 sends/mo." },
@@ -89,14 +89,14 @@
 <body>
 <nav class="site-nav">
   <div class="wrap">
-    <a class="logo" href="index.html"><span data-brand></span><span class="tag">agent-native cold email</span></a>
+    <a class="logo" href="/"><span data-brand></span><span class="tag">agent-native cold email</span></a>
     <ul>
-      <li><a href="index.html" aria-current="page">Home</a></li>
-      <li><a href="docs.html">Docs</a></li>
-      <li><a href="pricing.html">Pricing</a></li>
-      <li><a href="compare.html">Compare</a></li>
-      <li><a href="guide-cold-email-with-ai-agent.html">Guides</a></li>
-      <li><a href="faq.html">FAQ</a></li>
+      <li><a href="/" aria-current="page">Home</a></li>
+      <li><a href="/docs">Docs</a></li>
+      <li><a href="/pricing">Pricing</a></li>
+      <li><a href="/compare">Compare</a></li>
+      <li><a href="/guide-cold-email-with-ai-agent">Guides</a></li>
+      <li><a href="/faq">FAQ</a></li>
     </ul>
   </div>
 </nav>
@@ -108,14 +108,14 @@
     <p class="lede">Strap this to your Claude Code or Codex session and it has what it needs: one signup, one token, and ~12 curated tools that provision isolated branded domains and mailboxes, run sequences, and manage replies. Your agent stays the brain — it writes the content and drives the tools. We run the infrastructure underneath.</p>
     <div class="cta-row">
       <a class="btn primary" href="#waitlist">Join the waitlist</a>
-      <a class="btn" href="docs.html">Read the docs</a>
+      <a class="btn" href="/docs">Read the docs</a>
       <a class="btn" href="https://github.com/YS-projectcalc/agent-cold-email/blob/main/AGENTS.md">AGENTS.md for agents</a>
     </div>
   </section>
 
   <div class="callout">
     <strong>Honest status disclosure</strong>
-    This platform is in active build and test-mode only. There is no live production deployment, no real vendor spend, and no deliverability track record yet. Nothing here is a guarantee of inbox placement, open rates, or reply rates — see <a href="compare.html">Compare</a> and <a href="terms.html">Terms</a> for the full framing.
+    This platform is in active build and test-mode only. There is no live production deployment, no real vendor spend, and no deliverability track record yet. Nothing here is a guarantee of inbox placement, open rates, or reply rates — see <a href="/compare">Compare</a> and <a href="/terms">Terms</a> for the full framing.
   </div>
 
   <section id="how-it-works">
@@ -135,7 +135,7 @@
       </div>
       <div class="card">
         <h3>4. Try it free first</h3>
-        <p>The free tier is a sandboxed dry run with fault injection (rate limits, bounces, timeouts) — no real domains, no real mailboxes, no real spend. See <a href="docs.html#demo">the demo</a>.</p>
+        <p>The free tier is a sandboxed dry run with fault injection (rate limits, bounces, timeouts) — no real domains, no real mailboxes, no real spend. See <a href="/docs#demo">the demo</a>.</p>
       </div>
     </div>
   </section>
@@ -157,7 +157,7 @@
         <tr><td><code>account</code></td><td>Usage, billing, and quota</td></tr>
       </tbody>
     </table>
-    <p><a href="docs.html#tools">Full tool reference with signatures →</a></p>
+    <p><a href="/docs#tools">Full tool reference with signatures →</a></p>
   </section>
 
   <section id="pricing-summary">
@@ -185,19 +185,19 @@
         <p>60 mailboxes, 18 domains, ~20,000 sends/mo.</p>
       </div>
     </div>
-    <p><a href="pricing.html">Full pricing + Custom tier →</a></p>
+    <p><a href="/pricing">Full pricing + Custom tier →</a></p>
   </section>
 
   <section id="waitlist">
     <h2>Join the waitlist</h2>
-    <p>Get notified when real sending goes live. We'll only email you about this project — see the <a href="privacy.html">privacy policy</a> for what we collect and how it's used.</p>
+    <p>Get notified when real sending goes live. We'll only email you about this project — see the <a href="/privacy">privacy policy</a> for what we collect and how it's used.</p>
     <form class="waitlist" action="https://agent-cold-email-api.yaakovscher.workers.dev/api/waitlist" method="post">
       <label for="wl-email" class="sr-only">Email address</label>
       <input id="wl-email" type="email" name="email" placeholder="you@company.com" required>
       <button type="submit">Notify me</button>
     </form>
     <p class="form-status" role="status"></p>
-    <p class="form-note">By submitting, you agree to receive early-access emails per the <a href="privacy.html">privacy policy</a>. Unsubscribe anytime.</p>
+    <p class="form-note">By submitting, you agree to receive early-access emails per the <a href="/privacy">privacy policy</a>. Unsubscribe anytime.</p>
   </section>
 
   <section id="faq">
@@ -235,12 +235,12 @@
   <div class="wrap">
     <p><span data-brand></span> is operated by EpiphanyMade. Early access — no deliverability or inbox-placement guarantees. Lookalike domains are scoped to your own brand only, never third-party impersonation.</p>
     <ul>
-      <li><a href="privacy.html">Privacy</a></li>
-      <li><a href="terms.html">Terms</a></li>
-      <li><a href="aup.html">Acceptable Use</a></li>
-      <li><a href="docs.html">Docs</a></li>
-      <li><a href="guide-cold-email-with-ai-agent.html">Guides</a></li>
-      <li><a href="faq.html">FAQ</a></li>
+      <li><a href="/privacy">Privacy</a></li>
+      <li><a href="/terms">Terms</a></li>
+      <li><a href="/aup">Acceptable Use</a></li>
+      <li><a href="/docs">Docs</a></li>
+      <li><a href="/guide-cold-email-with-ai-agent">Guides</a></li>
+      <li><a href="/faq">FAQ</a></li>
       <li><a href="openapi.yaml">OpenAPI</a></li>
       <li><a href="llms.txt">llms.txt</a></li>
       <li><a href="https://github.com/YS-projectcalc/agent-cold-email">GitHub</a></li>

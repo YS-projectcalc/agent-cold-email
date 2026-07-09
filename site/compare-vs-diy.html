@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Agent-Run Cold Email Platform vs. Hand-Assembling the Vendors Yourself — agent-cold-email</title>
 <meta name="description" content="The real cost of DIY cold email infrastructure — domain buying, DNS, warmup weeks, deliverability monitoring, per-session re-wiring — compared honestly to a stateful, billed backend. No fabricated benchmarks.">
-<link rel="canonical" href="https://agent-cold-email.pages.dev/compare-vs-diy.html">
+<link rel="canonical" href="https://agent-cold-email.pages.dev/compare-vs-diy">
 <link rel="stylesheet" href="assets/style.css">
 <script src="assets/brand.js" defer></script>
 <script type="application/ld+json">
@@ -22,14 +22,14 @@
 <body>
 <nav class="site-nav">
   <div class="wrap">
-    <a class="logo" href="index.html"><span data-brand></span><span class="tag">agent-native cold email</span></a>
+    <a class="logo" href="/"><span data-brand></span><span class="tag">agent-native cold email</span></a>
     <ul>
-      <li><a href="index.html">Home</a></li>
-      <li><a href="docs.html">Docs</a></li>
-      <li><a href="pricing.html">Pricing</a></li>
-      <li><a href="compare.html">Compare</a></li>
-      <li><a href="guide-cold-email-with-ai-agent.html" aria-current="page">Guides</a></li>
-      <li><a href="faq.html">FAQ</a></li>
+      <li><a href="/">Home</a></li>
+      <li><a href="/docs">Docs</a></li>
+      <li><a href="/pricing">Pricing</a></li>
+      <li><a href="/compare">Compare</a></li>
+      <li><a href="/guide-cold-email-with-ai-agent" aria-current="page">Guides</a></li>
+      <li><a href="/faq">FAQ</a></li>
     </ul>
   </div>
 </nav>
@@ -37,7 +37,7 @@
 <main class="wrap">
   <span class="draft-stamp">As of 2026-07-09</span>
   <h1>Agent-run cold email platform vs. hand-assembling the vendors yourself</h1>
-  <p class="lede">This deepens the summary on the <a href="compare.html">Compare</a> page into a concrete walk-through of what a coding agent actually has to do, and hold in context, to hand-assemble cold-email infrastructure from raw vendor APIs — versus driving a facade that already holds that state. Factual only: no competitor named or disparaged, no fabricated deliverability numbers.</p>
+  <p class="lede">This deepens the summary on the <a href="/compare">Compare</a> page into a concrete walk-through of what a coding agent actually has to do, and hold in context, to hand-assemble cold-email infrastructure from raw vendor APIs — versus driving a facade that already holds that state. Factual only: no competitor named or disparaged, no fabricated deliverability numbers.</p>
 
   <div class="callout">
     <strong>No fabricated numbers</strong>
@@ -50,7 +50,7 @@
     <li><strong>Registrar account and API key</strong> (e.g. Porkbun or Namecheap) — a separate signup, a separate credential to hold, a separate rate limit and error surface to handle.</li>
     <li><strong>Lookalike-domain generation logic</strong> — brand-derived candidates (<code>tryacme.com</code>, <code>getacme.com</code>) that read as legitimate rather than as phishing, built and maintained by you or your agent.</li>
     <li><strong>Domain purchase</strong> — roughly $11-15/yr per .com/.net domain at public wholesale pricing.</li>
-    <li><strong>Manual DNS per domain</strong> — SPF, DKIM, DMARC, and reverse DNS/PTR records, each configured correctly, because a single misconfigured record now gets mail rejected at the SMTP level under 2026 Gmail/Yahoo rules (see <a href="guide-cold-email-deliverability.html#auth">the deliverability guide</a>).</li>
+    <li><strong>Manual DNS per domain</strong> — SPF, DKIM, DMARC, and reverse DNS/PTR records, each configured correctly, because a single misconfigured record now gets mail rejected at the SMTP level under 2026 Gmail/Yahoo rules (see <a href="/guide-cold-email-deliverability#auth">the deliverability guide</a>).</li>
     <li><strong>A mailbox/warmup vendor account</strong> (e.g. Inboxkit) — another signup, another credential, roughly $5.5-6/mailbox/month all-in at public pricing, plus a multi-week warmup ramp your agent has to track state for across sessions.</li>
     <li><strong>A sequencing/reply engine</strong> — scheduling, per-mailbox send-cap enforcement, bounce/reply/unsubscribe detection, threading — either self-built or a separate OSS/vendor tool with its own setup.</li>
     <li><strong>Compliance logic, implemented correctly, every time</strong> — CAN-SPAM opt-out handling, a working suppression list, RFC 8058 one-click unsubscribe, physical-address footer injection — none of which is enforced by any of the vendors above; it's on you or your agent to build and not skip.</li>
@@ -103,14 +103,14 @@
   </ul>
 
   <h2>Wholesale economics behind the numbers above</h2>
-  <p>Domains ≈ $11-15/yr (.com/.net via Porkbun, public pricing); mailboxes + warmup ≈ $5.5-6/mailbox/mo (Inboxkit-class vendor, all-in, public pricing); Stripe processing ≈ 2.9% + 30¢. Fully-loaded cost per mailbox, including domain amortization and the normal 8-18%/month domain-burn replacement cycle (see <a href="guide-cold-email-deliverability.html#burn">why that's normal, not a failure</a>), comes to roughly $7/mo — full sourcing in <code>docs/research/vendor-tos-economics-2026-07-09.md</code> in the repository. This platform's <a href="pricing.html">retail pricing</a> targets a 2.5-3x margin over that wholesale cost.</p>
+  <p>Domains ≈ $11-15/yr (.com/.net via Porkbun, public pricing); mailboxes + warmup ≈ $5.5-6/mailbox/mo (Inboxkit-class vendor, all-in, public pricing); Stripe processing ≈ 2.9% + 30¢. Fully-loaded cost per mailbox, including domain amortization and the normal 8-18%/month domain-burn replacement cycle (see <a href="/guide-cold-email-deliverability#burn">why that's normal, not a failure</a>), comes to roughly $7/mo — full sourcing in <code>docs/research/vendor-tos-economics-2026-07-09.md</code> in the repository. This platform's <a href="/pricing">retail pricing</a> targets a 2.5-3x margin over that wholesale cost.</p>
   <p>No deliverability comparison against any named competitor exists on this page or anywhere on this site.</p>
 
   <h2>Related</h2>
   <ul>
-    <li><a href="guide-cold-email-with-ai-agent.html">How to run cold email with your AI coding agent</a> — the setup path this comparison is measured against.</li>
-    <li><a href="compare.html">Compare (summary)</a> — the shorter version of this page.</li>
-    <li><a href="guide-cold-email-deliverability.html">Cold email deliverability in 2026</a>.</li>
+    <li><a href="/guide-cold-email-with-ai-agent">How to run cold email with your AI coding agent</a> — the setup path this comparison is measured against.</li>
+    <li><a href="/compare">Compare (summary)</a> — the shorter version of this page.</li>
+    <li><a href="/guide-cold-email-deliverability">Cold email deliverability in 2026</a>.</li>
   </ul>
 </main>
 
@@ -118,12 +118,12 @@
   <div class="wrap">
     <p><span data-brand></span> is operated by EpiphanyMade. Early access — no deliverability or inbox-placement guarantees. Lookalike domains are scoped to your own brand only, never third-party impersonation.</p>
     <ul>
-      <li><a href="privacy.html">Privacy</a></li>
-      <li><a href="terms.html">Terms</a></li>
-      <li><a href="aup.html">Acceptable Use</a></li>
-      <li><a href="docs.html">Docs</a></li>
-      <li><a href="guide-cold-email-with-ai-agent.html">Guides</a></li>
-      <li><a href="faq.html">FAQ</a></li>
+      <li><a href="/privacy">Privacy</a></li>
+      <li><a href="/terms">Terms</a></li>
+      <li><a href="/aup">Acceptable Use</a></li>
+      <li><a href="/docs">Docs</a></li>
+      <li><a href="/guide-cold-email-with-ai-agent">Guides</a></li>
+      <li><a href="/faq">FAQ</a></li>
       <li><a href="openapi.yaml">OpenAPI</a></li>
       <li><a href="llms.txt">llms.txt</a></li>
       <li><a href="https://github.com/YS-projectcalc/agent-cold-email">GitHub</a></li>
