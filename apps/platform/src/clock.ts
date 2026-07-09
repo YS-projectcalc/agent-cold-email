@@ -38,6 +38,19 @@ export class VirtualClock implements Clock {
     return this.offsetMs;
   }
 
+  /**
+   * Jump the virtual clock forward by an already-virtual duration (bypasses
+   * the multiplier). This is the test/sandbox-control primitive — it's what
+   * "advance virtual clock" in the walking-skeleton test calls, letting a
+   * 4-week warmup ramp resolve without any real wall-clock wait. A future
+   * DO-alarm-driven tick (B2) would instead call `advance(realIntervalMs)`.
+   */
+  advanceVirtual(virtualMs: number): number {
+    if (virtualMs < 0) throw new RangeError("advanceVirtual() requires a non-negative duration");
+    this.offsetMs += virtualMs;
+    return this.offsetMs;
+  }
+
   get offset(): number {
     return this.offsetMs;
   }

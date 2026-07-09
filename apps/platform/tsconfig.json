@@ -2,8 +2,7 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "rootDir": ".",
-    "types": ["@cloudflare/workers-types"]
+    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-pool-workers/types"]
   },
-  "include": ["src", "test", "vitest.config.ts"],
-  "references": [{ "path": "../../packages/shared" }]
+  "include": ["src", "test", "vitest.config.ts"]
 }
