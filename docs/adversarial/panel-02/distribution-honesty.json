@@ -1,0 +1,40 @@
+{
+  "verdict": "FIX_THEN_SHIP",
+  "findings": [
+    {
+      "title": "docs.html tells agents/humans the hosted MCP server \"is not live yet\" — but /mcp is live and serving all 12 tools right now (and README/server-card say \"live now\")",
+      "severity": "HIGH",
+      "file": "/Users/yaakovscher/dev/coldstart/site/docs.html",
+      "failure_scenario": "A coding agent (or human) evaluating this for a 'cold email MCP' task lands on docs.html — the page linked from llms.txt and the nav as the canonical Quickstart/MCP-setup/tool-reference. Line 30 says 'The hosted MCP server and published CLI are landing shortly'; line 69 says 'The hosted MCP server ... is not live yet in this build phase.' Both are false: `curl -s -X POST https://agent-cold-email-api.yaakovscher.workers.dev/mcp -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}'` returns 200 with serverInfo, and `tools/list` returns all 12 tools. The page even prints the working MCP URL in its own config block (line 62) and then declares that server dead two lines later — self-contradictory on one page, and flatly contradicted by the public README (raw.githubusercontent.com README line 90: 'A hosted MCP endpoint ... live now') and server-card.json (live transport.url). Net effect: the primary distribution surface tells the exact audience you want to convert that the working, load-bearing MCP integration doesn't exist, so they won't configure it or recommend it — and the two primary docs disagreeing torches credibility.",
+      "fix": "Rewrite docs.html line 30 and line 69 to state the hosted MCP endpoint is LIVE in test mode (sandbox vendors, no real sends). Only the npm-published CLI and real-sending are pending. Mirror README wording: 'The hosted MCP endpoint (/mcp) is live now in test mode; the CLI npm publish and real sending are the remaining activation steps.' Remove 'is not live yet in this build phase' and 'hosted MCP server ... landing shortly'."
+    },
+    {
+      "title": "README calls POST /demo/run a \"no-signup\" demo, but the endpoint is auth-gated and 401s without a token",
+      "severity": "MEDIUM",
+      "file": "/Users/yaakovscher/dev/coldstart/README.md",
+      "failure_scenario": "README.md line 91 (also live on the public GitHub repo, HTTP 200) lists: '✅ A no-signup accelerated sandbox demo (`POST /demo/run`)'. An agent takes that literally and issues `POST /demo/run` with no Authorization header. Live response: `{\"error\":\"missing bearer token\"}` HTTP 401. Confirmed in code: apps/platform/src/index.ts:29 mounts demoRoute under `authed` (requireAuth), and apps/platform/src/routes/demo.ts's own comment says 'POST /demo/run — authed'. The only genuinely no-signup path is the CLI `demo` command, which internally calls POST /signup first (packages/cli/src/commands/demo.ts:38). So the endpoint labeled 'no-signup' is the one endpoint in the demo flow that requires a token.",
+      "fix": "Reword README.md:91 to attribute no-signup to the CLI flow and make the HTTP endpoint's auth explicit, e.g. 'A one-command sandbox demo: the CLI `demo` command mints a demo tenant automatically; the underlying `POST /demo/run` runs against that demo tenant's bearer token (get one from POST /signup — no card, no vendor account).' Alternatively, if a truly tokenless HTTP demo is wanted, add an unauthenticated handler that mints an ephemeral demo tenant server-side — but the doc correction is the anti-slop fix."
+    },
+    {
+      "title": "Every page serves a literal {{BRAND}} template token in the raw <title>; brand.js only patches it client-side, so crawlers/LLM indexers/link-preview bots index a broken title",
+      "severity": "MEDIUM",
+      "file": "/Users/yaakovscher/dev/coldstart/site/index.html",
+      "failure_scenario": "Raw HTML served by Cloudflare Pages contains `<title>{{BRAND}} — agent-native cold-email infrastructure</title>` (verified live via curl, no JS) on the homepage, and 'Privacy Policy — {{BRAND}}', 'Docs — {{BRAND}}', 'Terms of Service — {{BRAND}}', etc. on every other page. site/assets/brand.js:17 fixes it only inside a DOMContentLoaded handler (`document.title = document.title.replace('{{BRAND}}', BRAND_NAME)`), which never runs for non-JS consumers: Google/Bing crawlers reading raw HTML, LLM/AI answer-engine indexers, and Slack/iMessage/Twitter/LinkedIn link-preview unfurlers. The single most heavily-weighted on-page discovery signal — the title tag — is indexed and previewed as an unrendered mustache token. This directly undercuts the project's entire 'be discoverable by coding agents' thesis and reads as unfinished. (This is distinct from and NOT the intentional brand deferral — the intended fallback is the keyword slug `agent-cold-email`, not a leaked `{{BRAND}}` placeholder.)",
+      "fix": "Server-render the permanent keyword handle into the raw <title> at build/deploy time so it is valid without JS: hardcode `agent-cold-email — …` (or run brand.js's replacement as a build step over the static files). Keep the `[data-brand]` body spans and brand.js for the one-line activation swap; only the <title> needs the pre-rendered slug. Apply to index.html, docs.html, pricing.html, compare.html, privacy.html, terms.html, aup.html."
+    },
+    {
+      "title": "docs.html CLI example uses `setup-infrastructure` subcommand that doesn't exist (actual command is `setup`)",
+      "severity": "LOW",
+      "file": "/Users/yaakovscher/dev/coldstart/site/docs.html",
+      "failure_scenario": "docs.html line 75 shows `npx agent-cold-email setup-infrastructure --brand Acme --primary-domain acme.com ...`. The CLI dispatch (packages/cli/src/index.ts:43-72) has `case \"setup\"` and no `setup-infrastructure` case, so that invocation falls through to `default` → prints 'Unknown command: setup-infrastructure' and sets exit code 1. A user who builds the CLI locally (the repo says the CLI 'works today from a local build') and copies the documented command hits an immediate error on the core provisioning step. Low severity only because `npx agent-cold-email` is not yet npm-published, so it's not live-callable today.",
+      "fix": "Change docs.html:75 to `npx agent-cold-email setup --brand Acme --primary-domain acme.com --domains 2 --inboxes-each 3` to match the actual CLI verb in packages/cli/src/index.ts. While there, verify the `signup --email` flag name matches runSignup's parsing."
+    },
+    {
+      "title": "Bearer tokens minted with a `cs_live_` prefix for demo tenants on a platform that is explicitly not-live / test-mode-only",
+      "severity": "LOW",
+      "file": "/Users/yaakovscher/dev/coldstart/apps/platform/src/auth.ts",
+      "failure_scenario": "apps/platform/src/auth.ts:5 sets `TOKEN_PREFIX = \"cs_live_\"` and every /signup mints a demo-plan token; live signup returns e.g. `cs_live_e368625f...`. Every public surface simultaneously insists 'not yet available for real sending' / 'no live production deployment.' The `_live_` label mirrors Stripe's convention where `_live_` = real-money production credential (vs `_test_`), so an agent that persists a `cs_live_…` token may reason it holds a production credential and treat it accordingly — contradicting the everywhere-stated test-mode posture. It also means when real activation happens there's no prefix signal distinguishing a sandbox token from a real-sending one.",
+      "fix": "Use an environment-accurate prefix while in test mode — `cs_test_` or `cs_demo_` — and reserve `cs_live_` for tokens on activated real-sending tenants (branch on tenant plan), or drop the environment word entirely (`cs_`). Add a test asserting demo-plan tokens never carry a `_live_` prefix."
+    }
+  ]
+}

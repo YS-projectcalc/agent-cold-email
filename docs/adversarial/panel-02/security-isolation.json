@@ -1,0 +1,12 @@
+{
+  "verdict": "CLEAN",
+  "findings": [
+    {
+      "title": "Unauthenticated /signup has no rate limiting — unbounded tenant/token/DO/D1 creation",
+      "severity": "LOW",
+      "file": "apps/platform/src/routes/signup.ts",
+      "failure_scenario": "An unauthenticated script POSTs /signup in a loop. Confirmed live: every call returns 201 with a fresh tenantId+token and zero throttle. Each call inserts a tenants_index row into D1 and instantiates a brand-new TenantDO (its own SQLite storage). Thousands of calls bloat D1 and the Durable Object namespace at no cost/effort to the attacker. Notably, the sibling PUBLIC endpoint /api/waitlist already ships the exact mitigation (per-IP CF-Connecting-IP + windowed WAITLIST KV counter in routes/waitlist.ts), so this is an inconsistency in an existing pattern, not a missing capability. Impact is bounded to resource/cost abuse because this build is test-mode with sandbox-only vendors (no real spend/sends) and no cross-tenant data is exposed — hence LOW, not an isolation break.",
+      "fix": "Reuse the waitlist per-IP KV rate limiter in the /signup handler: derive ip from c.req.header('CF-Connecting-IP'), key a WAITLIST (or dedicated) KV counter as rl:signup:${ip}:${windowBucket} with a short expirationTtl, cap at N signups per window, and return 429 past the cap before minting the token / inserting the D1 row. Optionally add a global daily signup ceiling as defense-in-depth."
+    }
+  ]
+}

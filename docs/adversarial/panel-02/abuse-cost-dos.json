@@ -1,0 +1,40 @@
+{
+  "verdict": "FIX_THEN_SHIP",
+  "findings": [
+    {
+      "title": "/signup is unauthenticated with zero rate limit — unlimited tenant + token minting (cost-runaway / resource-exhaustion DoS)",
+      "severity": "HIGH",
+      "file": "apps/platform/src/routes/signup.ts (also index.ts:17 — mounted outside any rate-limit middleware; wrangler.toml has no Rate Limiting binding)",
+      "failure_scenario": "VERIFIED LIVE: 20 parallel POST /signup all returned 201, and 3 back-to-back returned 201 in <1s each — there is no per-IP or global cap anywhere (only WAITLIST KV exists; no rate-limit binding; the only middleware is requireAuth on the authed group). Each signup writes a D1 row (insertTenantIndex), instantiates a Durable Object with its own SQLite storage (initTenant runs schema + 2 INSERTs + billing.createCustomer), and mints a REAL bearer token. A trivial script (`for i in $(seq 1 10000000)`) mints millions of tenants: unbounded D1 row growth toward the database row ceiling, millions of billed DO instances/storage, and an unlimited supply of valid tokens that each unlock /demo/run, /mcp, and setup_infrastructure — turning findings #3/#4 into a distributed attack. This is the single root enabler of every other cost/DoS vector.",
+      "fix": "Add a per-IP rate limit on POST /signup BEFORE tenant creation. Do NOT copy the waitlist KV read-modify-write pattern (it is racy — see the waitlist finding); use Cloudflare's native Rate Limiting binding (`[[unsafe.bindings]] type=\"ratelimit\"` / the ratelimit binding) keyed on CF-Connecting-IP, e.g. 3/min and 20/day per IP, plus a global daily ceiling on demo-tenant creation. Add a Turnstile token requirement to /signup (the turnstile-spin skill is available) so headless scripting is blocked. Reject before the D1 write and DO instantiation."
+    },
+    {
+      "title": "Lookalike-domain generator does NOT reject third-party brands — the product's central documented safety guardrail is absent from code (impersonation-abuse vector)",
+      "severity": "HIGH",
+      "file": "apps/platform/src/engine/provisioning.ts:33 (runSetupInfrastructure — no validation) and apps/platform/src/vendors/sandbox/domain-port.ts:14 (searchLookalikes — slugs any primaryDomain with no ownership/third-party check)",
+      "failure_scenario": "VERIFIED LIVE: after a free signup, `setup_infrastructure` with brand=\"Google\", primaryDomain=\"google.com\" returned a jobId and infrastructure_status then showed provisioned mailboxes sales11@trygoogle.com, sales21@getgoogle.com, sales31@joingoogle.com. README.md:79, AGENTS.md:79, and ARCHITECTURE.md #8 all state the generator 'hard-rejects any third-party brand … enforced in code, not documented … This is not a phishing or impersonation tool' — but the code has no such validator and no check that primaryDomain belongs to the tenant. The guardrail is advertised as live yet ROADMAP.md B4 still lists it unchecked. In sandbox no real domain is bought, but the safety property the whole product is sold on is false, and the same unguarded path is what the real DomainPort will call at activation.",
+      "fix": "Add a third-party-brand hard-reject validator at the setup_infrastructure boundary (before searchLookalikes/buy): reject unless primaryDomain matches a domain the tenant has verified ownership of, and reject brand/primaryDomain values on a known-brand denylist / that don't derive from the tenant's own verified identity. Enforce it in engine code with a test that FAILS on a third-party brand (per ARCHITECTURE.md #8's 'enforced in code' claim). Until built, correct README.md/AGENTS.md/ARCHITECTURE.md to stop asserting the guardrail exists (align them with ROADMAP.md B4 being open)."
+    },
+    {
+      "title": "/demo/run has no per-tenant rate limit and accumulates unbounded DO SQLite state on every call",
+      "severity": "MEDIUM",
+      "file": "apps/platform/src/tenant-do.ts:167 (demoRun) → apps/platform/src/engine/demo.ts:52 (runDemo) → apps/platform/src/engine/campaigns.ts:14 (launchCampaign always newId, never dedups)",
+      "failure_scenario": "VERIFIED LIVE: 5 back-to-back POST /demo/run on one token all returned 200 (~200ms DO wall-time each). Nothing rate-limits it. Each call runs advanceClock + launchCampaign (inserts a new campaign + 3 leads + up to 6 scheduled_sends) + 2 ticks + 2 polls (inserting events), all appended — runDemo never resets prior demo state. An attacker holding one free token (trivially minted, see finding #1) loops /demo/run indefinitely: monotonic per-tenant DO SQLite growth toward the DO storage limit plus continuous billed DO compute. Parallelized across the unlimited free tenants from finding #1 this is a real Cloudflare-usage runaway.",
+      "fix": "Rate-limit demoRun inside TenantDO: persist a last_demo_run_at timestamp (and a demo_run_count) in DO storage and reject calls within a minimum interval (e.g. 1/min) and above a lifetime cap (e.g. 20 runs) for demo/free tenants. Additionally, make runDemo replace prior demo state (delete previous demo campaigns/leads/sends for the tenant) instead of appending, so storage is bounded regardless."
+    },
+    {
+      "title": "No request-body size cap before JSON.parse on unauthenticated endpoints (parse-before-validate memory/CPU burn)",
+      "severity": "MEDIUM",
+      "file": "apps/platform/src/validate.ts:9-13 (parseJsonBody calls c.req.json() with no size guard) and apps/platform/src/routes/mcp.ts:23 (same); affects unauth /signup, /api/waitlist, /mcp",
+      "failure_scenario": "VERIFIED LIVE: a 10 MB junk body to /signup and to /api/waitlist was fully read and JSON-parsed before zod rejected it (HTTP 400 after ~1s), because c.req.json() materializes and parses the ENTIRE body before any zod bound (brand.max(200), email) is checked. The Worker has a 128 MB memory ceiling and per-request CPU limits; large or pathological JSON bodies force full parse cost on every request, on endpoints that have no auth and (finding #1) no rate limit — so an attacker can cheaply fan out large-body POSTs to inflate Worker CPU-time billing and pressure memory.",
+      "fix": "Reject oversized bodies before parsing: check c.req.header('Content-Length') and return 413 above a small cap for the small-schema routes (e.g. 8 KB for /signup and /api/waitlist, ~64 KB for /mcp), and only allow a larger cap (~4 MB) on launch_campaign which legitimately carries up to 5000 leads. Apply via a Hono bodyLimit middleware or a manual Content-Length guard inside parseJsonBody and the /mcp handler before c.req.json()."
+    },
+    {
+      "title": "Waitlist rate limiter is a non-atomic KV read-then-write (bypassable under concurrent burst) with fixed-window boundary doubling",
+      "severity": "LOW",
+      "file": "apps/platform/src/routes/waitlist.ts:46-51",
+      "failure_scenario": "The limiter does WAITLIST.get(key) → compare to 5 → WAITLIST.put(count+1). This read-modify-write is not atomic: N requests that arrive concurrently within the same 60s window all read the same currentCount (e.g. 0), all pass the `>= 5` check, and all write — so a burst of parallel POSTs can insert far more than 5 waitlist emails per IP per window (each un-TTL'd email:* key persists forever, so this is unbounded KV growth). Additionally the window is fixed (Math.floor(now/60000)), so up to 10 requests are allowed across a window boundary a second apart. (Sequential limiting works — verified 5×200 then 429 — so blast radius is limited to the waitlist store, no cost/sends.)",
+      "fix": "Replace the KV read-modify-write with an atomic primitive: Cloudflare's Rate Limiting binding, or a small counter Durable Object per IP, so increments are serialized. If keeping KV, at minimum this pattern must NOT be reused for the higher-value /signup limiter (finding #1). Also set an expirationTtl on the email:* keys or cap total waitlist size to bound KV growth."
+    }
+  ]
+}
