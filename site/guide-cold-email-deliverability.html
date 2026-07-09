@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cold Email Deliverability in 2026: What Actually Matters — agent-cold-email</title>
+<meta name="description" content="What determines cold email deliverability in 2026: mandatory SPF/DKIM/DMARC, the Gmail and Yahoo bulk-sender rules, honest warmup reality, and domain burn as a normal cost — no fabricated benchmarks, no guarantees.">
+<link rel="canonical" href="https://agent-cold-email.pages.dev/guide-cold-email-deliverability.html">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/brand.js" defer></script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "Article",
+  "headline": "Cold email deliverability in 2026: what actually matters",
+  "description": "SPF/DKIM/DMARC requirements, Gmail/Yahoo bulk-sender rules, honest warmup reality, and domain burn as a normal operating cost for cold email in 2026.",
+  "dateModified": "2026-07-09",
+  "author": { "@type": "Organization", "name": "EpiphanyMade" }
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Do SPF, DKIM, and DMARC actually matter for cold email in 2026?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes, and they are no longer optional. Since Gmail and Yahoo's 2024 bulk-sender requirements, mail from a domain missing or misconfigured SPF, DKIM, or DMARC is commonly rejected at the SMTP level rather than filtered to spam — meaning it never gets a placement decision at all." }
+    },
+    {
+      "@type": "Question",
+      "name": "What is the Gmail/Yahoo spam-complaint threshold?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Gmail's published bulk-sender guidance sets a spam-complaint-rate threshold of under 0.30% to remain eligible for its delivery-mitigation program; staying under 0.10% is recommended. Crossing the threshold does not guarantee inbox placement is lost, but it removes a program that otherwise helps borderline senders." }
+    },
+    {
+      "@type": "Question",
+      "name": "Does cold-email warmup guarantee better deliverability?",
+      "acceptedAnswer": { "@type": "Answer", "text": "No. Warmup is legitimate reputation-building over a multi-week ramp, not a way to bypass spam filtering. Independent testing has not shown a major warmup tool producing a reliable deliverability lift on its own, and public warmup-pool signal is discounted by Gmail and Microsoft's own bot and closed-loop-graph detection." }
+    },
+    {
+      "@type": "Question",
+      "name": "Is losing a sending domain to spam blocks normal?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. Domain burn in the 8-18% per month range is a normal, expected part of running cold email at any real volume, not a sign of a broken setup. Isolating outreach onto branded lookalike domains, rather than a primary domain, contains the damage and makes replacing a burned domain routine instead of catastrophic." }
+    }
+  ]
+}
+</script>
+</head>
+<body>
+<nav class="site-nav">
+  <div class="wrap">
+    <a class="logo" href="index.html"><span data-brand></span><span class="tag">agent-native cold email</span></a>
+    <ul>
+      <li><a href="index.html">Home</a></li>
+      <li><a href="docs.html">Docs</a></li>
+      <li><a href="pricing.html">Pricing</a></li>
+      <li><a href="compare.html">Compare</a></li>
+      <li><a href="guide-cold-email-with-ai-agent.html" aria-current="page">Guides</a></li>
+      <li><a href="faq.html">FAQ</a></li>
+    </ul>
+  </div>
+</nav>
+
+<main class="wrap">
+  <span class="draft-stamp">As of 2026-07-09</span>
+  <h1>Cold email deliverability in 2026: what actually matters</h1>
+  <p class="lede">No cold-email platform, including this one, can guarantee inbox placement. What follows is the mechanical, verifiable part: the authentication requirements that gate whether a message is even evaluated, the bulk-sender rules Gmail and Yahoo actually publish, and an honest account of what warmup does and doesn't do.</p>
+
+  <div class="callout">
+    <strong>No guarantees, anywhere on this page</strong>
+    This is not a pitch for a deliverability outcome. It's a factual explainer of the mechanics, so you (or your agent) can reason about what's actually in your control versus what Gmail/Microsoft decide unilaterally.
+  </div>
+
+  <h2 id="auth">SPF, DKIM, and DMARC are mandatory, not best-practice</h2>
+  <p>As of Gmail and Yahoo's 2024 bulk-sender requirements (still in force through 2026), a sending domain missing or misconfigured SPF, DKIM, or DMARC is commonly <strong>rejected at the SMTP level</strong> for bulk senders — not delivered to spam, not filtered, simply refused before a placement decision is ever made. This changes the failure mode from "landed in spam" to "never sent." Any cold-email setup needs all three configured correctly per sending domain, plus valid reverse DNS (rDNS/PTR records), before a single message goes out.</p>
+  <p>This platform's <code>setup_infrastructure</code> tool automates SPF/DKIM/DMARC/rDNS configuration for every lookalike domain it provisions and verifies the DNS before a mailbox on that domain is used — see <a href="guide-cold-email-with-ai-agent.html">the setup guide</a>.</p>
+
+  <h2 id="bulk-rules">The Gmail/Yahoo bulk-sender rules</h2>
+  <p>For senders delivering roughly 5,000+ messages per day to Gmail addresses, Google's bulk-sender guidelines require, in addition to authentication:</p>
+  <ul>
+    <li><strong>Spam-complaint rate under 0.30%</strong> to remain eligible for Gmail's delivery-mitigation program (Google recommends staying under 0.10%). Sustained violation makes a sender ineligible for that program for a rolling clean period.</li>
+    <li><strong>One-click unsubscribe</strong> conforming to RFC 8058 (the <code>List-Unsubscribe</code> and <code>List-Unsubscribe-Post</code> headers) on every message that includes an unsubscribe option, honored within a short window.</li>
+    <li>Messages formatted to standard internet mail conventions (valid <code>From</code> headers, no misleading routing).</li>
+  </ul>
+  <p>Even senders below the 5,000/day bulk threshold are, in practice, judged by the same underlying reputation signals — the published thresholds describe where enforcement is most mechanical, not where the underlying signals stop mattering.</p>
+
+  <h2 id="warmup">Warmup: what it is, and what it isn't</h2>
+  <p>Warmup is the practice of gradually ramping a new mailbox's sending volume — typically from a handful of messages per day in week one to 25-40/day by week four — while a pool of other inboxes opens, replies to, and rescues warmup messages from spam. The goal is building genuine domain and IP sending history before real cold outreach volume hits it.</p>
+  <p><strong>The honest limitations, stated plainly:</strong></p>
+  <ul>
+    <li><strong>Public warmup-pool signal is discounted.</strong> Gmail and Microsoft can detect the closed-loop graph structure of a warmup pool and the datacenter IPs many pool participants run on — a warmup dashboard showing rising "opens" does not mean Gmail's own systems see the same signal as genuine.</li>
+    <li><strong>No major warmup tool has shown a reliable deliverability lift in independent testing.</strong> Warmup is reputation-building, not a lever that reliably moves placement on its own.</li>
+    <li><strong>Private, vetted warmup pools perform better than public ones</strong> — independent estimates put the difference around 20-30% — but "better than a weak baseline" is not "a guarantee."</li>
+    <li><strong>"Pre-warmed" mailboxes are a time-shift, not magic.</strong> A vendor selling pre-warmed inboxes ran the same ramp on pre-aged domains or established IPs before handing them over — the mechanism is identical, just moved earlier.</li>
+    <li><strong>Warmup never stops.</strong> A mailbox that only ever sends cold outreach and receives zero organic replies is itself a detectable pattern; ongoing low-level warmup activity is part of maintaining a mailbox, not a one-time onboarding step.</li>
+  </ul>
+  <p>The strongest signal available to any sender, always, is <strong>real replies from real recipients</strong> to real campaigns — not synthetic warmup traffic. This platform runs vendor-provided base warmup plus an AI-driven layer aimed at diverse, non-closed-loop activity, and is explicit that this is an incremental edge in an ongoing arms race against spam-filter detection, not a permanent workaround. Never trust a vendor claiming warmup "beats" or "bypasses" spam filters — that claim describes filter evasion, not reputation-building, and this platform does not make it.</p>
+
+  <h2 id="burn">Domain burn is a normal operating cost</h2>
+  <p>Losing a sending domain to spam-block or reputation decay at a rate of roughly <strong>8-18% per month</strong> is typical for active cold-email sending at any real volume — not a sign of a misconfigured setup. The response that actually works is structural: send from branded lookalike domains rather than your primary domain, so a burned domain is contained and replaced rather than damaging the domain your business depends on for everything else. Auto-retire-and-replace of a burning domain is treated as a routine, expected operation in this platform's design, not an incident.</p>
+
+  <h2 id="response">What an AI deliverability control loop can and can't do</h2>
+  <p>A monitoring loop over vendor-provided signals (bounce rate, spam-complaint rate, placement-test results, warmup health) can automate the response within the rules: auto-pause a degrading mailbox, rotate sending, detect a burning domain and provision a replacement, throttle volume to what a mailbox's current health supports. What it cannot do is change how Gmail or Microsoft evaluate a sender — those are third-party, non-public decisions. Any platform, including this one, that implies otherwise is not being accurate.</p>
+
+  <h2>Related</h2>
+  <ul>
+    <li><a href="guide-cold-email-with-ai-agent.html">How to run cold email with your AI coding agent</a> — where these guardrails plug into the setup flow.</li>
+    <li><a href="compare-vs-diy.html">Agent-run platform vs. hand-assembling the vendors yourself</a>.</li>
+    <li><a href="faq.html">FAQ</a> — including "does this guarantee deliverability?" (no).</li>
+  </ul>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p><span data-brand></span> is operated by EpiphanyMade. Early access — no deliverability or inbox-placement guarantees. Lookalike domains are scoped to your own brand only, never third-party impersonation.</p>
+    <ul>
+      <li><a href="privacy.html">Privacy</a></li>
+      <li><a href="terms.html">Terms</a></li>
+      <li><a href="aup.html">Acceptable Use</a></li>
+      <li><a href="docs.html">Docs</a></li>
+      <li><a href="guide-cold-email-with-ai-agent.html">Guides</a></li>
+      <li><a href="faq.html">FAQ</a></li>
+      <li><a href="openapi.yaml">OpenAPI</a></li>
+      <li><a href="llms.txt">llms.txt</a></li>
+      <li><a href="https://github.com/YS-projectcalc/agent-cold-email">GitHub</a></li>
+    </ul>
+  </div>
+</footer>
+</body>
+</html>

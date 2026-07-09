@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Cold Email MCP Server for Coding Agents — agent-cold-email</title>
+<meta name="description" content="The agent-cold-email MCP server: 12 curated tools over streamable HTTP for cold-email infrastructure, exact input schemas, how to connect it to Claude Code or Codex, and the no-signup CLI demo.">
+<link rel="canonical" href="https://agent-cold-email.pages.dev/guide-mcp-cold-email.html">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/brand.js" defer></script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "The cold-email MCP server for coding agents",
+  "description": "What the agent-cold-email MCP server does, its 12 tools with exact input schemas, how to add it to a coding agent, and the no-signup CLI demo.",
+  "dateModified": "2026-07-09",
+  "about": { "@type": "SoftwareApplication", "name": "agent-cold-email", "applicationCategory": "BusinessApplication" }
+}
+</script>
+</head>
+<body>
+<nav class="site-nav">
+  <div class="wrap">
+    <a class="logo" href="index.html"><span data-brand></span><span class="tag">agent-native cold email</span></a>
+    <ul>
+      <li><a href="index.html">Home</a></li>
+      <li><a href="docs.html">Docs</a></li>
+      <li><a href="pricing.html">Pricing</a></li>
+      <li><a href="compare.html">Compare</a></li>
+      <li><a href="guide-cold-email-with-ai-agent.html" aria-current="page">Guides</a></li>
+      <li><a href="faq.html">FAQ</a></li>
+    </ul>
+  </div>
+</nav>
+
+<main class="wrap">
+  <span class="draft-stamp">As of 2026-07-09</span>
+  <h1>The cold-email MCP server for coding agents</h1>
+  <p class="lede">A hosted, streamable-HTTP MCP server exposing 12 curated cold-email infrastructure tools, per-tenant bearer-token scoped, live in test mode now. This page documents the exact tool surface — verified against the live <code>tools/list</code> response, not aspirational.</p>
+
+  <div class="callout">
+    <strong>Live and test-mode</strong>
+    The endpoint below is reachable today. It runs against a sandboxed vendor layer only — no real domains, mailboxes, or sends yet. See <a href="faq.html">FAQ</a> for the full early-access disclosure.
+  </div>
+
+  <h2 id="what">What this MCP server does</h2>
+  <p>Most cold-email MCP servers in the wild re-export a vendor's full API surface — a well-known example ships 100+ tools. This one is a curated, high-level facade: 12 intents that hide domain-registrar, mailbox-vendor, and sequencing-engine plumbing behind calls an agent can reason about in one context window. Content generation — the offer, the subject lines, the sequence body — stays your agent's job; this server owns infrastructure provisioning, sequencing, isolation, and compliance guardrails.</p>
+
+  <h2 id="connect">How to add it</h2>
+  <p>Streamable HTTP, JSON-RPC 2.0 (<code>initialize</code>, <code>tools/list</code>, <code>tools/call</code>), one config line, no OAuth dance. Get a token first via <code>POST /signup</code> (see <a href="guide-cold-email-with-ai-agent.html#setup">the setup guide</a>), then add:</p>
+  <pre><code>{
+  "mcpServers": {
+    "agent-cold-email": {
+      "url": "https://agent-cold-email-api.yaakovscher.workers.dev/mcp",
+      "headers": {
+        "Authorization": "Bearer &lt;your-token&gt;"
+      }
+    }
+  }
+}</code></pre>
+  <p>The endpoint resolves your token fresh on every call — there is no session or cache that could leak another tenant's data. The same tool names and same per-tenant auth are also reachable as plain REST (see <a href="openapi.yaml">openapi.yaml</a>) if your agent talks HTTP directly instead of MCP.</p>
+
+  <h2 id="tools">The 12 tools — exact schemas</h2>
+  <p>Verified directly against the live <code>tools/list</code> response and <a href="openapi.yaml">openapi.yaml</a>. Two additional helpers described in the design spec (<code>write_sequence</code>, <code>suggest_domains</code>) are <strong>not implemented</strong> — don't assume they exist.</p>
+
+  <h3><code>setup_infrastructure</code></h3>
+  <p>Buy branded lookalike domains, provision mailboxes, and start the warmup ramp. Returns immediately (async job); poll <code>infrastructure_status</code> for progress.</p>
+  <pre><code>{
+  brand: string (1-200 chars),
+  primaryDomain: string (3-253 chars),
+  domains: integer (1-20),
+  inboxesEach: integer (1-10),
+  persona: string (1-200 chars),
+  physicalAddress: string (1-500 chars),   // CAN-SPAM footer address
+  senderIdentity: string (1-200 chars)     // verified legal sender identity
+}
+// all 7 fields required</code></pre>
+
+  <h3><code>infrastructure_status</code></h3>
+  <p>Provisioning + warmup progress, per-mailbox health, and send-readiness. No parameters.</p>
+
+  <h3><code>launch_campaign</code></h3>
+  <p>Create and activate a campaign against a lead list. The caller supplies the offer and sequence step content — this platform does not generate outreach copy.</p>
+  <pre><code>{
+  name: string (1-200 chars),
+  offer: string (1-2000 chars),
+  leads: [ { email: string, firstName: string (1-200 chars), company?: string } ],  // 1-5000 items
+  sequence: [ { step: integer (>=1), subject: string (1-300 chars),
+                body: string (1-20000 chars), delayDays: integer (0-60) } ],        // 1-10 items
+  timezone: string,          // default "UTC"
+  sendWindow: { startHour: integer (0-23), endHour: integer (0-23) },  // default 0-23
+  stopOnReply: boolean       // default true
+}</code></pre>
+
+  <h3><code>campaign_results</code></h3>
+  <p>Sends, replies, bounces, and complaints for one campaign.</p>
+  <pre><code>{ campaignId: string }</code></pre>
+
+  <h3><code>metrics</code></h3>
+  <p>Account-wide deliverability + warmup health. No parameters.</p>
+
+  <h3><code>inbox</code></h3>
+  <p>Unified reply inbox across all mailboxes for the tenant. No parameters.</p>
+
+  <h3><code>thread</code></h3>
+  <p>Full message history for one thread.</p>
+  <pre><code>{ threadId: string }</code></pre>
+
+  <h3><code>reply</code></h3>
+  <p>Send a reply on an existing thread.</p>
+  <pre><code>{ threadId: string, body: string (1-20000 chars) }</code></pre>
+
+  <h3><code>mark</code></h3>
+  <p>Mark a thread read, unread, or archived.</p>
+  <pre><code>{ threadId: string, status: "read" | "unread" | "archived" }</code></pre>
+
+  <h3><code>pause</code></h3>
+  <p>Pause one campaign.</p>
+  <pre><code>{ campaignId: string }</code></pre>
+
+  <h3><code>pause_all</code></h3>
+  <p>Pause every campaign for the tenant. No parameters.</p>
+
+  <h3><code>account</code></h3>
+  <p>Usage, billing state, and quota for the tenant. No parameters.</p>
+
+  <h2 id="demo">The no-signup CLI demo</h2>
+  <p><code>npx agent-cold-email demo</code> mints a demo tenant, provisions sample infrastructure, and runs the accelerated sandbox pipeline end to end (warmup, sends, replies, bounces, stop-on-reply) in one command — no signup or token-wrangling required. <strong>The CLI is not yet published to npm</strong> — until it is, drive the same 12 tools over the hosted MCP endpoint above or directly over HTTP (<a href="docs.html#quickstart">quickstart</a>). The npm package name is reserved as the permanent keyword handle; publishing is one of the remaining activation steps (see <a href="faq.html">FAQ</a>).</p>
+
+  <h2 id="auth">Auth model</h2>
+  <p>One bearer token per tenant, minted by the unauthenticated <code>POST /signup</code> bootstrap call. Every other tool call requires <code>Authorization: Bearer &lt;token&gt;</code> and resolves server-side to exactly one tenant's isolated state — there is no cross-tenant data access at any layer.</p>
+
+  <h2>Related</h2>
+  <ul>
+    <li><a href="guide-cold-email-with-ai-agent.html">How to run cold email with your AI coding agent</a> — the full step-by-step walkthrough.</li>
+    <li><a href="docs.html">Docs</a> — quickstart, CLI usage, auth model.</li>
+    <li><a href="openapi.yaml">openapi.yaml</a> — the same 12 intents as REST.</li>
+    <li><a href=".well-known/mcp/server-card.json">MCP server card</a> — machine-readable transport + tool list for registry scans.</li>
+  </ul>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p><span data-brand></span> is operated by EpiphanyMade. Early access — no deliverability or inbox-placement guarantees. Lookalike domains are scoped to your own brand only, never third-party impersonation.</p>
+    <ul>
+      <li><a href="privacy.html">Privacy</a></li>
+      <li><a href="terms.html">Terms</a></li>
+      <li><a href="aup.html">Acceptable Use</a></li>
+      <li><a href="docs.html">Docs</a></li>
+      <li><a href="guide-cold-email-with-ai-agent.html">Guides</a></li>
+      <li><a href="faq.html">FAQ</a></li>
+      <li><a href="openapi.yaml">OpenAPI</a></li>
+      <li><a href="llms.txt">llms.txt</a></li>
+      <li><a href="https://github.com/YS-projectcalc/agent-cold-email">GitHub</a></li>
+    </ul>
+  </div>
+</footer>
+</body>
+</html>

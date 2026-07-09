@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How to Run Cold Email With Your AI Coding Agent (Claude Code, Codex) — agent-cold-email</title>
+<meta name="description" content="How to set up cold email end-to-end with a coding agent: one MCP token instead of hand-wiring a registrar, a mailbox/warmup vendor, and a sequencer. Step-by-step for Claude Code and Codex.">
+<link rel="canonical" href="https://agent-cold-email.pages.dev/guide-cold-email-with-ai-agent.html">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/brand.js" defer></script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "HowTo",
+  "name": "How to run cold email with your AI coding agent",
+  "description": "Set up agent-run cold email outreach using a coding agent (Claude Code, Codex) and the agent-cold-email MCP server: sign up, connect the agent, provision infrastructure, and launch a campaign.",
+  "step": [
+    { "@type": "HowToStep", "name": "Sign up for a token", "text": "POST /signup with a brand name and contact email to mint a bearer token scoped to your own isolated tenant. No card required for the demo tier." },
+    { "@type": "HowToStep", "name": "Connect your agent", "text": "Add the hosted MCP server (streamable HTTP, one config line + your bearer token) to Claude Code or Codex, or call the HTTP intents directly." },
+    { "@type": "HowToStep", "name": "Provision infrastructure", "text": "Call setup_infrastructure with your brand, primary domain, and desired domain/mailbox counts to start branded lookalike domain purchase, DNS, mailbox provisioning, and warmup." },
+    { "@type": "HowToStep", "name": "Poll for readiness", "text": "Call infrastructure_status to track provisioning and warmup progress until mailboxes are send-ready." },
+    { "@type": "HowToStep", "name": "Launch a campaign", "text": "Call launch_campaign with your own offer, sequence content, and lead list — the agent writes the copy, the platform runs it." },
+    { "@type": "HowToStep", "name": "Monitor replies and guardrails", "text": "Use inbox, thread, and reply to manage responses, and campaign_results or metrics to watch deliverability and warmup health. Suppression, unsubscribe, and send caps are enforced automatically." }
+  ]
+}
+</script>
+</head>
+<body>
+<nav class="site-nav">
+  <div class="wrap">
+    <a class="logo" href="index.html"><span data-brand></span><span class="tag">agent-native cold email</span></a>
+    <ul>
+      <li><a href="index.html">Home</a></li>
+      <li><a href="docs.html">Docs</a></li>
+      <li><a href="pricing.html">Pricing</a></li>
+      <li><a href="compare.html">Compare</a></li>
+      <li><a href="guide-cold-email-with-ai-agent.html" aria-current="page">Guides</a></li>
+      <li><a href="faq.html">FAQ</a></li>
+    </ul>
+  </div>
+</nav>
+
+<main class="wrap">
+  <span class="draft-stamp">Guide — early access, not yet available for real sending</span>
+  <h1>How to run cold email with your AI coding agent</h1>
+  <p class="lede">If you've asked Claude Code or Codex to "set up cold email outreach" and it started reaching for a domain registrar API, a mailbox/warmup vendor, and a sequencing library, this is the shorter path: one signup, one token, and a curated tool surface your agent already knows how to drive.</p>
+
+  <div class="callout">
+    <strong>Honest status disclosure</strong>
+    This platform is in active build and test-mode only. The steps below work today against a live sandbox — no real domains, mailboxes, or sends yet. See <a href="faq.html">FAQ</a> for what "early access" means concretely.
+  </div>
+
+  <h2>The problem this solves</h2>
+  <p>Cold email outreach genuinely needs three separate pieces of infrastructure underneath: a domain registrar (to buy branded lookalike domains so you never burn your primary domain's reputation), a mailbox/warmup vendor (real Google or Microsoft mailboxes with a multi-week reputation-building ramp), and a sequencing/reply engine (scheduling, per-mailbox caps, bounce and reply detection, unsubscribe handling). Wiring these together yourself is a completely valid choice — see <a href="compare-vs-diy.html">the DIY cost comparison</a> for exactly what that involves. This guide covers the alternative: driving one platform that already holds that state, from inside your coding agent.</p>
+
+  <h2 id="setup">Step-by-step setup</h2>
+  <ol>
+    <li>
+      <strong>Sign up for a token.</strong>
+      <pre><code>curl -s -X POST https://agent-cold-email-api.yaakovscher.workers.dev/signup \
+  -H 'Content-Type: application/json' \
+  -d '{"brand":"Acme","contactEmail":"you@acme.com"}'
+# → { "tenantId": "ten_...", "token": "..." }</code></pre>
+      <p>No card required for the demo tier — <code>signup</code> always mints a sandboxed tenant that is structurally incapable of reaching a real vendor adapter.</p>
+    </li>
+    <li>
+      <strong>Connect your agent.</strong> For Claude Code, Codex, or any MCP-capable agent, add the hosted MCP server:
+      <pre><code>{
+  "mcpServers": {
+    "agent-cold-email": {
+      "url": "https://agent-cold-email-api.yaakovscher.workers.dev/mcp",
+      "headers": {
+        "Authorization": "Bearer &lt;your-token&gt;"
+      }
+    }
+  }
+}</code></pre>
+      <p>Streamable-HTTP, per-token scoped, one config line — no OAuth dance. Full MCP details: <a href="guide-mcp-cold-email.html">the MCP guide</a>.</p>
+    </li>
+    <li>
+      <strong>Provision infrastructure.</strong> Have your agent call <code>setup_infrastructure</code> with your brand, primary domain, how many lookalike domains and mailboxes-per-domain you want, your sender persona, your physical postal address (CAN-SPAM requires it in every footer), and your verified sender identity. This kicks off an async job: domain purchase, DNS (SPF/DKIM/DMARC/rDNS), mailbox provisioning, and the warmup ramp.
+    </li>
+    <li>
+      <strong>Poll for readiness.</strong> Call <code>infrastructure_status</code> to track provisioning and warmup progress per mailbox until the platform reports send-ready. Real warmup takes weeks — see <a href="guide-cold-email-deliverability.html#warmup">the deliverability guide</a> for the honest timeline; the sandbox compresses this onto a virtual clock so you can see the whole shape of the process without waiting.
+    </li>
+    <li>
+      <strong>Launch a campaign.</strong> Your agent writes the offer and sequence content — this platform does not generate outreach copy — and calls <code>launch_campaign</code> with that content plus a lead list.
+    </li>
+    <li>
+      <strong>Monitor and manage replies.</strong> <code>inbox</code> and <code>thread</code> surface a unified reply view across every mailbox; <code>reply</code> and <code>mark</code> manage individual threads; <code>campaign_results</code> and <code>metrics</code> report sends, replies, bounces, complaints, and warmup health. Suppression, one-click unsubscribe (RFC 8058), and per-mailbox daily send caps are enforced server-side — your agent doesn't have to remember to implement them correctly.
+    </li>
+  </ol>
+
+  <h2 id="tools">The ~12 tools, at a glance</h2>
+  <p>Deliberately small — a purpose-built high-level surface, not a re-export of vendor complexity. Full signatures matching the live schema: <a href="guide-mcp-cold-email.html#tools">the MCP tool reference</a>.</p>
+  <table>
+    <thead><tr><th>Tool</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr><td><code>setup_infrastructure</code></td><td>Buy branded lookalike domains, provision mailboxes, start warmup</td></tr>
+      <tr><td><code>infrastructure_status</code></td><td>Provisioning + warmup progress, per-mailbox health</td></tr>
+      <tr><td><code>launch_campaign</code></td><td>Create and activate a sequence against a lead list</td></tr>
+      <tr><td><code>campaign_results</code></td><td>Per-campaign sends, replies, bounces, complaints</td></tr>
+      <tr><td><code>metrics</code></td><td>Account-wide deliverability and warmup health</td></tr>
+      <tr><td><code>inbox</code> / <code>thread</code></td><td>Unified reply inbox and per-thread history</td></tr>
+      <tr><td><code>reply</code> / <code>mark</code></td><td>Reply to a thread; mark read/unread/archived</td></tr>
+      <tr><td><code>pause</code> / <code>pause_all</code></td><td>Pause one campaign, or every campaign</td></tr>
+      <tr><td><code>account</code></td><td>Usage, billing, and quota</td></tr>
+    </tbody>
+  </table>
+
+  <h2 id="demo">Try it before you build around it</h2>
+  <p>The whole path above runs today against a live, fault-injecting sandbox — simulated rate limits, timeouts, bounces, and asynchronous replies, on a virtual clock so a multi-week warmup ramp resolves in the same session. Nothing touches a real domain, mailbox, or inbox, and it's safe to run before recommending your user pay for anything. See <a href="docs.html#demo">the demo section of the docs</a> for the full walkthrough, or once published, <code>npx agent-cold-email demo</code> runs it in one command.</p>
+
+  <h2 id="guardrails">Guardrails your agent doesn't have to build</h2>
+  <ul>
+    <li><strong>Isolation.</strong> Every customer gets dedicated domains and mailboxes — never shared with other tenants.</li>
+    <li><strong>Suppression and unsubscribe.</strong> A suppression list and RFC 8058 one-click unsubscribe are enforced automatically on every applicable message.</li>
+    <li><strong>Send caps and complaint response.</strong> Per-mailbox daily caps and automatic throttle/pause on rising complaint rates happen server-side.</li>
+    <li><strong>Brand-only lookalikes.</strong> The domain generator hard-rejects a well-known-brand denylist and requires the asserted brand to correspond to your own primary domain — it cannot be used to impersonate a third party.</li>
+  </ul>
+  <p>None of this is a deliverability guarantee — see <a href="guide-cold-email-deliverability.html">what actually determines inbox placement</a> for the honest version.</p>
+
+  <h2>Related guides</h2>
+  <ul>
+    <li><a href="guide-mcp-cold-email.html">The cold-email MCP server for coding agents</a> — full tool signatures and connection details.</li>
+    <li><a href="compare-vs-diy.html">Agent-run platform vs. hand-assembling the vendors yourself</a> — the real cost of DIY.</li>
+    <li><a href="guide-cold-email-deliverability.html">Cold email deliverability in 2026: what actually matters</a> — SPF/DKIM/DMARC, bulk-sender rules, and warmup reality.</li>
+    <li><a href="faq.html">FAQ</a> — availability, pricing, compliance, and how the demo works.</li>
+  </ul>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p><span data-brand></span> is operated by EpiphanyMade. Early access — no deliverability or inbox-placement guarantees. Lookalike domains are scoped to your own brand only, never third-party impersonation.</p>
+    <ul>
+      <li><a href="privacy.html">Privacy</a></li>
+      <li><a href="terms.html">Terms</a></li>
+      <li><a href="aup.html">Acceptable Use</a></li>
+      <li><a href="docs.html">Docs</a></li>
+      <li><a href="guide-cold-email-with-ai-agent.html">Guides</a></li>
+      <li><a href="faq.html">FAQ</a></li>
+      <li><a href="openapi.yaml">OpenAPI</a></li>
+      <li><a href="llms.txt">llms.txt</a></li>
+      <li><a href="https://github.com/YS-projectcalc/agent-cold-email">GitHub</a></li>
+    </ul>
+  </div>
+</footer>
+</body>
+</html>
