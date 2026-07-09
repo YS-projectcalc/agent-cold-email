@@ -1,0 +1,10 @@
+node_modules
+dist
+.env
+.env.*
+.dev.vars
+.wrangler
+coverage
+.DS_Store
+*.log
+scratch/

@@ -6,6 +6,7 @@ Multi-tenant cold-email infrastructure platform built to be **operated by the cu
 
 - `SPEC.md` — canonical spec: architecture, vendor stack, isolation model, distribution thesis, locked decisions
 - `ROADMAP.md` — phases, status, session log
+- `CLAUDE.md` / `ARCHITECTURE.md` / `HANDOFF.md` / `MEMORY.md` — project law, living architecture record, resume-here doc, durable facts ledger
 - Prior-art provenance (frozen): `~/.claude/priorart-archive/ai-agent-controllable-cold-email-platform-2026-06-25.md`
 
 Operated by EpiphanyMade. Test-mode build; activation checklist gates real spend/live keys.
