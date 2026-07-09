@@ -2,6 +2,7 @@ import type { SequenceStep } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
 import { reportUsageToStripeIfConfigured } from "./billing.js";
+import { isLifecycleFrozen } from "./billing-state.js";
 import { runDeliverabilitySweep } from "./deliverability-actions.js";
 import { refreshMailboxWarmupState } from "./mailbox-state.js";
 import { isWithinSendWindow, pickMailboxWithCapacity, type SendWindow } from "./scheduler.js";
@@ -48,10 +49,12 @@ function parseSendWindow(raw: string): SendWindow {
  * it as a directly-callable RPC method since real alarm-driven scheduling is B2.
  */
 export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipped: number; deferred: number }> {
-  // D5 tenant-level freeze (kill switch). A suspended tenant (dunning
-  // SUSPEND or an abuse TERMINATE) or a chargeback-disputed tenant sends
-  // NOTHING — this is the reversible send-freeze the dispute lane relies on
-  // (a won dispute flips billing_state back to 'active' and sends resume).
+  // D5 tenant-level freeze (kill switch). A suspended tenant (dunning SUSPEND
+  // or an abuse TERMINATE), a chargeback-disputed tenant, OR a canceled/
+  // canceling tenant sends NOTHING (adversarial panel-03 finding #5 added
+  // canceled/canceling — a voluntary cancel used to leave the tick unfrozen, so
+  // a canceled tenant kept sending). The single predicate is shared with the
+  // deliverability sweep + the setup/launch guards (engine/billing-state.ts).
   // Reads state cheaply, no await added before it — the forced sync shape of
   // the send loop below is preserved.
   const lifecycle = ctx.sql
@@ -60,7 +63,7 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
       ctx.tenantId,
     )
     .one();
-  if (lifecycle.status === "suspended" || lifecycle.billing_state === "disputed") {
+  if (isLifecycleFrozen(lifecycle.status, lifecycle.billing_state)) {
     return { sent: 0, skipped: 0, deferred: 0 };
   }
 

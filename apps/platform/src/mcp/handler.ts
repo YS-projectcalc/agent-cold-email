@@ -85,7 +85,12 @@ export async function handleMcpRequest(env: Env, authHeader: string | null, raw:
       const tools = MCP_TOOLS.map((t) => ({
         name: t.name,
         description: t.description,
-        inputSchema: z.toJSONSchema(t.schema, { target: "draft-7" }),
+        // INPUT mode: a tool's arguments are what the CALLER sends, so a field
+        // with a `.default()` (company, timezone, sendWindow, stopOnReply) is
+        // OPTIONAL — the caller may omit it. The default OUTPUT mode marked
+        // those `required`, contradicting the permissive runtime parse + the
+        // HTTP openapi shape (adversarial panel-03 finding #11).
+        inputSchema: z.toJSONSchema(t.schema, { target: "draft-7", io: "input" }),
       }));
       return result(id, { tools });
     }

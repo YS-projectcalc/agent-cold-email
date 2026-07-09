@@ -5,6 +5,7 @@
 
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
+import { isLifecycleFrozen, readLifecycleState } from "./billing-state.js";
 import {
   DEFAULT_THRESHOLDS,
   evaluate,
@@ -203,6 +204,17 @@ export async function runDeliverabilitySweep(
   ctx: TenantContext,
   thresholds: DeliverabilityThresholds = DEFAULT_THRESHOLDS,
 ): Promise<{ actions: DeliverabilityAction[] }> {
+  // Lifecycle freeze — the SAME kill switch the tick has, but enforced INSIDE
+  // the sweep so it also covers the standalone TenantDO.deliverabilitySweep()
+  // RPC and the cron runDeliverabilitySweepAllTenants lane (adversarial
+  // panel-03 finding #3: those bypassed the tick's guard, so a frozen tenant's
+  // burning domain still triggered REPLACE_DOMAIN -> buys a new domain +
+  // mailboxes = real vendor spend on an account we deliberately froze).
+  const { status, billingState } = readLifecycleState(ctx);
+  if (isLifecycleFrozen(status, billingState)) {
+    return { actions: [] };
+  }
+
   const mailboxes = gatherMailboxHealth(ctx);
   const domains = gatherDomainStats(ctx, mailboxes);
   const pendingSends = ctx.sql

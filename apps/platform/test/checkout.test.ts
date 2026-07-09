@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { api, signup } from "./helpers.js";
+import { runInDurableObject } from "cloudflare:test";
+import { api, signup, tenantStub } from "./helpers.js";
 
 interface CheckoutResponse {
   mode: "stripe" | "simulated";
@@ -99,5 +100,34 @@ describe("POST /checkout — simulated test-mode upgrade (B1 money path)", () =>
     const { token } = await signup("Bad Plan Co", "founder@badplan.test");
     const res = await api("/checkout", { method: "POST", token, body: JSON.stringify({ plan: "enterprise" }) });
     expect(res.status).toBe(400);
+  });
+
+  // Adversarial panel-03 finding #10: startCheckout INSERTed a new
+  // checkout_sessions row on every call — a tenant looping POST /checkout grew
+  // its own DO storage unboundedly. A pending session for the same plan is now
+  // reused. FAILS on the old code (old code leaves 5 rows).
+  it("repeated /checkout for the same plan reuses one pending session (bounded storage, finding #10)", async () => {
+    const { tenantId, token } = await signup("Loop Checkout Co", "founder@loopcheckout.test");
+
+    const sessionIds = new Set<string>();
+    for (let i = 0; i < 5; i++) {
+      const res = await api<{ sessionId: string }>("/checkout", {
+        method: "POST",
+        token,
+        body: JSON.stringify({ plan: "launch" }),
+      });
+      expect(res.status).toBe(201);
+      sessionIds.add(res.body.sessionId);
+    }
+    // Same session returned every time.
+    expect(sessionIds.size).toBe(1);
+
+    // Exactly one pending row in the DO, not five.
+    const rows = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
+      state.storage.sql
+        .exec<{ n: number }>(`SELECT COUNT(*) as n FROM checkout_sessions WHERE tenant_id = ? AND status = 'pending'`, tenantId)
+        .one().n,
+    );
+    expect(rows).toBe(1);
   });
 });

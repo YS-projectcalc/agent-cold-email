@@ -2,6 +2,7 @@ import { isPaidPlanTier, type SetupInfrastructureInput } from "@coldstart/shared
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
 import { reportUsageToStripeIfConfigured } from "./billing.js";
+import { assertNotLifecycleFrozen } from "./billing-state.js";
 import { assertBrandOwnership } from "./brand-guard.js";
 import { gatherMailboxHealth } from "./deliverability.js";
 import { refreshMailboxWarmupState } from "./mailbox-state.js";
@@ -114,6 +115,11 @@ export async function runSetupInfrastructure(
   ctx: TenantContext,
   input: SetupInfrastructureInput,
 ): Promise<{ jobId: string }> {
+  // Lifecycle freeze — BEFORE any spend. A suspended/disputed/canceled tenant
+  // must not provision fresh infra (real registrar/mailbox spend at activation
+  // on an account we deliberately froze — adversarial panel-03 finding #5).
+  assertNotLifecycleFrozen(ctx, "setup_infrastructure");
+
   // Lookalike third-party-brand hard-reject — BEFORE any searchLookalikes/buy
   // (ARCHITECTURE.md #8 "enforced in code"). Throws ValidationError -> HTTP 400.
   assertBrandOwnership({ brand: input.brand, primaryDomain: input.primaryDomain });

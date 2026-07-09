@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activatePaidPlan, adminApi, api, mintTenant } from "./helpers.js";
+import { activatePaidPlan, adminApi, api, mintTenant, postWebhook } from "./helpers.js";
 
 interface OpsDigestResponse {
   lifecycle: { canceled: number; terminated: number; disputed: number; annualDomainLiabilityCents: number };
@@ -28,11 +28,12 @@ async function provisionTwoDomains(token: string, brand: string): Promise<void> 
 // exist in the D1 index and the aggregate counts are exact.
 describe("GET /admin/ops/digest — D5 lifecycle wiring", () => {
   it("aggregates canceled / terminated / disputed counts + total annual-domain liability", async () => {
-    // 1 canceled (voluntary), with 2 domains -> books liability.
+    // 1 canceled (voluntary IMMEDIATE, so teardown runs now and books
+    // liability — an end-of-period cancel DEFERS teardown, finding #7).
     const canceled = await mintTenant("Digest Canceled Co", "launch");
     await activatePaidPlan(canceled.tenantId, "launch");
     await provisionTwoDomains(canceled.token, "DigestCanceled");
-    await api("/cancel", { method: "POST", token: canceled.token });
+    await api("/cancel", { method: "POST", token: canceled.token, body: JSON.stringify({ immediate: true }) });
 
     // 1 terminated (abuse), with 2 domains -> books liability + enforcement row.
     const terminated = await mintTenant("Digest Terminated Co", "launch");
@@ -46,13 +47,10 @@ describe("GET /admin/ops/digest — D5 lifecycle wiring", () => {
     // 1 disputed (chargeback).
     const disputed = await mintTenant("Digest Disputed Co", "launch");
     await activatePaidPlan(disputed.tenantId, "launch");
-    await api("/webhooks/stripe", {
-      method: "POST",
-      body: JSON.stringify({
-        id: `evt_${crypto.randomUUID()}`,
-        type: "charge.dispute.created",
-        data: { object: { id: "dp_digest_1", amount: 9900, metadata: { tenantId: disputed.tenantId } } },
-      }),
+    await postWebhook({
+      id: `evt_${crypto.randomUUID()}`,
+      type: "charge.dispute.created",
+      data: { object: { id: "dp_digest_1", amount: 9900, metadata: { tenantId: disputed.tenantId } } },
     });
 
     const digest = await adminApi<OpsDigestResponse>("/admin/ops/digest");

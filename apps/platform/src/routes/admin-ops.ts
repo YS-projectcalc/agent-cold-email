@@ -3,7 +3,7 @@ import { TerminateInput } from "@coldstart/shared";
 import { getTenantIndexById, insertEnforcementActionIfNew } from "../admin/db.js";
 import { buildOpsDigest, runDunningSweep } from "../admin/ops-sweep.js";
 import { RealClock } from "../clock.js";
-import { setTenantIndexStatus } from "../db.js";
+import { listWaitlistEmails, setTenantIndexStatus } from "../db.js";
 import type { Env } from "../env.js";
 import { newId } from "../schema.js";
 import { parseJsonBody } from "../validate.js";
@@ -38,6 +38,12 @@ export const adminOpsRoute = new Hono<{ Bindings: Env }>()
     const windowHours = parseWindowHours(c.req.query("hours"));
     const digest = await buildOpsDigest(c.env, new RealClock().now(), windowHours);
     return c.json(digest);
+  })
+  // C6 — the owner's durable waitlist export (adversarial panel-03 finding #9:
+  // the funnel had no owner-retrieval path). Ordered newest-first.
+  .get("/admin/ops/waitlist", async (c) => {
+    const entries = await listWaitlistEmails(c.env);
+    return c.json({ count: entries.length, entries });
   })
   // D5 — abuse offboarding: the terminal rung of the AUP consequence ladder
   // (site/aup.html §7). Immediately suspends + reclaims the tenant's infra (the

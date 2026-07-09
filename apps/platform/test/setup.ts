@@ -5,6 +5,7 @@ import { env } from "cloudflare:test";
 import migration1Sql from "../migrations/0001_init.sql?raw";
 import migration2Sql from "../migrations/0002_admin_ops.sql?raw";
 import migration3Sql from "../migrations/0003_lifecycle.sql?raw";
+import migration4Sql from "../migrations/0004_waitlist.sql?raw";
 
 function statementsOf(sql: string): string[] {
   return sql
@@ -20,6 +21,7 @@ for (const statement of [
   ...statementsOf(migration1Sql),
   ...statementsOf(migration2Sql),
   ...statementsOf(migration3Sql),
+  ...statementsOf(migration4Sql),
 ]) {
   await env.DB.prepare(statement).run();
 }

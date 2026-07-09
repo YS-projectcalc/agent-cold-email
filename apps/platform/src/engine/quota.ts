@@ -40,11 +40,20 @@ export function assertWithinProvisioningCap(
   requested: { domains: number; mailboxes: number },
 ): void {
   const cap = capFor(ctx.plan);
+  // Count only LIVE resources — a released (canceled/re-subscribed) domain or
+  // mailbox is no longer provisioned and must NOT count toward the cap, or a
+  // paying tenant who cancels then re-subscribes is locked out of
+  // re-provisioning ("have 2 domains" that are all released — adversarial
+  // panel-03 finding #4). Domains: status='active' (released/burning excluded);
+  // mailboxes: released_at IS NULL.
   const existingDomains = ctx.sql
-    .exec<{ n: number }>(`SELECT COUNT(*) as n FROM domains WHERE tenant_id = ?`, ctx.tenantId)
+    .exec<{ n: number }>(`SELECT COUNT(*) as n FROM domains WHERE tenant_id = ? AND status = 'active'`, ctx.tenantId)
     .one().n;
   const existingMailboxes = ctx.sql
-    .exec<{ n: number }>(`SELECT COUNT(*) as n FROM mailboxes WHERE tenant_id = ?`, ctx.tenantId)
+    .exec<{ n: number }>(
+      `SELECT COUNT(*) as n FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL`,
+      ctx.tenantId,
+    )
     .one().n;
 
   if (existingDomains + requested.domains > cap.domains) {

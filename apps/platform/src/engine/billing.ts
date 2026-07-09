@@ -12,6 +12,8 @@ import { createStripeCheckoutSession, reportUsageRecord } from "../billing/strip
 import type { StripeEventInput } from "../billing/stripe-webhook.js";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
+import { clearTeardownRecord } from "./lifecycle.js";
+import { reactivateFromDunning } from "./ops-summary.js";
 
 export interface CheckoutResult {
   mode: "stripe" | "simulated";
@@ -35,15 +37,29 @@ export async function startCheckout(ctx: TenantContext, input: CheckoutInput, or
     return { mode: "stripe", url: session.url, sessionId: session.id };
   }
 
-  const sessionId = newId("cs");
-  const now = ctx.clock.now();
-  ctx.sql.exec(
-    `INSERT INTO checkout_sessions (id, tenant_id, plan, status, created_at) VALUES (?, ?, ?, 'pending', ?)`,
-    sessionId,
-    ctx.tenantId,
-    input.plan,
-    now,
-  );
+  // Reuse an existing PENDING session for the same plan instead of inserting a
+  // new row on every call — otherwise a tenant looping POST /checkout grows its
+  // own DO SQLite storage unboundedly (adversarial panel-03 finding #10, same
+  // self-amplifier class /demo/run was hardened against). Bounds pending
+  // sessions to at most one per (tenant, plan).
+  const existing = ctx.sql
+    .exec<{ id: string }>(
+      `SELECT id FROM checkout_sessions WHERE tenant_id = ? AND plan = ? AND status = 'pending' ORDER BY created_at ASC LIMIT 1`,
+      ctx.tenantId,
+      input.plan,
+    )
+    .toArray()[0];
+  const sessionId = existing?.id ?? newId("cs");
+  if (!existing) {
+    const now = ctx.clock.now();
+    ctx.sql.exec(
+      `INSERT INTO checkout_sessions (id, tenant_id, plan, status, created_at) VALUES (?, ?, ?, 'pending', ?)`,
+      sessionId,
+      ctx.tenantId,
+      input.plan,
+      now,
+    );
+  }
   const url = `${origin}/checkout/simulate?tenant=${ctx.tenantId}&session=${sessionId}`;
   return { mode: "simulated", url, sessionId };
 }
@@ -74,7 +90,24 @@ export function completeSimulatedCheckout(ctx: TenantContext, sessionId: string)
 
   const now = ctx.clock.now();
   ctx.sql.exec(`UPDATE checkout_sessions SET status = 'completed', completed_at = ? WHERE id = ?`, now, sessionId);
-  ctx.sql.exec(`UPDATE tenant_profile SET plan = ?, billing_state = 'active' WHERE id = ?`, session.plan, ctx.tenantId);
+  // STICKY against a chargeback freeze: a checkout can reactivate a
+  // canceled/canceling tenant (a legitimate re-subscribe) but must NEVER lift a
+  // 'disputed' freeze — only a won dispute may (adversarial panel-03 finding
+  // #2). If the tenant is disputed the UPDATE writes 0 rows and we do not
+  // upgrade (the disputed tenant's own /checkout/simulate is a no-op).
+  const applied = ctx.sql.exec(
+    `UPDATE tenant_profile SET plan = ?, billing_state = 'active' WHERE id = ? AND billing_state != 'disputed'`,
+    session.plan,
+    ctx.tenantId,
+  );
+  if (applied.rowsWritten === 0) {
+    return { upgraded: false, plan: ctx.plan };
+  }
+  // Re-subscribe bookkeeping: drop any prior teardown tombstone (so a later
+  // cancel re-runs teardown on the NEW infra — finding #4) and clear a dunning
+  // suspension (a now-paying customer — finding #6).
+  clearTeardownRecord(ctx);
+  reactivateFromDunning(ctx);
   ctx.sql.exec(
     `INSERT INTO ledger_entries (id, tenant_id, kind, amount_cents, description, ts) VALUES (?, ?, 'credit', 0, ?, ?)`,
     newId("ledg"),
@@ -136,17 +169,26 @@ export function applyStripeWebhookEvent(ctx: TenantContext, event: StripeEventIn
       if (!plan) return { applied: false, duplicate: false };
       const customerId = typeof obj.customer === "string" ? obj.customer : null;
       const subscriptionId = typeof obj.subscription === "string" ? obj.subscription : null;
-      ctx.sql.exec(
+      // STICKY against a chargeback freeze (finding #2): checkout reactivates a
+      // canceled/canceling tenant (re-subscribe) but must NOT lift 'disputed'.
+      const res = ctx.sql.exec(
         `UPDATE tenant_profile
            SET plan = ?, billing_state = 'active',
                stripe_customer_id = COALESCE(?, stripe_customer_id),
                stripe_subscription_id = COALESCE(?, stripe_subscription_id)
-         WHERE id = ?`,
+         WHERE id = ? AND billing_state != 'disputed'`,
         plan,
         customerId,
         subscriptionId,
         ctx.tenantId,
       );
+      if (res.rowsWritten === 0) {
+        // Frozen by an open dispute — checkout did not apply (plan unchanged).
+        return { applied: false, duplicate: false };
+      }
+      // Re-subscribe bookkeeping (findings #4 + #6).
+      clearTeardownRecord(ctx);
+      reactivateFromDunning(ctx);
       ctx.sql.exec(
         `INSERT INTO ledger_entries (id, tenant_id, kind, amount_cents, description, ts) VALUES (?, ?, 'credit', 0, ?, ?)`,
         newId("ledg"),
@@ -160,17 +202,44 @@ export function applyStripeWebhookEvent(ctx: TenantContext, event: StripeEventIn
     case "customer.subscription.updated": {
       const billingState = mapStripeSubscriptionStatus(obj.status);
       if (!billingState) return { applied: false, duplicate: false };
-      ctx.sql.exec(`UPDATE tenant_profile SET billing_state = ? WHERE id = ?`, billingState, ctx.tenantId);
+      // STICKY: a routine subscription event (renewal, plan/metadata change)
+      // must NEVER silently overwrite a frozen state — a subscription stays
+      // 'active' at Stripe throughout an open dispute, so an unguarded write
+      // here re-activated a disputed/canceled tenant and resumed sends
+      // (adversarial panel-03 finding #2). Only a won dispute / explicit
+      // checkout may exit a frozen state.
+      const res = ctx.sql.exec(
+        `UPDATE tenant_profile SET billing_state = ?
+         WHERE id = ? AND billing_state NOT IN ('disputed', 'canceling', 'canceled')`,
+        billingState,
+        ctx.tenantId,
+      );
+      // Recovery-to-active also un-suspends a dunning-frozen tenant (finding #6).
+      if (billingState === "active" && res.rowsWritten > 0) reactivateFromDunning(ctx);
       return { applied: true, duplicate: false };
     }
 
     case "customer.subscription.deleted": {
-      ctx.sql.exec(`UPDATE tenant_profile SET billing_state = 'canceled', plan = 'free' WHERE id = ?`, ctx.tenantId);
-      return { applied: true, duplicate: false, plan: "free" };
+      // Guard against overwriting a chargeback freeze — the dispute is stickier
+      // and stays until it's resolved (both states freeze sends regardless).
+      const res = ctx.sql.exec(
+        `UPDATE tenant_profile SET billing_state = 'canceled', plan = 'free' WHERE id = ? AND billing_state != 'disputed'`,
+        ctx.tenantId,
+      );
+      // Only report plan='free' when it actually applied, so the DO's in-memory
+      // plan mirror never drifts from the row (it stays disputed -> old plan).
+      return res.rowsWritten > 0
+        ? { applied: true, duplicate: false, plan: "free" }
+        : { applied: false, duplicate: false };
     }
 
     case "invoice.payment_failed": {
-      ctx.sql.exec(`UPDATE tenant_profile SET billing_state = 'past_due' WHERE id = ?`, ctx.tenantId);
+      // STICKY: a failed invoice must not overwrite a dispute/cancel freeze.
+      ctx.sql.exec(
+        `UPDATE tenant_profile SET billing_state = 'past_due'
+         WHERE id = ? AND billing_state NOT IN ('disputed', 'canceling', 'canceled')`,
+        ctx.tenantId,
+      );
       return { applied: true, duplicate: false };
     }
 
@@ -221,6 +290,9 @@ export function applyStripeWebhookEvent(ctx: TenantContext, event: StripeEventIn
           `UPDATE tenant_profile SET billing_state = 'active' WHERE id = ? AND billing_state = 'disputed'`,
           ctx.tenantId,
         );
+        // A won dispute is a billing-recovery transition — also un-suspend a
+        // dunning-frozen tenant (finding #6).
+        if (res.rowsWritten > 0) reactivateFromDunning(ctx);
         return { applied: true, duplicate: false, unfrozen: res.rowsWritten > 0 };
       }
       return { applied: true, duplicate: false };

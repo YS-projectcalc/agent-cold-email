@@ -33,6 +33,40 @@ export function tenantStub(tenantId: string): DurableObjectStub<TenantDO> {
   return env.TENANT.get(env.TENANT.idFromName(tenantId));
 }
 
+// The test webhook secret — MUST match vitest.config.ts's miniflare binding.
+// The route fails CLOSED without a secret (adversarial panel-03 finding #1), so
+// every webhook fixture is signed exactly as a real Stripe delivery would be.
+export const TEST_STRIPE_WEBHOOK_SECRET = "whsec_test_secret_for_vitest";
+
+/** Computes a valid `Stripe-Signature` header (`t=<ts>,v1=<hex-hmac>`) over the
+ * raw payload — the same HMAC-SHA256 scheme src/billing/stripe-webhook.ts
+ * verifies. */
+export async function signStripeEvent(payload: string, secret: string = TEST_STRIPE_WEBHOOK_SECRET): Promise<string> {
+  const timestamp = Math.floor(Date.now() / 1000);
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sigBuf = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${timestamp}.${payload}`));
+  const hex = [...new Uint8Array(sigBuf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `t=${timestamp},v1=${hex}`;
+}
+
+/** POSTs a Stripe webhook event through the real HTTP surface with a valid
+ * signature — the standard way tests drive billing state now that the webhook
+ * verifies signatures (finding #1). */
+export async function postWebhook<T = unknown>(event: unknown): Promise<ApiResult<T>> {
+  const body = JSON.stringify(event);
+  return api<T>("/webhooks/stripe", {
+    method: "POST",
+    headers: { "stripe-signature": await signStripeEvent(body) },
+    body,
+  });
+}
+
 // D1/D2/D6 admin-surface tests (test/admin-*.test.ts) all present this same
 // fixed bearer — see test/setup.ts, which sets `env.ADMIN_TOKEN` to this
 // exact value once before every test file's DB migrations run.
@@ -69,7 +103,7 @@ export async function failPayment(tenantId: string): Promise<void> {
     type: "invoice.payment_failed",
     data: { object: { metadata: { tenantId } } },
   };
-  const res = await api("/webhooks/stripe", { method: "POST", body: JSON.stringify(event) });
+  const res = await postWebhook(event);
   if (res.status !== 200) throw new Error(`failPayment webhook failed: ${JSON.stringify(res)}`);
 }
 
@@ -93,7 +127,7 @@ export async function activatePaidPlan(tenantId: string, plan: TenantPlan): Prom
       },
     },
   };
-  const res = await api("/webhooks/stripe", { method: "POST", body: JSON.stringify(event) });
+  const res = await postWebhook(event);
   if (res.status !== 200) throw new Error(`activatePaidPlan webhook failed: ${JSON.stringify(res)}`);
 }
 

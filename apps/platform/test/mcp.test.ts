@@ -81,6 +81,34 @@ describe("POST /mcp — hosted MCP JSON-RPC 2.0 endpoint", () => {
     }
   });
 
+  // Adversarial panel-03 finding #11: z.toJSONSchema OUTPUT mode marked
+  // .default() fields (company, timezone, sendWindow, stopOnReply) as REQUIRED,
+  // contradicting the permissive runtime parse + the HTTP shape. INPUT mode
+  // makes them optional. FAILS on the old code (old required set includes the
+  // defaulted fields).
+  it("tools/list marks .default() fields OPTIONAL, matching the runtime parse (finding #11)", async () => {
+    const res = await api<JsonRpcSuccess<ToolListResult>>("/mcp", { method: "POST", body: rpc("tools/list") });
+    const launch = res.body.result.tools.find((t) => t.name === "launch_campaign");
+    expect(launch).toBeDefined();
+    const schema = launch!.inputSchema as {
+      required?: string[];
+      properties: { leads: { items: { required?: string[] } } };
+    };
+
+    const required = schema.required ?? [];
+    // The genuinely-required fields are present...
+    expect(required).toEqual(expect.arrayContaining(["name", "offer", "leads", "sequence"]));
+    // ...and the DEFAULTED fields are NOT required (the caller may omit them).
+    expect(required).not.toContain("timezone");
+    expect(required).not.toContain("sendWindow");
+    expect(required).not.toContain("stopOnReply");
+
+    // Inside a lead, `company` (a .default("")) is likewise optional.
+    const leadRequired = schema.properties.leads.items.required ?? [];
+    expect(leadRequired).toEqual(expect.arrayContaining(["email", "firstName"]));
+    expect(leadRequired).not.toContain("company");
+  });
+
   it("unknown JSON-RPC method returns a proper -32601 error object", async () => {
     const res = await api<JsonRpcFailure>("/mcp", { method: "POST", body: rpc("not/a/real/method") });
     expect(res.body.error.code).toBe(-32601);

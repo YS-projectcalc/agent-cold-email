@@ -17,6 +17,12 @@ CREATE TABLE IF NOT EXISTS tenant_profile (
   billing_state TEXT NOT NULL DEFAULT 'none',
   stripe_customer_id TEXT,
   stripe_subscription_id TEXT,
+  -- D5 — why the tenant is suspended (status='suspended'): 'dunning' (failed
+  -- payments — reversible on billing recovery) | 'terminate' (abuse — NEVER
+  -- reversed by a billing event). NULL while status='active'. Lets a
+  -- billing-recovery webhook un-suspend a now-paying dunning tenant without
+  -- resurrecting a terminated one (adversarial panel-03 finding #6).
+  suspend_reason TEXT,
   -- The tenant's own stated primary domain (SPEC.md §8), captured at
   -- setup_infrastructure. The deliverability control loop reads it to derive a
   -- replacement lookalike when a domain burns (engine/deliverability.ts).

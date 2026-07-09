@@ -14,7 +14,8 @@ interface TeardownSummary {
 interface CancelResponse {
   alreadyCanceled: boolean;
   billingState: string;
-  teardown: TeardownSummary;
+  effective: string;
+  teardown: TeardownSummary | null;
 }
 
 interface AccountResponse {
@@ -54,11 +55,15 @@ async function provisionAndLaunch(token: string): Promise<void> {
   expect(camp.status).toBe(201);
 }
 
-// D5.1 — voluntary cancellation + infra teardown/reclaim. The required cases:
-// cancel -> campaigns stopped + mailboxes/domains released + liability
-// recorded; re-cancel idempotent.
+// D5.1 — voluntary cancellation + infra teardown/reclaim.
 describe("POST /cancel — voluntary cancellation + teardown/reclaim (D5)", () => {
-  it("releases all infra, stops campaigns, books annual-domain liability, and reflects in account()", async () => {
+  // Adversarial panel-03 finding #7: the DEFAULT (end-of-period) cancel used to
+  // tear everything down IMMEDIATELY while claiming effective:end_of_period —
+  // the customer paid for a period during which they had zero infra. Teardown
+  // is now DEFERRED for end_of_period; infra stays live (the tick freeze still
+  // stops any new spend). This test FAILS on the old code (old code returns a
+  // non-null teardown with 2 domains released + drops the live counts to 0).
+  it("end_of_period cancel DEFERS teardown — domains/mailboxes stay live until the period boundary", async () => {
     const { tenantId, token } = await mintTenant("Cancel Co", "launch");
     await activatePaidPlan(tenantId, "launch");
     await provisionAndLaunch(token);
@@ -68,19 +73,68 @@ describe("POST /cancel — voluntary cancellation + teardown/reclaim (D5)", () =
     expect(cancel.status).toBe(200);
     expect(cancel.body.alreadyCanceled).toBe(false);
     expect(cancel.body.billingState).toBe("canceling");
-    expect(cancel.body.teardown.reason).toBe("voluntary_cancel");
-    expect(cancel.body.teardown.effective).toBe("end_of_period");
-    expect(cancel.body.teardown.domainsReleased).toBe(2);
-    expect(cancel.body.teardown.mailboxesReleased).toBe(4);
-    expect(cancel.body.teardown.campaignsStopped).toBe(1);
+    expect(cancel.body.effective).toBe("end_of_period");
+    // No teardown yet — deferred to the period boundary.
+    expect(cancel.body.teardown).toBeNull();
+
+    // account() shows canceling, but the infra is STILL LIVE and un-reclaimed.
+    const account = await api<AccountResponse>("/account", { token });
+    expect(account.body.billingState).toBe("canceling");
+    expect(account.body.domains).toBe(2);
+    expect(account.body.mailboxes).toBe(4);
+    expect(account.body.teardown).toBeNull();
+
+    // Ground truth: nothing released, nothing paused, no liability booked yet.
+    await runInDurableObject(tenantStub(tenantId), async (_i, state) => {
+      const activeDomains = state.storage.sql
+        .exec<{ n: number }>(`SELECT COUNT(*) as n FROM domains WHERE tenant_id = ? AND status = 'active'`, tenantId)
+        .one().n;
+      expect(activeDomains).toBe(2);
+      const liveMailboxes = state.storage.sql
+        .exec<{ n: number }>(`SELECT COUNT(*) as n FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL`, tenantId)
+        .one().n;
+      expect(liveMailboxes).toBe(4);
+      const liability = state.storage.sql
+        .exec<{ n: number }>(`SELECT COUNT(*) as n FROM ledger_entries WHERE tenant_id = ? AND kind = 'liability'`, tenantId)
+        .one().n;
+      expect(liability).toBe(0);
+    });
+
+    // But 'canceling' is a FROZEN state (finding #5): the tick sends nothing
+    // even though the step-1 send is due (delayDays 0) and mailboxes are live.
+    const frozenTick = await tenantStub(tenantId).tick();
+    expect(frozenTick.sent).toBe(0);
+  });
+
+  it("immediate cancel releases all infra, stops campaigns, books annual-domain liability, and reflects in account()", async () => {
+    const { tenantId, token } = await mintTenant("Cancel Co", "launch");
+    await activatePaidPlan(tenantId, "launch");
+    await provisionAndLaunch(token);
+
+    const cancel = await api<CancelResponse>("/cancel", {
+      method: "POST",
+      token,
+      body: JSON.stringify({ immediate: true }),
+    });
+    expect(cancel.status).toBe(200);
+    expect(cancel.body.alreadyCanceled).toBe(false);
+    expect(cancel.body.billingState).toBe("canceled");
+    expect(cancel.body.effective).toBe("immediate");
+    expect(cancel.body.teardown).not.toBeNull();
+    const teardown = cancel.body.teardown!;
+    expect(teardown.reason).toBe("voluntary_cancel");
+    expect(teardown.effective).toBe("immediate");
+    expect(teardown.domainsReleased).toBe(2);
+    expect(teardown.mailboxesReleased).toBe(4);
+    expect(teardown.campaignsStopped).toBe(1);
     // 2 domains reclaimed at effectively the start of their annual term ->
     // near the full 2 x $11.08 = $22.16 liability (integer cents).
-    expect(cancel.body.teardown.annualDomainLiabilityCents).toBeGreaterThan(2000);
-    expect(cancel.body.teardown.annualDomainLiabilityCents).toBeLessThanOrEqual(2216);
+    expect(teardown.annualDomainLiabilityCents).toBeGreaterThan(2000);
+    expect(teardown.annualDomainLiabilityCents).toBeLessThanOrEqual(2216);
 
     // account() reflects the canceled state + teardown summary.
     const account = await api<AccountResponse>("/account", { token });
-    expect(account.body.billingState).toBe("canceling");
+    expect(account.body.billingState).toBe("canceled");
     expect(account.body.teardown).not.toBeNull();
     expect(account.body.teardown?.domainsReleased).toBe(2);
     expect(account.body.teardown?.mailboxesReleased).toBe(4);
@@ -119,7 +173,7 @@ describe("POST /cancel — voluntary cancellation + teardown/reclaim (D5)", () =
         )
         .one();
       expect(liability.n).toBe(2);
-      expect(liability.total).toBe(cancel.body.teardown.annualDomainLiabilityCents);
+      expect(liability.total).toBe(teardown.annualDomainLiabilityCents);
     });
   });
 
@@ -128,12 +182,15 @@ describe("POST /cancel — voluntary cancellation + teardown/reclaim (D5)", () =
     await activatePaidPlan(tenantId, "launch");
     await provisionAndLaunch(token);
 
-    const first = await api<CancelResponse>("/cancel", { method: "POST", token });
+    const first = await api<CancelResponse>("/cancel", {
+      method: "POST",
+      token,
+      body: JSON.stringify({ immediate: true }),
+    });
     expect(first.body.alreadyCanceled).toBe(false);
-    const firstLiability = first.body.teardown.annualDomainLiabilityCents;
+    const firstLiability = first.body.teardown!.annualDomainLiabilityCents;
 
-    // Re-cancel (immediate this time) — must return the EXISTING teardown, not
-    // apply a second one.
+    // Re-cancel — must return the EXISTING teardown, not apply a second one.
     const second = await api<CancelResponse>("/cancel", {
       method: "POST",
       token,
@@ -141,8 +198,8 @@ describe("POST /cancel — voluntary cancellation + teardown/reclaim (D5)", () =
     });
     expect(second.status).toBe(200);
     expect(second.body.alreadyCanceled).toBe(true);
-    expect(second.body.teardown.domainsReleased).toBe(2);
-    expect(second.body.teardown.annualDomainLiabilityCents).toBe(firstLiability);
+    expect(second.body.teardown!.domainsReleased).toBe(2);
+    expect(second.body.teardown!.annualDomainLiabilityCents).toBe(firstLiability);
 
     // Exactly 2 liability rows total (one per domain) — not 4.
     await runInDurableObject(tenantStub(tenantId), async (_i, state) => {
@@ -151,5 +208,13 @@ describe("POST /cancel — voluntary cancellation + teardown/reclaim (D5)", () =
         .one().n;
       expect(n).toBe(2);
     });
+  });
+
+  // Adversarial panel-03 finding #8 — /cancel had no Content-Length body cap.
+  it("rejects an over-cap request body with 413 (finding #8)", async () => {
+    const { token } = await mintTenant("Cancel Body Co", "launch");
+    const oversized = JSON.stringify({ immediate: false, pad: "x".repeat(9 * 1024) });
+    const res = await api("/cancel", { method: "POST", token, body: oversized });
+    expect(res.status).toBe(413);
   });
 });

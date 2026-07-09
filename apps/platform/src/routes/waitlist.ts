@@ -1,13 +1,16 @@
 // POST /api/waitlist — the public marketing-site waitlist form (C6 in
 // ROADMAP.md; site/assets/waitlist.js posts here). Unauthenticated by
-// design (no bearer token exists yet for someone who hasn't signed up), so
-// this is a KV-backed store + a basic per-IP rate limit rather than a
-// tenant-scoped facade intent — it never touches TenantDO.
+// design (no bearer token exists yet for someone who hasn't signed up).
+// Emails are persisted DURABLY in the D1 `waitlist` table (no expiry —
+// adversarial panel-03 finding #9: the old KV store expired leads after 90
+// days and nothing read them back). Only the per-IP RATE-LIMIT counters stay
+// in KV (short TTL, correctly ephemeral). Never touches a TenantDO.
 
 import { Hono } from "hono";
 import { z } from "zod";
 import type { Env } from "../env.js";
 import { RealClock } from "../clock.js";
+import { insertWaitlistEmail } from "../db.js";
 import { parseJsonBody } from "../validate.js";
 
 const WaitlistInput = z.object({ email: z.string().email() });
@@ -17,8 +20,6 @@ const ALLOWED_ORIGIN = "https://agent-cold-email.pages.dev";
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_PER_WINDOW = 5;
 const RATE_LIMIT_KV_TTL_SECONDS = 120; // > the window, so a bucket always outlives its own window
-// Bound KV growth: waitlist entries expire after 90 days (min KV TTL is 60s).
-const EMAIL_KEY_TTL_SECONDS = 90 * 24 * 60 * 60;
 
 function corsHeaders(): Record<string, string> {
   return {
@@ -59,15 +60,9 @@ export const waitlistRoute = new Hono<{ Bindings: Env }>()
     await c.env.WAITLIST.put(rateLimitKey, String(currentCount + 1), { expirationTtl: RATE_LIMIT_KV_TTL_SECONDS });
 
     const email = parsed.data.email.trim().toLowerCase();
-    const emailKey = `email:${email}`;
-    const existing = await c.env.WAITLIST.get(emailKey);
-    if (!existing) {
-      // TTL bounds unbounded KV growth from repeated distinct submissions.
-      await c.env.WAITLIST.put(emailKey, JSON.stringify({ email, createdAt: new RealClock().now() }), {
-        expirationTtl: EMAIL_KEY_TTL_SECONDS,
-      });
-    }
-    // existing !== null: already on the list — dedupe silently, still `ok: true`.
+    // Durable D1 store, no expiry. INSERT OR IGNORE dedupes by email (PK) —
+    // a repeat submission is a silent no-op, still `ok: true`.
+    await insertWaitlistEmail(c.env, email, new RealClock().now());
 
     return json({ ok: true }, 200);
   });

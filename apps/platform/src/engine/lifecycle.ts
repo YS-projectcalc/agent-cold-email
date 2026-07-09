@@ -79,6 +79,20 @@ export function getTeardownSummary(ctx: TenantContext): TeardownSummary | null {
 }
 
 /**
+ * Clears the teardown tombstone on REACTIVATION (a re-subscribe via checkout —
+ * engine/billing.ts). teardown_records is the idempotency anchor for
+ * cancel/terminate; leaving a stale row from a prior cancel means a LATER
+ * cancel reads it and no-ops, never releasing the tenant's NEW infra (a
+ * vendor-spend leak — adversarial panel-03 finding #4). Dropping it on
+ * reactivation re-arms teardown against the current infra. The historical
+ * annual-domain LIABILITY already booked (ledger kind='liability') is untouched
+ * — that spend really happened; only the reclaim anchor resets.
+ */
+export function clearTeardownRecord(ctx: TenantContext): void {
+  ctx.sql.exec(`DELETE FROM teardown_records WHERE tenant_id = ?`, ctx.tenantId);
+}
+
+/**
  * Reclaims a tenant's dedicated infrastructure: release every domain +
  * mailbox back to the vendor (DomainPort/MailboxPort.release — sandbox executes
  * it now, the real adapter calls the vendor at activation), stop all campaigns,
@@ -192,14 +206,31 @@ export async function teardownTenant(
 export interface CancelResult {
   alreadyCanceled: boolean;
   billingState: string;
-  teardown: TeardownSummary;
+  /** 'immediate' | 'end_of_period' — the requested billing-cancellation timing. */
+  effective: string;
+  /** The infra reclaim summary. `null` for an END-OF-PERIOD cancel: teardown is
+   *  DEFERRED to the period boundary (the paid-through period keeps infra live)
+   *  — see the cancelTenant doc. Non-null only for an immediate cancel. */
+  teardown: TeardownSummary | null;
 }
 
 /**
- * Voluntary cancellation (POST /cancel). Transitions billing_state
- * ('canceling' end-of-period by default, 'canceled' if immediate) and reclaims
- * the tenant's infra. Idempotent: a re-cancel returns the existing teardown
- * without changing state or re-releasing anything.
+ * Voluntary cancellation (POST /cancel).
+ *
+ *  - immediate:true  -> billing_state='canceled' AND teardown NOW (the customer
+ *    gave up the remaining paid period, so we reclaim infra immediately).
+ *  - immediate:false (default) -> billing_state='canceling' ONLY. Teardown is
+ *    DEFERRED to the end of the paid period (adversarial panel-03 finding #7):
+ *    the OLD code tore everything down immediately while the response claimed
+ *    'effective:end_of_period', so the customer paid for a period during which
+ *    they had zero infra. The infra now stays LIVE until the period actually
+ *    elapses; the tick/sweep/setup freeze ('canceling' is a frozen state) stops
+ *    any NEW spend meanwhile. Reclaiming at the boundary is a DO-alarm / D2 cron
+ *    reaper job wired at activation (B2) — noted, not built here.
+ *
+ * Idempotent: once a teardown record exists (immediate cancel), a re-cancel
+ * returns it without re-releasing anything. A repeated end-of-period cancel is
+ * likewise a no-op re-flip of 'canceling'.
  */
 export async function cancelTenant(ctx: TenantContext, input: { immediate: boolean }): Promise<CancelResult> {
   const existing = readTeardownRecord(ctx);
@@ -207,15 +238,20 @@ export async function cancelTenant(ctx: TenantContext, input: { immediate: boole
     const state = ctx.sql
       .exec<{ billing_state: string }>(`SELECT billing_state FROM tenant_profile WHERE id = ?`, ctx.tenantId)
       .one().billing_state;
-    return { alreadyCanceled: true, billingState: state, teardown: existing };
+    return { alreadyCanceled: true, billingState: state, effective: existing.effective, teardown: existing };
   }
 
   const billingState = input.immediate ? "canceled" : "canceling";
   const effective = input.immediate ? "immediate" : "end_of_period";
   ctx.sql.exec(`UPDATE tenant_profile SET billing_state = ? WHERE id = ?`, billingState, ctx.tenantId);
 
+  // End-of-period: DEFER teardown — infra stays live through the paid period.
+  if (!input.immediate) {
+    return { alreadyCanceled: false, billingState, effective, teardown: null };
+  }
+
   const teardown = await teardownTenant(ctx, { reason: "voluntary_cancel", effective });
-  return { alreadyCanceled: false, billingState, teardown };
+  return { alreadyCanceled: false, billingState, effective, teardown };
 }
 
 export interface TerminateResult {
@@ -235,7 +271,7 @@ export interface TerminateResult {
  */
 export async function terminateTenant(ctx: TenantContext): Promise<TerminateResult> {
   const alreadyTornDown = readTeardownRecord(ctx) !== null;
-  suspendTenant(ctx);
+  suspendTenant(ctx, "terminate");
   const teardown = await teardownTenant(ctx, { reason: "abuse_terminate", effective: "immediate" });
   return { suspended: true, alreadyTornDown, teardown };
 }

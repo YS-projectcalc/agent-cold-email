@@ -40,3 +40,38 @@ export async function lookupTenantByTokenHash(env: Env, tokenHash: string): Prom
 export async function setTenantIndexStatus(env: Env, id: string, status: string): Promise<void> {
   await env.DB.prepare(`UPDATE tenants_index SET status = ? WHERE id = ?`).bind(status, id).run();
 }
+
+// --- C6 waitlist (migrations/0004_waitlist.sql) — durable lead store for the
+// public marketing-site form (adversarial panel-03 finding #9). Emails persist
+// with NO expiry (unlike the prior 90-day KV TTL). ---
+
+/** Persists one waitlist email durably. Idempotent (email is the PK): a repeat
+ * signup is a silent no-op, preserving the original createdAt. Returns true iff
+ * this call inserted a NEW lead. */
+export async function insertWaitlistEmail(env: Env, email: string, createdAt: number): Promise<boolean> {
+  const result = await env.DB.prepare(`INSERT OR IGNORE INTO waitlist (email, created_at) VALUES (?, ?)`)
+    .bind(email, createdAt)
+    .run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
+/** Total waitlist leads — surfaced in the owner digest (buildOpsDigest). */
+export async function countWaitlistEmails(env: Env): Promise<number> {
+  const row = await env.DB.prepare(`SELECT COUNT(*) as n FROM waitlist`).first<{ n: number }>();
+  return row?.n ?? 0;
+}
+
+export interface WaitlistEntry {
+  email: string;
+  createdAt: number;
+}
+
+/** Ordered waitlist export (newest first) for the owner — GET /admin/ops/waitlist. */
+export async function listWaitlistEmails(env: Env, limit = 1000): Promise<WaitlistEntry[]> {
+  const result = await env.DB.prepare(
+    `SELECT email, created_at FROM waitlist ORDER BY created_at DESC LIMIT ?`,
+  )
+    .bind(limit)
+    .all<{ email: string; created_at: number }>();
+  return result.results.map((r) => ({ email: r.email, createdAt: r.created_at }));
+}

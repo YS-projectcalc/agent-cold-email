@@ -78,6 +78,8 @@ export class TenantDO extends DurableObject<Env> {
     this.addColumnIfMissing("tenant_profile", "billing_state", "TEXT NOT NULL DEFAULT 'none'");
     this.addColumnIfMissing("tenant_profile", "stripe_customer_id", "TEXT");
     this.addColumnIfMissing("tenant_profile", "stripe_subscription_id", "TEXT");
+    // D5 dunning-vs-terminate suspension reason (adversarial panel-03 #6).
+    this.addColumnIfMissing("tenant_profile", "suspend_reason", "TEXT");
     this.addColumnIfMissing("tenant_profile", "primary_domain", "TEXT NOT NULL DEFAULT ''");
     // B6 deliverability control-loop state on mailboxes (see schema.ts).
     this.addColumnIfMissing("mailboxes", "deliv_status", "TEXT NOT NULL DEFAULT 'healthy'");
@@ -268,7 +270,7 @@ export class TenantDO extends DurableObject<Env> {
 
   /** D2 dunning sweep's "suspend after grace" action — a real local state transition (not a vendor call), armed now. */
   suspendForDunning(): void {
-    suspendTenant(this.requireContext());
+    suspendTenant(this.requireContext(), "dunning");
   }
 
   // --- POST /demo/run (B5) — sandbox-only, structurally gated to demo/free plans ---

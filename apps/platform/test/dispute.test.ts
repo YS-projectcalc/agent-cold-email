@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { runInDurableObject } from "cloudflare:test";
-import { activatePaidPlan, api, mintTenant, tenantStub } from "./helpers.js";
+import { activatePaidPlan, api, mintTenant, postWebhook, tenantStub } from "./helpers.js";
 
 interface WebhookResponse {
   received: boolean;
@@ -66,10 +66,9 @@ describe("charge.dispute.* webhook — chargeback freeze/unfreeze lane (D5)", ()
     await provisionAndLaunch(token);
 
     const disputeId = "dp_test_1";
-    const created = await api<WebhookResponse>("/webhooks/stripe", {
-      method: "POST",
-      body: JSON.stringify(disputeCreatedEvent(`evt_${crypto.randomUUID()}`, tenantId, disputeId)),
-    });
+    const created = await postWebhook<WebhookResponse>(
+      disputeCreatedEvent(`evt_${crypto.randomUUID()}`, tenantId, disputeId),
+    );
     expect(created.status).toBe(200);
     expect(created.body).toMatchObject({ applied: true, duplicate: false, frozen: true });
 
@@ -90,10 +89,9 @@ describe("charge.dispute.* webhook — chargeback freeze/unfreeze lane (D5)", ()
     expect(frozenTick.sent).toBe(0);
 
     // Won -> unfreeze.
-    const closed = await api<WebhookResponse>("/webhooks/stripe", {
-      method: "POST",
-      body: JSON.stringify(disputeClosedEvent(`evt_${crypto.randomUUID()}`, tenantId, disputeId, "won")),
-    });
+    const closed = await postWebhook<WebhookResponse>(
+      disputeClosedEvent(`evt_${crypto.randomUUID()}`, tenantId, disputeId, "won"),
+    );
     expect(closed.body).toMatchObject({ applied: true, unfrozen: true });
 
     const unfrozenAccount = await api<AccountResponse>("/account", { token });
@@ -118,10 +116,10 @@ describe("charge.dispute.* webhook — chargeback freeze/unfreeze lane (D5)", ()
     const eventId = `evt_${crypto.randomUUID()}`;
     const event = disputeCreatedEvent(eventId, tenantId, "dp_idem_1");
 
-    const first = await api<WebhookResponse>("/webhooks/stripe", { method: "POST", body: JSON.stringify(event) });
+    const first = await postWebhook<WebhookResponse>(event);
     expect(first.body).toMatchObject({ applied: true, duplicate: false, frozen: true });
 
-    const second = await api<WebhookResponse>("/webhooks/stripe", { method: "POST", body: JSON.stringify(event) });
+    const second = await postWebhook<WebhookResponse>(event);
     expect(second.status).toBe(200);
     expect(second.body).toMatchObject({ applied: false, duplicate: true });
 
@@ -141,14 +139,10 @@ describe("charge.dispute.* webhook — chargeback freeze/unfreeze lane (D5)", ()
     await activatePaidPlan(tenantId, "launch");
     const disputeId = "dp_lost_1";
 
-    await api("/webhooks/stripe", {
-      method: "POST",
-      body: JSON.stringify(disputeCreatedEvent(`evt_${crypto.randomUUID()}`, tenantId, disputeId)),
-    });
-    const closed = await api<WebhookResponse>("/webhooks/stripe", {
-      method: "POST",
-      body: JSON.stringify(disputeClosedEvent(`evt_${crypto.randomUUID()}`, tenantId, disputeId, "lost")),
-    });
+    await postWebhook(disputeCreatedEvent(`evt_${crypto.randomUUID()}`, tenantId, disputeId));
+    const closed = await postWebhook<WebhookResponse>(
+      disputeClosedEvent(`evt_${crypto.randomUUID()}`, tenantId, disputeId, "lost"),
+    );
     expect(closed.body).toMatchObject({ applied: true });
     expect(closed.body.unfrozen).toBeFalsy();
 

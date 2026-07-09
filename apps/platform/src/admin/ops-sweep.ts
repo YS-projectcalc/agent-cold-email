@@ -5,6 +5,7 @@
 // tenants_index, dispatching into each tenant's own DO via RPC — see
 // admin/README.md for why this is the aggregation boundary.
 
+import { countWaitlistEmails } from "../db.js";
 import type { Env } from "../env.js";
 import { newId } from "../schema.js";
 import { countSupportTicketsByStatus, countTerminatedTenants, insertDunningEventIfNew, listAllTenantIds } from "./db.js";
@@ -85,6 +86,8 @@ export interface OpsDigest {
   pastDueCount: number;
   /** D5 lifecycle health — canceled/terminated/disputed tenant counts + total annual-domain liability (integer cents). */
   lifecycle: { canceled: number; terminated: number; disputed: number; annualDomainLiabilityCents: number };
+  /** C6 — total durable waitlist leads (adversarial panel-03 finding #9: owner visibility into the funnel). */
+  waitlist: { count: number };
   watchdogAlerts: string[];
 }
 
@@ -126,6 +129,7 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
   // abuse TERMINATE is orthogonal to billing_state — see admin/db.ts).
   const terminatedCount = await countTerminatedTenants(env);
   const support = await countSupportTicketsByStatus(env);
+  const waitlistCount = await countWaitlistEmails(env);
 
   // Watchdog alerts — simple threshold-crossing prose, not a separate
   // alerting system (YAGNI, CLAUDE.md rule i). "Stuck jobs" (provisioning
@@ -156,6 +160,7 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
     support,
     pastDueCount,
     lifecycle: { canceled: canceledCount, terminated: terminatedCount, disputed: disputedCount, annualDomainLiabilityCents },
+    waitlist: { count: waitlistCount },
     watchdogAlerts,
   };
 }

@@ -42,9 +42,40 @@ function countActionsInWindow(ctx: TenantContext, action: string, sinceMs: numbe
     .one().n;
 }
 
-/** D2 dunning sweep's "suspend after grace" action (admin/dunning.ts) — a real local state transition, no vendor call. */
-export function suspendTenant(ctx: TenantContext): void {
-  ctx.sql.exec(`UPDATE tenant_profile SET status = 'suspended' WHERE id = ?`, ctx.tenantId);
+export type SuspendReason = "dunning" | "terminate";
+
+/**
+ * Suspends a tenant (tick freeze via status='suspended'). `reason` records
+ * WHY, so a later billing-recovery event can reactivate a DUNNING suspension
+ * (a now-paying customer) WITHOUT resurrecting an abuse TERMINATE (adversarial
+ * panel-03 finding #6). Distinguishing them via a stored reason avoids reading
+ * D1 from inside the DO (the DO/D1 write boundary invariant — see the file
+ * header). Called by the D2 dunning sweep (reason='dunning') and the abuse
+ * terminate lane (reason='terminate').
+ */
+export function suspendTenant(ctx: TenantContext, reason: SuspendReason): void {
+  ctx.sql.exec(
+    `UPDATE tenant_profile SET status = 'suspended', suspend_reason = ? WHERE id = ?`,
+    reason,
+    ctx.tenantId,
+  );
+}
+
+/**
+ * Clears a DUNNING suspension on a billing-recovery transition
+ * (subscription.updated->active / checkout.session.completed / dispute won).
+ * Scoped to `suspend_reason = 'dunning'` so an abuse TERMINATE is NEVER lifted
+ * by a stray billing event (adversarial panel-03 finding #6). Idempotent: a
+ * no-op for an already-active or terminate-suspended tenant. Returns true iff
+ * it actually un-suspended a dunning-frozen tenant.
+ */
+export function reactivateFromDunning(ctx: TenantContext): boolean {
+  const res = ctx.sql.exec(
+    `UPDATE tenant_profile SET status = 'active', suspend_reason = NULL
+     WHERE id = ? AND status = 'suspended' AND suspend_reason = 'dunning'`,
+    ctx.tenantId,
+  );
+  return res.rowsWritten > 0;
 }
 
 export function getOpsSummary(ctx: TenantContext, sinceMs: number): TenantOpsSummary {

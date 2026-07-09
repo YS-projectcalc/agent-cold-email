@@ -2,6 +2,7 @@ import type { LaunchCampaignInput } from "@coldstart/shared";
 import { NotFoundError } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
+import { assertNotLifecycleFrozen } from "./billing-state.js";
 import { ONE_DAY_MS } from "./warmup.js";
 
 /**
@@ -19,6 +20,11 @@ export function launchCampaign(
   input: LaunchCampaignInput,
   opts: { isDemo?: boolean } = {},
 ): { campaignId: string } {
+  // Lifecycle freeze — a suspended/disputed/canceled tenant must not launch new
+  // sends (adversarial panel-03 finding #5). Demo/free tenants are never frozen,
+  // so the sandbox /demo/run path is unaffected.
+  assertNotLifecycleFrozen(ctx, "launch_campaign");
+
   const now = ctx.clock.now();
   const campaignId = newId("camp");
 

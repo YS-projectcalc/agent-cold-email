@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { runInDurableObject } from "cloudflare:test";
-import { api, mintTenant, tenantStub } from "./helpers.js";
+import { api, mintTenant, postWebhook, tenantStub } from "./helpers.js";
 
 interface AccountResponse {
   plan: string;
@@ -37,23 +37,24 @@ function invoicePaymentFailedEvent(eventId: string, tenantId: string) {
   };
 }
 
-// No STRIPE_WEBHOOK_SECRET is configured in this test environment, so every
-// event here goes through the "test-sim mode" accept-without-verification
-// path (B1 brief) — signature verification itself (src/billing/stripe-webhook.ts)
-// is exercised only by the pure HMAC math, not end-to-end here (no secret to
-// configure via env in this suite).
+// A test STRIPE_WEBHOOK_SECRET IS configured (vitest.config.ts), and the route
+// now FAILS CLOSED without one (adversarial panel-03 finding #1). So every
+// fixture here is delivered through `postWebhook()`, which signs the raw body
+// exactly as a real Stripe delivery would — these tests exercise the full
+// verify-then-route-then-apply path end to end. The fail-closed + bad-signature
+// transport cases live in webhook-security.test.ts.
 describe("POST /webhooks/stripe — idempotent per event id (ARCHITECTURE.md #3)", () => {
   it("checkout.session.completed upgrades the tenant plan exactly once, even redelivered", async () => {
     const { tenantId, token } = await mintTenant("Webhook Co", "demo");
     const eventId = `evt_${crypto.randomUUID()}`;
     const event = checkoutCompletedEvent(eventId, tenantId, "scale");
 
-    const first = await api<WebhookResponse>("/webhooks/stripe", { method: "POST", body: JSON.stringify(event) });
+    const first = await postWebhook<WebhookResponse>(event);
     expect(first.status).toBe(200);
     expect(first.body).toMatchObject({ applied: true, duplicate: false, plan: "scale" });
 
     // Redelivery of the SAME event id — must be a no-op, not a second upgrade.
-    const second = await api<WebhookResponse>("/webhooks/stripe", { method: "POST", body: JSON.stringify(event) });
+    const second = await postWebhook<WebhookResponse>(event);
     expect(second.status).toBe(200);
     expect(second.body).toMatchObject({ applied: false, duplicate: true });
 
@@ -77,7 +78,7 @@ describe("POST /webhooks/stripe — idempotent per event id (ARCHITECTURE.md #3)
     const { tenantId, token } = await mintTenant("Dunning Co", "launch");
     const event = invoicePaymentFailedEvent(`evt_${crypto.randomUUID()}`, tenantId);
 
-    const res = await api<WebhookResponse>("/webhooks/stripe", { method: "POST", body: JSON.stringify(event) });
+    const res = await postWebhook<WebhookResponse>(event);
     expect(res.status).toBe(200);
     expect(res.body.applied).toBe(true);
 
@@ -94,7 +95,7 @@ describe("POST /webhooks/stripe — idempotent per event id (ARCHITECTURE.md #3)
       data: { object: { metadata: { tenantId } } },
     };
 
-    const res = await api<WebhookResponse>("/webhooks/stripe", { method: "POST", body: JSON.stringify(event) });
+    const res = await postWebhook<WebhookResponse>(event);
     expect(res.body).toMatchObject({ applied: true, plan: "free" });
 
     const account = await api<AccountResponse>("/account", { token });
@@ -104,7 +105,7 @@ describe("POST /webhooks/stripe — idempotent per event id (ARCHITECTURE.md #3)
 
   it("an event with no resolvable tenant reference is accepted but not applied", async () => {
     const event = { id: `evt_${crypto.randomUUID()}`, type: "checkout.session.completed", data: { object: {} } };
-    const res = await api<WebhookResponse>("/webhooks/stripe", { method: "POST", body: JSON.stringify(event) });
+    const res = await postWebhook<WebhookResponse>(event);
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ received: true, applied: false });
   });
