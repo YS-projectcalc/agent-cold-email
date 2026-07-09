@@ -32,8 +32,11 @@
   <ul>
     <li>Illegal content of any kind, including fraud, scams, and content violating intellectual-property rights.</li>
     <li>Sexually explicit content, hate speech, or content promoting violence.</li>
-    <li>Malware, phishing, or any attempt to deceive a recipient about the identity of the sender.</li>
-    <li>Sending to lists you do not have a lawful basis to contact, including purchased lists of unknown provenance, scraped lists in violation of a source site's terms, or lists containing known spam-trap addresses.</li>
+    <li><strong>Malware or phishing</strong> — including any attempt to deceive a recipient about the identity of the sender, or to impersonate a third party (see §2, brand and domain use).</li>
+    <li><strong>Scraped or purchased lead lists</strong> — sending to lists you do not have a lawful basis to contact, including purchased lists of unknown provenance, lists scraped in violation of a source site's terms, or lists containing known spam-trap addresses.</li>
+    <li><strong>Unlawful filter-evasion</strong> — any technique intended to deceive a spam filter, mailbox provider, or recipient about the source, nature, or origin of a message (e.g., misleading header manipulation, disguised links, cloaked sending infrastructure). Legitimate reputation-building — like the platform's own warmup sequencing — is not filter evasion and is the only sanctioned way to improve inbox placement; see the <a href="guide-cold-email-deliverability.html">deliverability guide</a>.</li>
+    <li><strong>Sanctioned or denied parties</strong> — using the Service to contact, or on behalf of, any individual or entity on a U.S. Treasury OFAC sanctions list or other applicable denied-party list, or from a jurisdiction subject to comprehensive U.S. sanctions.</li>
+    <li><strong>High-complaint spam</strong> — sending practices that generate, or are reasonably likely to generate, spam-complaint rates inconsistent with legitimate outreach (see §6).</li>
     <li>Any content or targeting that would violate CAN-SPAM, CA B&amp;P §17529.5, or equivalent laws in your recipients' jurisdiction.</li>
   </ul>
 
@@ -52,10 +55,19 @@
   <h2>6. Complaint-rate consequences</h2>
   <p>If a mailbox's spam-complaint rate approaches or exceeds Gmail's delivery-mitigation ineligibility threshold (0.30%), the Service will automatically throttle or pause that mailbox. Repeated or severe complaint-rate violations across your account may result in account-level suspension, at EpiphanyMade's discretion, to protect the shared vendor infrastructure and other customers' isolated resources.</p>
 
-  <h2>7. How this is enforced</h2>
-  <p>This is not a paper policy. The guardrails described above — suppression, unsubscribe honoring, send caps, complaint-rate auto-pause, and the third-party-brand hard-reject on the lookalike generator — are implemented in the product itself and are exercised by automated tests, not left to customer discretion or after-the-fact manual review alone. EpiphanyMade additionally reserves the right to investigate reported abuse and to suspend or terminate accounts that violate this AUP, reclaiming provisioned infrastructure as needed.</p>
+  <h2>7. Consequence ladder</h2>
+  <p>Enforcement of this AUP is automated and escalates with severity:</p>
+  <ol>
+    <li><strong>Throttle.</strong> A mailbox approaching a volume or complaint-rate threshold (§5, §6) is automatically slowed or paused; sequencing resumes once signals return to a safe range.</li>
+    <li><strong>Auto-pause.</strong> A mailbox or campaign that crosses a hard threshold (e.g., the 0.30% complaint-rate ineligibility line, or a detected suppression-list bypass attempt) is automatically paused pending review.</li>
+    <li><strong>Account suspension.</strong> Repeated, severe, or unresolved violations — including any attempt to circumvent a guardrail — result in suspension of the account, disabling further sends until the matter is resolved.</li>
+    <li><strong>Immediate termination.</strong> EpiphanyMade reserves the right to terminate an account immediately, without prior warning or an opportunity to cure, for the most severe violations: illegal content, phishing or sender-identity impersonation, third-party brand impersonation via the lookalike feature, sending to a sanctioned or denied party, or any other conduct that puts the shared vendor infrastructure, other customers, or recipients at immediate risk.</li>
+  </ol>
 
-  <h2>8. Reporting abuse</h2>
+  <h2>8. How this is enforced</h2>
+  <p>This is not a paper policy. The guardrails described above — suppression, unsubscribe honoring, send caps, complaint-rate auto-pause, and the third-party-brand hard-reject on the lookalike generator — are implemented in the product itself and are exercised by automated tests, not left to customer discretion or after-the-fact manual review alone. This enforcement relies on the monitoring you consent to under the <a href="terms.html">Terms of Service</a> and the <a href="privacy.html">Privacy Policy</a>. EpiphanyMade additionally reserves the right to investigate reported abuse and to suspend or terminate accounts that violate this AUP, reclaiming provisioned infrastructure as needed.</p>
+
+  <h2>9. Reporting abuse</h2>
   <p>To report suspected abuse of the Service (e.g., you received a message you believe misrepresents its sender, or targets you improperly): <strong>abuse@epiphanymade.com</strong>.</p>
 </main>
 

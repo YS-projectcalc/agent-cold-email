@@ -28,6 +28,7 @@
 
 ## Gate 4 — Legal & ops arming
 - [ ] **Attorney review** of ToS / Privacy / AUP (built to the specified clause inventory, DRAFT-flagged) before real customers.
+- [ ] **Fill the CAN-SPAM mailing address** — replace `[EpiphanyMade mailing address — inserted at activation]` in `site/terms.html` §13 and `site/privacy.html` §12 (2 occurrences) before attorney sign-off / any real waitlist send.
 - [ ] **Arm email routing** for support@ + reply ingestion (Cloudflare Email Routing / vendor IMAP) — AI support triage lane is built, disarmed.
 - [ ] **Arm scheduled ops** — deliverability loop, dunning sweep, metrics digest crons (built, disabled in test mode).
 - [ ] **OFAC screening provider** key (if using a paid list) — screening hook is built; wire the data source.
