@@ -9,6 +9,7 @@ declare global {
       DB: D1Database;
       TENANT: DurableObjectNamespace<TenantDO>;
       TOKEN_HASH_PEPPER: string;
+      WAITLIST: KVNamespace;
     }
   }
 }

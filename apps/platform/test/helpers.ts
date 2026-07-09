@@ -1,4 +1,8 @@
 import { env, SELF } from "cloudflare:test";
+import type { TenantPlan } from "@coldstart/shared";
+import { generateApiToken, hashApiToken } from "../src/auth.js";
+import { insertTenantIndex } from "../src/db.js";
+import { newId } from "../src/schema.js";
 import type { TenantDO } from "../src/tenant-do.js";
 
 export interface ApiResult<T = unknown> {
@@ -36,4 +40,21 @@ export async function signup(brand: string, contactEmail: string): Promise<{ ten
   });
   if (res.status !== 201) throw new Error(`signup failed: ${JSON.stringify(res)}`);
   return res.body;
+}
+
+/**
+ * Mints a tenant on an arbitrary plan, bypassing `POST /signup` (which
+ * always mints `demo` — see routes/signup.ts). Test-only: the real product
+ * has no paid-signup path yet (B1); this exists solely to prove the B5
+ * `/demo/run` guard actually rejects a non-demo/free plan (there is no
+ * other way to construct one in this build).
+ */
+export async function mintTenant(brand: string, plan: TenantPlan): Promise<{ tenantId: string; token: string }> {
+  const tenantId = newId("ten");
+  const token = generateApiToken();
+  const tokenHash = await hashApiToken(token, env.TOKEN_HASH_PEPPER);
+  await insertTenantIndex(env, { id: tenantId, apiTokenHash: tokenHash, brand, plan, createdAt: Date.now() });
+  const stub = env.TENANT.get(env.TENANT.idFromName(tenantId));
+  await stub.initTenant({ tenantId, brand, plan });
+  return { tenantId, token };
 }

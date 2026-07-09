@@ -58,7 +58,7 @@ This is the full list — see [`SPEC.md` §6](./SPEC.md#6-agent-surface--the-too
 npx agent-cold-email demo
 ```
 
-The HTTP facade is **live in test mode** at `https://agent-cold-email-api.yaakovscher.workers.dev` — the ~12 intents are real, tested endpoints running against a fault-injecting **sandbox** vendor layer (no real domains/mailboxes/spend, not yet available for real sending). The published npm CLI and the hosted MCP endpoint land in the next build phase; the npm handle `agent-cold-email` is reserved. This test-mode URL becomes the brand's custom domain at launch.
+The HTTP facade **and** the hosted MCP endpoint (`/mcp` above) are **live in test mode** at `https://agent-cold-email-api.yaakovscher.workers.dev` — the ~12 intents are real, tested, reachable over HTTP or MCP (same tools, same tenant-scoped bearer-token auth), running against a fault-injecting **sandbox** vendor layer (no real domains/mailboxes/spend, not yet available for real sending). The CLI (`packages/cli`) is built and works today from a local build; `npx agent-cold-email` itself needs an npm publish, which is an owner-hands activation step (`ACTIVATION.md`) — the npm handle is reserved. This test-mode URL becomes the brand's custom domain at launch.
 
 **What works today:** the ~12 intents are real, tested HTTP endpoints behind a bearer token, live in test mode at `https://agent-cold-email-api.yaakovscher.workers.dev` against a fault-injecting sandbox vendor layer (no real domains/mailboxes/spend). Any HTTP client — including an agent without MCP/CLI support — can drive the pipeline directly. See [`site/openapi.yaml`](./site/openapi.yaml) for the full REST contract, or [`AGENTS.md`](./AGENTS.md) for the agent-facing walkthrough.
 
@@ -86,8 +86,9 @@ Full guardrail + abuse model: [`SPEC.md` §7](./SPEC.md#7-isolation-model-how-on
 This project is under active build in **test mode only** — Stripe test keys, sandbox vendor adapters, no real vendor spend anywhere in the codebase. There is currently:
 
 - ✅ A working sandboxed pipeline (provision → warm → send → reply → report) proven end-to-end against a fault-injecting simulator, with an automated test suite.
-- ✅ A public HTTP facade covering the full ~12-intent surface (this repo).
-- 🚧 Hosted MCP server + published CLI (in progress).
+- ✅ A public HTTP facade covering the full ~12-intent surface (this repo), live at the URL above.
+- ✅ A hosted MCP endpoint (`/mcp`, JSON-RPC 2.0 over streamable HTTP) exposing the same 12 tools, live now.
+- ✅ A no-signup accelerated sandbox demo (`POST /demo/run`) and the `agent-cold-email` CLI (built; not yet npm-published).
 - 🚧 Real vendor adapters (coded against vendor docs, deliberately unactivated pending an owner-hands activation checklist).
 - 🚧 No live production deployment, no real customers, no deliverability track record yet.
 

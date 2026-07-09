@@ -1,7 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
 import type { LaunchCampaignInput, SetupInfrastructureInput, TenantPlan } from "@coldstart/shared";
+import { TenantIsolationError } from "@coldstart/shared";
 import { RealClock, VirtualClock } from "./clock.js";
 import type { Env } from "./env.js";
+import { runDemo, type DemoRunSummary } from "./engine/demo.js";
 import { getInfrastructureStatus, runSetupInfrastructure } from "./engine/provisioning.js";
 import { launchCampaign, pauseAllCampaigns, pauseCampaign } from "./engine/campaigns.js";
 import { runTick } from "./engine/tick.js";
@@ -158,6 +160,17 @@ export class TenantDO extends DurableObject<Env> {
 
   async pollInbox() {
     return runPollInbox(this.requireContext());
+  }
+
+  // --- POST /demo/run (B5) — sandbox-only, structurally gated to demo/free plans ---
+
+  async demoRun(): Promise<DemoRunSummary> {
+    if (this.plan !== "demo" && this.plan !== "free") {
+      throw new TenantIsolationError(
+        "demo run is a sandbox-only surface, unavailable for this tenant's plan — see ARCHITECTURE.md #8",
+      );
+    }
+    return runDemo(this.requireContext());
   }
 
   // --- Sandbox/test-only clock control — never exposed as an HTTP facade intent ---

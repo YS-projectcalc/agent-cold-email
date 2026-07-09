@@ -19,10 +19,14 @@ repo root for what's in/out of scope at this phase.
 - `src/schema.ts` — the TenantDO SQLite schema (`CREATE TABLE` DDL) + id helper.
 - `src/vendors/` — `VendorPort` implementations (`sandbox/` active, `real/`
   coded-but-unactivated stubs) + the adapter factory. See its README.
-- `src/engine/` — the sequencing/warmup/reply engine. See its README.
-- `src/routes/` — Hono route handlers, one file per intent cluster. See its README.
+- `src/engine/` — the sequencing/warmup/reply engine (+ `demo.ts`, the B5
+  `POST /demo/run` accelerated sandbox pipeline). See its README.
+- `src/routes/` — Hono route handlers, one file per intent cluster, plus
+  `demo.ts`, `mcp.ts`, `waitlist.ts` (B5). See its README.
+- `src/mcp/` — the hosted MCP JSON-RPC 2.0 handler (B5). See its README.
 - `migrations/0001_init.sql` — the D1 schema.
-- `test/` — the walking-skeleton E2E suite + the two required guardrail tests.
+- `test/` — the walking-skeleton E2E suite, the tenant-isolation/demo-guard
+  tests, and the B5 MCP/demo-run/waitlist tests.
 
 ## How to run
 
@@ -38,7 +42,8 @@ npm run dev -w apps/platform # wrangler dev (needs .dev.vars — copy .dev.vars.
 - `wrangler.toml` — Worker name `agent-cold-email-api`; `TENANT` Durable
   Object binding (new_sqlite_classes migration `v1`); `DB` D1 binding
   (`coldstart-platform-db`, created via `wrangler d1 create`, migration
-  applied from `migrations/`).
+  applied from `migrations/`); `WAITLIST` KV binding (`wrangler kv namespace
+  create WAITLIST`, B5) backing `POST /api/waitlist`.
 - `.dev.vars.example` — copy to `.dev.vars` (gitignored) for local dev/test;
   currently only `TOKEN_HASH_PEPPER`. No real vendor secrets exist anywhere
   in this app (CLAUDE.md rule g) — sandbox adapters need none, and `real/`

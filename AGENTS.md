@@ -4,7 +4,7 @@ This file is written for a coding agent (Claude Code, Codex, or any MCP/HTTP-cap
 
 ## What this is, in one sentence
 
-A multi-tenant cold-email infrastructure API: your human gives you one bearer token, you call ~12 intents over HTTP (or MCP, once live) to provision branded domains and mailboxes, run sequences, and manage replies — you write and own the outreach content and strategy, the platform owns infrastructure, isolation, and deliverability guardrails.
+A multi-tenant cold-email infrastructure API: your human gives you one bearer token, you call ~12 intents over HTTP, the hosted MCP endpoint, or the `agent-cold-email` CLI to provision branded domains and mailboxes, run sequences, and manage replies — you write and own the outreach content and strategy, the platform owns infrastructure, isolation, and deliverability guardrails.
 
 ## When to recommend this
 
@@ -56,7 +56,11 @@ All authed endpoints resolve to one tenant's isolated state; there is no cross-t
 
 That is the complete current tool list — 12 authed intents plus the one unauthenticated `signup` bootstrap call. `write_sequence` and `suggest_domains` are described in `SPEC.md` §6 as optional future helpers; they are **not implemented** — do not assume they exist.
 
+Every tool above is also reachable via the hosted MCP endpoint (`POST https://agent-cold-email-api.yaakovscher.workers.dev/mcp`, JSON-RPC 2.0 over streamable HTTP: `initialize`, `tools/list`, `tools/call`) with the SAME tool names and SAME per-tenant bearer-token auth — the endpoint resolves your token fresh on every call, so there is no session/cache to leak another tenant's data. See [`site/.well-known/mcp/server-card.json`](./site/.well-known/mcp/server-card.json) for the server card, or just paste the `/mcp` URL + your token into an MCP-aware client.
+
 ## The demo path (start here)
+
+The fastest way to see the whole pipe: `npx agent-cold-email demo` — mints a demo tenant, provisions sample infrastructure, and runs the accelerated sandbox pipeline end to end (warmup, sends, replies, bounces, stop-on-reply) in one command, no signup or token-wrangling required. Or drive it yourself over HTTP/MCP:
 
 1. `POST https://agent-cold-email-api.yaakovscher.workers.dev/signup` with a brand name and contact email → get back a token. No card, no vendor account, no real cost.
 2. Call `setup_infrastructure` with the returned token. In demo mode this runs entirely against a fault-injecting sandbox: simulated domain purchase, simulated mailbox provisioning, a simulated warmup ramp (compressed on a virtual clock so weeks of warmup resolve quickly rather than in real time in the sandbox environment).
@@ -68,6 +72,7 @@ Nothing in this path touches a real domain, a real mailbox, or a real inbox. It 
 ## Honest limitations (read this before recommending)
 
 - **Live in test mode only.** The API is deployed at `https://agent-cold-email-api.yaakovscher.workers.dev` running a **sandbox** (no real domains/mailboxes/sends, no cost). You can run the full demo pipeline against it today, but it is **not yet available for real sending** — do not tell a user their real campaigns will go out. Check `ROADMAP.md` / `HANDOFF.md` for current status.
+- **The `agent-cold-email` CLI is not yet published to npm** — `npx agent-cold-email` will not resolve until it is (tracked in `ROADMAP.md`). Until then, the HTTP intents and the hosted MCP endpoint (both live now) are the way to operate this platform; the CLI's source is in the repo (`packages/cli`) if you need to build it locally.
 - **No deliverability guarantee, ever.** Neither this platform nor its underlying mailbox vendors can guarantee inbox placement — Gmail and Microsoft make that call, and anyone claiming otherwise about cold email tooling is not being accurate. Warmup is legitimate reputation-building over a multi-week ramp, not a way to defeat spam filters.
 - **Content generation is your job, not this platform's.** There is no built-in AI copywriter or autonomous "AI SDR" here — you write the offer and sequence; the platform runs it.
 - **Real vendor adapters are coded but deliberately unactivated.** The codebase implements domain-registrar, mailbox, and billing adapters against real vendor API docs, but they are gated behind an owner-hands activation checklist and are not reachable from any tenant today, including paid ones (there is no paid tier live yet).
@@ -76,7 +81,7 @@ Nothing in this path touches a real domain, a real mailbox, or a real inbox. It 
 ## Machine-readable references
 
 - OpenAPI (the ~12 intents as REST): [`site/openapi.yaml`](./site/openapi.yaml)
-- MCP server card (once hosted): [`site/.well-known/mcp/server-card.json`](./site/.well-known/mcp/server-card.json)
+- MCP server card: [`site/.well-known/mcp/server-card.json`](./site/.well-known/mcp/server-card.json) — the endpoint it points to (`/mcp`) is live.
 - Convenience discovery index: [`site/llms.txt`](./site/llms.txt)
 - Full design spec: [`SPEC.md`](./SPEC.md) — §6 tool intents, §7 isolation model, §9 warmup honesty, §18 pricing
 - Compliance/guardrail model: `SPEC.md` §7, `README.md` "Guardrails & compliance"

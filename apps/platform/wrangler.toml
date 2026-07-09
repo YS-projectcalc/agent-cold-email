@@ -13,6 +13,10 @@ migrations_dir = "migrations"
 name = "TENANT"
 class_name = "TenantDO"
 
+[[kv_namespaces]]
+binding = "WAITLIST"
+id = "e2d5939d1fdc498d85b59cfc6a3e0187"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["TenantDO"]

@@ -1,0 +1,42 @@
+{
+  "name": "agent-cold-email",
+  "version": "0.1.0",
+  "description": "CLI for agent-cold-email, agent-native cold-email infrastructure: provision isolated branded domains and mailboxes, run sequences, and manage replies with one bearer token. Run `npx agent-cold-email demo` for a no-signup sandbox demo, no card, no real emails sent.",
+  "type": "module",
+  "bin": {
+    "agent-cold-email": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YS-projectcalc/agent-cold-email.git"
+  },
+  "homepage": "https://agent-cold-email.pages.dev/",
+  "keywords": [
+    "cold-email",
+    "cold-outreach",
+    "email-infrastructure",
+    "mcp",
+    "model-context-protocol",
+    "ai-agent",
+    "coding-agent",
+    "cli",
+    "sales-automation",
+    "outreach"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^7.0.2"
+  }
+}
