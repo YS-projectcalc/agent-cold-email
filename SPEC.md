@@ -1,7 +1,20 @@
 # ColdStart — SPEC
 
 > Working name (placeholder). Canonical spec; single source of truth. Date: 2026-06-25.
-> Status: design locked through architecture; pre-Phase-0. No code yet.
+> Status: design locked through architecture; build program started 2026-07-09 (see ROADMAP.md).
+
+## 0. Locked business decisions (owner interview, 2026-07-09 — final; no further questions until activation)
+
+1. **Spend:** NO real vendor spend until the final activation session. Build sandbox-first: every vendor behind an adapter interface with a high-fidelity `sandbox` implementation active and a `real` implementation (Inboxkit/Porkbun/Stripe) coded against public API docs but unactivated.
+2. **Entity:** EpiphanyMade operates the business (ToS party, CAN-SPAM address, Stripe account).
+3. **Name:** deferred — build keyword-first/brand-independent (GitHub repo renames 301-redirect; npm publish held since names can't rename). Three verified-available candidates presented at the end: **coldrig / coldpipe / coldloop** (all npm-free; coldrig+coldpipe: GitHub + .dev/.sh/.io all free; no product collisions found).
+4. **Go-live = test mode:** everything built + deployed with Stripe test keys and sandbox vendors; ONE final activation checklist collects every step needing the owner's identity/card (Stripe live KYC, vendor signups, npm login, GitHub org create/transfer, domain purchase).
+5. **Pricing:** full authority delegated — tiers at ~2.5–3x wholesale; free first-use = sandboxed dry-run (no real sends), abuse-proof.
+6. **Public surfaces publish NOW:** public GitHub repo (under YS-projectcalc, transfer at activation), live docs/marketing site, MCP registry listings — early-access/waitlist framing until backend activates. SEO/AEO aging clock starts immediately.
+7. **Orchestration:** full adversarial regime authorized — multi-lens opus panels against every part, parallel Workflow lanes.
+8. **Compliance:** US-first, compliance-forward (suppression, RFC 8058 one-click unsub, physical address, per-mailbox caps, complaint auto-pause, light KYC, abuse-drop ToS). EU/GDPR deferred + geo-gated.
+9. **Marketing reach:** owned surfaces + directories only (site, GitHub, npm, MCP registries, awesome-list PRs, directory listings). No community posting as the owner; no astroturfing.
+10. **Support/ops:** AI-run by default (built now, armed at activation) — the business itself must run on agents with a digest to the owner.
 
 ---
 
