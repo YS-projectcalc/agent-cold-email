@@ -1,10 +1,12 @@
 import type { Clock, MetricsPort, PlacementResult } from "@coldstart/shared";
 
 // Sandbox MetricsPort — stand-in for vendor-side placement-test results
-// (Inboxkit-style). Our own campaign_results()/metrics() intents aggregate
-// from TenantDO's event log directly; this port is for vendor-reported
-// signals (e.g. the deliverability control loop, B6) which B0 does not
-// exercise yet — kept minimal on purpose (YAGNI, CLAUDE.md rule i).
+// (Inboxkit-style seed-list inbox/spam placement). Our own
+// campaign_results()/metrics() aggregate from the event log; the B6
+// deliverability loop reads vendor reputation/placement via MailboxPort.getHealth
+// (surfaced in infrastructure_status). This dedicated placement-test port stays
+// part of the frozen VendorPort contract (ARCHITECTURE.md #1) for activation-time
+// seed-list enrichment — kept minimal on purpose (YAGNI, CLAUDE.md rule i).
 export class SandboxMetricsPort implements MetricsPort {
   constructor(private readonly clock: Clock) {}
 

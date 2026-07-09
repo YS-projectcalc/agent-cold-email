@@ -4,12 +4,15 @@ import type { Clock, EmailPort, PolledEvent, SendEmailInput, SendEmailResult } f
  * Sandbox EmailPort — the send/poll simulator the walking-skeleton test
  * exercises. Deterministic by design (no randomness) so tests are stable:
  * the recipient's local-part decides what happens next poll():
+ *   - local-part contains "complaint" -> a spam-complaint is queued (this is
+ *     the deliverability-loop fault-injection driver: enough complaints from
+ *     one mailbox drive it to 'burning' and the loop responds — B6)
  *   - local-part contains "bounce" -> a bounce is queued for that mailbox
  *   - local-part contains "reply"  -> a reply is queued for that mailbox
  *   - anything else                -> silence (the common real-world case)
  * This is a first-class, documented simulator contract, not a happy-path
  * mock — deeper fault injection (rate limits, 5xx, latency) is a later,
- * budgeted lane (ROADMAP.md hardening-budget rule), out of B0 scope.
+ * budgeted lane (ROADMAP.md hardening-budget rule).
  */
 export class SandboxEmailPort implements EmailPort {
   private readonly sentByIdempotencyKey = new Map<string, SendEmailResult>();
@@ -25,7 +28,16 @@ export class SandboxEmailPort implements EmailPort {
     this.sentByIdempotencyKey.set(idempotencyKey, result);
 
     const behavior = classifyRecipient(input.toEmail);
-    if (behavior === "bounce") {
+    if (behavior === "complaint") {
+      this.enqueue(input.fromEmail, {
+        kind: "complaint",
+        mailboxEmail: input.fromEmail,
+        threadId: input.threadId,
+        originalMessageId: result.messageId,
+        toEmail: input.toEmail,
+        receivedAt: result.sentAt,
+      });
+    } else if (behavior === "bounce") {
       this.enqueue(input.fromEmail, {
         kind: "bounce",
         mailboxEmail: input.fromEmail,
@@ -62,8 +74,11 @@ export class SandboxEmailPort implements EmailPort {
   }
 }
 
-function classifyRecipient(toEmail: string): "bounce" | "reply" | "none" {
+function classifyRecipient(toEmail: string): "complaint" | "bounce" | "reply" | "none" {
   const local = (toEmail.split("@")[0] ?? "").toLowerCase();
+  // "complaint" first: a complaint is the most severe signal and must not be
+  // masked by an incidental "reply"/"bounce" substring in the same local-part.
+  if (local.includes("complaint")) return "complaint";
   if (local.includes("bounce")) return "bounce";
   if (local.includes("reply")) return "reply";
   return "none";

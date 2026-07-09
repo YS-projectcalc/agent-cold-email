@@ -19,17 +19,33 @@ into a god file:
 - `campaigns.ts` — `launch_campaign` (schedules every sequence step for
   every non-suppressed lead up front; `is_demo` marks demo-run campaigns) +
   `pause`/`pause_all`. The tick is the actual send-time guard, not launch.
-- `tick.ts` — the engine tick: sends every due `scheduled_send`, enforcing
-  per-mailbox daily caps AND, at send time, lead/campaign status, the
-  `suppressions` table, and the campaign send window. Claims each row
-  atomically (`pending`→`sending`) before the network send so a
-  concurrent/retried tick can't double-process it, and records usage before
-  committing `sent`/cap so a row is never left sent-but-unbilled. The ledger
-  usage entry is idempotent on `source_send_id`.
+- `tick.ts` — the engine tick: runs the deliverability sweep FIRST (so a
+  degrading mailbox is throttled/paused before it sends more this tick), then
+  sends every due `scheduled_send`, enforcing per-mailbox daily caps AND, at
+  send time, lead/campaign status, the `suppressions` table, and the campaign
+  send window. The send picker excludes `deliv_status='paused'` mailboxes,
+  which is what realizes ROTATE. Claims each row atomically (`pending`→
+  `sending`) before the network send so a concurrent/retried tick can't
+  double-process it, and records usage before committing `sent`/cap so a row is
+  never left sent-but-unbilled. The ledger usage entry is idempotent on
+  `source_send_id`.
 - `reply-processor.ts` — polls each mailbox's `EmailPort.poll()`, lands
   replies in the inbox (step cancellation is gated on the campaign's
-  `stop_on_reply` flag) and bounces into `suppressions` (always cancels
-  remaining steps).
+  `stop_on_reply` flag) and bounces AND spam-complaints into `suppressions`
+  (both always cancel remaining steps). Complaints carry the original send's
+  message id so the deliverability loop can attribute them per-mailbox.
+- `deliverability.ts` — B6 control loop, DECIDE half. A PURE
+  `evaluate(mailboxHealth[], domainStats[], thresholds) -> Action[]`
+  (unit-testable in isolation) + `gatherMailboxHealth`/`gatherDomainStats`
+  which assemble first-party per-mailbox/per-domain bounce+complaint RATES
+  (fractions, 0-1) from the event log — same units as reporting.ts and the
+  vendor port; the Gmail 0.30% red line is 0.003, NOT 0.30 (the 100x trap).
+- `deliverability-actions.ts` — B6 control loop, ACT half. `applyActions`
+  mutates DO state (throttle cap via `cap_override`, pause via `deliv_status`,
+  retire+replace a burning domain via `provisionDomainWithMailboxes`) and
+  audits each to `deliverability_actions`; `runDeliverabilitySweep` is the one
+  entry point the tick calls each cycle BEFORE scheduling. Replacements are
+  rate-capped per window so a replacement that also burns can't spawn forever.
 - `demo.ts` — `demo_run`: the sandbox accelerated pipeline. Resets prior demo
   state each run so DO storage stays bounded; per-tenant throttled in `tenant-do.ts`.
 - `threads.ts` — `inbox()` / `thread(id)` / `reply(thread, body)` /

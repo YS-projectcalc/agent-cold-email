@@ -139,11 +139,11 @@ export async function runDemo(ctx: TenantContext): Promise<DemoRunSummary> {
     sent: tick1.sent + tick2.sent,
     replies: poll1.replies + poll2.replies,
     bounces: poll1.bounces + poll2.bounces,
-    // The sandbox EmailPort does not yet simulate complaints (only
-    // bounce/reply — see vendors/sandbox/email-port.ts); reported honestly
-    // as 0 rather than fabricated. Complaint fault-injection is a later,
-    // budgeted lane (ROADMAP.md hardening-budget rule), not B5 scope.
-    complaints: 0,
+    // Real complaint count from the poll (the sandbox EmailPort simulates
+    // complaints for "complaint"-tagged recipients — B6). The canned DEMO_LEADS
+    // below have no complaint lead, so a normal demo reports 0; the number is
+    // now observed, not fabricated.
+    complaints: poll1.complaints + poll2.complaints,
     stopOnReplyProof,
     sampleThread,
   };

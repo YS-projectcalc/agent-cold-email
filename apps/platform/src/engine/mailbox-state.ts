@@ -6,21 +6,29 @@ import { computeWarmupDay, epochDay, warmupDailyCap, warmupStatus } from "./warm
  * clock and persists it, resetting `sent_today` when the virtual day has
  * rolled over. Called before anything that reads or enforces mailbox
  * capacity (tick, infrastructure_status) so callers can trust the columns.
+ *
+ * The effective `daily_cap` is MIN(warmup ramp cap, cap_override): a
+ * deliverability throttle (engine/deliverability-actions.ts sets cap_override)
+ * therefore survives this per-tick recompute instead of being wiped back up to
+ * the ramp cap. This function only touches the warmup `status` column; the
+ * separate `deliv_status` (healthy/throttled/paused) is owned by the loop and
+ * is deliberately left untouched here.
  */
 export function refreshMailboxWarmupState(ctx: TenantContext): void {
   const now = ctx.clock.now();
   const today = epochDay(now);
 
   const rows = ctx.sql
-    .exec<{ id: string; warmup_started_at: number; sent_today_epoch_day: number }>(
-      `SELECT id, warmup_started_at, sent_today_epoch_day FROM mailboxes WHERE tenant_id = ?`,
+    .exec<{ id: string; warmup_started_at: number; sent_today_epoch_day: number; cap_override: number | null }>(
+      `SELECT id, warmup_started_at, sent_today_epoch_day, cap_override FROM mailboxes WHERE tenant_id = ?`,
       ctx.tenantId,
     )
     .toArray();
 
   for (const row of rows) {
     const day = computeWarmupDay(row.warmup_started_at, now);
-    const cap = warmupDailyCap(day);
+    const rampCap = warmupDailyCap(day);
+    const cap = row.cap_override === null ? rampCap : Math.min(rampCap, row.cap_override);
     const status = warmupStatus(day);
 
     if (row.sent_today_epoch_day !== today) {

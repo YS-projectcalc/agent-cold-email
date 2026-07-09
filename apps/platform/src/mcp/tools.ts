@@ -33,7 +33,7 @@ export const MCP_TOOLS: McpTool<any>[] = [
   ),
   tool(
     "infrastructure_status",
-    "Provisioning + warmup progress, per-mailbox health, and send-readiness.",
+    "Provisioning + warmup progress, per-mailbox health (warmup + deliverability: throttle/pause state, complaint/bounce rates, vendor reputation/placement), and send-readiness.",
     EmptyInput,
     (stub) => stub.infrastructureStatus(),
   ),
@@ -67,5 +67,10 @@ export const MCP_TOOLS: McpTool<any>[] = [
     await stub.pauseAll();
     return { pausedAll: true };
   }),
-  tool("account", "Usage, billing state, and quota for the tenant.", EmptyInput, (stub) => stub.account()),
+  tool(
+    "account",
+    "Usage, billing state, quota, and what the AI deliverability control loop has done (paused/throttled mailboxes, burning domains, auto-replacements, recent actions).",
+    EmptyInput,
+    (stub) => stub.account(),
+  ),
 ];

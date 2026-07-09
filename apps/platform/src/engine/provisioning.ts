@@ -3,9 +3,10 @@ import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
 import { reportUsageToStripeIfConfigured } from "./billing.js";
 import { assertBrandOwnership } from "./brand-guard.js";
+import { gatherMailboxHealth } from "./deliverability.js";
 import { refreshMailboxWarmupState } from "./mailbox-state.js";
 import { assertWithinProvisioningCap } from "./quota.js";
-import { computeWarmupDay, epochDay, isSendReady, warmupDailyCap, warmupStatus } from "./warmup.js";
+import { computeWarmupDay, epochDay, warmupDailyCap, warmupStatus } from "./warmup.js";
 
 // Per-mailbox/mo metering fee (SPEC.md §18 ballpark fully-loaded cost) —
 // paid tiers only. Demo/free is structurally 0-real-spend (ARCHITECTURE.md
@@ -13,8 +14,92 @@ import { computeWarmupDay, epochDay, isSendReady, warmupDailyCap, warmupStatus }
 // fee accrues (see e2e.test.ts's demo-tenant usageCents assertion).
 const MAILBOX_MONTHLY_FEE_CENTS = 600;
 
-function slugify(input: string): string {
+export function slugify(input: string): string {
   return input.toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 20) || "hello";
+}
+
+/**
+ * Provisions ONE domain + its mailboxes: buy → DNS → insert domain row → for
+ * each mailbox provision + startWarmup + insert mailbox row (+ per-mailbox/mo
+ * metering on paid tiers). The single implementation shared by
+ * setup_infrastructure (initial provisioning) and the deliverability control
+ * loop's REPLACE_DOMAIN (burn replacement) — CLAUDE.md rule c (no duplicated
+ * logic). Idempotency keys are namespaced by `domainKey` (`domain#index`) so
+ * distinct domains never collide.
+ */
+export async function provisionDomainWithMailboxes(
+  ctx: TenantContext,
+  opts: { domain: string; domainIndex: number; personaSlug: string; inboxesEach: number },
+): Promise<{ domainId: string; domain: string; mailboxEmails: string[] }> {
+  const now = ctx.clock.now();
+  const domainKey = `${opts.domain}#${opts.domainIndex}`;
+
+  const purchased = await ctx.adapters.domain.buy(opts.domain, `buy:${ctx.tenantId}:${domainKey}`);
+  await ctx.adapters.domain.setDns(opts.domain, `dns:${ctx.tenantId}:${domainKey}`);
+
+  const domainId = newId("dom");
+  ctx.sql.exec(
+    `INSERT INTO domains (id, tenant_id, domain, status, purchased_at) VALUES (?, ?, ?, 'active', ?)`,
+    domainId,
+    ctx.tenantId,
+    purchased.domain,
+    purchased.purchasedAt,
+  );
+
+  const mailboxEmails: string[] = [];
+  for (let mailboxIndex = 0; mailboxIndex < opts.inboxesEach; mailboxIndex++) {
+    const localPart = `${opts.personaSlug}${opts.domainIndex + 1}${mailboxIndex + 1}`;
+    const provisionIdempotencyKey = `mbx:${ctx.tenantId}:${domainKey}:${localPart}`;
+    const provisioned = await ctx.adapters.mailbox.provision(purchased.domain, localPart, provisionIdempotencyKey);
+    const warmup = await ctx.adapters.mailbox.startWarmup(
+      provisioned.email,
+      `warmup:${ctx.tenantId}:${provisioned.email}`,
+    );
+
+    const day = computeWarmupDay(warmup.startedAt, now);
+    ctx.sql.exec(
+      `INSERT INTO mailboxes
+         (id, tenant_id, domain_id, domain, email, daily_cap, sent_today, sent_today_epoch_day, status, warmup_started_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+      newId("mbx"),
+      ctx.tenantId,
+      domainId,
+      purchased.domain,
+      provisioned.email,
+      warmupDailyCap(day),
+      epochDay(now),
+      warmupStatus(day),
+      warmup.startedAt,
+      now,
+    );
+    mailboxEmails.push(provisioned.email);
+
+    // Per-mailbox/mo metering — paid tiers only (see MAILBOX_MONTHLY_FEE_CENTS
+    // comment above). Reuses the SAME idempotency key as mailbox.provision()
+    // as the ledger's source_send_id (a generic idempotency anchor, not
+    // send-specific — see schema.ts), so a retried/duplicated provisioning
+    // call can never double-charge this mailbox.
+    if (isPaidPlanTier(ctx.plan)) {
+      await ctx.adapters.billing.recordUsage(
+        ctx.tenantId,
+        "mailbox provisioned (mo)",
+        MAILBOX_MONTHLY_FEE_CENTS,
+        provisionIdempotencyKey,
+      );
+      ctx.sql.exec(
+        `INSERT OR IGNORE INTO ledger_entries (id, tenant_id, kind, amount_cents, description, ts, source_send_id)
+         VALUES (?, ?, 'usage', ?, 'mailbox provisioned (mo)', ?, ?)`,
+        newId("ledg"),
+        ctx.tenantId,
+        MAILBOX_MONTHLY_FEE_CENTS,
+        now,
+        provisionIdempotencyKey,
+      );
+      await reportUsageToStripeIfConfigured(ctx, 1);
+    }
+  }
+
+  return { domainId, domain: purchased.domain, mailboxEmails };
 }
 
 /**
@@ -36,11 +121,10 @@ export async function runSetupInfrastructure(
   // Plan quota / provisioning-cap guard (B1 brief) — BEFORE any spend.
   assertWithinProvisioningCap(ctx, { domains: input.domains, mailboxes: input.domains * input.inboxesEach });
 
-  const now = ctx.clock.now();
-
   ctx.sql.exec(
-    `UPDATE tenant_profile SET brand = ?, physical_address = ?, sender_identity = ? WHERE id = ?`,
+    `UPDATE tenant_profile SET brand = ?, primary_domain = ?, physical_address = ?, sender_identity = ? WHERE id = ?`,
     input.brand,
+    input.primaryDomain,
     input.physicalAddress,
     input.senderIdentity,
     ctx.tenantId,
@@ -52,70 +136,12 @@ export async function runSetupInfrastructure(
   for (let domainIndex = 0; domainIndex < input.domains; domainIndex++) {
     const candidate = candidates[domainIndex % candidates.length];
     if (!candidate) continue;
-    const domainKey = `${candidate.domain}#${domainIndex}`;
-
-    const purchased = await ctx.adapters.domain.buy(candidate.domain, `buy:${ctx.tenantId}:${domainKey}`);
-    await ctx.adapters.domain.setDns(candidate.domain, `dns:${ctx.tenantId}:${domainKey}`);
-
-    const domainId = newId("dom");
-    ctx.sql.exec(
-      `INSERT INTO domains (id, tenant_id, domain, status, purchased_at) VALUES (?, ?, ?, 'active', ?)`,
-      domainId,
-      ctx.tenantId,
-      purchased.domain,
-      purchased.purchasedAt,
-    );
-
-    for (let mailboxIndex = 0; mailboxIndex < input.inboxesEach; mailboxIndex++) {
-      const localPart = `${personaSlug}${domainIndex + 1}${mailboxIndex + 1}`;
-      const provisionIdempotencyKey = `mbx:${ctx.tenantId}:${domainKey}:${localPart}`;
-      const provisioned = await ctx.adapters.mailbox.provision(purchased.domain, localPart, provisionIdempotencyKey);
-      const warmup = await ctx.adapters.mailbox.startWarmup(
-        provisioned.email,
-        `warmup:${ctx.tenantId}:${provisioned.email}`,
-      );
-
-      const day = computeWarmupDay(warmup.startedAt, now);
-      ctx.sql.exec(
-        `INSERT INTO mailboxes
-           (id, tenant_id, domain_id, domain, email, daily_cap, sent_today, sent_today_epoch_day, status, warmup_started_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
-        newId("mbx"),
-        ctx.tenantId,
-        domainId,
-        purchased.domain,
-        provisioned.email,
-        warmupDailyCap(day),
-        epochDay(now),
-        warmupStatus(day),
-        warmup.startedAt,
-        now,
-      );
-
-      // Per-mailbox/mo metering — paid tiers only (see MAILBOX_MONTHLY_FEE_CENTS
-      // comment above). Reuses the SAME idempotency key as mailbox.provision()
-      // as the ledger's source_send_id (a generic idempotency anchor, not
-      // send-specific — see schema.ts), so a retried/duplicated
-      // setup_infrastructure call can never double-charge this mailbox.
-      if (isPaidPlanTier(ctx.plan)) {
-        await ctx.adapters.billing.recordUsage(
-          ctx.tenantId,
-          "mailbox provisioned (mo)",
-          MAILBOX_MONTHLY_FEE_CENTS,
-          provisionIdempotencyKey,
-        );
-        ctx.sql.exec(
-          `INSERT OR IGNORE INTO ledger_entries (id, tenant_id, kind, amount_cents, description, ts, source_send_id)
-           VALUES (?, ?, 'usage', ?, 'mailbox provisioned (mo)', ?, ?)`,
-          newId("ledg"),
-          ctx.tenantId,
-          MAILBOX_MONTHLY_FEE_CENTS,
-          now,
-          provisionIdempotencyKey,
-        );
-        await reportUsageToStripeIfConfigured(ctx, 1);
-      }
-    }
+    await provisionDomainWithMailboxes(ctx, {
+      domain: candidate.domain,
+      domainIndex,
+      personaSlug,
+      inboxesEach: input.inboxesEach,
+    });
   }
 
   return { jobId: newId("job") };
@@ -129,6 +155,15 @@ export interface MailboxHealthReport {
   dailyCap: number;
   sentToday: number;
   sendReady: boolean;
+  // B6 deliverability signals surfaced so the customer's agent can see the
+  // control loop working: our own throttle/pause state + observed first-party
+  // rates (fractions, 0-1) + the vendor-reported reputation/placement.
+  delivStatus: string;
+  sends: number;
+  complaintRate: number;
+  bounceRate: number;
+  reputationScore: number;
+  placementRate: number;
 }
 
 export interface InfrastructureStatus {
@@ -138,39 +173,42 @@ export interface InfrastructureStatus {
   sendReady: boolean;
 }
 
-export function getInfrastructureStatus(ctx: TenantContext): InfrastructureStatus {
+export async function getInfrastructureStatus(ctx: TenantContext): Promise<InfrastructureStatus> {
   refreshMailboxWarmupState(ctx);
-  const now = ctx.clock.now();
   const domainCount = ctx.sql
     .exec<{ n: number }>(`SELECT COUNT(*) as n FROM domains WHERE tenant_id = ?`, ctx.tenantId)
     .one().n;
 
-  const mailboxRows = ctx.sql
-    .exec<{
-      email: string;
-      domain: string;
-      warmup_started_at: number;
-      sent_today: number;
-    }>(`SELECT email, domain, warmup_started_at, sent_today FROM mailboxes WHERE tenant_id = ?`, ctx.tenantId)
-    .toArray();
-
-  const mailboxHealth: MailboxHealthReport[] = mailboxRows.map((row) => {
-    const day = computeWarmupDay(row.warmup_started_at, now);
-    return {
-      email: row.email,
-      domain: row.domain,
-      status: warmupStatus(day),
-      warmupDay: day,
-      dailyCap: warmupDailyCap(day),
-      sentToday: row.sent_today,
-      sendReady: isSendReady(day),
-    };
-  });
+  const signals = gatherMailboxHealth(ctx);
+  const mailboxHealth: MailboxHealthReport[] = await Promise.all(
+    signals.map(async (s) => {
+      // Vendor-reported reputation/placement (SPEC.md §10 raw signal, Inboxkit
+      // in the real adapter). On-demand here, NOT on the hot tick path.
+      const vendor = await ctx.adapters.mailbox.getHealth(s.email);
+      return {
+        email: s.email,
+        domain: s.domain,
+        status: s.warmupStatus,
+        warmupDay: s.warmupDay,
+        dailyCap: s.dailyCap,
+        sentToday: s.sentToday,
+        sendReady: s.sendReady,
+        delivStatus: s.delivStatus,
+        sends: s.sends,
+        complaintRate: s.complaintRate,
+        bounceRate: s.bounceRate,
+        reputationScore: vendor.reputationScore,
+        placementRate: vendor.placementRate,
+      };
+    }),
+  );
 
   return {
     domains: domainCount,
     mailboxes: mailboxHealth.length,
     mailboxHealth,
+    // Send-readiness ignores paused/throttled state (it's a warmup concept);
+    // a paused mailbox still counts as warmed. delivStatus surfaces the pause.
     sendReady: mailboxHealth.length > 0 && mailboxHealth.every((m) => m.sendReady),
   };
 }

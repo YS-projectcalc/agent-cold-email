@@ -83,7 +83,24 @@ export interface PolledBounce {
   receivedAt: number;
 }
 
-export type PolledEvent = PolledReply | PolledBounce;
+/**
+ * A spam-complaint fed back from the mailbox vendor (Gmail/MS feedback loop,
+ * surfaced by Inboxkit in the real adapter). Carries the sending mailbox and
+ * the original send's message id so the deliverability control loop
+ * (engine/deliverability.ts) can attribute the complaint to the exact mailbox
+ * that sent it and compute a per-mailbox complaint RATE. Complaints suppress
+ * the recipient like a bounce — you never re-mail a complainer.
+ */
+export interface PolledComplaint {
+  kind: "complaint";
+  mailboxEmail: string;
+  threadId: string;
+  originalMessageId: string;
+  toEmail: string;
+  receivedAt: number;
+}
+
+export type PolledEvent = PolledReply | PolledBounce | PolledComplaint;
 
 export interface EmailPort {
   send(input: SendEmailInput, idempotencyKey: string): Promise<SendEmailResult>;

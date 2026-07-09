@@ -17,6 +17,10 @@ CREATE TABLE IF NOT EXISTS tenant_profile (
   billing_state TEXT NOT NULL DEFAULT 'none',
   stripe_customer_id TEXT,
   stripe_subscription_id TEXT,
+  -- The tenant's own stated primary domain (SPEC.md §8), captured at
+  -- setup_infrastructure. The deliverability control loop reads it to derive a
+  -- replacement lookalike when a domain burns (engine/deliverability.ts).
+  primary_domain TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL,
   clock_base INTEGER NOT NULL,
   clock_offset INTEGER NOT NULL DEFAULT 0,
@@ -41,6 +45,16 @@ CREATE TABLE IF NOT EXISTS mailboxes (
   sent_today INTEGER NOT NULL DEFAULT 0,
   sent_today_epoch_day INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'warming',
+  -- Deliverability control-loop state (B6), DISTINCT from the warmup status
+  -- column above (which mailbox-state.ts recomputes every tick from the warmup
+  -- ramp). One of healthy | throttled | paused. Kept in its own column so a
+  -- warmup refresh can never resurrect a paused/throttled mailbox. The tick
+  -- excludes deliv_status='paused' from send scheduling (engine/tick.ts).
+  deliv_status TEXT NOT NULL DEFAULT 'healthy',
+  -- When throttled, the reduced daily cap the loop imposed. NULL = no throttle;
+  -- the effective cap is MIN(warmup cap, cap_override) so the throttle survives
+  -- the per-tick warmup-cap recompute (engine/mailbox-state.ts).
+  cap_override INTEGER,
   warmup_started_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL
 );
@@ -148,6 +162,22 @@ CREATE TABLE IF NOT EXISTS checkout_sessions (
 CREATE TABLE IF NOT EXISTS webhook_events (
   event_id TEXT PRIMARY KEY,
   type TEXT NOT NULL,
+  ts INTEGER NOT NULL
+);
+
+-- Deliverability control-loop audit log (B6). Every action the loop takes
+-- (THROTTLE / PAUSE / ROTATE / REPLACE_DOMAIN + the capped/no-op variants) is
+-- appended here so account()/infrastructure_status() can surface what the AI
+-- ops loop did, and so REPLACE_DOMAIN can enforce a per-window replacement cap
+-- (count of prior replacements) to prevent infinite domain-respawn. Deliberately
+-- NOT the events table: that row shape is campaign/lead/thread-bound (NOT NULL)
+-- and its counts feed metrics(); a system action has none of those.
+CREATE TABLE IF NOT EXISTS deliverability_actions (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  action TEXT NOT NULL,
+  target TEXT NOT NULL,
+  detail_json TEXT NOT NULL DEFAULT '{}',
   ts INTEGER NOT NULL
 );
 

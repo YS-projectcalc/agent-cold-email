@@ -55,6 +55,26 @@ export function getMetrics(ctx: TenantContext): EventCounts {
   return countEvents(ctx);
 }
 
+export interface DeliverabilityAudit {
+  action: string;
+  target: string;
+  ts: number;
+  detail: Record<string, unknown>;
+}
+
+export interface DeliverabilitySummary {
+  /** Mailboxes the control loop has paused (crossed a hard threshold). */
+  pausedMailboxes: number;
+  /** Mailboxes the control loop has throttled (reduced daily cap). */
+  throttledMailboxes: number;
+  /** Domains retired as 'burning' by the loop. */
+  burningDomains: number;
+  /** Replacement domains the loop has auto-provisioned. */
+  domainsReplaced: number;
+  /** Most-recent loop actions (newest first) so the agent can see the loop working. */
+  recentActions: DeliverabilityAudit[];
+}
+
 export interface AccountSummary {
   tenantId: string;
   brand: string;
@@ -69,6 +89,55 @@ export interface AccountSummary {
   usageCents: number;
   /** The domains/mailboxes cap governing this tenant's current plan — see engine/quota.ts. */
   quota: { domains: number; mailboxes: number };
+  /** B6 — what the AI deliverability control loop has done for this tenant. */
+  deliverability: DeliverabilitySummary;
+}
+
+function getDeliverabilitySummary(ctx: TenantContext): DeliverabilitySummary {
+  const countMailbox = (delivStatus: string): number =>
+    ctx.sql
+      .exec<{ n: number }>(
+        `SELECT COUNT(*) as n FROM mailboxes WHERE tenant_id = ? AND deliv_status = ?`,
+        ctx.tenantId,
+        delivStatus,
+      )
+      .one().n;
+
+  const burningDomains = ctx.sql
+    .exec<{ n: number }>(
+      `SELECT COUNT(*) as n FROM domains WHERE tenant_id = ? AND status = 'burning'`,
+      ctx.tenantId,
+    )
+    .one().n;
+
+  const domainsReplaced = ctx.sql
+    .exec<{ n: number }>(
+      `SELECT COUNT(*) as n FROM deliverability_actions WHERE tenant_id = ? AND action = 'REPLACE_DOMAIN'`,
+      ctx.tenantId,
+    )
+    .one().n;
+
+  const recentActions = ctx.sql
+    .exec<{ action: string; target: string; ts: number; detail_json: string }>(
+      `SELECT action, target, ts, detail_json FROM deliverability_actions
+       WHERE tenant_id = ? ORDER BY ts DESC, rowid DESC LIMIT 20`,
+      ctx.tenantId,
+    )
+    .toArray()
+    .map((r) => ({
+      action: r.action,
+      target: r.target,
+      ts: r.ts,
+      detail: JSON.parse(r.detail_json) as Record<string, unknown>,
+    }));
+
+  return {
+    pausedMailboxes: countMailbox("paused"),
+    throttledMailboxes: countMailbox("throttled"),
+    burningDomains,
+    domainsReplaced,
+    recentActions,
+  };
 }
 
 export function getAccount(ctx: TenantContext): AccountSummary {
@@ -106,5 +175,6 @@ export function getAccount(ctx: TenantContext): AccountSummary {
     sends,
     usageCents,
     quota: capFor(ctx.plan),
+    deliverability: getDeliverabilitySummary(ctx),
   };
 }

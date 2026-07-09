@@ -66,18 +66,61 @@ function processBounce(ctx: TenantContext, ev: Extract<PolledEvent, { kind: "bou
   );
 }
 
+function processComplaint(
+  ctx: TenantContext,
+  ev: Extract<PolledEvent, { kind: "complaint" }>,
+  ref: ThreadRef,
+): void {
+  // A spam complaint is terminal for the lead: suppress the address (never
+  // re-mail a complainer — legal + deliverability hygiene) and cancel any
+  // remaining sequence steps, exactly like a bounce. The event is recorded
+  // with the ORIGINAL send's message id so the deliverability control loop
+  // (engine/deliverability.ts) can join it back to the sending mailbox and
+  // compute a per-mailbox complaint rate.
+  ctx.sql.exec(
+    `UPDATE leads SET global_status = 'suppressed' WHERE id = ? AND tenant_id = ?`,
+    ref.lead_id,
+    ctx.tenantId,
+  );
+  cancelPendingSteps(ctx, ref.lead_id);
+  ctx.sql.exec(
+    `INSERT INTO suppressions (tenant_id, email, reason, ts) VALUES (?, ?, 'complaint', ?)
+     ON CONFLICT (tenant_id, email) DO UPDATE SET reason = excluded.reason, ts = excluded.ts`,
+    ctx.tenantId,
+    ev.toEmail,
+    ev.receivedAt,
+  );
+  ctx.sql.exec(
+    `INSERT INTO events (id, tenant_id, campaign_id, lead_id, type, step, message_id, thread_id, ts, metadata_json)
+     VALUES (?, ?, ?, ?, 'complaint', 0, ?, ?, ?, ?)`,
+    newId("evt"),
+    ctx.tenantId,
+    ref.campaign_id,
+    ref.lead_id,
+    ev.originalMessageId,
+    ev.threadId,
+    ev.receivedAt,
+    JSON.stringify({ toEmail: ev.toEmail, mailboxEmail: ev.mailboxEmail }),
+  );
+}
+
 /**
- * poll_inbox — SPEC.md §6 flow step 6. Fetches new replies/bounces per
- * mailbox from EmailPort.poll, lands replies in the unified inbox,
- * stop-on-reply cancels remaining steps, bounces suppress the lead.
+ * poll_inbox — SPEC.md §6 flow step 6. Fetches new replies/bounces/complaints
+ * per mailbox from EmailPort.poll, lands replies in the unified inbox,
+ * stop-on-reply cancels remaining steps, bounces AND complaints suppress the
+ * lead. Complaints additionally feed the deliverability control loop's
+ * per-mailbox complaint rate (engine/deliverability.ts).
  */
-export async function runPollInbox(ctx: TenantContext): Promise<{ replies: number; bounces: number }> {
+export async function runPollInbox(
+  ctx: TenantContext,
+): Promise<{ replies: number; bounces: number; complaints: number }> {
   const mailboxes = ctx.sql
     .exec<{ email: string }>(`SELECT email FROM mailboxes WHERE tenant_id = ?`, ctx.tenantId)
     .toArray();
 
   let replies = 0;
   let bounces = 0;
+  let complaints = 0;
 
   for (const mailbox of mailboxes) {
     const events = await ctx.adapters.email.poll(mailbox.email);
@@ -88,12 +131,15 @@ export async function runPollInbox(ctx: TenantContext): Promise<{ replies: numbe
       if (ev.kind === "reply") {
         processReply(ctx, ev, ref);
         replies++;
-      } else {
+      } else if (ev.kind === "bounce") {
         processBounce(ctx, ev, ref);
         bounces++;
+      } else {
+        processComplaint(ctx, ev, ref);
+        complaints++;
       }
     }
   }
 
-  return { replies, bounces };
+  return { replies, bounces, complaints };
 }

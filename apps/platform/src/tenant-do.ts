@@ -75,6 +75,10 @@ export class TenantDO extends DurableObject<Env> {
     this.addColumnIfMissing("tenant_profile", "billing_state", "TEXT NOT NULL DEFAULT 'none'");
     this.addColumnIfMissing("tenant_profile", "stripe_customer_id", "TEXT");
     this.addColumnIfMissing("tenant_profile", "stripe_subscription_id", "TEXT");
+    this.addColumnIfMissing("tenant_profile", "primary_domain", "TEXT NOT NULL DEFAULT ''");
+    // B6 deliverability control-loop state on mailboxes (see schema.ts).
+    this.addColumnIfMissing("mailboxes", "deliv_status", "TEXT NOT NULL DEFAULT 'healthy'");
+    this.addColumnIfMissing("mailboxes", "cap_override", "INTEGER");
     // Created here, not in TENANT_DO_SCHEMA, so it runs only after the column
     // above is guaranteed to exist (safe for DOs that predate the column).
     this.ctx.storage.sql.exec(

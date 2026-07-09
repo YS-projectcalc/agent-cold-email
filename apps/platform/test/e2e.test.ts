@@ -117,7 +117,7 @@ describe("B0 walking skeleton — signup through reply/bounce handling", () => {
 
     // 6. sandbox poll returns 1 reply + 1 bounce.
     const poll1 = await tenantStub(tenantId).pollInbox();
-    expect(poll1).toEqual({ replies: 1, bounces: 1 });
+    expect(poll1).toEqual({ replies: 1, bounces: 1, complaints: 0 });
 
     let results = await api<CampaignResults>(`/campaigns/${campaignId}/results`, { token });
     expect(results.body.sent).toBe(3);

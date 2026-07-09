@@ -2,6 +2,7 @@ import type { SequenceStep } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
 import { reportUsageToStripeIfConfigured } from "./billing.js";
+import { runDeliverabilitySweep } from "./deliverability-actions.js";
 import { refreshMailboxWarmupState } from "./mailbox-state.js";
 import { isWithinSendWindow, pickMailboxWithCapacity, type SendWindow } from "./scheduler.js";
 
@@ -48,6 +49,12 @@ function parseSendWindow(raw: string): SendWindow {
  */
 export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipped: number; deferred: number }> {
   refreshMailboxWarmupState(ctx);
+  // Deliverability control loop runs BEFORE scheduling (B6): a mailbox whose
+  // complaint/bounce rate has crossed a threshold is throttled/paused, and a
+  // burning domain is retired + replaced, so the send loop below never sends
+  // more from a degrading mailbox this tick. Paused mailboxes are excluded from
+  // the capacity picker query, which realizes the ROTATE reroute.
+  await runDeliverabilitySweep(ctx);
   const now = ctx.clock.now();
 
   const due = ctx.sql
@@ -89,7 +96,8 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
 
     const mailboxes = ctx.sql
       .exec<{ id: string; email: string; sentToday: number; dailyCap: number }>(
-        `SELECT id, email, sent_today as sentToday, daily_cap as dailyCap FROM mailboxes WHERE tenant_id = ?`,
+        `SELECT id, email, sent_today as sentToday, daily_cap as dailyCap FROM mailboxes
+         WHERE tenant_id = ? AND deliv_status != 'paused'`,
         ctx.tenantId,
       )
       .toArray();

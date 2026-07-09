@@ -42,7 +42,7 @@ All authed endpoints resolve to one tenant's isolated state; there is no cross-t
 | Tool | HTTP | Auth | Notes |
 |---|---|---|---|
 | `setup_infrastructure` | `POST /setup-infrastructure` | required | `{ brand, primaryDomain, domains, inboxesEach, persona, physicalAddress, senderIdentity }` — kicks off async domain purchase + DNS + mailbox provisioning + warmup. Returns `202` immediately; poll `infrastructure_status`. |
-| `infrastructure_status` | `GET /infrastructure-status` | required | Provisioning progress, warmup day, per-mailbox health, send-readiness estimate. |
+| `infrastructure_status` | `GET /infrastructure-status` | required | Provisioning progress, warmup day, per-mailbox health (warmup + deliverability: throttle/pause state, complaint/bounce rates, vendor reputation/placement), send-readiness estimate. |
 | `launch_campaign` | `POST /campaigns` | required | `{ name, offer, leads[], sequence[], timezone, sendWindow, stopOnReply }`. You (the agent) write `offer` and the `sequence` step subjects/bodies — this platform does not generate content for you. |
 | `campaign_results` | `GET /campaigns/{id}/results` | required | Sends, replies, bounces, complaints for one campaign. |
 | `metrics` | `GET /metrics` | required | Account-wide deliverability + warmup health. |
@@ -52,7 +52,7 @@ All authed endpoints resolve to one tenant's isolated state; there is no cross-t
 | `mark` | `POST /threads/{id}/mark` | required | `{ status: "read" \| "unread" \| "archived" }`. |
 | `pause` | `POST /campaigns/{id}/pause` | required | Pauses one campaign. |
 | `pause_all` | `POST /campaigns/pause-all` | required | Pauses every campaign for the tenant. |
-| `account` | `GET /account` | required | Usage, billing state, quota. |
+| `account` | `GET /account` | required | Usage, billing state, quota, and a `deliverability` summary of what the AI ops loop did (paused/throttled mailboxes, burning domains, auto-replacements, recent actions). |
 
 That is the complete current tool list — 12 authed intents plus the one unauthenticated `signup` bootstrap call. `write_sequence` and `suggest_domains` are described in `SPEC.md` §6 as optional future helpers; they are **not implemented** — do not assume they exist.
 
