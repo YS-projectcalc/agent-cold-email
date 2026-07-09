@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Docs — {{BRAND}}</title>
+<title>Docs — agent-cold-email</title>
 <meta name="description" content="Quickstart, MCP setup, CLI usage, and the full tool reference for agent-cold-email, agent-native cold-email infrastructure.">
 <link rel="stylesheet" href="assets/style.css">
 <script src="assets/brand.js" defer></script>
@@ -27,7 +27,7 @@
 
   <div class="callout">
     <strong>Early access</strong>
-    The hosted MCP server and published CLI are landing shortly; the HTTP facade they wrap already exists and is tested. <code>https://agent-cold-email-api.yaakovscher.workers.dev</code> below is a placeholder for the deployed API host.
+    The hosted MCP endpoint (<code>/mcp</code>) is live now at <code>https://agent-cold-email-api.yaakovscher.workers.dev</code> — in test mode: sandbox vendor adapters only, no real sends. The npm-published CLI and real sending are the remaining activation steps.
   </div>
 
   <div class="doc-toc">
@@ -66,15 +66,15 @@
     }
   }
 }</code></pre>
-  <p>The hosted MCP server is streamable-HTTP, per-token scoped — one config line, no OAuth dance. It is not live yet in this build phase; see the status banner above.</p>
+  <p>The hosted MCP server is streamable-HTTP, per-token scoped — one config line, no OAuth dance. It is live now in test mode (sandbox vendors, no real sends); see the status banner above.</p>
 
   <h2 id="cli">CLI usage</h2>
   <pre><code># once published:
 npx agent-cold-email demo                 # run the full pipeline against the live sandbox, no signup
 npx agent-cold-email signup --brand Acme --email you@acme.com
-npx agent-cold-email setup-infrastructure --brand Acme --primary-domain acme.com --domains 2 --inboxes-each 3
+npx agent-cold-email setup --brand Acme --primary-domain acme.com --domains 2 --inboxes-each 3
 npx agent-cold-email status
-npx agent-cold-email campaign launch --name "Q3 outbound" --leads leads.csv --sequence sequence.json</code></pre>
+npx agent-cold-email campaign launch --file campaign.json</code></pre>
   <p>The CLI is a thin twin over the same HTTP facade documented below — every subcommand maps 1:1 to a tool in the <a href="#tools">tool reference</a>. The npm package name <code>agent-cold-email</code> is reserved (the permanent keyword handle — see the home page FAQ on naming); publishing is one of the last steps before general availability.</p>
 
   <h2 id="demo">The free demo</h2>
