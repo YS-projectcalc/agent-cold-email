@@ -1,0 +1,18 @@
+name = "agent-cold-email-api"
+main = "src/index.ts"
+compatibility_date = "2026-07-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "coldstart-platform-db"
+database_id = "119be39d-05c3-4608-b628-b2cc7bddfac1"
+migrations_dir = "migrations"
+
+[[durable_objects.bindings]]
+name = "TENANT"
+class_name = "TenantDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["TenantDO"]

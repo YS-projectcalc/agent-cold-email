@@ -17,7 +17,7 @@ Adversarial panels apply to what is REAL: control plane, auth, tenancy, billing,
 - [x] A2. Adversarial panel #1 (4 opus lenses) — 4× CONDITIONAL_GO; amendments synthesized + adopted
 - [x] A2.5 Architecture settled (ARCHITECTURE.md — hybrid topology, DO-SQLite ledger, injected clock, idempotency, engine-as-adapter)
 - [x] A3. cold-cli license = MIT (verified via GitHub API 2026-07-09) — clean to fork; reference for engine contract
-- [ ] A4. $0 vendor-ToS resale + isolation + unit-economics research (running) → feeds vendor pick + pricing; NO-GO branch documented if resale prohibited (facade swaps vendor)
+- [x] A4. $0 vendor-ToS resale + isolation + unit-economics research DONE (docs/research/vendor-tos-economics-2026-07-09.md) → pricing designed (SPEC §18); resale-permission gate recorded (SPEC §13 — Mailforge ToS-clean, Inboxkit needs enterprise deal, or management-service model); Porkbun buy-domain undocumented → Namecheap fallback. NO-GO branch = facade swap, does not block sandbox.
 - [ ] A5. Local-mailserver engine spike (Mailpit/GreenMail, $0): validate send/reply/bounce/thread/unsub contract BEFORE `VendorPort` freeze
 
 ### Phase B — Core product

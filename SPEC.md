@@ -169,11 +169,12 @@ This turns the "perpetual specialist ops" burden into an **automated control loo
 
 ---
 
-## 12. Economics (wholesale; verified)
+## 12. Economics (wholesale; verified 2026-07-09 — primary sources, see docs/research/vendor-tos-economics-2026-07-09.md)
 
-- Domains ~$10–15/yr (Porkbun/Namecheap).
-- Mailboxes self-serve: **Inboxkit / Zapmail** $39 / $99 / $299 per mo for 10 / 30 / 100 mbx (~$3/extra); **Maildoso** ~$1.9–2.5/mbx; **Mailforge** $2–3/mbx (shared IP). **Mailreef** ~$3.99/mbx (dedicated IP, 75 min, no warmup, not self-serve).
-- **Margin** = our retail − vendor wholesale. **Quota lever** = mailbox/lead allocations per tenant.
+- Domains (Porkbun, primary): **.com $11.08/yr**, .net $12.52, .io $28→$52 renewal, .co $16→$31 renewal. Default lookalikes to **.com** (no renewal cliff; burn-replacements pay full renewal). Maildoso/Mailforge bundle domains at $12–14/yr.
+- Mailboxes (all-in = mailbox + warmup): **Inboxkit** $3.1/$2.7/$2.5 per mbx/mo (Pro/Agency/Ent) **+ $3/mbx/mo warmup ≈ $5.5–6.1 all-in**, API on all paid tiers. **Maildoso** $2.5→$0.5/mbx (30→1000, cheapest at volume). **Mailforge** $3/mbx yearly (shared IP; billed on slots). **Mailreef** server-based $240–249/mo ~150 mbx/server, +$0.001/send. **Zapmail** ~$3–3.5/mbx, API gated to $299 tier.
+- **Stripe:** 2.9% + 30¢ domestic; ~$15/dispute (cold-email = high-chargeback category → dunning + dispute lane required).
+- Fully-loaded cost/mailbox ≈ **$7/mo** (mailbox+warmup+domain amortization+8–18%/mo burn replacement+Stripe). Retail per-mailbox line (§18) at $13–15 clears the **2.5–3x** target. **Margin** = retail − wholesale; **quota lever** = mailbox/domain/lead allocations per tenant + per-tenant spend caps.
 
 ---
 
@@ -188,6 +189,24 @@ This turns the "perpetual specialist ops" burden into an **automated control loo
 | Mailreef | ❌ (email for API) | gated | SMTP + dedicated IP | ✅ dedicated IP | ❌ no warmup | ~$3.99/mbx |
 
 **Primary = Inboxkit** (API on every plan + warmup + monitoring + isolation built in → we inherit base deliverability machinery). Zapmail = pre-warmed alt. Maildoso = best $/mbx. Mailreef = best isolation but not self-serve. **Term that applies to all:** mailboxes governed by Google/MS terms; comply as if a direct customer.
+
+**⚠ RESALE-PERMISSION GATE (research 2026-07-09, activation-blocking for the LEGAL model — not the sandbox build).** A multi-tenant "we provision on your behalf" wrapper is a resale/agency use. Per each vendor's OWN ToS: **only Mailforge explicitly permits it** ("indirect subscriber… reselling… to your clients" via required sub-accounts). **Inboxkit** grants only "internal business operations, non-transferable" (no resale carve-out; enterprise-negotiated terms are the escape hatch). Zapmail = internal-use-only. **Mailreef explicitly prohibits** resale. Maildoso = silent. **Resolution paths (activation decision):** (a) negotiate an Inboxkit enterprise/reseller agreement; (b) default the real adapter to Mailforge (ToS-clean, accept weaker shared-IP isolation); or (c) restructure as a **management-service** where the customer is the account principal — which also satisfies the "customer is the CAN-SPAM sender" compliance posture (§compliance). The `VendorPort` facade makes this a swap, not a rebuild. **Porkbun's domain-purchase endpoint is undocumented** (DNS confirmed only) → buy-domain real adapter uses **Namecheap** (documented registration API) as the confirmed fallback.
+
+---
+
+## 18. Pricing (delegated design authority, 2026-07-09 — canonical; drives Stripe test-mode products + site pricing page)
+
+Value metric = **per-mailbox/mo** (tracks our cost) + a platform fee (control plane, agent surface, deliverability loop, AI support). Domains bundled (needed for the mailboxes anyway). Sends are naturally bounded by deliverability caps (~40–50/mbx/day) so no separate send meter — simpler for an agent to reason about. Packaged bundles (agents pick clean options):
+
+| Tier | Price/mo | Mailboxes | Domains | ~Sends/mo | Fully-loaded cost | Gross margin |
+|---|---|---|---|---|---|---|
+| **Free / Demo** | $0 | 0 (sandbox dry-run, NO real sends) | — | 0 real | ~$0 | the abuse-proof first-use (`npx agent-cold-email demo`) |
+| **Launch** | $99 | 5 | 2 | ~1,000 | ~$36 | ~64% |
+| **Growth** ⭐ | $299 | 20 | 6 | ~6,000 | ~$138 | ~54% |
+| **Scale** | $799 | 60 | 18 | ~20,000 | ~$409 | ~49% |
+| **Custom** | platform $49 + $13/mbx/mo | 60+ | ⅓ of mbx | metered | — | negotiated (reseller wholesale improves it) |
+
+All paid tiers clear the 2.5–3x per-mailbox target ($13–15 retail vs ~$6 wholesale). **Free/Demo is structurally sandbox-only** (type-guarded, tested) — abuse-proof. Card-on-file at signup; auto-renew with ROSCA/state-ARL disclosure + easy-cancel. Numbers stay adjustable in Stripe test mode until activation.
 
 ---
 

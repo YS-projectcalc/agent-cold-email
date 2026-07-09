@@ -1,0 +1,7 @@
+# Copy to .dev.vars (gitignored) for local `wrangler dev` / `vitest` runs.
+# Test-mode only — CLAUDE.md forbids any real vendor secret here.
+
+# Pepper mixed into the SHA-256 hash of bearer API tokens before they're
+# stored in D1 (tenants_index.api_token_hash). Any random string works for
+# local dev; rotate via `wrangler secret put` for deployed environments.
+TOKEN_HASH_PEPPER=dev-only-pepper-change-me
