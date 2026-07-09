@@ -1,35 +1,25 @@
 # ColdStart — HANDOFF (resume here)
 
-## Where we are (2026-07-09)
-**LIVE in test mode.** The core product + distribution + agent surface are deployed and working:
-- **API Worker:** https://agent-cold-email-api.yaakovscher.workers.dev — B0 full sandbox pipe + B5 agent surface (/mcp 12 tools, /demo/run, /api/waitlist). 28/28 tests.
-- **Site (Pages):** https://agent-cold-email.pages.dev — AEO shell (llms.txt/openapi/server-card/sitemap/JSON-LD), honest early-access framing.
-- **Public repo:** https://github.com/YS-projectcalc/agent-cold-email — public, 11 topics, AGENTS.md/README/LICENSE/site.
-- **CLI:** `packages/cli` `agent-cold-email` (demo verified live; npm publish = activation).
+## ⭐ PROGRAM COMPLETE (test-mode CORE) — 2026-07-09
+The entire business is BUILT, DEPLOYED, LIVE in test mode, and hardened through 3 adversarial opus panels (all remediated + live-verified). **130/130 tests.** Nothing else is buildable autonomously — remaining work needs the owner (ACTIVATION.md) or is refinement of working systems.
 
-Phases done: A (foundation+panel#1), B0/B4/B5, C0/C1/C2/C3/C6. Architecture SETTLED (ARCHITECTURE.md). Pricing SPEC §18. Vendor/economics research done (SPEC §12/13, docs/research/).
+**Live:**
+- API (Worker v 13f8ee36): https://agent-cold-email-api.yaakovscher.workers.dev — full sandbox pipe + AI deliverability loop + Stripe test-mode billing/quotas + MCP(12 tools)/CLI/demo + admin support/dunning/digest + lifecycle(cancel/teardown/terminate/chargeback). D1 `coldstart-platform-db` (migrations through 0004). Secrets set: TOKEN_HASH_PEPPER, ADMIN_TOKEN. STRIPE_* unset by design (webhook fails-closed until activation).
+- Site (Pages `agent-cold-email`): https://agent-cold-email.pages.dev — AEO shell + 5 deep guides + legal, clean URLs.
+- Repo (public): https://github.com/YS-projectcalc/agent-cold-email
 
-## In flight (2026-07-09)
-**Panel #2 (live surfaces) fixes — 2 disjoint waves running:**
-- Wave 1 (hard-builder, apps/platform + root docs): lookalike-brand guardrail (was advertised-but-absent), /signup rate limit, suppression-at-send, stop_on_reply, send-window enforce, atomic send-claim+ledger idempotency, billing order, /demo/run limits, body-size cap, token prefix.
-- Wave 2 (design-builder, site/ only): docs "MCP live" honesty, `{{BRAND}}` title pre-render, CLI command names.
-After both: verify → commit → redeploy Worker + Pages → push repo.
-Panel #2 verdicts + records: `docs/adversarial/panel-02/`. security-isolation = CLEAN (no cross-tenant leak).
+**Owner deliverables:** `FINAL-REPORT.md` (summary + name rec coldrig + 3 held decisions) · `ACTIVATION.md` (every owner-hands step) · `docs/adversarial/panel-0{1,2,3}/` (panel records) · `docs/research/` (vendor/economics provenance).
 
-## In flight (2026-07-09, cont'd)
-**B1 money path built, NOT yet deployed.** `POST /checkout` (real Stripe test-mode Checkout Session when `STRIPE_SECRET_KEY` is set, else a fully-exercisable simulated session/landing route), plan quotas + a distinct sandbox/paid provisioning-cap runaway guard enforced in `setup_infrastructure`, per-mailbox/mo + per-send metering aggregating into `account().usageCents` (+ inert Stripe usage-report call), idempotent `POST /webhooks/stripe` (signature-verified when `STRIPE_WEBHOOK_SECRET` is set). 65/65 tests green, typecheck clean (3 workspaces), `wrangler deploy --dry-run` clean. Real-Stripe code paths are coded-to-docs but UNVERIFIED (no key anywhere) — that's the activation gate. Left uncommitted (shared worktree, git-guard) — orchestrator to review + commit + redeploy.
+## To go live
+Work `ACTIVATION.md` top to bottom. First gate before any paying customer: the real-world deliverability smoke test.
 
-## In flight (2026-07-09, cont'd)
-**B6 deliverability control loop built, NOT yet deployed.** SPEC §10 monitor→decide→act as sandbox LOGIC + tests. `engine/deliverability.ts` (pure `evaluate` + first-party rate gather, fraction units — Gmail 0.30%=0.003) + `engine/deliverability-actions.ts` (throttle via `cap_override`, pause via `deliv_status`, retire+auto-replace a burning domain, per-window replacement cap, audit table). Wired into the tick BEFORE scheduling; send picker excludes paused mailboxes (= ROTATE). Sandbox EmailPort now injects spam-complaints for "complaint"-tagged recipients; reply-processor suppresses+attributes them per-mailbox. Surfaced in `account().deliverability` + `infrastructure_status` per-mailbox health (12-tool surface unchanged, responses extended). 78/78 tests (13 new), 2 interaction guards revert-fail-proven, typecheck + `wrangler deploy --dry-run` clean. New schema: `mailboxes.deliv_status`/`cap_override`, `tenant_profile.primary_domain`, `deliverability_actions` table (all back-filled via `ensureColumnMigrations`). Deferred to activation: threshold VALUES vs live Gmail, a recovery/un-pause path. Left uncommitted (shared worktree) — orchestrator to review + commit + (decide whether to) redeploy.
-
-## In flight (2026-07-09, cont'd)
-**D1/D2/D6 business-ops automation built, NOT yet deployed.** New `apps/platform/src/admin/` surface (support triage KB/classifier, dunning decision, D1 helpers, cross-tenant ops-sweep/digest logic + README) behind a SEPARATE `ADMIN_TOKEN` bearer (`src/require-admin-auth.ts`, timing-safe, fails closed): `POST /admin/support/triage` + `GET /admin/support/digest` (D1), `POST /admin/ops/dunning-sweep` + `GET /admin/ops/digest` (D2/D6), public `GET /status` (D6). `src/scheduled.ts` is the Cron Trigger entry point (deliverability sweep → dunning sweep → digest, for every tenant) — `wrangler.toml`'s `[triggers]` block is commented-out, armed at activation (ACTIVATION.md Gate 4 already lists both "Arm email routing" + "Arm scheduled ops"). New D1 migration `0002_admin_ops.sql` (`support_tickets`, `dunning_events`). 102/102 tests green (24 new), typecheck clean (root, 3 workspaces), `wrangler deploy --dry-run` clean. Left uncommitted (shared worktree, git-guard) — orchestrator to review + commit + (decide whether to) redeploy.
-
-## Next lanes (ROADMAP)
-B2 (resumable alarm-driven provisioning sagas — B0's are synchronous), B7 done-ish; D1-D6 (support/ops/legal/lifecycle/health); A5 (local-mailserver engine spike, Docker present); C4 (deep comparison content), C5 (registry submissions — activation); E (final panels + report). Then ACTIVATION.md (all owner-hands steps, +wiring a real Stripe TEST key + `STRIPE_WEBHOOK_SECRET`). B6 deliverability loop = built (above); D2 ops routines can now reference it.
+## Remaining (ACTIVATION-hardening backlog — none block test-mode)
+B2 resumable alarm sagas + end-of-period-teardown & send→bill reapers; D4 OFAC screening (needs real signups); A5 local-mailserver engine spike (Docker present; validates real IMAP contract before the swap); D6 per-tenant margin + backups/DR + master-key rotation; real Stripe live + vendor + Go-engine wiring; distribution-validation harness (fresh-agent-discovers-us, meaningful only post-index). All in ROADMAP §"remaining" + ACTIVATION.
 
 ## Locked constraints (SPEC §0)
-Sandbox-first (no vendor spend till activation); test-mode go-live + ACTIVATION.md; NO owner questions till final report; full adversarial regime.
+Sandbox-first; test-mode; NO owner questions till the report (done — held items are in ACTIVATION/FINAL-REPORT); full adversarial regime (done, 3 panels).
 
-## Held for owner → all tracked in ACTIVATION.md
-Name pick (coldrig/coldpipe/coldloop), Stripe live KYC, vendor accounts + resale-model decision, npm login+publish, GitHub org transfer, domain, attorney review, email-routing arm, cron arm, Go-engine host, real-world deliverability smoke test (first activation gate).
+## Key ops notes
+- Two-builder git rule: subagents leave commits to the main loop (git-guard); parallel builders must touch DISJOINT files (apps/platform vs site/ vs root docs).
+- Deploy: `cd apps/platform && wrangler deploy`; migrations `wrangler d1 migrations apply coldstart-platform-db --remote`; site `wrangler pages deploy site --project-name agent-cold-email`.
+- Cron watchdog baf7d82d (3h, session-only, 7-day expiry) — build resilience, not product.
