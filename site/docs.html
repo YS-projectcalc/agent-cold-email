@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Docs — {{BRAND}}</title>
+<meta name="description" content="Quickstart, MCP setup, CLI usage, and the full tool reference for agent-cold-email, agent-native cold-email infrastructure.">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/brand.js" defer></script>
+</head>
+<body>
+<nav class="site-nav">
+  <div class="wrap">
+    <a class="logo" href="index.html"><span data-brand></span><span class="tag">agent-native cold email</span></a>
+    <ul>
+      <li><a href="index.html">Home</a></li>
+      <li><a href="docs.html" aria-current="page">Docs</a></li>
+      <li><a href="pricing.html">Pricing</a></li>
+      <li><a href="compare.html">Compare</a></li>
+    </ul>
+  </div>
+</nav>
+
+<main class="wrap">
+  <h1>Docs</h1>
+  <p class="lede">Quickstart, MCP setup, CLI usage, and the full tool reference — written for both a human setting this up and an agent operating it.</p>
+
+  <div class="callout">
+    <strong>Early access</strong>
+    The hosted MCP server and published CLI are landing shortly; the HTTP facade they wrap already exists and is tested. <code>__API_BASE__</code> below is a placeholder for the deployed API host.
+  </div>
+
+  <div class="doc-toc">
+    <strong>On this page</strong>
+    <ul>
+      <li><a href="#quickstart">Quickstart</a></li>
+      <li><a href="#mcp">MCP setup</a></li>
+      <li><a href="#cli">CLI usage</a></li>
+      <li><a href="#demo">The free demo</a></li>
+      <li><a href="#tools">Tool reference</a></li>
+      <li><a href="#auth">Auth model</a></li>
+    </ul>
+  </div>
+
+  <h2 id="quickstart">Quickstart</h2>
+  <ol>
+    <li>Sign up (no card required for the demo tier):
+      <pre><code>curl -s -X POST __API_BASE__/signup \
+  -H 'Content-Type: application/json' \
+  -d '{"brand":"Acme","contactEmail":"you@acme.com"}'
+# → { "tenantId": "ten_...", "token": "..." }</code></pre>
+    </li>
+    <li>Hand the token to your agent — via MCP config, CLI env var, or directly as a bearer token if your agent talks HTTP.</li>
+    <li>Have your agent call <code>setup_infrastructure</code>, then poll <code>infrastructure_status</code>, then <code>launch_campaign</code>.</li>
+  </ol>
+
+  <h2 id="mcp">MCP setup</h2>
+  <p>For Claude Code, Codex, or any MCP-capable agent, add a remote MCP server pointing at the hosted endpoint:</p>
+  <pre><code>{
+  "mcpServers": {
+    "agent-cold-email": {
+      "url": "__API_BASE__/mcp",
+      "headers": {
+        "Authorization": "Bearer &lt;your-token&gt;"
+      }
+    }
+  }
+}</code></pre>
+  <p>The hosted MCP server is streamable-HTTP, per-token scoped — one config line, no OAuth dance. It is not live yet in this build phase; see the status banner above.</p>
+
+  <h2 id="cli">CLI usage</h2>
+  <pre><code># once published:
+npx agent-cold-email demo                 # run the full pipeline against the live sandbox, no signup
+npx agent-cold-email signup --brand Acme --email you@acme.com
+npx agent-cold-email setup-infrastructure --brand Acme --primary-domain acme.com --domains 2 --inboxes-each 3
+npx agent-cold-email status
+npx agent-cold-email campaign launch --name "Q3 outbound" --leads leads.csv --sequence sequence.json</code></pre>
+  <p>The CLI is a thin twin over the same HTTP facade documented below — every subcommand maps 1:1 to a tool in the <a href="#tools">tool reference</a>. The npm package name <code>agent-cold-email</code> is reserved (the permanent keyword handle — see the home page FAQ on naming); publishing is one of the last steps before general availability.</p>
+
+  <h2 id="demo">The free demo</h2>
+  <p><code>POST /signup</code> mints a <code>demo</code>-plan tenant that is structurally incapable of reaching a real vendor adapter — enforced at the type level and covered by a test that fails if the guard is ever bypassed, not just documented policy. Every domain purchase, mailbox provisioning step, warmup tick, and send in demo mode runs against a fault-injecting sandbox: simulated rate limits, timeouts, bounces, and asynchronous replies, on a virtual clock so a multi-week warmup ramp resolves in the same session instead of in real time. This is the safe way to see the whole pipeline — provision, warm, send, reply, report — before anyone pays for anything.</p>
+
+  <h2 id="tools">Tool reference</h2>
+  <p>All 12 authed intents, plus the one unauthenticated bootstrap call. Full JSON Schemas: <a href="openapi.yaml">openapi.yaml</a>.</p>
+  <table>
+    <thead><tr><th>Tool</th><th>HTTP</th><th>Body / params</th></tr></thead>
+    <tbody>
+      <tr><td><code>signup</code></td><td><code>POST /signup</code> (no auth)</td><td><code>{ brand, contactEmail }</code></td></tr>
+      <tr><td><code>setup_infrastructure</code></td><td><code>POST /setup-infrastructure</code></td><td><code>{ brand, primaryDomain, domains, inboxesEach, persona, physicalAddress, senderIdentity }</code></td></tr>
+      <tr><td><code>infrastructure_status</code></td><td><code>GET /infrastructure-status</code></td><td>—</td></tr>
+      <tr><td><code>launch_campaign</code></td><td><code>POST /campaigns</code></td><td><code>{ name, offer, leads[], sequence[], timezone, sendWindow, stopOnReply }</code></td></tr>
+      <tr><td><code>campaign_results</code></td><td><code>GET /campaigns/{id}/results</code></td><td>—</td></tr>
+      <tr><td><code>pause</code></td><td><code>POST /campaigns/{id}/pause</code></td><td>—</td></tr>
+      <tr><td><code>pause_all</code></td><td><code>POST /campaigns/pause-all</code></td><td>—</td></tr>
+      <tr><td><code>metrics</code></td><td><code>GET /metrics</code></td><td>—</td></tr>
+      <tr><td><code>inbox</code></td><td><code>GET /inbox</code></td><td>—</td></tr>
+      <tr><td><code>thread</code></td><td><code>GET /threads/{id}</code></td><td>—</td></tr>
+      <tr><td><code>reply</code></td><td><code>POST /threads/{id}/reply</code></td><td><code>{ body }</code></td></tr>
+      <tr><td><code>mark</code></td><td><code>POST /threads/{id}/mark</code></td><td><code>{ status: "read"|"unread"|"archived" }</code></td></tr>
+      <tr><td><code>account</code></td><td><code>GET /account</code></td><td>—</td></tr>
+    </tbody>
+  </table>
+  <p>Two optional helpers (<code>write_sequence</code>, <code>suggest_domains</code>) are designed but not yet built — do not assume they exist today.</p>
+
+  <h2 id="auth">Auth model</h2>
+  <p>One bearer token per tenant, minted at signup. Every authed call:</p>
+  <pre><code>Authorization: Bearer &lt;token&gt;</code></pre>
+  <p>The token resolves server-side to exactly one tenant's isolated state — there is no cross-tenant data access at any layer, and every engine query is additionally scoped by tenant ID as a second, independent check.</p>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p><span data-brand></span> is operated by EpiphanyMade. Early access — no deliverability or inbox-placement guarantees.</p>
+    <ul>
+      <li><a href="privacy.html">Privacy</a></li>
+      <li><a href="terms.html">Terms</a></li>
+      <li><a href="aup.html">Acceptable Use</a></li>
+      <li><a href="openapi.yaml">OpenAPI</a></li>
+      <li><a href="llms.txt">llms.txt</a></li>
+    </ul>
+  </div>
+</footer>
+</body>
+</html>

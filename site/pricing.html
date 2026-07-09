@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pricing — {{BRAND}}</title>
+<meta name="description" content="agent-cold-email pricing: per-mailbox tiers from a free sandboxed demo through Launch, Growth, Scale, and Custom.">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/brand.js" defer></script>
+</head>
+<body>
+<nav class="site-nav">
+  <div class="wrap">
+    <a class="logo" href="index.html"><span data-brand></span><span class="tag">agent-native cold email</span></a>
+    <ul>
+      <li><a href="index.html">Home</a></li>
+      <li><a href="docs.html">Docs</a></li>
+      <li><a href="pricing.html" aria-current="page">Pricing</a></li>
+      <li><a href="compare.html">Compare</a></li>
+    </ul>
+  </div>
+</nav>
+
+<main class="wrap">
+  <h1>Pricing</h1>
+  <p class="lede">Priced per mailbox/month plus a platform fee — the value metric tracks the underlying infrastructure cost. Domains are bundled with mailboxes since you need them anyway; sends are naturally bounded by per-mailbox deliverability caps (~40–50/mailbox/day), so there's no separate send meter for your agent to reason about.</p>
+
+  <div class="callout">
+    <strong>Test-mode pricing</strong>
+    These numbers are live in Stripe test mode and are still adjustable until activation. Card-on-file is required at signup for paid tiers, with auto-renewal disclosed per applicable state auto-renewal law; cancel anytime.
+  </div>
+
+  <div class="pricing-grid">
+    <div class="tier">
+      <h3>Free / Demo</h3>
+      <div class="price">$0</div>
+      <ul>
+        <li>0 domains, 0 mailboxes (simulated)</li>
+        <li>0 real sends/mo</li>
+        <li>The abuse-proof first use — <code>signup</code>, then exercise every tool against a fault-injecting simulator</li>
+      </ul>
+    </div>
+    <div class="tier">
+      <h3>Launch</h3>
+      <div class="price">$99<small>/mo</small></div>
+      <ul>
+        <li>5 mailboxes</li>
+        <li>2 domains</li>
+        <li>~1,000 sends/mo</li>
+      </ul>
+    </div>
+    <div class="tier featured">
+      <h3>Growth</h3>
+      <div class="price">$299<small>/mo</small></div>
+      <ul>
+        <li>20 mailboxes</li>
+        <li>6 domains</li>
+        <li>~6,000 sends/mo</li>
+      </ul>
+    </div>
+    <div class="tier">
+      <h3>Scale</h3>
+      <div class="price">$799<small>/mo</small></div>
+      <ul>
+        <li>60 mailboxes</li>
+        <li>18 domains</li>
+        <li>~20,000 sends/mo</li>
+      </ul>
+    </div>
+    <div class="tier">
+      <h3>Custom</h3>
+      <div class="price">$49<small>+ $13/mailbox/mo</small></div>
+      <ul>
+        <li>60+ mailboxes</li>
+        <li>~⅓ domains-to-mailboxes ratio</li>
+        <li>Metered, negotiated</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2>Why per-mailbox</h2>
+  <p>Mailbox count is the resource that actually costs money underneath (mailbox rental, warmup, domain amortization, the 8–18%/month domain-burn-and-replace cycle that's a normal part of running cold email, not a failure mode). Pricing it directly means the number your agent sees maps to the number that determines your real send capacity — no separate "credits" abstraction to translate.</p>
+
+  <h2>What's included at every paid tier</h2>
+  <ul>
+    <li>Per-tenant domain and mailbox isolation — never shared with other customers.</li>
+    <li>Warmup ramp on every new mailbox before it's used for real sends.</li>
+    <li>Suppression list, one-click unsubscribe (RFC 8058), and full CAN-SPAM opt-out handling.</li>
+    <li>Per-mailbox daily send caps and automatic complaint-rate throttling/pause.</li>
+    <li>The full ~12-tool agent surface (MCP + CLI + HTTP).</li>
+  </ul>
+  <p>Not included, ever, at any tier: a deliverability or inbox-placement guarantee. See <a href="compare.html">Compare</a> and <a href="terms.html">Terms</a>.</p>
+
+  <h2>FAQ</h2>
+  <div class="faq">
+    <details>
+      <summary>Is there a contract or commitment?</summary>
+      <p>No — month-to-month, cancel anytime. Domains purchased on your behalf carry their own annual renewal economics regardless of your subscription status; see <a href="terms.html">Terms</a>.</p>
+    </details>
+    <details>
+      <summary>What happens if I exceed my mailbox/domain allocation?</summary>
+      <p>Your agent will get a clear quota error from the relevant tool rather than a silent overage charge — usage-based billing beyond the packaged tiers is a Custom-tier conversation.</p>
+    </details>
+    <details>
+      <summary>Can I start on the free tier and upgrade later without losing setup?</summary>
+      <p>Yes — the demo tenant's configuration (persona, sequence content, etc.) carries forward conceptually; real infrastructure is only provisioned once you're on a paid tier with a real vendor adapter enabled.</p>
+    </details>
+  </div>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p><span data-brand></span> is operated by EpiphanyMade. Early access — no deliverability or inbox-placement guarantees.</p>
+    <ul>
+      <li><a href="privacy.html">Privacy</a></li>
+      <li><a href="terms.html">Terms</a></li>
+      <li><a href="aup.html">Acceptable Use</a></li>
+      <li><a href="docs.html">Docs</a></li>
+    </ul>
+  </div>
+</footer>
+</body>
+</html>

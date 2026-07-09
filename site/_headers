@@ -1,0 +1,22 @@
+# Cloudflare Pages headers. Applies to every response from this site.
+# Docs: https://developers.cloudflare.com/pages/configuration/headers/
+
+/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: geolocation=(), camera=(), microphone=()
+  Content-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' __API_BASE__; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'
+
+# Machine-readable assets: allow any origin to fetch these for AEO/registry scans.
+/llms.txt
+  Access-Control-Allow-Origin: *
+  Content-Type: text/plain; charset=utf-8
+
+/openapi.yaml
+  Access-Control-Allow-Origin: *
+  Content-Type: application/yaml; charset=utf-8
+
+/.well-known/mcp/server-card.json
+  Access-Control-Allow-Origin: *
+  Content-Type: application/json; charset=utf-8

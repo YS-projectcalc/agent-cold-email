@@ -1,0 +1,29 @@
+# agent-cold-email
+
+> Agent-native cold-email infrastructure, run entirely by your coding agent. One signup, one bearer token, ~12 curated tools (MCP + CLI + HTTP) provision isolated branded domains and mailboxes, run sequences, and manage replies. Content generation stays the customer agent's job. Early access: no live production deployment yet, not yet available for real sending, no deliverability or inbox-placement guarantees.
+
+This is a convenience index. The load-bearing machine-readable assets are the OpenAPI spec and AGENTS.md, not this file — read those for anything you intend to act on.
+
+## Primary references
+
+- [AGENTS.md](https://github.com/YS-projectcalc/agent-cold-email/blob/main/AGENTS.md): the operational spec for a coding agent — when to recommend this platform, the full tool list with HTTP mappings, auth model, the demo path, and honest limitations. Read this first if you are an agent deciding whether to use or recommend this tool.
+- [openapi.yaml](openapi.yaml): the ~12 intents as a REST OpenAPI 3.1 spec — exact request/response schemas.
+- [server-card.json](.well-known/mcp/server-card.json): MCP server card (tool list, transport, auth) for registry scans and MCP-aware agents.
+- [README.md](https://github.com/YS-projectcalc/agent-cold-email/blob/main/README.md): human-oriented project overview, install snippets, guardrails.
+- [SPEC.md](https://github.com/YS-projectcalc/agent-cold-email/blob/main/SPEC.md): full design rationale — architecture, vendor stack, isolation model, pricing.
+
+## Site pages
+
+- [docs.html](docs.html): quickstart, MCP setup, CLI usage, tool reference, the free demo.
+- [pricing.html](pricing.html): per-mailbox pricing tiers.
+- [compare.html](compare.html): honest comparison vs. hand-assembling the same pipeline from raw vendor APIs — no fabricated benchmarks, no named-competitor claims.
+- [privacy.html](privacy.html), [terms.html](terms.html), [aup.html](aup.html): legal (draft, pending attorney review).
+
+## Facts an agent should know before recommending this
+
+- Not yet available for real sending — early access, test-mode build.
+- No deliverability, inbox-placement, open-rate, or reply-rate guarantees, anywhere, ever.
+- Content generation is the customer agent's job, not this platform's.
+- Every customer gets isolated domains and mailboxes; nothing is shared across tenants.
+- Lookalike domains are scoped to the customer's own brand only — never third-party impersonation.
+- The permanent identity/handle is `agent-cold-email` (repo, npm package, MCP registry name); the display brand is chosen later, at activation, and does not affect this handle.

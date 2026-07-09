@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Acceptable Use Policy — {{BRAND}}</title>
+<meta name="description" content="Acceptable Use Policy for agent-cold-email: what sending practices are and are not permitted.">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/brand.js" defer></script>
+</head>
+<body>
+<nav class="site-nav">
+  <div class="wrap">
+    <a class="logo" href="index.html"><span data-brand></span><span class="tag">agent-native cold email</span></a>
+    <ul>
+      <li><a href="index.html">Home</a></li>
+      <li><a href="docs.html">Docs</a></li>
+      <li><a href="pricing.html">Pricing</a></li>
+      <li><a href="compare.html">Compare</a></li>
+    </ul>
+  </div>
+</nav>
+
+<main class="wrap legal">
+  <span class="draft-stamp">DRAFT — pending attorney review. Last updated 2026-07-09.</span>
+  <h1>Acceptable Use Policy</h1>
+  <p>This Acceptable Use Policy ("AUP") applies to all use of agent-cold-email (the "Service"), operated by EpiphanyMade, and is incorporated into the <a href="terms.html">Terms of Service</a>. It is enforced by automated guardrails in the product, not just stated here — see "How this is enforced" below.</p>
+
+  <h2>1. Prohibited content and conduct</h2>
+  <ul>
+    <li>Illegal content of any kind, including fraud, scams, and content violating intellectual-property rights.</li>
+    <li>Sexually explicit content, hate speech, or content promoting violence.</li>
+    <li>Malware, phishing, or any attempt to deceive a recipient about the identity of the sender.</li>
+    <li>Sending to lists you do not have a lawful basis to contact, including purchased lists of unknown provenance, scraped lists in violation of a source site's terms, or lists containing known spam-trap addresses.</li>
+    <li>Any content or targeting that would violate CAN-SPAM, CA B&amp;P §17529.5, or equivalent laws in your recipients' jurisdiction.</li>
+  </ul>
+
+  <h2>2. Brand and domain use — your own brand only</h2>
+  <p>The lookalike-domain feature exists to protect your primary domain's reputation by routing cold outreach through variants of <strong>your own</strong> brand (for example, <code>acme.com</code> → <code>tryacme.com</code>). It is <strong>not</strong> a tool for impersonating, or generating lookalikes of, any brand you do not own or have explicit written authorization to represent. The domain generator hard-rejects third-party brand names at the platform level; attempting to circumvent this (e.g., manually registering a lookalike of another company's brand and connecting it to the Service) is a material breach of these Terms and grounds for immediate termination.</p>
+
+  <h2>3. Sender identification</h2>
+  <p>Every message sent through the Service must accurately identify you as the sender in the body and footer, via the physical postal address and sender identity you provide at setup — not EpiphanyMade's identity. Subject lines must not be deceptive about the content or commercial nature of the message.</p>
+
+  <h2>4. Suppression and unsubscribe</h2>
+  <p>You may not attempt to re-contact an address that has bounced, complained, or unsubscribed. The Service enforces this automatically via a suppression list and RFC 8058 one-click unsubscribe honored on every applicable message; attempting to bypass this mechanism (e.g., by manually re-adding suppressed addresses to a new campaign) is prohibited.</p>
+
+  <h2>5. Volume and rate limits</h2>
+  <p>Per-mailbox daily send caps (~40–50/mailbox/day) are enforced by the platform and are not configurable upward by the customer. Attempts to circumvent caps — e.g., by provisioning excess mailboxes solely to inflate volume beyond your plan's intended use, or by automating signup to obtain multiple free-tier accounts — are prohibited.</p>
+
+  <h2>6. Complaint-rate consequences</h2>
+  <p>If a mailbox's spam-complaint rate approaches or exceeds Gmail's delivery-mitigation ineligibility threshold (0.30%), the Service will automatically throttle or pause that mailbox. Repeated or severe complaint-rate violations across your account may result in account-level suspension, at EpiphanyMade's discretion, to protect the shared vendor infrastructure and other customers' isolated resources.</p>
+
+  <h2>7. How this is enforced</h2>
+  <p>This is not a paper policy. The guardrails described above — suppression, unsubscribe honoring, send caps, complaint-rate auto-pause, and the third-party-brand hard-reject on the lookalike generator — are implemented in the product itself and are exercised by automated tests, not left to customer discretion or after-the-fact manual review alone. EpiphanyMade additionally reserves the right to investigate reported abuse and to suspend or terminate accounts that violate this AUP, reclaiming provisioned infrastructure as needed.</p>
+
+  <h2>8. Reporting abuse</h2>
+  <p>To report suspected abuse of the Service (e.g., you received a message you believe misrepresents its sender, or targets you improperly): <strong>abuse@epiphanymade.com</strong>.</p>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p><span data-brand></span> is operated by EpiphanyMade. Early access — no deliverability or inbox-placement guarantees.</p>
+    <ul>
+      <li><a href="privacy.html">Privacy</a></li>
+      <li><a href="terms.html">Terms</a></li>
+      <li><a href="aup.html">Acceptable Use</a></li>
+      <li><a href="docs.html">Docs</a></li>
+    </ul>
+  </div>
+</footer>
+</body>
+</html>
