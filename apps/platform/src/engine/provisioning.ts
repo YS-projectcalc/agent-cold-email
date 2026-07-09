@@ -1,6 +1,7 @@
 import type { SetupInfrastructureInput } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
+import { assertBrandOwnership } from "./brand-guard.js";
 import { refreshMailboxWarmupState } from "./mailbox-state.js";
 import { computeWarmupDay, epochDay, isSendReady, warmupDailyCap, warmupStatus } from "./warmup.js";
 
@@ -20,6 +21,10 @@ export async function runSetupInfrastructure(
   ctx: TenantContext,
   input: SetupInfrastructureInput,
 ): Promise<{ jobId: string }> {
+  // Lookalike third-party-brand hard-reject — BEFORE any searchLookalikes/buy
+  // (ARCHITECTURE.md #8 "enforced in code"). Throws ValidationError -> HTTP 400.
+  assertBrandOwnership({ brand: input.brand, primaryDomain: input.primaryDomain });
+
   const now = ctx.clock.now();
 
   ctx.sql.exec(

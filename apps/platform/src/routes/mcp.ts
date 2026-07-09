@@ -15,9 +15,22 @@ function jsonResponse(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
+// /mcp is unauthenticated at the transport (per-JSON-RPC-method auth), so cap
+// the body before c.req.json() materializes it. 64 KB comfortably fits any
+// tools/call payload while blocking parse-cost amplification (panel-02).
+const MCP_BODY_MAX_BYTES = 64 * 1024;
+
 export const mcpRoute = new Hono<{ Bindings: Env }>()
   .get("/mcp", (c) => jsonResponse(MCP_INFO, 200))
   .post("/mcp", async (c) => {
+    const declaredLength = Number(c.req.header("content-length"));
+    if (Number.isFinite(declaredLength) && declaredLength > MCP_BODY_MAX_BYTES) {
+      return jsonResponse(
+        { jsonrpc: "2.0", id: null, error: { code: -32600, message: "request body too large" } },
+        413,
+      );
+    }
+
     let raw: unknown;
     try {
       raw = await c.req.json();

@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import type { LaunchCampaignInput, SetupInfrastructureInput, TenantPlan } from "@coldstart/shared";
-import { TenantIsolationError } from "@coldstart/shared";
+import { RateLimitError, TenantIsolationError } from "@coldstart/shared";
 import { RealClock, VirtualClock } from "./clock.js";
 import type { Env } from "./env.js";
 import { runDemo, type DemoRunSummary } from "./engine/demo.js";
@@ -20,6 +20,9 @@ export interface InitTenantInput {
   plan: TenantPlan;
 }
 
+const DEMO_RUN_MIN_INTERVAL_MS = 60_000; // at most 1 demo run / minute / tenant
+const DEMO_RUN_LIFETIME_CAP = 20; // total demo runs a single sandbox tenant may make
+
 /**
  * TenantDO — per-tenant state + the SQLite money ledger (ARCHITECTURE.md
  * decision #3). Holds no business logic itself: every RPC method builds a
@@ -35,6 +38,7 @@ export class TenantDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.ctx.storage.sql.exec(TENANT_DO_SCHEMA);
+    this.ensureColumnMigrations();
 
     const row = this.ctx.storage.sql
       .exec<{ id: string; plan: TenantPlan; clock_base: number; clock_offset: number; clock_multiplier: number }>(
@@ -46,6 +50,32 @@ export class TenantDO extends DurableObject<Env> {
       this.tenantId = row.id;
       this.plan = row.plan;
       this.clock = new VirtualClock(row.clock_base, row.clock_offset, row.clock_multiplier);
+    }
+  }
+
+  /**
+   * Idempotent column back-fill for DOs created before a column was added to
+   * TENANT_DO_SCHEMA (CREATE TABLE IF NOT EXISTS never alters an existing
+   * table). New DOs already have the columns from the schema, so the PRAGMA
+   * check skips the ALTER. Keeps schema.ts the single source of truth while
+   * not breaking already-instantiated tenant DOs on deploy.
+   */
+  private ensureColumnMigrations(): void {
+    this.addColumnIfMissing("campaigns", "is_demo", "INTEGER NOT NULL DEFAULT 0");
+    this.addColumnIfMissing("ledger_entries", "source_send_id", "TEXT");
+    // Created here, not in TENANT_DO_SCHEMA, so it runs only after the column
+    // above is guaranteed to exist (safe for DOs that predate the column).
+    this.ctx.storage.sql.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_source_send ON ledger_entries(source_send_id)`,
+    );
+  }
+
+  private addColumnIfMissing(table: string, column: string, definition: string): void {
+    const columns = this.ctx.storage.sql
+      .exec<{ name: string }>(`PRAGMA table_info(${table})`)
+      .toArray();
+    if (!columns.some((c) => c.name === column)) {
+      this.ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
     }
   }
 
@@ -170,7 +200,37 @@ export class TenantDO extends DurableObject<Env> {
         "demo run is a sandbox-only surface, unavailable for this tenant's plan — see ARCHITECTURE.md #8",
       );
     }
+    this.enforceDemoRunThrottle();
     return runDemo(this.requireContext());
+  }
+
+  // Per-tenant /demo/run throttle (adversarial panel-02): a single free token
+  // could otherwise loop /demo/run forever, growing DO SQLite + burning DO
+  // compute. Enforced on REAL wall time — the virtual clock advances ~weeks
+  // per demo run, so it can't gate a real-rate limit. runDemo itself also
+  // RESETs prior demo state so storage stays bounded regardless.
+  private enforceDemoRunThrottle(): void {
+    const nowReal = new RealClock().now();
+    const state = this.ctx.storage.sql
+      .exec<{ run_count: number; last_run_at: number }>(
+        `SELECT run_count, last_run_at FROM demo_run_state WHERE id = 1`,
+      )
+      .toArray()[0] ?? { run_count: 0, last_run_at: 0 };
+
+    if (state.run_count >= DEMO_RUN_LIFETIME_CAP) {
+      throw new RateLimitError(
+        `demo run lifetime cap reached (${DEMO_RUN_LIFETIME_CAP} runs) for this sandbox tenant — sign up a fresh demo tenant to keep exploring.`,
+      );
+    }
+    if (nowReal - state.last_run_at < DEMO_RUN_MIN_INTERVAL_MS) {
+      throw new RateLimitError("demo run rate limited — at most one /demo/run per minute per tenant.");
+    }
+
+    this.ctx.storage.sql.exec(
+      `INSERT INTO demo_run_state (id, run_count, last_run_at) VALUES (1, 1, ?)
+       ON CONFLICT (id) DO UPDATE SET run_count = run_count + 1, last_run_at = excluded.last_run_at`,
+      nowReal,
+    );
   }
 
   // --- Sandbox/test-only clock control — never exposed as an HTTP facade intent ---

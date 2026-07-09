@@ -2,7 +2,7 @@ import type { SequenceStep } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
 import { refreshMailboxWarmupState } from "./mailbox-state.js";
-import { pickMailboxWithCapacity } from "./scheduler.js";
+import { isWithinSendWindow, pickMailboxWithCapacity, type SendWindow } from "./scheduler.js";
 
 interface DueSend {
   id: string;
@@ -14,18 +14,36 @@ interface DueSend {
   lead_status: string;
   campaign_status: string;
   sequence_json: string;
+  send_window_json: string;
+  suppressed: number;
   [column: string]: SqlStorageValue;
 }
 
 const SEND_USAGE_FEE_CENTS = 2;
 
+const DEFAULT_SEND_WINDOW: SendWindow = { startHour: 0, endHour: 23 };
+
+function parseSendWindow(raw: string): SendWindow {
+  try {
+    const parsed = JSON.parse(raw) as Partial<SendWindow>;
+    if (typeof parsed?.startHour === "number" && typeof parsed?.endHour === "number") {
+      return { startHour: parsed.startHour, endHour: parsed.endHour };
+    }
+  } catch {
+    // fall through to the permissive default
+  }
+  return DEFAULT_SEND_WINDOW;
+}
+
 /**
- * The engine tick — SPEC.md §6 flow step 5. Sends every scheduled_send
- * that's due, respecting per-mailbox daily caps and skipping any lead no
- * longer 'active' (stop-on-reply / suppression already applied by
- * engine/reply-processor.ts). Represents what a DO-alarm would do once
- * fired; B0 exposes it as a directly-callable RPC method since real
- * alarm-driven scheduling is B2 scope.
+ * The engine tick — SPEC.md §6 flow step 5. Sends every scheduled_send that's
+ * due, enforcing at SEND TIME (not just at launch): per-mailbox daily caps,
+ * lead/campaign status, the suppressions table, and the campaign send window.
+ * Each row is claimed atomically (status pending -> sending) before the network
+ * send so a concurrent/retried tick cannot double-process it; usage is recorded
+ * before the 'sent'/cap side-effects commit so a row is never left
+ * sent-but-unbilled. Represents what a DO-alarm would do once fired; B0 exposes
+ * it as a directly-callable RPC method since real alarm-driven scheduling is B2.
  */
 export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipped: number; deferred: number }> {
   refreshMailboxWarmupState(ctx);
@@ -35,10 +53,12 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
     .exec<DueSend>(
       `SELECT ss.id, ss.campaign_id, ss.lead_id, ss.step, ss.thread_id,
               l.email as lead_email, l.global_status as lead_status,
-              c.status as campaign_status, c.sequence_json
+              c.status as campaign_status, c.sequence_json, c.send_window_json,
+              CASE WHEN sup.email IS NOT NULL THEN 1 ELSE 0 END as suppressed
        FROM scheduled_sends ss
        JOIN leads l ON l.id = ss.lead_id
        JOIN campaigns c ON c.id = ss.campaign_id
+       LEFT JOIN suppressions sup ON sup.tenant_id = ss.tenant_id AND sup.email = l.email
        WHERE ss.tenant_id = ? AND ss.status = 'pending' AND ss.send_at <= ?
        ORDER BY ss.send_at ASC`,
       ctx.tenantId,
@@ -51,9 +71,18 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
   let deferred = 0;
 
   for (const row of due) {
-    if (row.lead_status !== "active" || row.campaign_status !== "active") {
+    // Skip: lead no longer active, campaign not active, or the address is
+    // suppressed (bounce/complaint/unsub) — checked HERE at send time, across
+    // every campaign, so a suppression created after launch is honored.
+    if (row.lead_status !== "active" || row.campaign_status !== "active" || row.suppressed) {
       ctx.sql.exec(`UPDATE scheduled_sends SET status = 'skipped' WHERE id = ?`, row.id);
       skipped++;
+      continue;
+    }
+
+    // Defer (leave 'pending'): outside the campaign's configured send window.
+    if (!isWithinSendWindow(now, parseSendWindow(row.send_window_json))) {
+      deferred++;
       continue;
     }
 
@@ -77,6 +106,16 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
       continue;
     }
 
+    // Atomic claim BEFORE the network await: another concurrent/retried tick
+    // that reads this row as still 'pending' will fail this conditional UPDATE
+    // (rowsWritten === 0) and skip it, so the row is sent exactly once even
+    // when the real EmailPort's fetch() opens the DO input gate.
+    const claim = ctx.sql.exec(
+      `UPDATE scheduled_sends SET status = 'sending' WHERE id = ? AND status = 'pending'`,
+      row.id,
+    );
+    if (claim.rowsWritten !== 1) continue; // another tick already owns this row
+
     const result = await ctx.adapters.email.send(
       {
         fromEmail: picked.email,
@@ -89,6 +128,27 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
       `send:${ctx.tenantId}:${row.id}`,
     );
 
+    // Record usage BEFORE committing 'sent' + cap consumption, so a row is
+    // never left sent-but-unbilled. Wrapped per-row: one billing failure
+    // reverts JUST this row to 'pending' for retry (email.send is idempotent
+    // on that idempotency key) instead of throwing out of the whole batch.
+    try {
+      await ctx.adapters.billing.recordUsage(
+        ctx.tenantId,
+        "email send",
+        SEND_USAGE_FEE_CENTS,
+        `usage:${ctx.tenantId}:${row.id}`,
+      );
+    } catch {
+      ctx.sql.exec(`UPDATE scheduled_sends SET status = 'pending' WHERE id = ?`, row.id);
+      deferred++; // left pending — a later tick retries this row
+      continue;
+    }
+
+    // Usage is durably recorded: now commit 'sent' + cap + event + local ledger
+    // mirror together. These are all synchronous with no await between them, so
+    // within the DO they land as one unit. The ledger insert is idempotent on
+    // source_send_id, a second defense against a double-counted usage entry.
     ctx.sql.exec(
       `UPDATE scheduled_sends SET status = 'sent', mailbox_id = ?, message_id = ?, sent_at = ? WHERE id = ?`,
       picked.id,
@@ -110,20 +170,14 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
       result.sentAt,
       JSON.stringify({ fromEmail: picked.email, toEmail: row.lead_email, subject: step.subject, body: step.body }),
     );
-
-    await ctx.adapters.billing.recordUsage(
-      ctx.tenantId,
-      "email send",
-      SEND_USAGE_FEE_CENTS,
-      `usage:${ctx.tenantId}:${row.id}`,
-    );
     ctx.sql.exec(
-      `INSERT INTO ledger_entries (id, tenant_id, kind, amount_cents, description, ts)
-       VALUES (?, ?, 'usage', ?, 'email send', ?)`,
+      `INSERT OR IGNORE INTO ledger_entries (id, tenant_id, kind, amount_cents, description, ts, source_send_id)
+       VALUES (?, ?, 'usage', ?, 'email send', ?, ?)`,
       newId("ledg"),
       ctx.tenantId,
       SEND_USAGE_FEE_CENTS,
       result.sentAt,
+      row.id,
     );
 
     sent++;

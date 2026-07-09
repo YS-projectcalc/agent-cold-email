@@ -31,6 +31,19 @@ export class TenantIsolationError extends Error {
   }
 }
 
+/**
+ * Thrown when a per-tenant/per-IP rate limit or lifetime cap is exceeded.
+ * The Worker's onError maps this to HTTP 429. Used by the demo-run throttle
+ * (TenantDO.demoRun); the /signup per-IP limiter returns 429 directly at the
+ * HTTP layer without throwing (see routes/signup.ts).
+ */
+export class RateLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RateLimitError";
+  }
+}
+
 export class NotFoundError extends Error {
   constructor(message: string) {
     super(message);

@@ -34,8 +34,12 @@ export function tenantStub(tenantId: string): DurableObjectStub<TenantDO> {
 }
 
 export async function signup(brand: string, contactEmail: string): Promise<{ tenantId: string; token: string }> {
+  // Each signup uses a unique synthetic source IP so it lands in its own
+  // per-IP RateLimiterDO bucket instead of self-throttling the suite under the
+  // /signup rate limit (routes/signup.ts). Real clients present distinct IPs.
   const res = await api<{ tenantId: string; token: string }>("/signup", {
     method: "POST",
+    headers: { "CF-Connecting-IP": `test-ip-${crypto.randomUUID()}` },
     body: JSON.stringify({ brand, contactEmail }),
   });
   if (res.status !== 201) throw new Error(`signup failed: ${JSON.stringify(res)}`);

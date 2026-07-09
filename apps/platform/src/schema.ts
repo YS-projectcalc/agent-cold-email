@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   stop_on_reply INTEGER NOT NULL DEFAULT 1,
   send_window_json TEXT NOT NULL,
   timezone TEXT NOT NULL DEFAULT 'UTC',
+  is_demo INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL
 );
 
@@ -97,18 +98,37 @@ CREATE TABLE IF NOT EXISTS suppressions (
   PRIMARY KEY (tenant_id, email)
 );
 
+-- source_send_id is the idempotency anchor for usage entries: a
+-- reprocessed/duplicated send (same scheduled_send id) can never double-count
+-- usage (engine/tick.ts uses INSERT OR IGNORE keyed on it). The backing UNIQUE
+-- index is created in TenantDO.ensureColumnMigrations() AFTER the column is
+-- guaranteed to exist (so already-deployed DOs that predate this column don't
+-- fail on the index during construction). NULLs are distinct in SQLite, so
+-- non-usage entries (credits/adjustments) with NULL source_send_id never
+-- collide. See adversarial panel-02 correctness-engine finding.
 CREATE TABLE IF NOT EXISTS ledger_entries (
   id TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL,
   kind TEXT NOT NULL,
   amount_cents INTEGER NOT NULL,
   description TEXT NOT NULL,
-  ts INTEGER NOT NULL
+  ts INTEGER NOT NULL,
+  source_send_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS thread_marks (
   thread_id TEXT PRIMARY KEY,
   status TEXT NOT NULL
+);
+
+-- Per-tenant demo-run throttle state (single-row). Bounds /demo/run abuse:
+-- min-interval + lifetime cap enforced in TenantDO.demoRun using REAL wall
+-- time (the virtual clock jumps ~weeks per demo run, so it can't gate a
+-- real-rate limit). See adversarial panel-02 abuse-cost-dos finding.
+CREATE TABLE IF NOT EXISTS demo_run_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  run_count INTEGER NOT NULL DEFAULT 0,
+  last_run_at INTEGER NOT NULL DEFAULT 0
 );
 `;
 

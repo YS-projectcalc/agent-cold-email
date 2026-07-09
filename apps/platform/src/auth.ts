@@ -2,7 +2,12 @@
 // only their SHA-256(+pepper) hash is ever persisted (D1 tenants_index),
 // never the plaintext — CLAUDE.md rule g (no secrets in git/store).
 
-const TOKEN_PREFIX = "cs_live_";
+// Every tenant in this build is a non-activated sandbox tenant (no real
+// sending), so tokens carry a `cs_test_` prefix — mirroring Stripe's
+// test/live convention so an agent never mistakes a sandbox token for a
+// production credential (adversarial panel-02). `cs_live_` is reserved for
+// activated real-sending tenants once ACTIVATION.md is executed.
+const TOKEN_PREFIX = "cs_test_";
 
 export function generateApiToken(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(32));

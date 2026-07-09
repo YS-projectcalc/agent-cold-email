@@ -2,11 +2,13 @@ import { Hono } from "hono";
 import { LaunchCampaignInput } from "@coldstart/shared";
 import type { Env } from "../env.js";
 import type { AuthedVariables } from "../require-auth.js";
-import { parseJsonBody } from "../validate.js";
+import { LARGE_BODY_MAX_BYTES, parseJsonBody } from "../validate.js";
 
 export const campaignsRoute = new Hono<{ Bindings: Env; Variables: AuthedVariables }>()
   .post("/campaigns", async (c) => {
-    const parsed = await parseJsonBody(c, LaunchCampaignInput);
+    // launch_campaign legitimately carries up to 5000 leads — the one route
+    // that needs the large body cap (validate.ts default is the small cap).
+    const parsed = await parseJsonBody(c, LaunchCampaignInput, LARGE_BODY_MAX_BYTES);
     if (!parsed.ok) return parsed.response;
     const result = await c.get("tenantStub").launchCampaign(parsed.data);
     return c.json(result, 201);

@@ -17,6 +17,8 @@ const ALLOWED_ORIGIN = "https://agent-cold-email.pages.dev";
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_PER_WINDOW = 5;
 const RATE_LIMIT_KV_TTL_SECONDS = 120; // > the window, so a bucket always outlives its own window
+// Bound KV growth: waitlist entries expire after 90 days (min KV TTL is 60s).
+const EMAIL_KEY_TTL_SECONDS = 90 * 24 * 60 * 60;
 
 function corsHeaders(): Record<string, string> {
   return {
@@ -43,6 +45,12 @@ export const waitlistRoute = new Hono<{ Bindings: Env }>()
     const windowBucket = Math.floor(new RealClock().now() / RATE_LIMIT_WINDOW_MS);
     const rateLimitKey = `rl:${ip}:${windowBucket}`;
 
+    // NOTE: this KV read-modify-write is NOT atomic (a concurrent burst can all
+    // read the same count and bypass the cap). It is tolerated here only
+    // because the blast radius is the waitlist store — no cost/sends. The
+    // higher-value /signup limiter uses the atomic RateLimiterDO instead
+    // (rate-limiter-do.ts); migrating this endpoint to that DO is the intended
+    // follow-up (adversarial panel-02).
     const currentCountRaw = await c.env.WAITLIST.get(rateLimitKey);
     const currentCount = currentCountRaw ? Number.parseInt(currentCountRaw, 10) : 0;
     if (currentCount >= RATE_LIMIT_MAX_PER_WINDOW) {
@@ -54,7 +62,10 @@ export const waitlistRoute = new Hono<{ Bindings: Env }>()
     const emailKey = `email:${email}`;
     const existing = await c.env.WAITLIST.get(emailKey);
     if (!existing) {
-      await c.env.WAITLIST.put(emailKey, JSON.stringify({ email, createdAt: new RealClock().now() }));
+      // TTL bounds unbounded KV growth from repeated distinct submissions.
+      await c.env.WAITLIST.put(emailKey, JSON.stringify({ email, createdAt: new RealClock().now() }), {
+        expirationTtl: EMAIL_KEY_TTL_SECONDS,
+      });
     }
     // existing !== null: already on the list — dedupe silently, still `ok: true`.
 

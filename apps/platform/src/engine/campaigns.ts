@@ -7,17 +7,24 @@ import { ONE_DAY_MS } from "./warmup.js";
 /**
  * launch_campaign — SPEC.md §6. Every sequence step for every non-suppressed
  * lead is scheduled up front (send_at = campaign start + cumulative
- * delayDays); the tick (engine/tick.ts) is what actually enforces
- * stop-on-reply/suppression at send time, so a step scheduled days ahead
- * simply gets skipped if the lead is no longer 'active' by then.
+ * delayDays). Enforcement happens at send time in the tick (engine/tick.ts):
+ * it re-checks lead status, campaign status, the suppressions table, and the
+ * send window on every due row, so a step scheduled days ahead is skipped or
+ * deferred if the lead was replied-to/suppressed or the window closed by then.
+ * The suppression snapshot below is only a launch-time optimization — the
+ * tick's suppressions join is the actual guard.
  */
-export function launchCampaign(ctx: TenantContext, input: LaunchCampaignInput): { campaignId: string } {
+export function launchCampaign(
+  ctx: TenantContext,
+  input: LaunchCampaignInput,
+  opts: { isDemo?: boolean } = {},
+): { campaignId: string } {
   const now = ctx.clock.now();
   const campaignId = newId("camp");
 
   ctx.sql.exec(
-    `INSERT INTO campaigns (id, tenant_id, name, status, sequence_json, stop_on_reply, send_window_json, timezone, created_at)
-     VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?)`,
+    `INSERT INTO campaigns (id, tenant_id, name, status, sequence_json, stop_on_reply, send_window_json, timezone, is_demo, created_at)
+     VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)`,
     campaignId,
     ctx.tenantId,
     input.name,
@@ -25,6 +32,7 @@ export function launchCampaign(ctx: TenantContext, input: LaunchCampaignInput): 
     input.stopOnReply ? 1 : 0,
     JSON.stringify(input.sendWindow),
     input.timezone,
+    opts.isDemo ? 1 : 0,
     now,
   );
 

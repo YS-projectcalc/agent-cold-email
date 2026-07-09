@@ -19,6 +19,16 @@ describe("POST /api/waitlist — public waitlist form", () => {
     expect(JSON.parse(stored!)).toMatchObject({ email: email.toLowerCase() });
   });
 
+  it("sets an expirationTtl on the stored email key to bound KV growth (finding #11)", async () => {
+    const email = `ttl-${crypto.randomUUID()}@waitlist-test.example`;
+    const res = await postWaitlist(email);
+    expect(res.status).toBe(200);
+    const listed = await env.WAITLIST.list({ prefix: `email:${email.toLowerCase()}` });
+    expect(listed.keys).toHaveLength(1);
+    // Old code stored the email key with no TTL -> `expiration` is undefined.
+    expect(typeof listed.keys[0]!.expiration).toBe("number");
+  });
+
   it("dedupes by email — a second submission does not create a second record or change the stored createdAt", async () => {
     const email = `dedupe-${crypto.randomUUID()}@waitlist-test.example`;
     const first = await postWaitlist(email);

@@ -64,7 +64,7 @@ The HTTP facade **and** the hosted MCP endpoint (`/mcp` above) are **live in tes
 
 ## First use: the free demo
 
-There is no-cost, no-signup way to see the full pipeline run: `POST /signup` mints a `demo`-plan tenant that is **structurally incapable of reaching a real vendor adapter** (enforced by a type guard and a test that fails if violated, not just a policy) — every domain purchase, mailbox, and send in demo mode is simulated against a fault-injecting sandbox (rate limits, bounces, timeouts, async replies included) so it behaves like the real thing without spending a cent or touching a real inbox. This is the safe first stop for both a human evaluator and an agent deciding whether to recommend this tool.
+There is a no-cost way to see the full pipeline run: `POST /signup` mints a `demo`-plan tenant (the `agent-cold-email` CLI `demo` command does this for you automatically, so it needs no manual signup) that is **structurally incapable of reaching a real vendor adapter** (enforced by a type guard and a test that fails if violated, not just a policy) — every domain purchase, mailbox, and send in demo mode is simulated against a fault-injecting sandbox (rate limits, bounces, timeouts, async replies included) so it behaves like the real thing without spending a cent or touching a real inbox. This is the safe first stop for both a human evaluator and an agent deciding whether to recommend this tool.
 
 ## Guardrails & compliance
 
@@ -76,7 +76,7 @@ Built into the platform, not just promised in a policy:
 - **Full CAN-SPAM opt-out flow** — conspicuous in-body opt-out, honor windows, no sale/transfer of suppressed addresses.
 - **Per-tenant physical postal address + verified sender identity** injected into every message footer — each customer is registered and identifiable as the actual sender, not EpiphanyMade.
 - **Complaint-rate auto-pause** — a mailbox degrading toward Gmail's 0.30% ineligibility threshold is throttled or paused automatically.
-- **Lookalike domains are scoped to the sender's own brand only.** The lookalike-domain generator produces variants of *your own* domain (e.g. `acme.com` → `tryacme.com`) to route around primary-domain reputation risk — it hard-rejects any third-party brand. This is not a phishing or impersonation tool.
+- **Lookalike domains are scoped to the sender's own brand only.** The lookalike-domain generator produces variants of *your own* domain (e.g. `acme.com` → `tryacme.com`) to route around primary-domain reputation risk. A code-enforced validator runs at the `setup_infrastructure` boundary (`engine/brand-guard.ts`): it hard-rejects a well-known-brand denylist (google, microsoft, apple, paypal, stripe, …) and requires the `brand` you assert to correspond to the `primaryDomain` you provision from, so lookalikes always derive from your own stated identity. Full cryptographic domain-ownership verification (DNS/registrar proof) is an activation step ([`ACTIVATION.md`](./ACTIVATION.md)). This is not a phishing or impersonation tool.
 - **Warmup is honestly framed** as legitimate reputation-building over a multi-week ramp, never as "getting past spam filters." There is no magic and no filter-evasion mechanism here — see [`SPEC.md` §9](./SPEC.md#9-warmup--whats-true-what-we-do).
 
 Full guardrail + abuse model: [`SPEC.md` §7](./SPEC.md#7-isolation-model-how-one-bad-customer--company-death). Legal documents (drafts, pending attorney review): [`site/terms.html`](./site/terms.html), [`site/privacy.html`](./site/privacy.html), [`site/aup.html`](./site/aup.html).
@@ -88,7 +88,7 @@ This project is under active build in **test mode only** — Stripe test keys, s
 - ✅ A working sandboxed pipeline (provision → warm → send → reply → report) proven end-to-end against a fault-injecting simulator, with an automated test suite.
 - ✅ A public HTTP facade covering the full ~12-intent surface (this repo), live at the URL above.
 - ✅ A hosted MCP endpoint (`/mcp`, JSON-RPC 2.0 over streamable HTTP) exposing the same 12 tools, live now.
-- ✅ A no-signup accelerated sandbox demo (`POST /demo/run`) and the `agent-cold-email` CLI (built; not yet npm-published).
+- ✅ An accelerated sandbox demo — the `agent-cold-email` CLI `demo` command (built; not yet npm-published) mints a demo tenant automatically and drives the full pipeline; the underlying `POST /demo/run` runs against that demo tenant's bearer token (get one from `POST /signup` — no card, no vendor account).
 - 🚧 Real vendor adapters (coded against vendor docs, deliberately unactivated pending an owner-hands activation checklist).
 - 🚧 No live production deployment, no real customers, no deliverability track record yet.
 

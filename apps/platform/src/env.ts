@@ -1,4 +1,5 @@
 import type { TenantDO } from "./tenant-do.js";
+import type { RateLimiterDO } from "./rate-limiter-do.js";
 
 // Cloudflare's convention (what `wrangler types` generates): augment the
 // global `Cloudflare.Env` namespace so both `c.env` in Hono and the `env`
@@ -8,6 +9,7 @@ declare global {
     interface Env {
       DB: D1Database;
       TENANT: DurableObjectNamespace<TenantDO>;
+      SIGNUP_LIMITER: DurableObjectNamespace<RateLimiterDO>;
       TOKEN_HASH_PEPPER: string;
       WAITLIST: KVNamespace;
     }

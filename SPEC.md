@@ -128,6 +128,7 @@ Required guardrails (also legal hygiene): suppression list, **one-click unsubscr
 ## 8. Lookalike-domain workflow (concrete)
 
 Given brand + primary domain:
+0. **Third-party-brand hard-reject (enforced in code).** Before any candidate generation or purchase, `setup_infrastructure` validates the request (`apps/platform/src/engine/brand-guard.ts`): (a) a well-known-brand denylist (google, microsoft, apple, amazon, meta, paypal, stripe, netflix, …) rejects impersonation of major brands; (b) the asserted `brand` must correspond to the `primaryDomain` (normalized substring match), so lookalikes provably derive from the tenant's *own* stated identity, not an arbitrary third party. Violations return HTTP 400. In test mode this brand↔domain consistency check stands in for real domain-ownership proof; full cryptographic ownership verification (DNS TXT / registrar) is an activation step (`ACTIVATION.md`).
 1. **AI generates lookalike candidates** — `try/get/join` prefixes, `-hq` suffix, sane TLDs. Must read clearly as the brand; no symbols/numbers/unrelated words (else reads as phishing). `acme.com` → `tryacme.com`, `getacme.com`, `acmehq.io`, NOT `reallygoodproducts.com`.
 2. **Buy** via registrar API (Porkbun/Namecheap).
 3. **Auto DNS:** MX, SPF, DKIM, DMARC, rDNS/PTR. (2026: missing/wrong = rejected at SMTP level, not spam-foldered.)

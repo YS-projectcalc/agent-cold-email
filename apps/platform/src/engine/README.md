@@ -9,18 +9,29 @@ into a god file:
   send counters on a virtual-day rollover. Called before anything that
   reads/enforces mailbox capacity.
 - `scheduler.ts` — pure send-window + least-loaded-mailbox-with-capacity
-  helpers used by `tick.ts`.
-- `provisioning.ts` — `setup_infrastructure` (buys domains, DNS, provisions
-  mailboxes, starts warmup) + `infrastructure_status`.
+  helpers used by `tick.ts` (`isWithinSendWindow` is wired into the tick).
+- `brand-guard.ts` — the lookalike third-party-brand hard-reject validator
+  (`assertBrandOwnership`), called at the `setup_infrastructure` boundary
+  before any domain purchase: a well-known-brand denylist + a
+  brand↔primaryDomain ownership-consistency check (SPEC.md §8, panel-02).
+- `provisioning.ts` — `setup_infrastructure` (validates brand ownership, then
+  buys domains, DNS, provisions mailboxes, starts warmup) + `infrastructure_status`.
 - `campaigns.ts` — `launch_campaign` (schedules every sequence step for
-  every non-suppressed lead up front) + `pause`/`pause_all`.
+  every non-suppressed lead up front; `is_demo` marks demo-run campaigns) +
+  `pause`/`pause_all`. The tick is the actual send-time guard, not launch.
 - `tick.ts` — the engine tick: sends every due `scheduled_send`, enforcing
-  per-mailbox daily caps and skipping leads that are no longer `active`
-  (stop-on-reply/suppression already applied). Records a ledger usage entry
-  per send.
+  per-mailbox daily caps AND, at send time, lead/campaign status, the
+  `suppressions` table, and the campaign send window. Claims each row
+  atomically (`pending`→`sending`) before the network send so a
+  concurrent/retried tick can't double-process it, and records usage before
+  committing `sent`/cap so a row is never left sent-but-unbilled. The ledger
+  usage entry is idempotent on `source_send_id`.
 - `reply-processor.ts` — polls each mailbox's `EmailPort.poll()`, lands
-  replies in the inbox (stop-on-reply cancels remaining steps) and bounces
-  into `suppressions` (cancels remaining steps too).
+  replies in the inbox (step cancellation is gated on the campaign's
+  `stop_on_reply` flag) and bounces into `suppressions` (always cancels
+  remaining steps).
+- `demo.ts` — `demo_run`: the sandbox accelerated pipeline. Resets prior demo
+  state each run so DO storage stays bounded; per-tenant throttled in `tenant-do.ts`.
 - `threads.ts` — `inbox()` / `thread(id)` / `reply(thread, body)` /
   `mark(thread, status)`.
 - `reporting.ts` — `campaign_results()` / `metrics()` / `account()`. Opens

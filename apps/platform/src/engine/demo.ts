@@ -34,6 +34,25 @@ function advanceClock(ctx: TenantContext, virtualMs: number): void {
   ctx.sql.exec(`UPDATE tenant_profile SET clock_offset = ? WHERE id = ?`, newOffset, ctx.tenantId);
 }
 
+// Delete every row belonging to PRIOR demo campaigns (is_demo = 1) so demo
+// state stays bounded across repeated /demo/run calls. Dependent rows first,
+// then the campaigns themselves. Non-demo campaigns/leads/sends and the money
+// ledger + suppressions are deliberately preserved.
+function resetPriorDemoState(ctx: TenantContext): void {
+  const demoCampaignIds = ctx.sql
+    .exec<{ id: string }>(`SELECT id FROM campaigns WHERE tenant_id = ? AND is_demo = 1`, ctx.tenantId)
+    .toArray()
+    .map((r) => r.id);
+  if (demoCampaignIds.length === 0) return;
+
+  const placeholders = demoCampaignIds.map(() => "?").join(", ");
+  const scope = [ctx.tenantId, ...demoCampaignIds];
+  ctx.sql.exec(`DELETE FROM scheduled_sends WHERE tenant_id = ? AND campaign_id IN (${placeholders})`, ...scope);
+  ctx.sql.exec(`DELETE FROM events WHERE tenant_id = ? AND campaign_id IN (${placeholders})`, ...scope);
+  ctx.sql.exec(`DELETE FROM leads WHERE tenant_id = ? AND campaign_id IN (${placeholders})`, ...scope);
+  ctx.sql.exec(`DELETE FROM campaigns WHERE tenant_id = ? AND id IN (${placeholders})`, ...scope);
+}
+
 const DEMO_SEQUENCE = [
   { step: 1, subject: "Quick question about {{company}}", body: "Hi {{firstName}}, quick question about your outreach process.", delayDays: 0 },
   { step: 2, subject: "Following up", body: "Just checking back in — any thoughts?", delayDays: 2 },
@@ -50,19 +69,29 @@ const DEMO_LEADS = [
 ];
 
 export async function runDemo(ctx: TenantContext): Promise<DemoRunSummary> {
+  // 0. Reset prior demo state so repeated runs don't grow DO SQLite unbounded
+  //    (adversarial panel-02). Only rows from previous DEMO runs (is_demo = 1)
+  //    are deleted — a demo/free tenant's own real /campaigns launches are
+  //    left untouched. The money ledger + suppressions are intentionally kept.
+  resetPriorDemoState(ctx);
+
   // 1. Advance the virtual clock past the warmup ramp so mailboxes are send-ready.
   advanceClock(ctx, (WARMUP_RAMP_DAYS + 1) * ONE_DAY_MS);
 
   // 2. Launch a canned sample campaign against the deterministic sandbox leads above.
-  const { campaignId } = launchCampaign(ctx, {
-    name: `Demo run ${newId("run")}`,
-    offer: "A sandbox demo offer — no real product, no real emails sent.",
-    leads: DEMO_LEADS,
-    sequence: DEMO_SEQUENCE,
-    timezone: "UTC",
-    sendWindow: { startHour: 0, endHour: 23 },
-    stopOnReply: true,
-  });
+  const { campaignId } = launchCampaign(
+    ctx,
+    {
+      name: `Demo run ${newId("run")}`,
+      offer: "A sandbox demo offer — no real product, no real emails sent.",
+      leads: DEMO_LEADS,
+      sequence: DEMO_SEQUENCE,
+      timezone: "UTC",
+      sendWindow: { startHour: 0, endHour: 23 },
+      stopOnReply: true,
+    },
+    { isDemo: true },
+  );
 
   // 3. Step-1 send tick, then poll the sandbox inbox for the reply + bounce.
   const tick1 = await runTick(ctx);

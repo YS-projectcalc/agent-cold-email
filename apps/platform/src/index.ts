@@ -11,6 +11,7 @@ import { mcpRoute } from "./routes/mcp.js";
 import { waitlistRoute } from "./routes/waitlist.js";
 
 export { TenantDO } from "./tenant-do.js";
+export { RateLimiterDO } from "./rate-limiter-do.js";
 
 const app = new Hono<{ Bindings: Env; Variables: AuthedVariables }>();
 
@@ -34,6 +35,7 @@ app.onError((err, c) => {
   if (name === "ValidationError") return c.json({ error: err.message }, 400);
   if (name === "NotFoundError") return c.json({ error: err.message }, 404);
   if (name === "TenantIsolationError") return c.json({ error: err.message }, 403);
+  if (name === "RateLimitError") return c.json({ error: err.message }, 429);
   console.error(err);
   return c.json({ error: "internal error" }, 500);
 });

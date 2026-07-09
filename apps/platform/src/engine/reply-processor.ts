@@ -13,8 +13,21 @@ function cancelPendingSteps(ctx: TenantContext, leadId: string): void {
 }
 
 function processReply(ctx: TenantContext, ev: Extract<PolledEvent, { kind: "reply" }>, ref: ThreadRef): void {
+  // Reply status + event are recorded unconditionally. Cancelling the
+  // remaining sequence steps is gated on the campaign's stop_on_reply flag —
+  // a customer who set stopOnReply:false wants the sequence to continue after
+  // a reply (e.g. tolerating auto-responder/OOO replies). See panel-02.
   ctx.sql.exec(`UPDATE leads SET global_status = 'replied' WHERE id = ? AND tenant_id = ?`, ref.lead_id, ctx.tenantId);
-  cancelPendingSteps(ctx, ref.lead_id);
+
+  const stopOnReply = ctx.sql
+    .exec<{ stop_on_reply: number }>(
+      `SELECT stop_on_reply FROM campaigns WHERE id = ? AND tenant_id = ?`,
+      ref.campaign_id,
+      ctx.tenantId,
+    )
+    .toArray()[0]?.stop_on_reply;
+  if (stopOnReply === 1) cancelPendingSteps(ctx, ref.lead_id);
+
   ctx.sql.exec(
     `INSERT INTO events (id, tenant_id, campaign_id, lead_id, type, step, message_id, thread_id, ts, metadata_json)
      VALUES (?, ?, ?, ?, 'reply', 0, ?, ?, ?, ?)`,

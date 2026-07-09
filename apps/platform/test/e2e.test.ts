@@ -49,7 +49,7 @@ describe("B0 walking skeleton — signup through reply/bounce handling", () => {
     // 1. signup
     const { tenantId, token } = await signup("Acme Rockets", "founder@acme-rockets.test");
     expect(tenantId).toMatch(/^ten_/);
-    expect(token).toMatch(/^cs_live_/);
+    expect(token).toMatch(/^cs_test_/);
 
     // 2. setup_infrastructure — 2 domains x 2 mailboxes each = 4 mailboxes
     const setupRes = await api<{ jobId: string }>("/setup-infrastructure", {
