@@ -15,7 +15,7 @@ info:
   license:
     name: MIT
 servers:
-  - url: __API_BASE__
+  - url: https://agent-cold-email-api.yaakovscher.workers.dev
     description: Placeholder — substituted with the deployed API host post-deploy.
 
 security:

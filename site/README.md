@@ -17,16 +17,16 @@ The public marketing + docs site for `agent-cold-email`: static HTML/CSS/JS, no 
 - `_redirects` — Cloudflare Pages redirects.
 - `assets/style.css` — the entire shared stylesheet (system fonts, theme-aware via `prefers-color-scheme`, responsive).
 - `assets/brand.js` — **the single swappable brand constant** (`BRAND_NAME`). Populates every `[data-brand]` element and replaces the `{{BRAND}}` token in `<title>`. This is the one place to edit when the final display brand (coldrig/coldpipe/coldloop, per `SPEC.md` §0.3) is chosen at activation — nothing else in `site/` needs to change.
-- `assets/waitlist.js` — waitlist form submission logic; posts to `__API_BASE__/api/waitlist`.
+- `assets/waitlist.js` — waitlist form submission logic; posts to `https://agent-cold-email-api.yaakovscher.workers.dev/api/waitlist`.
 
-## The `__API_BASE__` placeholder
+## The `https://agent-cold-email.pages.dev` placeholder
 
-Every reference to the deployed API host — the waitlist POST target, MCP config URLs, OpenAPI `servers:`, the sitemap/robots/CSP entries, the JSON-LD `url` fields — uses the literal token `__API_BASE__`. Substitute it repo-wide (a single find-and-replace across `site/` and the repo root `README.md`/`AGENTS.md`) once the platform has a real deployed URL. There is intentionally only this one placeholder token; do not introduce a second one for the site's own origin.
+Every reference to the deployed API host — the waitlist POST target, MCP config URLs, OpenAPI `servers:`, the sitemap/robots/CSP entries, the JSON-LD `url` fields — uses the literal token `https://agent-cold-email.pages.dev`. Substitute it repo-wide (a single find-and-replace across `site/` and the repo root `README.md`/`AGENTS.md`) once the platform has a real deployed URL. There is intentionally only this one placeholder token; do not introduce a second one for the site's own origin.
 
 ## How to deploy
 
 ```bash
-# from the repo root, after substituting __API_BASE__:
+# from the repo root, after substituting https://agent-cold-email.pages.dev:
 npx wrangler pages deploy site --project-name=agent-cold-email
 ```
 
@@ -42,4 +42,4 @@ npx serve site
 
 ## Depends on
 
-Nothing outside this directory at runtime (self-contained CSS/JS, no external requests except the eventual `__API_BASE__` waitlist POST). Content here should stay in sync with `packages/shared/src/intents.ts` and `apps/platform/src/routes/*` (the tool reference and OpenAPI spec) and with `SPEC.md` §18 (pricing) — if either changes, update this directory in the same change.
+Nothing outside this directory at runtime (self-contained CSS/JS, no external requests except the eventual `https://agent-cold-email.pages.dev` waitlist POST). Content here should stay in sync with `packages/shared/src/intents.ts` and `apps/platform/src/routes/*` (the tool reference and OpenAPI spec) and with `SPEC.md` §18 (pricing) — if either changes, update this directory in the same change.

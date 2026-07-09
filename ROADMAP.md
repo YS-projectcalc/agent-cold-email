@@ -31,13 +31,13 @@ Adversarial panels apply to what is REAL: control plane, auth, tenancy, billing,
 - [ ] B7. Unified inbox + reply management
 
 ### Phase C — Distribution machine (C-shell parallel with B; deep content after product is describable)
-- [ ] C0. **Identity vs brand split:** keyword-permanent slug `agent-cold-email` for repo/npm/registry (never renamed); coldrig/coldpipe/coldloop = domain/display brand only, at activation
-- [ ] C1. Public GitHub repo (keyword slug, under YS-projectcalc; AGENTS.md + README at agents' literal queries; guardrails prominent so abuse-scanners read it as compliance-first infra)
-- [ ] C2. Docs + AEO content on Pages/github.io (crawlable, authority-accruing): AGENTS.md + OpenAPI + JSON-LD (the real assets) + llms.txt (convenience); not-yet-available + no-deliverability-guarantee disclosures; privacy policy BEFORE any waitlist email
+- [x] C0. **Identity vs brand split:** keyword-permanent slug `agent-cold-email` for repo/npm/registry (never renamed); coldrig/coldpipe/coldloop = domain/display brand only, at activation
+- [~] C1. (files ready; repo PUSH pending) Public GitHub repo (keyword slug, under YS-projectcalc; AGENTS.md + README at agents' literal queries; guardrails prominent so abuse-scanners read it as compliance-first infra)
+- [x] C2. Docs + AEO content on Pages/github.io (crawlable, authority-accruing): AGENTS.md + OpenAPI + JSON-LD (the real assets) + llms.txt (convenience); not-yet-available + no-deliverability-guarantee disclosures; privacy policy BEFORE any waitlist email
 - [ ] C3. Agent-facing free first-use: `npx agent-cold-email demo` runs full pipeline vs live sandbox, no signup; lead capture + conversion handoff at the end
 - [ ] C4. SEO/AEO comparison + how-to pages targeting agent queries (after product describable)
 - [ ] C5. `/.well-known/mcp/server-card.json` served; MCP registry listings (Smithery/mcp.so/PulseMCP) submitted once identity exists + scan is clean; npm publish + awesome-list PRs = ACTIVATION.md (identity-gated)
-- [ ] C6. Waitlist (billed path only) + early-access flow; distribution validation harness (fresh agent + query → discovers us?) baselined + re-run per surface
+- [~] C6. (form built; /api/waitlist endpoint = B5) Waitlist + early-access flow; distribution validation harness (fresh agent + query → discovers us?) baselined + re-run per surface
 
 ### Phase D — Business automation & the missing lanes (panel #1 add)
 - [ ] D1. AI support lane: support inbox → agent triage → auto-answer/escalate → daily digest (armed at activation)

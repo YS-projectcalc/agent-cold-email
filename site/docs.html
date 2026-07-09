@@ -27,7 +27,7 @@
 
   <div class="callout">
     <strong>Early access</strong>
-    The hosted MCP server and published CLI are landing shortly; the HTTP facade they wrap already exists and is tested. <code>__API_BASE__</code> below is a placeholder for the deployed API host.
+    The hosted MCP server and published CLI are landing shortly; the HTTP facade they wrap already exists and is tested. <code>https://agent-cold-email-api.yaakovscher.workers.dev</code> below is a placeholder for the deployed API host.
   </div>
 
   <div class="doc-toc">
@@ -45,7 +45,7 @@
   <h2 id="quickstart">Quickstart</h2>
   <ol>
     <li>Sign up (no card required for the demo tier):
-      <pre><code>curl -s -X POST __API_BASE__/signup \
+      <pre><code>curl -s -X POST https://agent-cold-email-api.yaakovscher.workers.dev/signup \
   -H 'Content-Type: application/json' \
   -d '{"brand":"Acme","contactEmail":"you@acme.com"}'
 # → { "tenantId": "ten_...", "token": "..." }</code></pre>
@@ -59,7 +59,7 @@
   <pre><code>{
   "mcpServers": {
     "agent-cold-email": {
-      "url": "__API_BASE__/mcp",
+      "url": "https://agent-cold-email-api.yaakovscher.workers.dev/mcp",
       "headers": {
         "Authorization": "Bearer &lt;your-token&gt;"
       }

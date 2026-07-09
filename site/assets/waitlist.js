@@ -1,8 +1,8 @@
-// Waitlist form submission. Posts to __API_BASE__/api/waitlist — the API
+// Waitlist form submission. Posts to https://agent-cold-email-api.yaakovscher.workers.dev/api/waitlist — the API
 // host token is substituted post-deploy (see site/README.md). The endpoint
 // itself is not wired yet in this build phase; this script degrades to a
 // clear "not connected yet" status rather than pretending success.
-const WAITLIST_ENDPOINT = "__API_BASE__/api/waitlist";
+const WAITLIST_ENDPOINT = "https://agent-cold-email-api.yaakovscher.workers.dev/api/waitlist";
 
 document.addEventListener("DOMContentLoaded", () => {
   const form = document.querySelector("form.waitlist");

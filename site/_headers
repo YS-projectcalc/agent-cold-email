@@ -6,7 +6,7 @@
   X-Frame-Options: DENY
   Referrer-Policy: strict-origin-when-cross-origin
   Permissions-Policy: geolocation=(), camera=(), microphone=()
-  Content-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' __API_BASE__; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'
+  Content-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https://agent-cold-email-api.yaakovscher.workers.dev; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'
 
 # Machine-readable assets: allow any origin to fetch these for AEO/registry scans.
 /llms.txt

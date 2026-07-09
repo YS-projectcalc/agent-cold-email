@@ -46,7 +46,7 @@ This is the full list — see [`SPEC.md` §6](./SPEC.md#6-agent-surface--the-too
 {
   "mcpServers": {
     "agent-cold-email": {
-      "url": "__API_BASE__/mcp"
+      "url": "https://agent-cold-email-api.yaakovscher.workers.dev/mcp"
     }
   }
 }
@@ -58,9 +58,9 @@ This is the full list — see [`SPEC.md` §6](./SPEC.md#6-agent-surface--the-too
 npx agent-cold-email demo
 ```
 
-Both the hosted MCP server and the published CLI are part of the current build phase and are **not live yet** (see [Status](#status--early-access)) — the npm package name `agent-cold-email` is reserved, and the HTTP facade both surfaces will wrap already exists and is under test. `__API_BASE__` is a placeholder for the deployed API host; it will be a concrete URL once the platform is live.
+The HTTP facade is **live in test mode** at `https://agent-cold-email-api.yaakovscher.workers.dev` — the ~12 intents are real, tested endpoints running against a fault-injecting **sandbox** vendor layer (no real domains/mailboxes/spend, not yet available for real sending). The published npm CLI and the hosted MCP endpoint land in the next build phase; the npm handle `agent-cold-email` is reserved. This test-mode URL becomes the brand's custom domain at launch.
 
-**What works today:** the ~12 intents are real, tested HTTP endpoints behind a bearer token, running against a fault-injecting sandbox vendor layer (no real domains/mailboxes/spend). Once `__API_BASE__` is substituted with a live deployment, any HTTP client — including an agent without MCP/CLI support — can drive the same pipeline directly. See [`site/openapi.yaml`](./site/openapi.yaml) for the full REST contract, or [`AGENTS.md`](./AGENTS.md) for the agent-facing walkthrough.
+**What works today:** the ~12 intents are real, tested HTTP endpoints behind a bearer token, live in test mode at `https://agent-cold-email-api.yaakovscher.workers.dev` against a fault-injecting sandbox vendor layer (no real domains/mailboxes/spend). Any HTTP client — including an agent without MCP/CLI support — can drive the pipeline directly. See [`site/openapi.yaml`](./site/openapi.yaml) for the full REST contract, or [`AGENTS.md`](./AGENTS.md) for the agent-facing walkthrough.
 
 ## First use: the free demo
 

@@ -4,20 +4,20 @@
   "displayName": "agent-cold-email",
   "version": "0.1.0",
   "description": "Agent-native cold-email infrastructure. One bearer token, ~12 curated tools provision isolated branded domains and mailboxes, run sequences, and manage replies. Early access — not yet available for real sending; no deliverability guarantees.",
-  "homepage": "__API_BASE__/",
-  "documentation": "__API_BASE__/docs.html",
+  "homepage": "https://agent-cold-email.pages.dev/",
+  "documentation": "https://agent-cold-email.pages.dev/docs.html",
   "license": "MIT",
   "author": {
     "name": "EpiphanyMade",
-    "url": "__API_BASE__/"
+    "url": "https://agent-cold-email.pages.dev/"
   },
   "transport": {
     "type": "streamable-http",
-    "url": "__API_BASE__/mcp"
+    "url": "https://agent-cold-email-api.yaakovscher.workers.dev/mcp"
   },
   "auth": {
     "type": "bearer",
-    "description": "One token per tenant, obtained via POST __API_BASE__/signup (no auth required for signup itself). Pass as Authorization: Bearer <token>."
+    "description": "One token per tenant, obtained via POST https://agent-cold-email-api.yaakovscher.workers.dev/signup (no auth required for signup itself). Pass as Authorization: Bearer <token>."
   },
   "status": "early-access",
   "statusNote": "No live production deployment yet; not yet available for real sending. Free/demo tenants run entirely against a sandboxed simulator with no real vendor spend.",
@@ -48,6 +48,6 @@
     "complaint-rate auto-pause",
     "lookalike-domain generation scoped to the customer's own brand only"
   ],
-  "openapi": "__API_BASE__/openapi.yaml",
+  "openapi": "https://agent-cold-email.pages.dev/openapi.yaml",
   "repository": "https://github.com/YS-projectcalc/agent-cold-email"
 }

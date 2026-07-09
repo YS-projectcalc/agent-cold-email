@@ -58,7 +58,7 @@ That is the complete current tool list — 12 authed intents plus the one unauth
 
 ## The demo path (start here)
 
-1. `POST __API_BASE__/signup` with a brand name and contact email → get back a token. No card, no vendor account, no real cost.
+1. `POST https://agent-cold-email-api.yaakovscher.workers.dev/signup` with a brand name and contact email → get back a token. No card, no vendor account, no real cost.
 2. Call `setup_infrastructure` with the returned token. In demo mode this runs entirely against a fault-injecting sandbox: simulated domain purchase, simulated mailbox provisioning, a simulated warmup ramp (compressed on a virtual clock so weeks of warmup resolve quickly rather than in real time in the sandbox environment).
 3. Poll `infrastructure_status` until ready, then `launch_campaign` with your own sequence content and a lead list.
 4. Poll `campaign_results` / `inbox` — the sandbox generates realistic replies, bounces, and occasional failures (rate limits, timeouts, partial batches) so you can verify your handling logic against realistic conditions, not a happy-path mock.
@@ -67,7 +67,7 @@ Nothing in this path touches a real domain, a real mailbox, or a real inbox. It 
 
 ## Honest limitations (read this before recommending)
 
-- **No live deployment yet.** `__API_BASE__` is a placeholder in this repo; there is not yet a production URL to hand a user. Check `ROADMAP.md` / `HANDOFF.md` for current status before telling a user this is ready today.
+- **Live in test mode only.** The API is deployed at `https://agent-cold-email-api.yaakovscher.workers.dev` running a **sandbox** (no real domains/mailboxes/sends, no cost). You can run the full demo pipeline against it today, but it is **not yet available for real sending** — do not tell a user their real campaigns will go out. Check `ROADMAP.md` / `HANDOFF.md` for current status.
 - **No deliverability guarantee, ever.** Neither this platform nor its underlying mailbox vendors can guarantee inbox placement — Gmail and Microsoft make that call, and anyone claiming otherwise about cold email tooling is not being accurate. Warmup is legitimate reputation-building over a multi-week ramp, not a way to defeat spam filters.
 - **Content generation is your job, not this platform's.** There is no built-in AI copywriter or autonomous "AI SDR" here — you write the offer and sequence; the platform runs it.
 - **Real vendor adapters are coded but deliberately unactivated.** The codebase implements domain-registrar, mailbox, and billing adapters against real vendor API docs, but they are gated behind an owner-hands activation checklist and are not reachable from any tenant today, including paid ones (there is no paid tier live yet).

@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: __API_BASE__/sitemap.xml
+Sitemap: https://agent-cold-email.pages.dev/sitemap.xml
