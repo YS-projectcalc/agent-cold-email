@@ -28,3 +28,15 @@ export async function lookupTenantByTokenHash(env: Env, tokenHash: string): Prom
     .first<TenantIndexRow>();
   return row ?? null;
 }
+
+/**
+ * Flips a tenant's control-plane index status (D5 abuse offboarding). Setting
+ * it to anything but 'active' makes `resolveTenantFromToken` reject the
+ * tenant's bearer token on EVERY authed route — so a terminated tenant cannot
+ * re-provision or re-launch and undo the infra reclaim. Voluntary /cancel does
+ * NOT call this (a canceled tenant keeps read access so account() can reflect
+ * its canceled state).
+ */
+export async function setTenantIndexStatus(env: Env, id: string, status: string): Promise<void> {
+  await env.DB.prepare(`UPDATE tenants_index SET status = ? WHERE id = ?`).bind(status, id).run();
+}

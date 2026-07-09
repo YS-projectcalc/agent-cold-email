@@ -55,6 +55,13 @@ CREATE TABLE IF NOT EXISTS mailboxes (
   -- the effective cap is MIN(warmup cap, cap_override) so the throttle survives
   -- the per-tick warmup-cap recompute (engine/mailbox-state.ts).
   cap_override INTEGER,
+  -- D5 teardown/reclaim marker (engine/lifecycle.ts). NULL = live; a timestamp
+  -- means the mailbox was released back to the vendor (MailboxPort.release).
+  -- Its own column, NOT the warmup status (recomputed every tick — a
+  -- 'released' there would be wiped) and NOT deliv_status (owned by the B6
+  -- loop, semantically distinct). Teardown also sets deliv_status='paused' so
+  -- the tick's capacity picker stops sending from it immediately.
+  released_at INTEGER,
   warmup_started_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL
 );
@@ -178,6 +185,41 @@ CREATE TABLE IF NOT EXISTS deliverability_actions (
   action TEXT NOT NULL,
   target TEXT NOT NULL,
   detail_json TEXT NOT NULL DEFAULT '{}',
+  ts INTEGER NOT NULL
+);
+
+-- D5 chargeback / dispute lane (protects the master Stripe account). One row
+-- per Stripe dispute, applied by the charge.dispute.* webhook INSIDE this
+-- tenant's own DO (engine/billing.ts) — same atomic transaction as the
+-- webhook_events event-id dedupe + the billing_state='disputed' freeze, so a
+-- redelivered event can never double-apply. Scoped per-DO (one tenant per DO
+-- instance) exactly like webhook_events; keyed on the Stripe dispute id so two
+-- DIFFERENT events referencing the SAME dispute (created then closed) collapse
+-- to one row (INSERT OR IGNORE on create, UPDATE on close).
+CREATE TABLE IF NOT EXISTS disputes (
+  dispute_id TEXT PRIMARY KEY,
+  charge_id TEXT,
+  amount_cents INTEGER NOT NULL DEFAULT 0,
+  reason TEXT,
+  -- 'open' (dispute.created — funds frozen) | 'won' | 'lost' (dispute.closed).
+  status TEXT NOT NULL DEFAULT 'open',
+  created_at INTEGER NOT NULL,
+  closed_at INTEGER
+);
+
+-- D5 teardown/reclaim record (engine/lifecycle.ts). At most one row per tenant
+-- (its existence is the idempotency anchor for cancel/terminate — a re-cancel
+-- reads this row and no-ops). Surfaced by account() so the owner/agent sees the
+-- reclaim summary, incl. the annual-domain-liability we eat by releasing
+-- annually-registered domains mid-term (SPEC.md §12: .com $11.08/yr).
+CREATE TABLE IF NOT EXISTS teardown_records (
+  tenant_id TEXT PRIMARY KEY,
+  reason TEXT NOT NULL,
+  effective TEXT NOT NULL,
+  domains_released INTEGER NOT NULL DEFAULT 0,
+  mailboxes_released INTEGER NOT NULL DEFAULT 0,
+  campaigns_stopped INTEGER NOT NULL DEFAULT 0,
+  annual_domain_liability_cents INTEGER NOT NULL DEFAULT 0,
   ts INTEGER NOT NULL
 );
 

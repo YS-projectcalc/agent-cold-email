@@ -75,3 +75,24 @@ export const CheckoutSimulateQuery = z.object({
   session: z.string().min(1).max(200),
 });
 export type CheckoutSimulateQuery = z.infer<typeof CheckoutSimulateQuery>;
+
+// D5 lifecycle — voluntary cancellation (POST /cancel, tenant-authed).
+// `immediate` (default false) cancels the subscription now (billing_state ->
+// 'canceled'); the default schedules it for end-of-billing-period
+// (billing_state -> 'canceling'; Stripe's later customer.subscription.deleted
+// finalizes it to 'canceled'). Infra teardown/reclaim runs now in both cases —
+// dedicated cold-email domains/mailboxes have no shared pool to keep warm.
+export const CancelInput = z.object({
+  immediate: z.boolean().default(false),
+});
+export type CancelInput = z.infer<typeof CancelInput>;
+
+// D5 lifecycle — abuse offboarding (POST /admin/tenants/:id/terminate,
+// ADMIN_TOKEN-authed). The terminal rung of the AUP consequence ladder
+// (site/aup.html §7). `reason` + `evidence` are recorded to enforcement_actions
+// (migrations/0003) as the audit trail behind the termination.
+export const TerminateInput = z.object({
+  reason: z.string().min(1).max(2000),
+  evidence: z.record(z.string(), z.unknown()).default({}),
+});
+export type TerminateInput = z.infer<typeof TerminateInput>;

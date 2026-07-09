@@ -1,7 +1,12 @@
 import { Hono } from "hono";
+import { TerminateInput } from "@coldstart/shared";
+import { getTenantIndexById, insertEnforcementActionIfNew } from "../admin/db.js";
 import { buildOpsDigest, runDunningSweep } from "../admin/ops-sweep.js";
 import { RealClock } from "../clock.js";
+import { setTenantIndexStatus } from "../db.js";
 import type { Env } from "../env.js";
+import { newId } from "../schema.js";
+import { parseJsonBody } from "../validate.js";
 
 const DEFAULT_DIGEST_WINDOW_HOURS = 24;
 
@@ -33,4 +38,38 @@ export const adminOpsRoute = new Hono<{ Bindings: Env }>()
     const windowHours = parseWindowHours(c.req.query("hours"));
     const digest = await buildOpsDigest(c.env, new RealClock().now(), windowHours);
     return c.json(digest);
+  })
+  // D5 — abuse offboarding: the terminal rung of the AUP consequence ladder
+  // (site/aup.html §7). Immediately suspends + reclaims the tenant's infra (the
+  // SAME teardown path as voluntary /cancel), honors suppression obligations
+  // (teardownTenant never deletes opt-outs), and records the reason + evidence
+  // to the D1 enforcement_actions audit log — idempotent per (tenant, action),
+  // so a retry after the DO teardown committed lands exactly one row. Real
+  // vendor RELEASE is the sandbox port now; the live registrar/mailbox release
+  // call is an activation step (ACTIVATION.md).
+  .post("/admin/tenants/:id/terminate", async (c) => {
+    const tenantId = c.req.param("id");
+    const tenant = await getTenantIndexById(c.env, tenantId);
+    if (!tenant) return c.json({ error: `tenant ${tenantId} not found` }, 404);
+
+    const parsed = await parseJsonBody(c, TerminateInput);
+    if (!parsed.ok) return parsed.response;
+
+    const stub = c.env.TENANT.get(c.env.TENANT.idFromName(tenantId));
+    const result = await stub.terminate();
+
+    // Lock the control-plane token so the terminated tenant cannot re-provision
+    // or re-launch and undo the reclaim (see setTenantIndexStatus). Idempotent.
+    await setTenantIndexStatus(c.env, tenantId, "suspended");
+
+    const logged = await insertEnforcementActionIfNew(c.env, {
+      id: newId("enf"),
+      tenantId,
+      action: "TERMINATE",
+      reason: parsed.data.reason,
+      evidence: parsed.data.evidence,
+      ts: new RealClock().now(),
+    });
+
+    return c.json({ tenantId, terminated: true, enforcementLogged: logged, ...result });
   });

@@ -89,6 +89,10 @@ export interface WebhookApplyResult {
   applied: boolean;
   duplicate: boolean;
   plan?: TenantPlan;
+  /** D5 chargeback lane: the event froze the tenant (billing_state -> 'disputed', sends paused). */
+  frozen?: boolean;
+  /** D5 chargeback lane: a won dispute lifted the freeze (billing_state -> 'active'). */
+  unfrozen?: boolean;
 }
 
 function readStripeMetadataPlan(obj: Record<string, unknown>): TenantPlan | null {
@@ -167,6 +171,58 @@ export function applyStripeWebhookEvent(ctx: TenantContext, event: StripeEventIn
 
     case "invoice.payment_failed": {
       ctx.sql.exec(`UPDATE tenant_profile SET billing_state = 'past_due' WHERE id = ?`, ctx.tenantId);
+      return { applied: true, duplicate: false };
+    }
+
+    // D5 chargeback / dispute lane. Cold email is a high-chargeback category
+    // (SPEC.md §12) — a dispute WAVE could get our whole master Stripe account
+    // frozen, so we freeze the disputing tenant FAST: billing_state='disputed'
+    // makes the tick's freeze guard stop every send (engine/tick.ts). Recorded
+    // to the per-DO `disputes` table (keyed on the Stripe dispute id) so
+    // dispute.created + dispute.closed collapse to one row. Idempotency by
+    // EVENT id is already handled by the webhook_events dedupe above; the
+    // INSERT OR IGNORE here is a second guard for two DISTINCT events that
+    // reference the same dispute.
+    case "charge.dispute.created": {
+      const disputeId = typeof obj.id === "string" ? obj.id : newId("dp");
+      const chargeId = typeof obj.charge === "string" ? obj.charge : null;
+      const amountCents = typeof obj.amount === "number" ? obj.amount : 0;
+      const reason = typeof obj.reason === "string" ? obj.reason : null;
+      ctx.sql.exec(
+        `INSERT OR IGNORE INTO disputes (dispute_id, charge_id, amount_cents, reason, status, created_at)
+         VALUES (?, ?, ?, ?, 'open', ?)`,
+        disputeId,
+        chargeId,
+        amountCents,
+        reason,
+        now,
+      );
+      ctx.sql.exec(`UPDATE tenant_profile SET billing_state = 'disputed' WHERE id = ?`, ctx.tenantId);
+      return { applied: true, duplicate: false, frozen: true };
+    }
+
+    case "charge.dispute.closed": {
+      const disputeId = typeof obj.id === "string" ? obj.id : null;
+      const rawStatus = typeof obj.status === "string" ? obj.status : "";
+      const outcome = rawStatus === "won" ? "won" : rawStatus === "lost" ? "lost" : "closed";
+      if (disputeId) {
+        ctx.sql.exec(
+          `UPDATE disputes SET status = ?, closed_at = ? WHERE dispute_id = ?`,
+          outcome,
+          now,
+          disputeId,
+        );
+      }
+      // Won -> lift the freeze WE set (only when still 'disputed', so we never
+      // resurrect a tenant that was canceled/suspended in the meantime). A lost
+      // dispute keeps the freeze — the owner decides via terminate.
+      if (outcome === "won") {
+        const res = ctx.sql.exec(
+          `UPDATE tenant_profile SET billing_state = 'active' WHERE id = ? AND billing_state = 'disputed'`,
+          ctx.tenantId,
+        );
+        return { applied: true, duplicate: false, unfrozen: res.rowsWritten > 0 };
+      }
       return { applied: true, duplicate: false };
     }
 

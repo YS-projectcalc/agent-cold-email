@@ -1,9 +1,11 @@
-import type { Clock, MailboxHealth, MailboxPort, ProvisionedMailbox } from "@coldstart/shared";
+import type { Clock, MailboxHealth, MailboxPort, ProvisionedMailbox, ReleaseResult } from "@coldstart/shared";
 
 // Sandbox MailboxPort — deterministic, healthy-by-default mailboxes. Actual
 // warmup ramp math lives in engine/warmup.ts (per-tenant, clock-driven); this
 // port only simulates the vendor-side provisioning + health-check calls.
 export class SandboxMailboxPort implements MailboxPort {
+  private readonly released = new Set<string>();
+
   constructor(private readonly clock: Clock) {}
 
   async provision(domain: string, localPart: string, _idempotencyKey: string): Promise<ProvisionedMailbox> {
@@ -16,5 +18,12 @@ export class SandboxMailboxPort implements MailboxPort {
 
   async startWarmup(_email: string, _idempotencyKey: string): Promise<{ started: boolean; startedAt: number }> {
     return { started: true, startedAt: this.clock.now() };
+  }
+
+  async release(email: string, idempotencyKey: string): Promise<ReleaseResult> {
+    // Idempotent no-op success — the real adapter calls Inboxkit's
+    // delete-mailbox endpoint here at activation.
+    this.released.add(`${idempotencyKey}:${email}`);
+    return { released: true, releasedAt: this.clock.now() };
   }
 }

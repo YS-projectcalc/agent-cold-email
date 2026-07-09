@@ -1,5 +1,6 @@
 import { NotFoundError } from "@coldstart/shared";
 import type { TenantContext } from "../tenant-context.js";
+import { getTeardownSummary, type TeardownSummary } from "./lifecycle.js";
 import { capFor } from "./quota.js";
 
 // campaign_results() / metrics() — SPEC.md §6: "replies, bounces,
@@ -91,6 +92,8 @@ export interface AccountSummary {
   quota: { domains: number; mailboxes: number };
   /** B6 — what the AI deliverability control loop has done for this tenant. */
   deliverability: DeliverabilitySummary;
+  /** D5 — the infra reclaim summary once the tenant has been canceled/terminated; null while live. */
+  teardown: TeardownSummary | null;
 }
 
 // Exported (not just used by getAccount below) so engine/ops-summary.ts
@@ -179,5 +182,6 @@ export function getAccount(ctx: TenantContext): AccountSummary {
     usageCents,
     quota: capFor(ctx.plan),
     deliverability: getDeliverabilitySummary(ctx),
+    teardown: getTeardownSummary(ctx),
   };
 }

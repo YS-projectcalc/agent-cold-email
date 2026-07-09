@@ -1,4 +1,4 @@
-import type { Clock, DnsRecordSet, DomainPort, LookalikeCandidate, PurchasedDomain } from "@coldstart/shared";
+import type { Clock, DnsRecordSet, DomainPort, LookalikeCandidate, PurchasedDomain, ReleaseResult } from "@coldstart/shared";
 
 // Sandbox DomainPort — SPEC.md §8 lookalike workflow, simulated. Deterministic
 // happy path (no fault injection yet — that's a later, budgeted lane per
@@ -8,6 +8,7 @@ const SUFFIX_TLDS = ["hq.io", "hq.com"];
 
 export class SandboxDomainPort implements DomainPort {
   private readonly seen = new Set<string>();
+  private readonly released = new Set<string>();
 
   constructor(private readonly clock: Clock) {}
 
@@ -32,5 +33,12 @@ export class SandboxDomainPort implements DomainPort {
 
   async setDns(_domain: string, _idempotencyKey: string): Promise<DnsRecordSet> {
     return { mx: true, spf: true, dkim: true, dmarc: true, rdns: true };
+  }
+
+  async release(domain: string, idempotencyKey: string): Promise<ReleaseResult> {
+    // Idempotent: releasing the same domain under the same key is a no-op
+    // success. The real adapter calls the registrar's release endpoint here.
+    this.released.add(`${idempotencyKey}:${domain}`);
+    return { released: true, releasedAt: this.clock.now() };
   }
 }

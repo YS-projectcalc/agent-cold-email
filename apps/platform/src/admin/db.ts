@@ -5,6 +5,7 @@
 // (see engine/ops-summary.ts + tenant-do.ts), keeping tenant isolation
 // belt-and-suspenders (CLAUDE.md rule h) even on the admin surface.
 
+import type { TenantIndexRow } from "../db.js";
 import type { Env } from "../env.js";
 import type { SupportCategory } from "./support-kb.js";
 
@@ -122,4 +123,43 @@ export async function insertDunningEventIfNew(
 export async function listAllTenantIds(env: Env): Promise<string[]> {
   const result = await env.DB.prepare(`SELECT id FROM tenants_index`).all<{ id: string }>();
   return result.results.map((r) => r.id);
+}
+
+/** Resolves a tenant by id from the control-plane index — the admin terminate
+ * route uses it to 404 on an unknown :id BEFORE touching a (would-be
+ * uninitialized) TenantDO. */
+export async function getTenantIndexById(env: Env, id: string): Promise<TenantIndexRow | null> {
+  const row = await env.DB.prepare(`SELECT id, brand, plan, status FROM tenants_index WHERE id = ?`)
+    .bind(id)
+    .first<TenantIndexRow>();
+  return row ?? null;
+}
+
+/**
+ * D5 abuse-offboarding audit row (migrations/0003). Idempotent per
+ * (tenantId, action) — mirrors insertDunningEventIfNew: returns `true` only
+ * when a NEW enforcement action was recorded, so a retried terminate (after the
+ * DO teardown already committed) lands exactly one row. `action` is
+ * 'TERMINATE' for the terminal AUP rung.
+ */
+export async function insertEnforcementActionIfNew(
+  env: Env,
+  params: { id: string; tenantId: string; action: string; reason: string; evidence: Record<string, unknown>; ts: number },
+): Promise<boolean> {
+  const result = await env.DB.prepare(
+    `INSERT OR IGNORE INTO enforcement_actions (id, tenant_id, action, reason, evidence_json, ts)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(params.id, params.tenantId, params.action, params.reason, JSON.stringify(params.evidence), params.ts)
+    .run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
+/** D6 digest — count of terminated tenants (one enforcement_actions row per
+ * terminated tenant, given the UNIQUE(tenant_id, action) anchor). */
+export async function countTerminatedTenants(env: Env): Promise<number> {
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) as n FROM enforcement_actions WHERE action = 'TERMINATE'`,
+  ).first<{ n: number }>();
+  return row?.n ?? 0;
 }

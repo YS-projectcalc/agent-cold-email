@@ -13,6 +13,7 @@ import {
   type WebhookApplyResult,
 } from "./engine/billing.js";
 import { runDemo, type DemoRunSummary } from "./engine/demo.js";
+import { cancelTenant, terminateTenant, type CancelResult, type TerminateResult } from "./engine/lifecycle.js";
 import { getInfrastructureStatus, runSetupInfrastructure } from "./engine/provisioning.js";
 import { launchCampaign, pauseAllCampaigns, pauseCampaign } from "./engine/campaigns.js";
 import { runTick } from "./engine/tick.js";
@@ -81,6 +82,8 @@ export class TenantDO extends DurableObject<Env> {
     // B6 deliverability control-loop state on mailboxes (see schema.ts).
     this.addColumnIfMissing("mailboxes", "deliv_status", "TEXT NOT NULL DEFAULT 'healthy'");
     this.addColumnIfMissing("mailboxes", "cap_override", "INTEGER");
+    // D5 teardown/reclaim marker on mailboxes (see schema.ts).
+    this.addColumnIfMissing("mailboxes", "released_at", "INTEGER");
     // Created here, not in TENANT_DO_SCHEMA, so it runs only after the column
     // above is guaranteed to exist (safe for DOs that predate the column).
     this.ctx.storage.sql.exec(
@@ -222,6 +225,19 @@ export class TenantDO extends DurableObject<Env> {
     const result = applyStripeWebhookEvent(this.requireContext(), event);
     if (result.plan) this.plan = result.plan;
     return result;
+  }
+
+  // --- D5 lifecycle: voluntary cancel (tenant-authed, POST /cancel) + abuse
+  // terminate (ADMIN_TOKEN-authed, POST /admin/tenants/:id/terminate). Both
+  // reclaim this tenant's OWN infra only — a DO can physically reach no other
+  // tenant's storage (ARCHITECTURE.md #3 + CLAUDE.md rule h). ---
+
+  async cancel(input: { immediate: boolean }): Promise<CancelResult> {
+    return cancelTenant(this.requireContext(), input);
+  }
+
+  async terminate(): Promise<TerminateResult> {
+    return terminateTenant(this.requireContext());
   }
 
   // --- Engine tick / poll — see engine/README.md for why these are directly-callable, not alarms ---

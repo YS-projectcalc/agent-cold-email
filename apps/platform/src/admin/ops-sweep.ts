@@ -7,7 +7,7 @@
 
 import type { Env } from "../env.js";
 import { newId } from "../schema.js";
-import { countSupportTicketsByStatus, insertDunningEventIfNew, listAllTenantIds } from "./db.js";
+import { countSupportTicketsByStatus, countTerminatedTenants, insertDunningEventIfNew, listAllTenantIds } from "./db.js";
 import { decideDunningAction } from "./dunning.js";
 
 export interface DunningSweepResult {
@@ -83,6 +83,8 @@ export interface OpsDigest {
   deliverability: { pausedMailboxesTotal: number; burningDomainsTotal: number; actionsInWindow: number };
   support: { open: number; escalated: number };
   pastDueCount: number;
+  /** D5 lifecycle health — canceled/terminated/disputed tenant counts + total annual-domain liability (integer cents). */
+  lifecycle: { canceled: number; terminated: number; disputed: number; annualDomainLiabilityCents: number };
   watchdogAlerts: string[];
 }
 
@@ -101,17 +103,28 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
   let pausedMailboxesTotal = 0;
   let burningDomainsTotal = 0;
   let deliverabilityActionsInWindow = 0;
+  let canceledCount = 0;
+  let disputedCount = 0;
+  let annualDomainLiabilityCents = 0;
 
   for (const s of summaries) {
     if (s.status === "active") activeByPlan[s.plan] = (activeByPlan[s.plan] ?? 0) + 1;
     mrrCents += s.mrrCents;
     totalUsageCents += s.usageCents;
     if (s.billingState === "past_due") pastDueCount++;
+    // 'canceling' (end-of-period) and 'canceled' (immediate / Stripe-finalized)
+    // both count as lifecycle-canceled for the owner's view.
+    if (s.billingState === "canceling" || s.billingState === "canceled") canceledCount++;
+    if (s.billingState === "disputed") disputedCount++;
+    annualDomainLiabilityCents += s.annualDomainLiabilityCents;
     pausedMailboxesTotal += s.deliverability.pausedMailboxes;
     burningDomainsTotal += s.deliverability.burningDomains;
     deliverabilityActionsInWindow += s.actionsInWindow.paused + s.actionsInWindow.replaced;
   }
 
+  // Terminated tenants come from the D1 enforcement_actions audit log (an
+  // abuse TERMINATE is orthogonal to billing_state — see admin/db.ts).
+  const terminatedCount = await countTerminatedTenants(env);
   const support = await countSupportTicketsByStatus(env);
 
   // Watchdog alerts — simple threshold-crossing prose, not a separate
@@ -129,6 +142,9 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
   if (support.escalated > 0) {
     watchdogAlerts.push(`${support.escalated} support ticket(s) escalated, awaiting owner review`);
   }
+  if (disputedCount > 0) {
+    watchdogAlerts.push(`${disputedCount} tenant(s) frozen by an open chargeback dispute`);
+  }
 
   return {
     windowHours,
@@ -139,6 +155,7 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
     deliverability: { pausedMailboxesTotal, burningDomainsTotal, actionsInWindow: deliverabilityActionsInWindow },
     support,
     pastDueCount,
+    lifecycle: { canceled: canceledCount, terminated: terminatedCount, disputed: disputedCount, annualDomainLiabilityCents },
     watchdogAlerts,
   };
 }

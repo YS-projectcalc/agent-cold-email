@@ -4,6 +4,7 @@ import { env } from "cloudflare:test";
 // the D1 schema stays defined in exactly one place: migrations/*.sql.
 import migration1Sql from "../migrations/0001_init.sql?raw";
 import migration2Sql from "../migrations/0002_admin_ops.sql?raw";
+import migration3Sql from "../migrations/0003_lifecycle.sql?raw";
 
 function statementsOf(sql: string): string[] {
   return sql
@@ -15,7 +16,11 @@ function statementsOf(sql: string): string[] {
     .filter(Boolean);
 }
 
-for (const statement of [...statementsOf(migration1Sql), ...statementsOf(migration2Sql)]) {
+for (const statement of [
+  ...statementsOf(migration1Sql),
+  ...statementsOf(migration2Sql),
+  ...statementsOf(migration3Sql),
+]) {
   await env.DB.prepare(statement).run();
 }
 

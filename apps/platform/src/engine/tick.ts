@@ -48,6 +48,22 @@ function parseSendWindow(raw: string): SendWindow {
  * it as a directly-callable RPC method since real alarm-driven scheduling is B2.
  */
 export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipped: number; deferred: number }> {
+  // D5 tenant-level freeze (kill switch). A suspended tenant (dunning
+  // SUSPEND or an abuse TERMINATE) or a chargeback-disputed tenant sends
+  // NOTHING — this is the reversible send-freeze the dispute lane relies on
+  // (a won dispute flips billing_state back to 'active' and sends resume).
+  // Reads state cheaply, no await added before it — the forced sync shape of
+  // the send loop below is preserved.
+  const lifecycle = ctx.sql
+    .exec<{ status: string; billing_state: string }>(
+      `SELECT status, billing_state FROM tenant_profile WHERE id = ?`,
+      ctx.tenantId,
+    )
+    .one();
+  if (lifecycle.status === "suspended" || lifecycle.billing_state === "disputed") {
+    return { sent: 0, skipped: 0, deferred: 0 };
+  }
+
   refreshMailboxWarmupState(ctx);
   // Deliverability control loop runs BEFORE scheduling (B6): a mailbox whose
   // complaint/bounce rate has crossed a threshold is throttled/paused, and a

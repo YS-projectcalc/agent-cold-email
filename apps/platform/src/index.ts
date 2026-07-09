@@ -8,6 +8,7 @@ import { campaignsRoute } from "./routes/campaigns.js";
 import { inboxRoute } from "./routes/inbox.js";
 import { accountRoute } from "./routes/account.js";
 import { checkoutRoute, checkoutSimulateRoute } from "./routes/checkout.js";
+import { lifecycleRoute } from "./routes/lifecycle.js";
 import { webhooksRoute } from "./routes/webhooks.js";
 import { demoRoute } from "./routes/demo.js";
 import { mcpRoute } from "./routes/mcp.js";
@@ -58,6 +59,7 @@ authed.route("/", campaignsRoute);
 authed.route("/", inboxRoute);
 authed.route("/", accountRoute);
 authed.route("/", checkoutRoute);
+authed.route("/", lifecycleRoute);
 authed.route("/", demoRoute);
 app.route("/", authed);
 

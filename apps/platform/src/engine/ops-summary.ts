@@ -19,6 +19,8 @@ export interface TenantOpsSummary {
   status: string;
   billingState: string;
   usageCents: number;
+  /** D5 — total annual-domain liability booked for this tenant (ledger kind='liability'), integer cents. */
+  annualDomainLiabilityCents: number;
   /** priceCents of the tenant's plan if it's a paid tier AND billing is 'active'; 0 otherwise (SPEC.md §18). */
   mrrCents: number;
   /** Count of invoice.payment_failed webhook events this tenant's DO has recorded — the dunning "cycle" (admin/dunning.ts). */
@@ -60,6 +62,13 @@ export function getOpsSummary(ctx: TenantContext, sinceMs: number): TenantOpsSum
     )
     .one().total ?? 0;
 
+  const annualDomainLiabilityCents = ctx.sql
+    .exec<{ total: number | null }>(
+      `SELECT SUM(amount_cents) as total FROM ledger_entries WHERE tenant_id = ? AND kind = 'liability'`,
+      ctx.tenantId,
+    )
+    .one().total ?? 0;
+
   // webhook_events is scoped per-DO already (one tenant per DO instance) —
   // no tenant_id column/filter needed, same as engine/billing.ts's idempotency check.
   const billingFailureCount = ctx.sql
@@ -76,6 +85,7 @@ export function getOpsSummary(ctx: TenantContext, sinceMs: number): TenantOpsSum
     status: profile.status,
     billingState: profile.billing_state,
     usageCents,
+    annualDomainLiabilityCents,
     mrrCents,
     billingFailureCount,
     deliverability: getDeliverabilitySummary(ctx),

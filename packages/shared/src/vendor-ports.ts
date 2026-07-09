@@ -23,10 +23,23 @@ export interface DnsRecordSet {
   rdns: boolean;
 }
 
+/** Result of releasing a provisioned resource back to the vendor (D5 teardown). */
+export interface ReleaseResult {
+  released: boolean;
+  releasedAt: number;
+}
+
 export interface DomainPort {
   searchLookalikes(brand: string, primaryDomain: string, count: number): Promise<LookalikeCandidate[]>;
   buy(domain: string, idempotencyKey: string): Promise<PurchasedDomain>;
   setDns(domain: string, idempotencyKey: string): Promise<DnsRecordSet>;
+  /**
+   * Releases a domain back to the registrar on tenant teardown/reclaim (D5).
+   * Idempotency-keyed like every side-effecting op (ARCHITECTURE.md #5). The
+   * real adapter calls the registrar's release/delete endpoint at activation;
+   * the sandbox executes it in-memory now.
+   */
+  release(domain: string, idempotencyKey: string): Promise<ReleaseResult>;
 }
 
 export interface ProvisionedMailbox {
@@ -47,6 +60,12 @@ export interface MailboxPort {
   provision(domain: string, localPart: string, idempotencyKey: string): Promise<ProvisionedMailbox>;
   getHealth(email: string): Promise<MailboxHealth>;
   startWarmup(email: string, idempotencyKey: string): Promise<{ started: boolean; startedAt: number }>;
+  /**
+   * Releases a mailbox back to the vendor on tenant teardown/reclaim (D5).
+   * Idempotency-keyed. Real adapter calls Inboxkit's delete-mailbox endpoint at
+   * activation; sandbox executes it in-memory now.
+   */
+  release(email: string, idempotencyKey: string): Promise<ReleaseResult>;
 }
 
 export interface SendEmailInput {

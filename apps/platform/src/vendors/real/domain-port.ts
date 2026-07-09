@@ -1,5 +1,5 @@
 import { NotActivatedError } from "@coldstart/shared";
-import type { DnsRecordSet, DomainPort, LookalikeCandidate, PurchasedDomain } from "@coldstart/shared";
+import type { DnsRecordSet, DomainPort, LookalikeCandidate, PurchasedDomain, ReleaseResult } from "@coldstart/shared";
 
 // Real DomainPort (Porkbun) — coded to the interface shape, never called.
 // ARCHITECTURE.md #6/#8: activation-gated; DO NOT wire real HTTP calls here
@@ -15,5 +15,9 @@ export class RealDomainPort implements DomainPort {
 
   async setDns(_domain: string, _idempotencyKey: string): Promise<DnsRecordSet> {
     throw new NotActivatedError("porkbun", "setDns");
+  }
+
+  async release(_domain: string, _idempotencyKey: string): Promise<ReleaseResult> {
+    throw new NotActivatedError("porkbun", "release");
   }
 }
