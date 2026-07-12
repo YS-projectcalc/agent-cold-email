@@ -34,7 +34,7 @@ Agent-operated cold-email platform, BUILT + LIVE in test mode. Live: API https:/
 - npm is NOT authed on this machine (npm publish = owner-hands, `ACTIVATION.md` Gate 3).
 - Memory split (pre-existing): global memory (`~/.claude-acct2/.../memory/coldstart-platform-build.md`) holds session-recall state; repo `MEMORY.md` holds build lessons. Both are live; don't consolidate mid-handoff.
 - Cron watchdog `baf7d82d` from the original build session was session-only w/ 7-day expiry — dead; ignore references to it.
-- `apps/platform` + `packages/shared` uncommitted work = the engine round-2 increment mid-gate — do NOT commit it until a CLEAN adversarial re-attack lands; do NOT deploy the worker before `wrangler d1 migrations apply` applies 0005 (`migrations/0005_support_dedupe.sql`, currently untracked/pending).
+- Engine increment: RESOLVED 2026-07-12 — committed + pushed as `d342cd0` after a CLEAN round-2 re-attack. Worker deploys must go through `npm run deploy` (the script now applies D1 migrations before `wrangler deploy` — 0005 must land before the new support-intake code).
 
 ## Key files
 
@@ -57,7 +57,7 @@ Present these to Yaakov, with the pre-computed recommendations:
 4. ~~AEO content commit/deploy approval~~ — **DONE, SHIPPED 2026-07-12**: commit `3477e7f`, pushed, deployed live to Cloudflare Pages (deployment `96a55be8`). See "Where we are right now" above.
 
 All four Resume items are now closed. **Resume order for a fresh session:**
-1. Check the engine round-2 fix lane's outcome (`apps/platform/` + `packages/shared/`, uncommitted) → if the verification battery + fresh adversarial re-attack are clean, commit + push the engine increment as its own commit; if not, keep working the gate.
+1. ~~Engine round-2 gate~~ — DONE 2026-07-12: re-attack CLEAN, committed + pushed `d342cd0` (suite 148/148). Nothing in flight in apps/ or packages/.
 2. Owner-hands items from the 2026-07-12 ship (`ROADMAP.md` session log): domain wiring (CNAME + Pages custom-domain attach), CF Web Analytics + GSC/Bing verification, npm auth session, standing brand-account authorization decision.
 3. Design polish pass (queued next session, per the 2026-07-26 audit item (d)).
 4. 2026-07-26 post-ship audit (full checklist in `ROADMAP.md` 2026-07-12 (ship) session-log entry).
