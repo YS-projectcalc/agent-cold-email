@@ -21,6 +21,13 @@ export interface SupportTicketRow {
   createdAt: number;
 }
 
+/**
+ * Inserts a triaged support ticket. B4 (CLASS B): idempotent on the source
+ * RFC 5322 `messageId` (unique index + INSERT OR IGNORE) so a redelivered
+ * inbound email can't create two tickets. `messageId` NULL (operator/console
+ * tickets) never dedupes — NULLs are distinct in SQLite. Returns `true` only
+ * when a NEW row was recorded (mirrors insertDunningEventIfNew).
+ */
 export async function insertSupportTicket(
   env: Env,
   params: {
@@ -33,11 +40,12 @@ export async function insertSupportTicket(
     draft: string | null;
     status: "open" | "escalated";
     createdAt: number;
+    messageId?: string | null;
   },
-): Promise<void> {
-  await env.DB.prepare(
-    `INSERT INTO support_tickets (id, from_email, subject, body, tenant_id, category, draft, status, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+): Promise<boolean> {
+  const result = await env.DB.prepare(
+    `INSERT OR IGNORE INTO support_tickets (id, from_email, subject, body, tenant_id, category, draft, status, created_at, message_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       params.id,
@@ -49,8 +57,10 @@ export async function insertSupportTicket(
       params.draft,
       params.status,
       params.createdAt,
+      params.messageId ?? null,
     )
     .run();
+  return (result.meta.changes ?? 0) > 0;
 }
 
 interface SupportTicketD1Row {

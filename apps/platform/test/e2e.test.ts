@@ -141,7 +141,9 @@ describe("B0 walking skeleton — signup through reply/bounce handling", () => {
       body: JSON.stringify({ body: "Great, let's talk more." }),
     });
     expect(replySendRes.status).toBe(201);
-    expect(replySendRes.body.messageId).toMatch(/^msg_/);
+    // C2: the sandbox now emits RFC 5322 Message-IDs (`<uuid@sandbox.local>`),
+    // not the opaque `msg_<uuid>` shape, so real IMAP threading is expressible.
+    expect(replySendRes.body.messageId).toMatch(/^<[0-9a-f-]+@sandbox\.local>$/);
 
     const threadAfterReply = await api<ThreadDetail>(`/threads/${replyThread!.threadId}`, { token });
     expect(threadAfterReply.body.messages.map((m) => m.type)).toEqual(["sent", "reply", "sent"]);

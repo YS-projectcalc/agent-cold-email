@@ -9,5 +9,9 @@ export const SupportTriageInput = z.object({
   subject: z.string().min(1).max(500),
   body: z.string().min(1).max(20_000),
   tenantId: z.string().min(1).max(200).optional(),
+  // B4 (CLASS B) — the source RFC 5322 Message-ID, when this message came from
+  // real inbound email. Optional: operator/console-created tickets have none.
+  // Deduped on (a redelivered inbound email won't create a second ticket).
+  messageId: z.string().min(1).max(998).optional(),
 });
 export type SupportTriageInput = z.infer<typeof SupportTriageInput>;

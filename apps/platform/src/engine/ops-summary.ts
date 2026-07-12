@@ -25,6 +25,10 @@ export interface TenantOpsSummary {
   mrrCents: number;
   /** Count of invoice.payment_failed webhook events this tenant's DO has recorded — the dunning "cycle" (admin/dunning.ts). */
   billingFailureCount: number;
+  /** A5 — the most recent charge decline code (permanent codes make the dunning sweep suspend immediately); null if none/unknown. */
+  lastDeclineCode: string | null;
+  /** A4 — count of sends that exhausted the retry cap / hit a non-retryable vendor error (engine/tick.ts) — ops-visible. */
+  failedSends: number;
   /** All-time deliverability rollup — same shape account() surfaces to the tenant. */
   deliverability: { pausedMailboxes: number; throttledMailboxes: number; burningDomains: number; domainsReplaced: number };
   /** Deliverability actions logged strictly since `sinceMs` — what the D6 digest windows over. */
@@ -80,11 +84,18 @@ export function reactivateFromDunning(ctx: TenantContext): boolean {
 
 export function getOpsSummary(ctx: TenantContext, sinceMs: number): TenantOpsSummary {
   const profile = ctx.sql
-    .exec<{ brand: string; plan: string; status: string; billing_state: string }>(
-      `SELECT brand, plan, status, billing_state FROM tenant_profile WHERE id = ?`,
+    .exec<{ brand: string; plan: string; status: string; billing_state: string; last_decline_code: string | null }>(
+      `SELECT brand, plan, status, billing_state, last_decline_code FROM tenant_profile WHERE id = ?`,
       ctx.tenantId,
     )
     .one();
+
+  const failedSends = ctx.sql
+    .exec<{ n: number }>(
+      `SELECT COUNT(*) as n FROM scheduled_sends WHERE tenant_id = ? AND status = 'failed'`,
+      ctx.tenantId,
+    )
+    .one().n;
 
   const usageCents = ctx.sql
     .exec<{ total: number | null }>(
@@ -119,6 +130,8 @@ export function getOpsSummary(ctx: TenantContext, sinceMs: number): TenantOpsSum
     annualDomainLiabilityCents,
     mrrCents,
     billingFailureCount,
+    lastDeclineCode: profile.last_decline_code,
+    failedSends,
     deliverability: getDeliverabilitySummary(ctx),
     actionsInWindow: {
       paused: countActionsInWindow(ctx, "PAUSE", sinceMs),

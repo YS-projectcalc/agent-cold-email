@@ -69,6 +69,7 @@ app.onError((err, c) => {
   if (name === "NotFoundError") return c.json({ error: err.message }, 404);
   if (name === "TenantIsolationError") return c.json({ error: err.message }, 403);
   if (name === "RateLimitError") return c.json({ error: err.message }, 429);
+  if (name === "RequestInProgressError") return c.json({ error: err.message }, 409);
   console.error(err);
   return c.json({ error: "internal error" }, 500);
 });

@@ -1,4 +1,4 @@
-import type { SequenceStep } from "@coldstart/shared";
+import { VendorError, type SequenceStep } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
 import { reportUsageToStripeIfConfigured } from "./billing.js";
@@ -19,10 +19,29 @@ interface DueSend {
   sequence_json: string;
   send_window_json: string;
   suppressed: number;
+  attempts: number;
   [column: string]: SqlStorageValue;
 }
 
 const SEND_USAGE_FEE_CENTS = 2;
+
+// A4 (CLASS A) — retry ceiling for a RETRYABLE vendor failure on the post-send
+// billing step. At the cap the send is marked 'failed' (ops-visible) instead of
+// reverted-to-pending forever, so no infinite-retry path survives.
+const MAX_SEND_ATTEMPTS = 5;
+
+/**
+ * RFC 8058 List-Unsubscribe header value (SPEC.md §0.8 / ARCHITECTURE.md #8).
+ * The `mailto:` opt-out is expressible today (the sending mailbox is a real,
+ * polled inbox). TODO(B4): the https one-click form + the matching
+ * `List-Unsubscribe-Post: List-Unsubscribe=One-Click` header need the
+ * hosted unsubscribe endpoint + inbound opt-out parsing built in the
+ * "Sequencing + reply engine — full CAN-SPAM opt-out flow" lane (ROADMAP B4);
+ * until then only the mailto form is populated (never a silent gap).
+ */
+function buildListUnsubscribe(mailboxEmail: string, threadId: string): string {
+  return `<mailto:${mailboxEmail}?subject=${encodeURIComponent(`unsubscribe ${threadId}`)}>`;
+}
 
 const DEFAULT_SEND_WINDOW: SendWindow = { startHour: 0, endHour: 23 };
 
@@ -78,7 +97,7 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
 
   const due = ctx.sql
     .exec<DueSend>(
-      `SELECT ss.id, ss.campaign_id, ss.lead_id, ss.step, ss.thread_id,
+      `SELECT ss.id, ss.campaign_id, ss.lead_id, ss.step, ss.thread_id, ss.attempts,
               l.email as lead_email, l.global_status as lead_status,
               c.status as campaign_status, c.sequence_json, c.send_window_json,
               CASE WHEN sup.email IS NOT NULL THEN 1 ELSE 0 END as suppressed
@@ -152,14 +171,18 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
         body: step.body,
         threadId: row.thread_id,
         inReplyToMessageId: null,
+        listUnsubscribe: buildListUnsubscribe(picked.email, row.thread_id),
       },
       `send:${ctx.tenantId}:${row.id}`,
     );
 
     // Record usage BEFORE committing 'sent' + cap consumption, so a row is
-    // never left sent-but-unbilled. Wrapped per-row: one billing failure
-    // reverts JUST this row to 'pending' for retry (email.send is idempotent
-    // on that idempotency key) instead of throwing out of the whole batch.
+    // never left sent-but-unbilled. Wrapped per-row: a billing failure is
+    // graded (A4, CLASS A) instead of retried forever. A RETRYABLE failure
+    // reverts JUST this row to 'pending' (email.send is idempotent on its key)
+    // and bumps an attempt counter, up to MAX_SEND_ATTEMPTS; a non-retryable
+    // failure (or the cap) marks the row 'failed' + records an ops-visible
+    // 'failed' event. Either way the batch never throws.
     try {
       await ctx.adapters.billing.recordUsage(
         ctx.tenantId,
@@ -167,9 +190,35 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
         SEND_USAGE_FEE_CENTS,
         `usage:${ctx.tenantId}:${row.id}`,
       );
-    } catch {
-      ctx.sql.exec(`UPDATE scheduled_sends SET status = 'pending' WHERE id = ?`, row.id);
-      deferred++; // left pending — a later tick retries this row
+    } catch (err) {
+      // Unknown (non-VendorError) failures are treated as transient — but still
+      // capped, so even a mis-graded permanent error can't loop forever.
+      const retryable = err instanceof VendorError ? err.retryable : true;
+      const nextAttempts = row.attempts + 1;
+      if (retryable && nextAttempts < MAX_SEND_ATTEMPTS) {
+        ctx.sql.exec(`UPDATE scheduled_sends SET status = 'pending', attempts = ? WHERE id = ?`, nextAttempts, row.id);
+        deferred++; // left pending — a later tick retries this row
+        continue;
+      }
+      // Non-retryable, or the retry cap is reached: the email already went out
+      // (send() precedes this step and is idempotent), but usage could not be
+      // recorded — fail the row so ops sees the unbilled send, rather than an
+      // infinite retry. metrics()/campaign_results surface the 'failed' event;
+      // ops-summary counts the failed row.
+      ctx.sql.exec(`UPDATE scheduled_sends SET status = 'failed', attempts = ? WHERE id = ?`, nextAttempts, row.id);
+      ctx.sql.exec(
+        `INSERT OR IGNORE INTO events (id, tenant_id, campaign_id, lead_id, type, step, message_id, thread_id, ts, metadata_json)
+         VALUES (?, ?, ?, ?, 'failed', ?, ?, ?, ?, ?)`,
+        newId("evt"),
+        ctx.tenantId,
+        row.campaign_id,
+        row.lead_id,
+        row.step,
+        result.messageId,
+        row.thread_id,
+        now,
+        JSON.stringify({ reason: err instanceof Error ? err.message : String(err), retryable, attempts: nextAttempts }),
+      );
       continue;
     }
 
@@ -185,8 +234,17 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
       row.id,
     );
     ctx.sql.exec(`UPDATE mailboxes SET sent_today = sent_today + 1 WHERE id = ?`, picked.id);
+    // NOTE (A2): a send does NOT reset the soft-bounce streak. In this
+    // architecture the EmailPort has no delivery receipt — a soft bounce is
+    // always the async result of a PRIOR send, polled AFTER it, so resetting on
+    // send would clear the streak just before the bounce it produced is counted
+    // (threshold unreachable). The streak resets ONLY on positive engagement (a
+    // reply) — see engine/reply-processor.ts.
+    // OR IGNORE mirrors the ledger insert below: the events dedupe index makes
+    // this a no-op on the (impossible-under-the-atomic-claim, but guarded)
+    // chance the same send lands twice, instead of crashing the batch.
     ctx.sql.exec(
-      `INSERT INTO events (id, tenant_id, campaign_id, lead_id, type, step, message_id, thread_id, ts, metadata_json)
+      `INSERT OR IGNORE INTO events (id, tenant_id, campaign_id, lead_id, type, step, message_id, thread_id, ts, metadata_json)
        VALUES (?, ?, ?, ?, 'sent', ?, ?, ?, ?, ?)`,
       newId("evt"),
       ctx.tenantId,
@@ -207,7 +265,7 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
       result.sentAt,
       row.id,
     );
-    await reportUsageToStripeIfConfigured(ctx, 1); // inert without env.STRIPE_SECRET_KEY — see engine/billing.ts
+    await reportUsageToStripeIfConfigured(ctx, 1, row.id); // inert without env.STRIPE_SECRET_KEY — see engine/billing.ts
 
     sent++;
   }

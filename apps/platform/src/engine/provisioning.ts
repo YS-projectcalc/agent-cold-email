@@ -96,7 +96,7 @@ export async function provisionDomainWithMailboxes(
         now,
         provisionIdempotencyKey,
       );
-      await reportUsageToStripeIfConfigured(ctx, 1);
+      await reportUsageToStripeIfConfigured(ctx, 1, provisionIdempotencyKey);
     }
   }
 
@@ -168,6 +168,8 @@ export interface MailboxHealthReport {
   sends: number;
   complaintRate: number;
   bounceRate: number;
+  /** Soft (transient 4.x.x) bounce fraction — visible here but never triggers pause/burn (A3). */
+  softBounceRate: number;
   reputationScore: number;
   placementRate: number;
 }
@@ -203,6 +205,7 @@ export async function getInfrastructureStatus(ctx: TenantContext): Promise<Infra
         sends: s.sends,
         complaintRate: s.complaintRate,
         bounceRate: s.bounceRate,
+        softBounceRate: s.softBounceRate,
         reputationScore: vendor.reputationScore,
         placementRate: vendor.placementRate,
       };

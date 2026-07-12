@@ -35,13 +35,15 @@ export async function runDunningSweep(env: Env, nowMs: number): Promise<DunningS
     if (summary.billingState !== "past_due") continue;
 
     const cycle = summary.billingFailureCount;
-    const action = decideDunningAction(cycle);
+    // A5: a permanent decline code makes this suspend immediately, regardless
+    // of cycle count (see admin/dunning.ts).
+    const action = decideDunningAction(cycle, summary.lastDeclineCode);
     const applied = await insertDunningEventIfNew(env, {
       id: newId("dun"),
       tenantId,
       cycle,
       action,
-      detail: { billingFailureCount: cycle, plan: summary.plan },
+      detail: { billingFailureCount: cycle, plan: summary.plan, declineCode: summary.lastDeclineCode },
       ts: nowMs,
     });
     if (applied && action === "suspend") {

@@ -135,6 +135,27 @@ function readStripeMetadataPlan(obj: Record<string, unknown>): TenantPlan | null
   return typeof plan === "string" && isPaidPlanTier(plan) ? plan : null;
 }
 
+/**
+ * Reads the charge decline/failure code from an `invoice.payment_failed` event
+ * object (A5). Stripe exposes it in a few shapes depending on expansion; we
+ * check the documented locations and fall back to null (unknown -> transient,
+ * the safe default). The exact real-Stripe path is verified at activation.
+ */
+function readDeclineCode(obj: Record<string, unknown>): string | null {
+  const asString = (v: unknown): string | null => (typeof v === "string" && v.length > 0 ? v : null);
+  const nested = (v: unknown, key: string): unknown =>
+    v && typeof v === "object" ? (v as Record<string, unknown>)[key] : undefined;
+
+  return (
+    asString(obj.decline_code) ??
+    asString(obj.failure_code) ??
+    asString(nested(obj.last_payment_error, "decline_code")) ??
+    asString(nested(obj.charge, "failure_code")) ??
+    asString(nested(nested(obj.payment_intent, "last_payment_error"), "decline_code")) ??
+    null
+  );
+}
+
 function mapStripeSubscriptionStatus(status: unknown): "active" | "past_due" | "canceled" | null {
   if (typeof status !== "string") return null;
   if (status === "active" || status === "trialing") return "active";
@@ -234,6 +255,12 @@ export function applyStripeWebhookEvent(ctx: TenantContext, event: StripeEventIn
     }
 
     case "invoice.payment_failed": {
+      // A5 (CLASS A): record the charge decline code so the dunning sweep can
+      // grade it (permanent -> suspend immediately; transient -> count-based
+      // grace). Stored even when the freeze guard below no-ops the state
+      // change, so the LATEST code always reflects the most recent failure.
+      const declineCode = readDeclineCode(obj);
+      ctx.sql.exec(`UPDATE tenant_profile SET last_decline_code = ? WHERE id = ?`, declineCode, ctx.tenantId);
       // STICKY: a failed invoice must not overwrite a dispute/cancel freeze.
       ctx.sql.exec(
         `UPDATE tenant_profile SET billing_state = 'past_due'
@@ -309,8 +336,13 @@ export function applyStripeWebhookEvent(ctx: TenantContext, event: StripeEventIn
  * `stripe_subscription_id` both exist — i.e. unreachable in this build.
  * Never throws: a Stripe reporting hiccup must not corrupt or block the
  * local ledger write it follows (that write already committed).
+ * `idempotencyKey` is the source send/provision id — see reportUsageRecord (B5).
  */
-export async function reportUsageToStripeIfConfigured(ctx: TenantContext, quantity: number): Promise<void> {
+export async function reportUsageToStripeIfConfigured(
+  ctx: TenantContext,
+  quantity: number,
+  idempotencyKey: string,
+): Promise<void> {
   const key = ctx.env.STRIPE_SECRET_KEY;
   if (!key) return;
   const row = ctx.sql
@@ -318,7 +350,9 @@ export async function reportUsageToStripeIfConfigured(ctx: TenantContext, quanti
     .one();
   if (!row.subId) return;
   try {
-    await reportUsageRecord(key, row.subId, quantity, ctx.clock.now());
+    // B5: dedupe key derived from the source send/provision id so a redelivered
+    // report can't double-increment Stripe metered usage.
+    await reportUsageRecord(key, row.subId, quantity, ctx.clock.now(), `usage-report:${idempotencyKey}`);
   } catch (err) {
     console.error("stripe usage report failed (non-fatal — the local ledger entry already committed)", err);
   }

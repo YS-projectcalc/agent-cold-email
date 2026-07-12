@@ -2,6 +2,13 @@ import { NotFoundError } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
 
+// sent_message_keys rows are evicted at write time once older than this — the
+// same unbounded-growth guard request_idempotency uses (NB1). After the TTL an
+// identical-body manual reply is treated as new, which also bounds how long a
+// legitimate repeat reply stays suppressed. Measured on ctx.clock, same time
+// base that stamps sent_at.
+const SENT_MESSAGE_KEY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
 export interface ThreadRef {
   lead_id: string;
   campaign_id: string;
@@ -108,10 +115,18 @@ export function getThread(ctx: TenantContext, threadId: string): ThreadDetail {
   };
 }
 
+/** SHA-256 hex of a UTF-8 string — the stable content component of a manual
+ * reply's vendor idempotency key when no request key is supplied (B3). */
+async function sha256Hex(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 export async function replyToThread(
   ctx: TenantContext,
   threadId: string,
   body: string,
+  idempotencyKey?: string,
 ): Promise<{ messageId: string }> {
   const ref = lookupThreadRef(ctx, threadId);
   if (!ref) throw new NotFoundError(`thread ${threadId} not found`);
@@ -131,14 +146,46 @@ export async function replyToThread(
     .toArray()[0]?.email;
   if (!mailboxEmail) throw new NotFoundError(`no sending mailbox on record for thread ${threadId}`);
 
+  // B3 (CLASS B): the vendor-send idempotency key must derive from STABLE
+  // inputs so a retried reply reuses it (email.send returns the cached result,
+  // not a second send). Embedding the wall clock (the pre-fix `:${now}`)
+  // defeated itself — every retry produced a fresh key + a duplicate send.
+  // Prefer the caller's request idempotency key; else a content hash so an
+  // identical-body retry still dedupes.
   const now = ctx.clock.now();
+  const keyBasis = idempotencyKey ? `k:${idempotencyKey}` : `h:${await sha256Hex(body)}`;
+  const sendKey = `manual-reply:${ctx.tenantId}:${threadId}:${keyBasis}`;
+
+  // B3 durability (NB4): the sandbox vendor's send-cache is in-memory, so across
+  // a DO cold start a retried no-key reply would mint a fresh messageId and
+  // double-send. Consult the DURABLE send-key -> messageId map first: a hit means
+  // this exact reply already went out — return the recorded id WITHOUT a second
+  // send (the matching 'sent' event is already durable from the first send).
+  const persisted = ctx.sql
+    .exec<{ message_id: string }>(`SELECT message_id FROM sent_message_keys WHERE send_key = ?`, sendKey)
+    .toArray()[0];
+  if (persisted) return { messageId: persisted.message_id };
+
   const result = await ctx.adapters.email.send(
     { fromEmail: mailboxEmail, toEmail: leadEmail, subject: "Re:", body, threadId, inReplyToMessageId: null },
-    `manual-reply:${ctx.tenantId}:${threadId}:${now}`,
+    sendKey,
   );
 
+  // Persist the mapping so the dedupe survives DO eviction. OR IGNORE: a
+  // concurrent same-key send that already recorded its id wins — never clobbered.
+  ctx.sql.exec(`DELETE FROM sent_message_keys WHERE sent_at < ?`, now - SENT_MESSAGE_KEY_TTL_MS);
   ctx.sql.exec(
-    `INSERT INTO events (id, tenant_id, campaign_id, lead_id, type, step, message_id, thread_id, ts, metadata_json)
+    `INSERT OR IGNORE INTO sent_message_keys (send_key, message_id, sent_at) VALUES (?, ?, ?)`,
+    sendKey,
+    result.messageId,
+    result.sentAt,
+  );
+
+  // OR IGNORE against the events dedupe index: a no-request-key retry with the
+  // same body reproduces the same messageId (via the stable key above), so the
+  // second reply is a no-op at the event layer instead of a duplicate row.
+  ctx.sql.exec(
+    `INSERT OR IGNORE INTO events (id, tenant_id, campaign_id, lead_id, type, step, message_id, thread_id, ts, metadata_json)
      VALUES (?, ?, ?, ?, 'sent', 0, ?, ?, ?, ?)`,
     newId("evt"),
     ctx.tenantId,

@@ -26,6 +26,8 @@ function mbx(over: Partial<MailboxHealthSignal> = {}): MailboxHealthSignal {
     complaints: 0,
     bounceRate: 0,
     complaintRate: 0,
+    softBounces: 0,
+    softBounceRate: 0,
     ...over,
   };
 }

@@ -73,4 +73,26 @@ describe("POST /admin/support/triage + GET /admin/support/digest — D1 AI suppo
     });
     expect(res.status).toBe(400);
   });
+
+  // NB5 — support_tickets is the SHARED control-plane table; the dedupe index is
+  // (tenant_id, message_id), not message_id alone. A Message-ID is only unique
+  // per sender, so a global index would drop a SECOND tenant's ticket reusing the
+  // same id. FAILS on the pre-fix global index (b1 below would be deduped away).
+  it("dedupes per (tenant, Message-ID): a Message-ID reused across two tenants is NOT dropped", async () => {
+    const messageId = "<shared-msgid@sender.example>";
+    const triage = (tenantId: string) =>
+      adminApi<TriageResponse & { deduplicated: boolean }>("/admin/support/triage", {
+        method: "POST",
+        body: JSON.stringify({ from: "c@example.com", subject: "billing question", body: "why was my card charged?", tenantId, messageId }),
+      });
+
+    const a1 = await triage("ten_A");
+    const b1 = await triage("ten_B"); // SAME Message-ID, DIFFERENT tenant
+    const a2 = await triage("ten_A"); // same Message-ID + same tenant -> deduped
+
+    expect(a1.body.deduplicated).toBe(false); // first ticket for tenant A
+    expect(b1.body.deduplicated).toBe(false); // NOT dropped despite the shared Message-ID
+    expect(a2.body.deduplicated).toBe(true); // same tenant + Message-ID collapses to one
+    expect(a2.body.ticketId).not.toBe(a1.body.ticketId); // a new id is minted, but no new row lands
+  });
 });

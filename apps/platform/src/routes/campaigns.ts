@@ -10,7 +10,9 @@ export const campaignsRoute = new Hono<{ Bindings: Env; Variables: AuthedVariabl
     // that needs the large body cap (validate.ts default is the small cap).
     const parsed = await parseJsonBody(c, LaunchCampaignInput, LARGE_BODY_MAX_BYTES);
     if (!parsed.ok) return parsed.response;
-    const result = await c.get("tenantStub").launchCampaign(parsed.data);
+    // B2: an Idempotency-Key header makes a retried launch return the first
+    // campaign instead of creating a second one (+ duplicate sends/billing).
+    const result = await c.get("tenantStub").launchCampaign(parsed.data, c.req.header("Idempotency-Key"));
     return c.json(result, 201);
   })
   .get("/campaigns/:id/results", async (c) => {

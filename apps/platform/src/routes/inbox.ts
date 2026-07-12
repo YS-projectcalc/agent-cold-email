@@ -16,7 +16,9 @@ export const inboxRoute = new Hono<{ Bindings: Env; Variables: AuthedVariables }
   .post("/threads/:id/reply", async (c) => {
     const parsed = await parseJsonBody(c, ReplyInput);
     if (!parsed.ok) return parsed.response;
-    const result = await c.get("tenantStub").reply(c.req.param("id"), parsed.data.body);
+    // B2/B3: an Idempotency-Key header makes a retried reply return the first
+    // send instead of dispatching a second identical email.
+    const result = await c.get("tenantStub").reply(c.req.param("id"), parsed.data.body, c.req.header("Idempotency-Key"));
     return c.json(result, 201);
   })
   .post("/threads/:id/mark", async (c) => {

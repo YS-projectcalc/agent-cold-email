@@ -84,12 +84,19 @@ export async function createStripeCheckoutSession(
  * unreachable without a real key regardless. Callers pass whatever
  * identifier they have; this function's job is only the documented call
  * shape, not the lookup.
+ *
+ * B5 (CLASS B): `idempotencyKey` is sent as Stripe's `Idempotency-Key` header,
+ * derived from the source send/provision id by the caller. Stripe dedupes on
+ * it for 24h, so a redelivered/retried report (an at-least-once tick re-run,
+ * a network retry) can't double-increment metered usage even though `action:
+ * increment` is otherwise additive.
  */
 export async function reportUsageRecord(
   secretKey: string,
   subscriptionItemId: string,
   quantity: number,
   timestampMs: number,
+  idempotencyKey: string,
 ): Promise<void> {
   const body = new URLSearchParams();
   body.set("quantity", String(quantity));
@@ -98,7 +105,7 @@ export async function reportUsageRecord(
 
   const res = await fetch(`${STRIPE_API_BASE}/subscription_items/${subscriptionItemId}/usage_records`, {
     method: "POST",
-    headers: stripeHeaders(secretKey),
+    headers: { ...stripeHeaders(secretKey), "Idempotency-Key": idempotencyKey },
     body: body.toString(),
   });
   if (!res.ok) {

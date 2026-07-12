@@ -9,14 +9,17 @@ import { capFor } from "./quota.js";
 export interface EventCounts {
   sent: number;
   reply: number;
+  /** HARD (permanent 5.x.x) bounces (A2). Soft bounces are counted separately below. */
   bounce: number;
   complaint: number;
   unsubscribe: number;
   failed: number;
+  /** SOFT (transient 4.x.x) bounces — tallied but not a permanent suppression (A2). */
+  soft_bounce: number;
 }
 
 function emptyCounts(): EventCounts {
-  return { sent: 0, reply: 0, bounce: 0, complaint: 0, unsubscribe: 0, failed: 0 };
+  return { sent: 0, reply: 0, bounce: 0, complaint: 0, unsubscribe: 0, failed: 0, soft_bounce: 0 };
 }
 
 function countEvents(ctx: TenantContext, campaignId?: string): EventCounts {

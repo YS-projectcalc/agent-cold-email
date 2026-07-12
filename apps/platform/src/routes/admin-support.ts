@@ -19,7 +19,10 @@ export const adminSupportRoute = new Hono<{ Bindings: Env }>()
 
     const { category, draft, status } = triageSupportMessage(parsed.data.subject, parsed.data.body);
     const id = newId("tkt");
-    await insertSupportTicket(c.env, {
+    // B4: dedupe on the source Message-ID. A redelivered inbound email whose
+    // Message-ID was already triaged is a no-op (`inserted: false`), not a
+    // second ticket — the caller sees it was already handled.
+    const inserted = await insertSupportTicket(c.env, {
       id,
       fromEmail: parsed.data.from,
       subject: parsed.data.subject,
@@ -29,9 +32,10 @@ export const adminSupportRoute = new Hono<{ Bindings: Env }>()
       draft,
       status,
       createdAt: new RealClock().now(),
+      messageId: parsed.data.messageId ?? null,
     });
 
-    return c.json({ ticketId: id, category, draft, status }, 201);
+    return c.json({ ticketId: id, category, draft, status, deduplicated: !inserted }, 201);
   })
   .get("/admin/support/digest", async (c) => {
     const [tickets, counts] = await Promise.all([

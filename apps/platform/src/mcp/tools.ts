@@ -4,9 +4,16 @@
 // same facade, never a parallel implementation (CLAUDE.md rule c).
 
 import type { ZodType } from "zod";
-import { LaunchCampaignInput, SetupInfrastructureInput } from "@coldstart/shared";
 import type { TenantDO } from "../tenant-do.js";
-import { CampaignIdInput, EmptyInput, ThreadIdInput, ThreadMarkInput, ThreadReplyInput } from "./schemas.js";
+import {
+  CampaignIdInput,
+  EmptyInput,
+  LaunchCampaignToolInput,
+  SetupInfrastructureToolInput,
+  ThreadIdInput,
+  ThreadMarkInput,
+  ThreadReplyInput,
+} from "./schemas.js";
 
 export interface McpTool<T = unknown> {
   name: string;
@@ -27,9 +34,9 @@ function tool<T>(
 export const MCP_TOOLS: McpTool<any>[] = [
   tool(
     "setup_infrastructure",
-    "Buy branded lookalike domains, provision mailboxes, and start the warmup ramp. Returns immediately (async job); poll infrastructure_status for progress.",
-    SetupInfrastructureInput,
-    (stub, args) => stub.setupInfrastructure(args),
+    "Buy branded lookalike domains, provision mailboxes, and start the warmup ramp. Returns immediately (async job); poll infrastructure_status for progress. Pass a stable idempotencyKey and resend it on retry so a dropped response can't re-provision duplicate infrastructure.",
+    SetupInfrastructureToolInput,
+    (stub, { idempotencyKey, ...args }) => stub.setupInfrastructure(args, idempotencyKey),
   ),
   tool(
     "infrastructure_status",
@@ -39,9 +46,9 @@ export const MCP_TOOLS: McpTool<any>[] = [
   ),
   tool(
     "launch_campaign",
-    "Create and activate a campaign against a lead list. The caller supplies the offer and sequence step content — this platform does not generate outreach copy.",
-    LaunchCampaignInput,
-    (stub, args) => stub.launchCampaign(args),
+    "Create and activate a campaign against a lead list. The caller supplies the offer and sequence step content — this platform does not generate outreach copy. Pass a stable idempotencyKey and resend it on retry so a dropped response can't create a duplicate campaign.",
+    LaunchCampaignToolInput,
+    (stub, { idempotencyKey, ...args }) => stub.launchCampaign(args, idempotencyKey),
   ),
   tool(
     "campaign_results",
@@ -52,8 +59,11 @@ export const MCP_TOOLS: McpTool<any>[] = [
   tool("metrics", "Account-wide deliverability + warmup health.", EmptyInput, (stub) => stub.metrics()),
   tool("inbox", "Unified reply inbox across all mailboxes for the tenant.", EmptyInput, (stub) => stub.inbox()),
   tool("thread", "Full message history for one thread.", ThreadIdInput, (stub, args) => stub.thread(args.threadId)),
-  tool("reply", "Send a reply on an existing thread.", ThreadReplyInput, (stub, args) =>
-    stub.reply(args.threadId, args.body),
+  tool(
+    "reply",
+    "Send a reply on an existing thread. Pass a stable idempotencyKey and resend it on retry so a dropped response can't dispatch a duplicate email.",
+    ThreadReplyInput,
+    (stub, args) => stub.reply(args.threadId, args.body, args.idempotencyKey),
   ),
   tool("mark", "Mark a thread read, unread, or archived.", ThreadMarkInput, async (stub, args) => {
     await stub.mark(args.threadId, args.status);

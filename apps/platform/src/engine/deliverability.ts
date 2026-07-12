@@ -74,10 +74,15 @@ export interface MailboxHealthSignal {
   sentToday: number;
   sendReady: boolean;
   sends: number;
+  /** HARD (permanent, 5.x.x) bounces only — the count the PAUSE/burn thresholds read (A3). */
   bounces: number;
   complaints: number;
+  /** HARD-bounce fraction — soft bounces are deliberately excluded so a transient blip never pauses/burns (A3). */
   bounceRate: number;
   complaintRate: number;
+  /** SOFT (transient, 4.x.x) bounces — surfaced for visibility; NEVER feeds a pause/burn/spend decision (A3). */
+  softBounces: number;
+  softBounceRate: number;
 }
 
 export interface DomainStat {
@@ -235,25 +240,32 @@ export function gatherMailboxHealth(ctx: TenantContext): MailboxHealthSignal[] {
     sendsByMailbox.set(row.mailbox_id, row.n);
   }
 
+  // A3: 'bounce' = HARD only (soft bounces are recorded as a distinct
+  // 'soft_bounce' type by reply-processor.ts). Hard bounces + complaints feed
+  // the pause/burn thresholds; soft bounces are counted separately, for
+  // visibility only, and NEVER drive an action.
   const bouncesByMailbox = new Map<string, number>();
+  const softBouncesByMailbox = new Map<string, number>();
   const complaintsByMailbox = new Map<string, number>();
   for (const row of ctx.sql
     .exec<{ mailbox_id: string; type: string; n: number }>(
       `SELECT ss.mailbox_id as mailbox_id, e.type as type, COUNT(*) as n
        FROM events e
        JOIN scheduled_sends ss ON ss.tenant_id = e.tenant_id AND ss.message_id = e.message_id
-       WHERE e.tenant_id = ? AND e.type IN ('bounce', 'complaint') AND ss.mailbox_id IS NOT NULL
+       WHERE e.tenant_id = ? AND e.type IN ('bounce', 'soft_bounce', 'complaint') AND ss.mailbox_id IS NOT NULL
        GROUP BY ss.mailbox_id, e.type`,
       ctx.tenantId,
     )
     .toArray()) {
     if (row.type === "bounce") bouncesByMailbox.set(row.mailbox_id, row.n);
+    else if (row.type === "soft_bounce") softBouncesByMailbox.set(row.mailbox_id, row.n);
     else complaintsByMailbox.set(row.mailbox_id, row.n);
   }
 
   return mailboxes.map((m) => {
     const sends = sendsByMailbox.get(m.id) ?? 0;
     const bounces = bouncesByMailbox.get(m.id) ?? 0;
+    const softBounces = softBouncesByMailbox.get(m.id) ?? 0;
     const complaints = complaintsByMailbox.get(m.id) ?? 0;
     const warmupDay = computeWarmupDay(m.warmup_started_at, now);
     return {
@@ -271,6 +283,8 @@ export function gatherMailboxHealth(ctx: TenantContext): MailboxHealthSignal[] {
       complaints,
       bounceRate: asRate(bounces, sends),
       complaintRate: asRate(complaints, sends),
+      softBounces,
+      softBounceRate: asRate(softBounces, sends),
     };
   });
 }

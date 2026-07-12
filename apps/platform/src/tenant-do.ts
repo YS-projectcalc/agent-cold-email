@@ -17,6 +17,7 @@ import { cancelTenant, terminateTenant, type CancelResult, type TerminateResult 
 import { getInfrastructureStatus, runSetupInfrastructure } from "./engine/provisioning.js";
 import { launchCampaign, pauseAllCampaigns, pauseCampaign } from "./engine/campaigns.js";
 import { runTick } from "./engine/tick.js";
+import { withRequestIdempotency } from "./engine/idempotency.js";
 import { runDeliverabilitySweep } from "./engine/deliverability-actions.js";
 import { runPollInbox } from "./engine/reply-processor.js";
 import { getThread, listInbox, markThread, replyToThread } from "./engine/threads.js";
@@ -86,11 +87,51 @@ export class TenantDO extends DurableObject<Env> {
     this.addColumnIfMissing("mailboxes", "cap_override", "INTEGER");
     // D5 teardown/reclaim marker on mailboxes (see schema.ts).
     this.addColumnIfMissing("mailboxes", "released_at", "INTEGER");
-    // Created here, not in TENANT_DO_SCHEMA, so it runs only after the column
-    // above is guaranteed to exist (safe for DOs that predate the column).
-    this.ctx.storage.sql.exec(
-      `CREATE UNIQUE INDEX IF NOT EXISTS idx_ledger_source_send ON ledger_entries(source_send_id)`,
-    );
+    // A4 (CLASS A) — per-send retry counter (see schema.ts).
+    this.addColumnIfMissing("scheduled_sends", "attempts", "INTEGER NOT NULL DEFAULT 0");
+    // A5 (CLASS A) — last charge decline code for dunning severity (see schema.ts).
+    this.addColumnIfMissing("tenant_profile", "last_decline_code", "TEXT");
+    // Created here, not in TENANT_DO_SCHEMA, so they run only after the columns
+    // above are guaranteed to exist (safe for DOs that predate the column). Each
+    // collapses any pre-existing rows that would violate the unique key BEFORE
+    // creating it (NB3): a DO instantiated before the index — whose plain-INSERT
+    // path could have produced duplicate rows on a re-poll/reprocess — must not
+    // throw a UNIQUE-constraint error out of this constructor (that would 500
+    // every intent for the tenant, permanently).
+    this.ensureDedupeIndex("idx_ledger_source_send", "ledger_entries", ["source_send_id"], "source_send_id");
+    // B1 (CLASS B) — inbound-event idempotency anchor: an at-least-once IMAP
+    // re-poll (or a client/queue retry) can re-deliver the same reply/bounce/
+    // complaint; INSERT OR IGNORE against this unique key applies each event's
+    // side effects at most once (engine/reply-processor.ts). (type, message_id)
+    // is unique per real inbound message; NULLs are distinct in SQLite, so the
+    // few event rows without a message id never collide.
+    this.ensureDedupeIndex("idx_events_dedupe", "events", ["tenant_id", "type", "message_id"], "message_id");
+  }
+
+  /**
+   * Creates a UNIQUE INDEX after collapsing any pre-existing duplicate rows that
+   * would violate it (NB3), keeping the lowest rowid per key. Only rows whose
+   * `nullableKey` is non-NULL are collapsed — SQLite treats NULLs as DISTINCT in
+   * a unique index, so NULL-key rows never collide and must be preserved
+   * (non-usage ledger entries; events without a source Message-ID). Non-wedging:
+   * a failure is swallowed rather than thrown out of the constructor — a bricked
+   * DO (every intent 500s) is strictly worse than best-effort idempotency for one
+   * boot, and the next successful construction retries. Idempotent (IF NOT EXISTS
+   * + a no-op DELETE once deduped). Table/column names are code-literal (never
+   * tenant input), so the interpolation is safe.
+   */
+  private ensureDedupeIndex(indexName: string, table: string, keyColumns: string[], nullableKey: string): void {
+    const cols = keyColumns.join(", ");
+    try {
+      this.ctx.storage.sql.exec(
+        `DELETE FROM ${table} WHERE ${nullableKey} IS NOT NULL AND rowid NOT IN (
+           SELECT MIN(rowid) FROM ${table} WHERE ${nullableKey} IS NOT NULL GROUP BY ${cols}
+         )`,
+      );
+      this.ctx.storage.sql.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ${indexName} ON ${table}(${cols})`);
+    } catch (err) {
+      console.error(`ensureDedupeIndex(${indexName}) failed; continuing without it this boot`, err);
+    }
   }
 
   private addColumnIfMissing(table: string, column: string, definition: string): void {
@@ -158,16 +199,26 @@ export class TenantDO extends DurableObject<Env> {
 
   // --- The facade intents (bearer-token-authed, tenant-scoped) ---
 
-  async setupInfrastructure(input: SetupInfrastructureInput) {
-    return runSetupInfrastructure(this.requireContext(), input);
+  async setupInfrastructure(input: SetupInfrastructureInput, idempotencyKey?: string) {
+    const ctx = this.requireContext();
+    return withRequestIdempotency(
+      ctx,
+      idempotencyKey ? `setup_infrastructure:${idempotencyKey}` : undefined,
+      () => runSetupInfrastructure(ctx, input),
+    );
   }
 
   infrastructureStatus() {
     return getInfrastructureStatus(this.requireContext());
   }
 
-  launchCampaign(input: LaunchCampaignInput) {
-    return launchCampaign(this.requireContext(), input);
+  async launchCampaign(input: LaunchCampaignInput, idempotencyKey?: string) {
+    const ctx = this.requireContext();
+    return withRequestIdempotency(
+      ctx,
+      idempotencyKey ? `launch_campaign:${idempotencyKey}` : undefined,
+      () => launchCampaign(ctx, input),
+    );
   }
 
   campaignResults(campaignId: string) {
@@ -186,8 +237,13 @@ export class TenantDO extends DurableObject<Env> {
     return getThread(this.requireContext(), threadId);
   }
 
-  async reply(threadId: string, body: string) {
-    return replyToThread(this.requireContext(), threadId, body);
+  async reply(threadId: string, body: string, idempotencyKey?: string) {
+    const ctx = this.requireContext();
+    return withRequestIdempotency(
+      ctx,
+      idempotencyKey ? `reply:${threadId}:${idempotencyKey}` : undefined,
+      () => replyToThread(ctx, threadId, body, idempotencyKey),
+    );
   }
 
   mark(threadId: string, status: string) {

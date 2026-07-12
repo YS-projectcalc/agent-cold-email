@@ -17,6 +17,15 @@ CREATE TABLE IF NOT EXISTS tenant_profile (
   billing_state TEXT NOT NULL DEFAULT 'none',
   stripe_customer_id TEXT,
   stripe_subscription_id TEXT,
+  -- A5 (CLASS A) — the charge failure/decline code from the most recent
+  -- invoice.payment_failed Stripe event (engine/billing.ts). The dunning sweep
+  -- (admin/dunning.ts) reads it: a PERMANENT decline (lost_card, stolen_card,
+  -- pickup_card, fraudulent, do_not_honor) skips straight to the suspend stage
+  -- — retrying a permanently-declined card only burns grace cycles — while a
+  -- transient code (insufficient_funds, processing_error, generic) keeps the
+  -- count-based grace cycle. NULL = no recorded failure / unknown code (treated
+  -- as transient, the safe default).
+  last_decline_code TEXT,
   -- D5 — why the tenant is suspended (status='suspended'): 'dunning' (failed
   -- payments — reversible on billing recovery) | 'terminate' (abuse — NEVER
   -- reversed by a billing event). NULL while status='active'. Lets a
@@ -108,7 +117,13 @@ CREATE TABLE IF NOT EXISTS scheduled_sends (
   status TEXT NOT NULL DEFAULT 'pending',
   thread_id TEXT NOT NULL,
   message_id TEXT,
-  sent_at INTEGER
+  sent_at INTEGER,
+  -- A4 (CLASS A) — per-send retry counter for a RETRYABLE vendor failure on
+  -- the post-send billing step (engine/tick.ts). Each transient failure
+  -- reverts the row to 'pending' and increments this; at the cap the row is
+  -- marked status='failed' (ops-visible) instead of retried forever. A
+  -- non-retryable VendorError skips straight to 'failed'. NULL/0 on a clean send.
+  attempts INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -132,6 +147,46 @@ CREATE TABLE IF NOT EXISTS suppressions (
   PRIMARY KEY (tenant_id, email)
 );
 
+-- A2 (CLASS A) — soft-bounce STREAK tally, kept SEPARATE from the permanent
+-- 'suppressions' table because a soft bounce LAPSES (it is transient) whereas a
+-- suppression is permanent. A soft (4.x.x) bounce increments 'streak' here
+-- (tally only — the lead stays active, the sequence continues); at
+-- SOFT_BOUNCE_SUPPRESS_THRESHOLD the address is escalated into 'suppressions'
+-- (persistently unreachable = treat as hard). The streak is CUMULATIVE-UNTIL-
+-- REPLY by design: this architecture has no delivery receipt, so absence-of-
+-- bounce is unobservable and a send cannot prove the mailbox is alive — only a
+-- REPLY does (engine/reply-processor.ts deletes the row on a reply). So the
+-- streak counts soft bounces with zero engagement in between across any time
+-- span/campaign; a hard bounce or escalation clears the (now-moot) row. Keyed
+-- per (tenant, email) like suppressions.
+CREATE TABLE IF NOT EXISTS soft_bounces (
+  tenant_id TEXT NOT NULL,
+  email TEXT NOT NULL,
+  streak INTEGER NOT NULL DEFAULT 0,
+  last_ts INTEGER NOT NULL,
+  PRIMARY KEY (tenant_id, email)
+);
+
+-- B2 (CLASS B) — request-level idempotency for mutating intents
+-- (launch_campaign / setup_infrastructure / thread reply). The client (an
+-- agent, retrying a dropped response) presents an Idempotency-Key (HTTP
+-- header or MCP tool arg); the first call records the serialized response here,
+-- and a replay returns it verbatim WITHOUT re-executing — so a retry can't
+-- create a second campaign / double-provision / double-bill. Scoped inside the
+-- tenant's own DO (one tenant per DO instance), so 'key' alone is the anchor.
+-- CLAIM-THEN-EXECUTE (engine/idempotency.ts): the first call inserts a 'pending'
+-- row (response_json NULL) BEFORE running fn, then UPDATEs it to 'done' with the
+-- response; a concurrent same-key call that finds 'pending' is rejected as
+-- retryable, so an intent that awaits vendor I/O can't be run twice. Rows are
+-- evicted at write time once older than the TTL (engine/idempotency.ts) so the
+-- table can't grow unbounded per tenant.
+CREATE TABLE IF NOT EXISTS request_idempotency (
+  key TEXT PRIMARY KEY,
+  status TEXT NOT NULL DEFAULT 'done',
+  response_json TEXT,
+  created_at INTEGER NOT NULL
+);
+
 -- source_send_id is the idempotency anchor for usage entries: a
 -- reprocessed/duplicated send (same scheduled_send id) can never double-count
 -- usage (engine/tick.ts uses INSERT OR IGNORE keyed on it). The backing UNIQUE
@@ -153,6 +208,20 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
 CREATE TABLE IF NOT EXISTS thread_marks (
   thread_id TEXT PRIMARY KEY,
   status TEXT NOT NULL
+);
+
+-- B3 (CLASS B) — DURABLE manual-reply send dedupe (NB4). A manual reply's vendor
+-- idempotency key derives from stable inputs (the caller's request key, else a
+-- content hash of the body), but the sandbox vendor's send-cache is IN-MEMORY:
+-- across a DO eviction it's gone, so a retried no-request-key reply would mint a
+-- NEW messageId and double-send. This persists the stable send-key -> messageId
+-- mapping in DO SQLite so the dedupe survives a cold start — engine/threads.ts
+-- checks it BEFORE calling send(). (The request-key path is already durable via
+-- request_idempotency; this closes the no-key content-hash gap.)
+CREATE TABLE IF NOT EXISTS sent_message_keys (
+  send_key TEXT PRIMARY KEY,
+  message_id TEXT NOT NULL,
+  sent_at INTEGER NOT NULL
 );
 
 -- B1 money path: simulated (no Stripe key) checkout sessions. A REAL Stripe
