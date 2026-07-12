@@ -437,6 +437,64 @@ footer.site-footer a {
   margin-bottom: var(--space-3);
 }
 
+.calc {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+  background: var(--bg-subtle);
+  margin: var(--space-3) 0 var(--space-4);
+}
+
+.calc label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: var(--space-2);
+}
+
+.calc-row {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.calc input[type="number"] {
+  padding: 0.65em 0.9em;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.95rem;
+  width: 140px;
+}
+
+.calc button {
+  padding: 0.65em 1.3em;
+  border-radius: var(--radius);
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-weight: 600;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+.calc-result {
+  margin-top: var(--space-3);
+  font-size: 1rem;
+  min-height: 1.4em;
+}
+
+.calc-result strong {
+  font-family: var(--font-mono);
+}
+
+.calc-note {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-top: var(--space-2);
+}
+
 .sr-only {
   position: absolute;
   width: 1px;

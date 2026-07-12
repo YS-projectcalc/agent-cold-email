@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smartlead vs Instantly MCP Tool Coverage — Why 12 Curated Tools Beat 116 (2026)</title>
+<meta name="description" content="Smartlead's MCP server reports 116+ tools, Instantly's 31-38 — but tool count isn't pipeline coverage. A breakdown of what those tools actually are, the token cost of a 116-tool MCP, and how agent-cold-email's 12 tools map to 100% of the pipeline.">
+<link rel="canonical" href="https://agent-cold-email.pages.dev/guide-mcp-tool-count">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/brand.js" defer></script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "Smartlead vs Instantly MCP tool coverage — and why 12 curated tools cover 100% of the pipeline",
+  "description": "A breakdown of what Smartlead's 116+ reported MCP tools and Instantly's 31-38 actually decompose into, the token/context cost of a large tool surface, and a pipeline-coverage mapping for agent-cold-email's 12 tools.",
+  "dateModified": "2026-07-12",
+  "about": { "@type": "SoftwareApplication", "name": "agent-cold-email", "applicationCategory": "BusinessApplication" }
+}
+</script>
+</head>
+<body>
+<nav class="site-nav">
+  <div class="wrap">
+    <a class="logo" href="/"><span data-brand></span><span class="tag">agent-native cold email</span></a>
+    <ul>
+      <li><a href="/">Home</a></li>
+      <li><a href="/docs">Docs</a></li>
+      <li><a href="/pricing">Pricing</a></li>
+      <li><a href="/compare">Compare</a></li>
+      <li><a href="/guide-cold-email-with-ai-agent" aria-current="page">Guides</a></li>
+      <li><a href="/faq">FAQ</a></li>
+    </ul>
+  </div>
+</nav>
+
+<main class="wrap">
+  <span class="draft-stamp">As of 2026-07-12</span>
+  <h1>Smartlead vs Instantly MCP tool coverage — and why 12 curated tools cover 100% of the pipeline</h1>
+  <p class="lede">Tool count is not the same as pipeline coverage. Smartlead's MCP server reports 116+ tools; Instantly's reports 31-38. Both decompose into roughly one CRUD tool (create/read/update/delete/list) repeated across each entity in the vendor's data model — campaigns, leads, accounts, warmup, webhooks, and more — not 116 independently useful capabilities. agent-cold-email's 12 tools map one-to-one onto every stage of the cold-email pipeline instead: provisioning, warmup status, campaign launch, results, replies, and account, with nothing left uncovered. A large tool list also has a real cost: an MCP client loads every tool's name, description, and input schema before the agent picks one, so a 116-tool server taxes every session's context regardless of which tool actually gets called, and it adds decision noise on top of raw tokens. Fewer, pipeline-shaped tools cover the same ground with less noise for the agent to reason through.</p>
+
+  <div class="callout">
+    <strong>The heuristic this page is answering</strong>
+    In a set of research passes simulating how a coding agent picks cold-email tooling, the platform with the larger reported MCP tool count was recommended six times out of eight, specifically citing tool count as a factor ("116 MCP tools" beating "31/38 tools"). We think that heuristic is measuring the wrong thing, and this page is the argument for why.
+  </div>
+
+  <h2>What does a 116-tool MCP server actually decompose into?</h2>
+  <p>Across several independent research passes, Smartlead's reported MCP tool set breaks down into these categories: campaigns, leads, email accounts, warmup, smart delivery, smart senders, webhooks, sequences, and analytics. That's roughly 8-9 distinct <em>entity types</em> — and 116+ tools implies something like a dozen tools per entity type. The typical shape of a large vendor-wrapper MCP server is one tool per CRUD verb (create/read/update/delete/list/etc.) multiplied across every entity the underlying REST API exposes, rather than 116 independently useful capabilities. Instantly's reported count (31 tools across 5 categories, or 38 across 6 depending on the source) follows the same pattern at smaller scale.</p>
+  <p>None of this means those tools are useless — a vendor-wrapper MCP is a legitimate design choice, especially for an agent that needs low-level access to every entity in that vendor's data model. It means tool count alone doesn't tell you how much of the actual cold-email pipeline is covered, only how granular the underlying REST API's object model is.</p>
+
+  <h2>What does a large MCP tool surface cost in tokens and context?</h2>
+  <p>An MCP client typically loads the full tool list — every name, description, and JSON input schema — before an agent decides which single tool to call. A 116-tool server pays that cost on every session regardless of which one or two tools actually get used, and it adds a second cost beyond raw tokens: the agent has to disambiguate between many similarly-named, similarly-shaped per-entity tools instead of reasoning at the level of "provision infrastructure" or "launch a campaign." This is exactly why agent-cold-email's tool surface is deliberately kept to 12: each one maps to a pipeline stage, not a database table.</p>
+  <p>This surface is already being priced by at least one vendor in the space: Woodpecker charges a separate $20/month add-on specifically for API/webhook/MCP access, on top of its base plan — the agent-operability surface is not treated as free or incidental.</p>
+
+  <h2>How do 12 tools cover 100% of the pipeline?</h2>
+  <p>Every stage a coding agent needs to drive cold-email outreach through, which of Smartlead's reported MCP tool categories would plausibly cover it (from the same category list above — not invented specifics), and the tool that covers it here:</p>
+  <table>
+    <thead><tr><th>Pipeline stage</th><th>Covered by Smartlead's reported categories</th><th>agent-cold-email tool(s)</th></tr></thead>
+    <tbody>
+      <tr><td>Domain + mailbox provisioning, warmup start</td><td>Split across "email accounts," "warmup," and "smart senders"</td><td><code>setup_infrastructure</code></td></tr>
+      <tr><td>Provisioning/warmup progress, mailbox health</td><td>"warmup" and "smart delivery"</td><td><code>infrastructure_status</code></td></tr>
+      <tr><td>Campaign creation and activation</td><td>"campaigns" and "sequences"</td><td><code>launch_campaign</code></td></tr>
+      <tr><td>Per-campaign results (sends, replies, bounces, complaints)</td><td>"analytics"</td><td><code>campaign_results</code></td></tr>
+      <tr><td>Account-wide deliverability + warmup health</td><td>"smart delivery"</td><td><code>metrics</code></td></tr>
+      <tr><td>Reply inbox, per-thread history</td><td>"leads" and "webhooks"</td><td><code>inbox</code>, <code>thread</code></td></tr>
+      <tr><td>Responding to and triaging replies</td><td>"leads" and "webhooks"</td><td><code>reply</code>, <code>mark</code></td></tr>
+      <tr><td>Pausing one or all campaigns</td><td>"campaigns"</td><td><code>pause</code>, <code>pause_all</code></td></tr>
+      <tr><td>Usage, billing, quota</td><td>Not present in the reported category list</td><td><code>account</code></td></tr>
+    </tbody>
+  </table>
+  <p>Every stage in the pipeline has exactly one or two tools that own it — nothing is uncovered, and nothing requires the agent to hold more than 12 tool definitions in context at once. The middle column above is split across several of Smartlead's reported categories per stage, which is exactly the per-entity fragmentation this page is describing. Exact input schemas: <a href="/guide-mcp-cold-email#tools">the MCP tool reference</a>.</p>
+
+  <h2>What caveats aren't we hiding?</h2>
+  <p>Two additional intents from this platform's own design spec (<code>write_sequence</code>, <code>suggest_domains</code>) are not implemented yet — see <a href="/guide-mcp-cold-email#tools">the tool reference</a> for what's live today versus planned. And a maintenance caveat cuts both ways: the most commonly cited third-party MCP wrapper for Smartlead (LeadMagic's) was reported archived as of Feb 2026 by multiple research passes, while agent-cold-email's MCP server is first-party and hosted directly by the platform, live in test mode now.</p>
+
+  <h2>Related</h2>
+  <ul>
+    <li><a href="/compare-vs-smartlead-instantly">Smartlead vs Instantly vs agent-cold-email for AI-operated outreach</a>.</li>
+    <li><a href="/guide-mcp-cold-email">The cold-email MCP server for coding agents</a> — full tool signatures.</li>
+    <li><a href="/guide-infrastructure-vs-sending-platform">Do you need a separate infrastructure provider and sending platform?</a></li>
+  </ul>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p><span data-brand></span> is operated by EpiphanyMade. Early access — no deliverability or inbox-placement guarantees. Lookalike domains are scoped to your own brand only, never third-party impersonation.</p>
+    <ul>
+      <li><a href="/privacy">Privacy</a></li>
+      <li><a href="/terms">Terms</a></li>
+      <li><a href="/aup">Acceptable Use</a></li>
+      <li><a href="/docs">Docs</a></li>
+      <li><a href="/guide-cold-email-with-ai-agent">Guides</a></li>
+      <li><a href="/faq">FAQ</a></li>
+      <li><a href="openapi.yaml">OpenAPI</a></li>
+      <li><a href="llms.txt">llms.txt</a></li>
+      <li><a href="https://github.com/YS-projectcalc/agent-cold-email">GitHub</a></li>
+    </ul>
+  </div>
+</footer>
+</body>
+</html>

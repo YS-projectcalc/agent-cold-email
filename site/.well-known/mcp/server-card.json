@@ -42,7 +42,7 @@
   ],
   "guardrails": [
     "per-tenant domain and mailbox isolation",
-    "suppression list + RFC 8058 one-click unsubscribe",
+    "suppression list + List-Unsubscribe header on every applicable message (full RFC 8058 one-click unsubscribe on the roadmap)",
     "per-mailbox daily send caps",
     "full CAN-SPAM opt-out flow",
     "complaint-rate auto-pause",

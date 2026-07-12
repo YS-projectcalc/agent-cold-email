@@ -14,8 +14,9 @@
   "@type": "Article",
   "headline": "Cold email deliverability in 2026: what actually matters",
   "description": "SPF/DKIM/DMARC requirements, Gmail/Yahoo bulk-sender rules, honest warmup reality, and domain burn as a normal operating cost for cold email in 2026.",
-  "dateModified": "2026-07-09",
-  "author": { "@type": "Organization", "name": "EpiphanyMade" }
+  "dateModified": "2026-07-12",
+  "author": { "@id": "https://agent-cold-email.pages.dev/#organization", "@type": "Organization", "name": "EpiphanyMade" },
+  "publisher": { "@id": "https://agent-cold-email.pages.dev/#organization", "@type": "Organization", "name": "EpiphanyMade" }
 }
 </script>
 <script type="application/ld+json">
@@ -63,7 +64,7 @@
 </nav>
 
 <main class="wrap">
-  <span class="draft-stamp">As of 2026-07-09</span>
+  <span class="draft-stamp">As of 2026-07-12</span>
   <h1>Cold email deliverability in 2026: what actually matters</h1>
   <p class="lede">No cold-email platform, including this one, can guarantee inbox placement. What follows is the mechanical, verifiable part: the authentication requirements that gate whether a message is even evaluated, the bulk-sender rules Gmail and Yahoo actually publish, and an honest account of what warmup does and doesn't do.</p>
 
@@ -85,8 +86,8 @@
   </ul>
   <p>Even senders below the 5,000/day bulk threshold are, in practice, judged by the same underlying reputation signals — the published thresholds describe where enforcement is most mechanical, not where the underlying signals stop mattering.</p>
 
-  <h2 id="warmup">Warmup: what it is, and what it isn't</h2>
-  <p>Warmup is the practice of gradually ramping a new mailbox's sending volume — typically from a handful of messages per day in week one to 25-40/day by week four — while a pool of other inboxes opens, replies to, and rescues warmup messages from spam. The goal is building genuine domain and IP sending history before real cold outreach volume hits it.</p>
+  <h2 id="warmup">Warmup timeline: what it is, and what it isn't</h2>
+  <p>Warmup is the practice of gradually ramping a new mailbox's sending volume over roughly a 3-4 week timeline — typically from a handful of messages per day in week one to 25-40/day by week four — while a pool of other inboxes opens, replies to, and rescues warmup messages from spam. The goal is building genuine domain and IP sending history before real cold outreach volume hits it. Your first send happens on day one of this ramp, not after it — see <a href="/guide-domains-inboxes-warmup-compliance#warmup-timeline">the warmup timeline before your first send, and a domains/inboxes-per-volume calculator</a>.</p>
   <p><strong>The honest limitations, stated plainly:</strong></p>
   <ul>
     <li><strong>Public warmup-pool signal is discounted.</strong> Gmail and Microsoft can detect the closed-loop graph structure of a warmup pool and the datacenter IPs many pool participants run on — a warmup dashboard showing rising "opens" does not mean Gmail's own systems see the same signal as genuine.</li>
@@ -106,6 +107,7 @@
   <h2>Related</h2>
   <ul>
     <li><a href="/guide-cold-email-with-ai-agent">How to run cold email with your AI coding agent</a> — where these guardrails plug into the setup flow.</li>
+    <li><a href="/guide-domains-inboxes-warmup-compliance">Domains/inboxes needed per volume, warmup timeline, and CAN-SPAM/GDPR compliance</a>.</li>
     <li><a href="/compare-vs-diy">Agent-run platform vs. hand-assembling the vendors yourself</a>.</li>
     <li><a href="/faq">FAQ</a> — including "does this guarantee deliverability?" (no).</li>
   </ul>

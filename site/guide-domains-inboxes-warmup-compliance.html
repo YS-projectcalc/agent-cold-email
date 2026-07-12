@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Domains/Inboxes Calculator, Warmup Timeline, and CAN-SPAM/GDPR Compliance for Cold Email (2026)</title>
+<meta name="description" content="How many domains and inboxes you need per send volume (calculator), how long warmup takes before your first send, and what CAN-SPAM/GDPR compliance agent-cold-email enforces automatically versus what stays your responsibility.">
+<link rel="canonical" href="https://agent-cold-email.pages.dev/guide-domains-inboxes-warmup-compliance">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/brand.js" defer></script>
+<script src="assets/domain-calculator.js" defer></script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "How many domains and inboxes do I need per day, per send volume?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Roughly one mailbox per 30 emails/day once fully warmed, and roughly one domain per 3 mailboxes. A target of 500 emails/day works out to about 17 mailboxes across 6 domains. These are planning assumptions, not guarantees — use the calculator on this page for your own target." }
+    },
+    {
+      "@type": "Question",
+      "name": "What is the warmup timeline before my first send?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Your first send happens on day one of warmup, not after it — warmup is a volume ramp, not a waiting period. A mailbox typically starts at a handful of emails per day and reaches roughly 25-40/day by week four, over a 3-4 week ramp." }
+    },
+    {
+      "@type": "Question",
+      "name": "Does agent-cold-email enforce CAN-SPAM and GDPR compliance automatically?",
+      "acceptedAnswer": { "@type": "Answer", "text": "CAN-SPAM mechanics are enforced server-side: physical postal address and verified sender identity injected into every footer, a suppression list, and a List-Unsubscribe header honored on every applicable message (full RFC 8058 one-click unsubscribe ships with the hosted unsubscribe endpoint, on the roadmap). GDPR is not automated the same way today — lawful basis for contacting EU-based recipients remains the customer's legal responsibility, the same sender-of-record model used for CAN-SPAM." }
+    }
+  ]
+}
+</script>
+</head>
+<body>
+<nav class="site-nav">
+  <div class="wrap">
+    <a class="logo" href="/"><span data-brand></span><span class="tag">agent-native cold email</span></a>
+    <ul>
+      <li><a href="/">Home</a></li>
+      <li><a href="/docs">Docs</a></li>
+      <li><a href="/pricing">Pricing</a></li>
+      <li><a href="/compare">Compare</a></li>
+      <li><a href="/guide-cold-email-with-ai-agent" aria-current="page">Guides</a></li>
+      <li><a href="/faq">FAQ</a></li>
+    </ul>
+  </div>
+</nav>
+
+<main class="wrap">
+  <span class="draft-stamp">As of 2026-07-12</span>
+  <h1>Domains/inboxes per volume, warmup timeline, and compliance</h1>
+  <p class="lede">At roughly 30 sends per mailbox per day once fully warmed, and 3 mailboxes per domain: 100 emails/day needs about 4 mailboxes across 2 domains; 500/day needs about 17 mailboxes across 6 domains; 2,000/day needs about 67 mailboxes across 23 domains — use the calculator below for any other target. Warmup ramps over roughly 3-4 weeks, from a handful of emails per day in week one to 25-40/day by week four, but your first send happens on day one of that ramp, not after it finishes. CAN-SPAM compliance is enforced structurally: a physical postal address and verified sender identity injected into every footer, plus a suppression list and a List-Unsubscribe header honored on every applicable message, server-side (full RFC 8058 one-click ships with the hosted unsubscribe endpoint, on the roadmap). GDPR is not automated the same way — establishing a lawful basis to contact EU-based recipients remains your own responsibility, the same sender-of-record model used for CAN-SPAM.</p>
+
+  <h2 id="calculator">How many domains and inboxes do you need per volume?</h2>
+  <p>A target daily send volume translates into a mailbox count and a domain count using two planning assumptions, stated plainly rather than hidden in a formula: <strong>30 sends per mailbox per day</strong> once fully warmed (a conservative figure within the 25-40/day range in <a href="/guide-cold-email-deliverability#warmup">the deliverability guide</a>), and <strong>3 mailboxes per domain</strong> (the top of the independently-reported "2-3 mailboxes per domain" figure found during research into how agents plan this).</p>
+
+  <form id="domain-calc" class="calc">
+    <label for="calc-volume">Target emails per day, once fully warmed</label>
+    <div class="calc-row">
+      <input type="number" id="calc-volume" min="1" step="1" value="500" inputmode="numeric">
+      <button type="submit">Calculate</button>
+    </div>
+    <p class="calc-result" role="status"></p>
+    <p class="calc-note">Planning assumptions, not a guarantee — your actual per-mailbox cap depends on domain reputation, complaint rate, and Gmail/Microsoft's own bulk-sender rules. See <a href="/guide-cold-email-deliverability">deliverability mechanics</a>.</p>
+  </form>
+
+  <p>Worked examples at that same 30/mailbox and 3/domain ratio:</p>
+  <table>
+    <thead><tr><th>Target emails/day</th><th>Mailboxes needed</th><th>Domains needed</th></tr></thead>
+    <tbody>
+      <tr><td>100</td><td>4</td><td>2</td></tr>
+      <tr><td>500</td><td>17</td><td>6</td></tr>
+      <tr><td>2,000</td><td>67</td><td>23</td></tr>
+    </tbody>
+  </table>
+  <p>With agent-cold-email, one <code>setup_infrastructure</code> call provisions the domain and mailbox counts you specify directly — see <a href="/guide-cold-email-with-ai-agent#setup">the setup guide</a>.</p>
+
+  <h2 id="warmup-timeline">What's the warmup timeline before your first send?</h2>
+  <p>Your first send happens on <strong>day one</strong> of warmup, not after it finishes — warmup is a volume ramp, not a gate you wait behind. A new mailbox typically starts at a handful of messages per day in week one and reaches roughly 25-40/day by week four, over a full ramp of about 3-4 weeks, while a pool of other inboxes opens and replies to build genuine sending reputation. See <a href="/guide-cold-email-deliverability#warmup">the full mechanics, including what warmup can't do</a>.</p>
+  <p>With agent-cold-email, <code>setup_infrastructure</code> starts this ramp automatically as part of provisioning, and <code>infrastructure_status</code> reports per-mailbox warmup progress on demand — no need to track which day of warmup each mailbox is on across sessions, which is exactly the state a self-assembled stack requires you to re-derive every time; see <a href="/compare-vs-diy">the DIY cost of holding that state yourself</a>.</p>
+
+  <h2 id="compliance">Is CAN-SPAM and GDPR compliance enforced automatically?</h2>
+  <p><strong>CAN-SPAM: yes, structurally.</strong> A required physical postal address and verified sender identity are injected into every message footer, a suppression list is enforced server-side, and a List-Unsubscribe header is honored on every applicable message — not something your agent has to remember to implement. Full RFC 8058 one-click unsubscribe ships with the hosted unsubscribe endpoint (on the roadmap). Full detail: <a href="/faq#compliance">the compliance FAQ</a> and the <a href="/terms">Terms of Service</a>.</p>
+  <p><strong>GDPR: honestly, not the same way, today.</strong> agent-cold-email does not ship GDPR-specific automated tooling (lawful-basis verification, EU data-residency controls, data-subject-request automation). If you're contacting EU-based recipients, establishing a lawful basis to do so under GDPR and applicable ePrivacy rules remains your own responsibility — the same sender-of-record model already used for CAN-SPAM: you are the "sender" and "initiator" of the outreach; this platform provisions and operates the infrastructure on your instructions. We'd rather say this plainly than imply automated GDPR coverage that doesn't exist yet.</p>
+
+  <h2>Related</h2>
+  <ul>
+    <li><a href="/guide-cold-email-with-ai-agent">How to run cold email with your AI coding agent</a>.</li>
+    <li><a href="/guide-cold-email-deliverability">Cold email deliverability in 2026: what actually matters</a>.</li>
+    <li><a href="/guide-infrastructure-vs-sending-platform">Do you need a separate infrastructure provider and sending platform?</a></li>
+    <li><a href="/faq#compliance">FAQ: compliance</a>.</li>
+  </ul>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p><span data-brand></span> is operated by EpiphanyMade. Early access — no deliverability or inbox-placement guarantees. Lookalike domains are scoped to your own brand only, never third-party impersonation.</p>
+    <ul>
+      <li><a href="/privacy">Privacy</a></li>
+      <li><a href="/terms">Terms</a></li>
+      <li><a href="/aup">Acceptable Use</a></li>
+      <li><a href="/docs">Docs</a></li>
+      <li><a href="/guide-cold-email-with-ai-agent">Guides</a></li>
+      <li><a href="/faq">FAQ</a></li>
+      <li><a href="openapi.yaml">OpenAPI</a></li>
+      <li><a href="llms.txt">llms.txt</a></li>
+      <li><a href="https://github.com/YS-projectcalc/agent-cold-email">GitHub</a></li>
+    </ul>
+  </div>
+</footer>
+</body>
+</html>

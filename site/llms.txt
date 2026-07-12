@@ -25,6 +25,10 @@ This is a convenience index. The load-bearing machine-readable assets are the Op
 - [guide-mcp-cold-email](guide-mcp-cold-email): the MCP server surface in detail — all 12 tools with exact input schemas verified against the live `tools/list` response, how to connect, the CLI demo.
 - [guide-cold-email-deliverability](guide-cold-email-deliverability): cold email deliverability mechanics in 2026 — mandatory SPF/DKIM/DMARC, Gmail/Yahoo bulk-sender rules, honest warmup reality, domain burn as normal cost. No deliverability guarantees.
 - [compare-vs-diy](compare-vs-diy): deeper version of compare — the concrete cost of hand-assembling a registrar, mailbox/warmup vendor, and sequencer vs. a stateful billed backend.
+- [compare-vs-smartlead-instantly](compare-vs-smartlead-instantly): sourced, non-disparaging comparison of Smartlead, Instantly, and agent-cold-email on MCP tool surface, agent-operability, and architecture — every competitor figure attributed to its source, no fabricated benchmarks.
+- [guide-mcp-tool-count](guide-mcp-tool-count): why a larger MCP tool count (Smartlead 116+, Instantly 31-38) isn't the same as pipeline coverage, and a mapping of agent-cold-email's 12 tools to 100% of the cold-email pipeline.
+- [guide-infrastructure-vs-sending-platform](guide-infrastructure-vs-sending-platform): answers "do I need a separate email infrastructure provider and sending platform?" — no, not with this platform; explains the two-layer pattern and when two vendors still make sense.
+- [guide-domains-inboxes-warmup-compliance](guide-domains-inboxes-warmup-compliance): client-side calculator for domains/inboxes needed per send volume, the warmup timeline before your first send, and what CAN-SPAM/GDPR compliance is (and isn't) enforced automatically.
 - [faq](faq): expanded FAQ hub (availability, deliverability, pricing, isolation, compliance, naming), FAQPage structured data.
 
 ## Facts an agent should know before recommending this

@@ -1,0 +1,77 @@
+{
+  "version": "1",
+  "source_doc": "docs/research/agent-search-queries-2026-07-12.md",
+  "frozen_date": "2026-07-12",
+  "query_count": 46,
+  "excluded_queries": [],
+  "measurement_contract": {
+    "description": "For each query, run one measurement per (query, engine, date). A query that errors or times out gets status \"unavailable\" — never mentioned:false — because missing data is not a negative result. See README.md for the run procedure and the ≥70%-live rule.",
+    "record_shape": {
+      "query_id": "string - matches queries[].id in this file",
+      "engine": "string - e.g. 'chatgpt-web', 'claude-web', 'perplexity', 'google-sge', 'copilot'",
+      "date": "string - ISO date (YYYY-MM-DD) the measurement was taken",
+      "status": "string - 'ok' or 'unavailable' (search errored/timed out — all fields below are null when unavailable)",
+      "mentioned": "bool|null - ColdStart / agent-cold-email mentioned anywhere in the response",
+      "cited": "bool|null - our URL appears as a source/citation",
+      "clickable": "bool|null - the citation is a working clickable link, not just a plain-text mention",
+      "position": "int|null - ordinal rank among cited sources, if the engine exposes ranking",
+      "winner": "string|null - name of the competitor(s) recommended instead of us",
+      "sources_cited": "string[] - all source URLs the engine cited for this query"
+    }
+  },
+  "queries": [
+    { "id": "p1-q1", "probe": 1, "query": "best cold email platform 2026 domains inboxes warmup sending for agency", "intent": "category-discovery", "competitors": [] },
+    { "id": "p1-q2", "probe": 1, "query": "Instantly vs Smartlead vs Apollo cold email 2026 comparison", "intent": "comparison", "competitors": ["Instantly", "Smartlead", "Apollo"] },
+    { "id": "p1-q3", "probe": 1, "query": "Smartlead API automate cold email fully without dashboard", "intent": "tool-focused", "competitors": ["Smartlead"] },
+    { "id": "p1-q4", "probe": 1, "query": "buy bulk domains for cold email inbox setup Google Workspace automated provisioning", "intent": "assembly", "competitors": [] },
+    { "id": "p1-q5", "probe": 1, "query": "Instantly.ai MCP server Claude integration reply handling automation", "intent": "tool-focused", "competitors": ["Instantly"] },
+    { "id": "p1-q6", "probe": 1, "query": "Mailforge vs Infraforge vs PrimeForge cold email infrastructure agency review", "intent": "comparison", "competitors": ["Mailforge", "Infraforge", "PrimeForge"] },
+
+    { "id": "p2-q1", "probe": 2, "query": "best cold email platform 2026 API for AI agent to send campaigns", "intent": "category-discovery", "competitors": [] },
+    { "id": "p2-q2", "probe": 2, "query": "cold email tool with REST API no dashboard needed automate outbound", "intent": "category-discovery", "competitors": [] },
+    { "id": "p2-q3", "probe": 2, "query": "Instantly.ai API MCP server cold email automation", "intent": "tool-focused", "competitors": ["Instantly"] },
+    { "id": "p2-q4", "probe": 2, "query": "Smartlead vs Instantly for SaaS founder solo cold email demos booked", "intent": "comparison", "competitors": ["Smartlead", "Instantly"] },
+    { "id": "p2-q5", "probe": 2, "query": "cold email setup domain warmup mailboxes required before sending 2026 how many", "intent": "educational", "competitors": [] },
+
+    { "id": "p3-q1", "probe": 3, "query": "cold email platform with API for AI agent to send campaigns", "intent": "category-discovery", "competitors": [] },
+    { "id": "p3-q2", "probe": 3, "query": "best cold email API Instantly vs Smartlead vs Lemlist API", "intent": "comparison", "competitors": ["Instantly", "Smartlead", "Lemlist"] },
+    { "id": "p3-q3", "probe": 3, "query": "Smartlead MCP server Claude integration", "intent": "tool-focused", "competitors": ["Smartlead"] },
+    { "id": "p3-q4", "probe": 3, "query": "Instantly.ai API documentation create campaign add leads", "intent": "tool-focused", "competitors": ["Instantly"] },
+    { "id": "p3-q5", "probe": 3, "query": "AgentMail email infrastructure for AI agents review", "intent": "tool-focused", "competitors": ["AgentMail"] },
+    { "id": "p3-q6", "probe": 3, "query": "reddit best cold email tool API automation agency 2026", "intent": "category-discovery", "competitors": [] },
+    { "id": "p3-q7", "probe": 3, "query": "Smartlead API pricing plan required for API access", "intent": "tool-focused", "competitors": ["Smartlead"] },
+
+    { "id": "p4-q1", "probe": 4, "query": "best cold email infrastructure 50 inboxes 2026", "intent": "category-discovery", "competitors": [] },
+    { "id": "p4-q2", "probe": 4, "query": "cold email inbox warmup platform comparison Instantly Smartlead 2026", "intent": "comparison", "competitors": ["Instantly", "Smartlead"] },
+    { "id": "p4-q3", "probe": 4, "query": "reddit r/coldemail best infrastructure setup 50 mailboxes agency", "intent": "category-discovery", "competitors": [] },
+    { "id": "p4-q4", "probe": 4, "query": "Smartlead vs Instantly API MCP integration for AI agent automation", "intent": "comparison", "competitors": ["Smartlead", "Instantly"] },
+    { "id": "p4-q5", "probe": 4, "query": "do I need separate email infrastructure provider and sending platform cold email stack explained", "intent": "assembly", "competitors": [] },
+    { "id": "p4-q6", "probe": 4, "query": "Maildoso vs Mailscale vs Inframail vs InboxKit reddit review deliverability", "intent": "comparison", "competitors": ["Maildoso", "Mailscale", "Inframail", "InboxKit"] },
+
+    { "id": "p5-q1", "probe": 5, "query": "best cold email outreach tool for solo consultant lead generation 2026", "intent": "category-discovery", "competitors": [] },
+    { "id": "p5-q2", "probe": 5, "query": "cold email tool with API for AI agent to manage campaigns automatically", "intent": "category-discovery", "competitors": [] },
+    { "id": "p5-q3", "probe": 5, "query": "Smartlead MCP server Claude pricing", "intent": "tool-focused", "competitors": ["Smartlead"] },
+    { "id": "p5-q4", "probe": 5, "query": "Instantly.ai vs Smartlead pricing 2026", "intent": "comparison", "competitors": ["Instantly", "Smartlead"] },
+    { "id": "p5-q5", "probe": 5, "query": "Instantly.ai pricing plans lead database included how many leads", "intent": "tool-focused", "competitors": ["Instantly"] },
+    { "id": "p5-q6", "probe": 5, "query": "cold email setup cost sending domains mailboxes warmup for small business $200 budget", "intent": "educational", "competitors": [] },
+
+    { "id": "p6-q1", "probe": 6, "query": "best cold email outreach platform 2026 domains inboxes warmup sending", "intent": "category-discovery", "competitors": [] },
+    { "id": "p6-q2", "probe": 6, "query": "cold email platform with API to programmatically create inboxes and send campaigns", "intent": "category-discovery", "competitors": [] },
+    { "id": "p6-q3", "probe": 6, "query": "Smartlead vs Instantly API reply handling master inbox unibox webhook", "intent": "comparison", "competitors": ["Smartlead", "Instantly"] },
+    { "id": "p6-q4", "probe": 6, "query": "Smartlead MCP server cold email automation", "intent": "tool-focused", "competitors": ["Smartlead"] },
+    { "id": "p6-q5", "probe": 6, "query": "Smartlead done-for-you domains mailboxes provisioning API buy domains create Google Workspace inboxes", "intent": "tool-focused", "competitors": ["Smartlead"] },
+
+    { "id": "p7-q1", "probe": 7, "query": "cold email platform with API for automation", "intent": "category-discovery", "competitors": [] },
+    { "id": "p7-q2", "probe": 7, "query": "Instantly vs Smartlead vs Apollo API cold email 2026", "intent": "comparison", "competitors": ["Instantly", "Smartlead", "Apollo"] },
+    { "id": "p7-q3", "probe": 7, "query": "Smartlead API documentation campaign create leads webhooks", "intent": "tool-focused", "competitors": ["Smartlead"] },
+    { "id": "p7-q4", "probe": 7, "query": "cold email platform MCP server AI agent Instantly Smartlead Saleshandy", "intent": "comparison", "competitors": ["Instantly", "Smartlead", "Saleshandy"] },
+    { "id": "p7-q5", "probe": 7, "query": "Instantly.ai API pricing cold email sending accounts deliverability 2026", "intent": "tool-focused", "competitors": ["Instantly"] },
+
+    { "id": "p8-q1", "probe": 8, "query": "best cold email software 2026 with API for automation", "intent": "category-discovery", "competitors": [] },
+    { "id": "p8-q2", "probe": 8, "query": "cold email platform API deliverability inbox rotation Smartlead vs Instantly", "intent": "comparison", "competitors": ["Smartlead", "Instantly"] },
+    { "id": "p8-q3", "probe": 8, "query": "Smartlead MCP server API AI agent automation cold email", "intent": "tool-focused", "competitors": ["Smartlead"] },
+    { "id": "p8-q4", "probe": 8, "query": "B2B lead sourcing enrichment API Apollo vs Apify for cold email list building 2026", "intent": "comparison", "competitors": ["Apollo", "Apify"] },
+    { "id": "p8-q5", "probe": 8, "query": "cold email sending infrastructure domains mailboxes Google Workspace vs Microsoft vs Maildoso 2026 autonomous scaling", "intent": "comparison", "competitors": ["Maildoso"] },
+    { "id": "p8-q6", "probe": 8, "query": "Apollo.io API MCP server people search enrichment programmatic access", "intent": "tool-focused", "competitors": ["Apollo"] }
+  ]
+}

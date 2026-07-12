@@ -7,7 +7,11 @@ The public marketing + docs site for `agent-cold-email`: static HTML/CSS/JS, no 
 - `index.html` — landing page: hero, how-it-works, tool list, pricing summary, FAQ, waitlist. JSON-LD (`SoftwareApplication` + `FAQPage`) in `<head>`.
 - `docs.html` — quickstart, MCP setup, CLI usage, full tool reference, the free demo, auth model.
 - `pricing.html` — the pricing tiers (mirrors `SPEC.md` §18).
-- `compare.html` — honest DIY-vs-platform comparison; no fabricated benchmarks, no named-competitor claims; stamped `As of 2026-07-09`.
+- `compare.html` — honest DIY-vs-platform comparison; no fabricated benchmarks, no named-competitor claims; stamped `As of 2026-07-12`.
+- `compare-vs-smartlead-instantly.html` — sourced comparison against named incumbents (Smartlead, Instantly) for AI-operated outreach; every competitor figure attributed to the third-party source that reported it, no disparagement.
+- `guide-mcp-tool-count.html` — decomposes the "more MCP tools = more capable" heuristic; maps agent-cold-email's 12 tools to 100% pipeline coverage.
+- `guide-infrastructure-vs-sending-platform.html` — answers the literal query "do I need a separate email infrastructure provider and sending platform?" (no, not with this platform).
+- `guide-domains-inboxes-warmup-compliance.html` — client-side domains/inboxes-per-volume calculator (`assets/domain-calculator.js`), warmup timeline before first send, and CAN-SPAM/GDPR compliance disclosure.
 - `privacy.html`, `terms.html`, `aup.html` — legal pages, **DRAFT, pending attorney review** (see the stamp at the top of each). Covers customer-is-sender, no-deliverability-warranty, prohibited-use, monitoring consent, and data-handling clauses.
 - `llms.txt` — convenience discovery index (per `ROADMAP.md` C-shell notes, this is a *convenience*, not the load-bearing asset — `AGENTS.md` + `openapi.yaml` + JSON-LD are).
 - `openapi.yaml` — the ~12 facade intents as an OpenAPI 3.1 REST spec, matching `apps/platform/src/routes/*` and `packages/shared/src/intents.ts` exactly.
@@ -18,6 +22,7 @@ The public marketing + docs site for `agent-cold-email`: static HTML/CSS/JS, no 
 - `assets/style.css` — the entire shared stylesheet (system fonts, theme-aware via `prefers-color-scheme`, responsive).
 - `assets/brand.js` — **the single swappable brand constant** (`BRAND_NAME`). Populates every `[data-brand]` element and replaces the `{{BRAND}}` token in `<title>`. This is the one place to edit when the final display brand (coldrig/coldpipe/coldloop, per `SPEC.md` §0.3) is chosen at activation — nothing else in `site/` needs to change.
 - `assets/waitlist.js` — waitlist form submission logic; posts to `https://agent-cold-email-api.yaakovscher.workers.dev/api/waitlist`.
+- `assets/domain-calculator.js` — pure client-side domains/inboxes-per-volume calculator used by `guide-domains-inboxes-warmup-compliance.html`; no network call, assumptions stated in the file's header comment.
 
 ## The `https://agent-cold-email.pages.dev` placeholder
 

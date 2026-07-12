@@ -1,0 +1,15 @@
+{
+  "name": "a5-engine-imap-spike",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "ROADMAP A5 spike — validate the EmailPort send/reply/bounce/thread/unsub contract against a real local SMTP+IMAP server (GreenMail) before the VendorPort freeze. Isolated from the root workspace on purpose (spikes/ is not in the workspace globs), so it never touches the root lockfile or the 130/130 suite.",
+  "scripts": {
+    "validate": "node validate.mjs"
+  },
+  "dependencies": {
+    "imapflow": "^1.0.191",
+    "mailparser": "^3.7.4",
+    "nodemailer": "^7.0.9"
+  }
+}
