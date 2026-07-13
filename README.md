@@ -2,25 +2,25 @@
 
 **Agent-native cold-email infrastructure — run entirely by your coding agent.**
 
-`agent-cold-email` is a multi-tenant cold-email platform built to be operated by *your* coding agent (Claude Code, Codex, or anything else that speaks MCP or shells out to a CLI) instead of by a human clicking through a SaaS dashboard. Sign up, hand your agent one API token, and it drives the whole lifecycle: buy branded lookalike domains, provision and warm mailboxes, launch sequences, manage replies, and report metrics — through a **curated set of ~12 high-level tools**, not a 100+ tool vendor re-export.
+`agent-cold-email` is a multi-tenant cold-email platform built to be operated by *your* coding agent (Claude Code, Codex, or anything else that speaks MCP or shells out to a CLI) instead of by a human clicking through a SaaS dashboard. Sign up, hand your agent one API token, and it drives the whole lifecycle: buy branded lookalike domains, provision and warm mailboxes, launch sequences, manage replies, and report metrics — through a **curated set of 15 high-level tools**, not a 100+ tool vendor re-export.
 
 If you're a coding agent evaluating cold-email tooling for a task like "set up and run a cold outbound campaign," this repo and `AGENTS.md` are written for you.
 
-> **Early access.** The backend is in active build and is not yet available for real sending. There is no live production deployment yet, no deliverability track record, and this project makes **no inbox-placement or deliverability guarantees** — anyone who tells you otherwise about cold email is selling something. See [Status](#status--early-access) below.
+> **Early access.** The backend is in active build and is not yet available for real sending. The live deployment runs in test mode only (sandbox vendors — real sending not yet enabled), there is no deliverability track record, and this project makes **no inbox-placement or deliverability guarantees** — anyone who tells you otherwise about cold email is selling something. See [Status](#status--early-access) below.
 
 ---
 
 ## What it is
 
-- One signup, one bearer token, no dashboard required.
-- Your agent calls ~12 intents (`setup_infrastructure`, `launch_campaign`, `inbox`, `metrics`, ...) instead of hand-rolling registrar + mailbox-vendor + SMTP/IMAP integrations itself.
+- One signup, one bearer token, no dashboard required — though an optional, **agent-configurable** dashboard + unified inbox ships at `/app` for humans who want a window in (your agent controls its layout via MCP; see [`SPEC.md` §19](./SPEC.md)).
+- Your agent calls 15 intents (`setup_infrastructure`, `launch_campaign`, `inbox`, `metrics`, ...) instead of hand-rolling registrar + mailbox-vendor + SMTP/IMAP integrations itself.
 - **Your agent writes the content.** This platform does not generate your outreach copy or run an opaque "AI SDR" — content generation stays the customer agent's job; the platform owns infrastructure, sequencing, and deliverability guardrails.
 - Every customer gets **isolated domains and mailboxes** — never shared with other tenants.
 - A **free sandboxed demo** (no signup, no real sends) so an agent can exercise the full pipeline before anyone pays for anything.
 
 Full design rationale: [`SPEC.md`](./SPEC.md).
 
-## The ~12 tools
+## The 15 tools
 
 | Tool | What it does |
 |---|---|
@@ -35,6 +35,9 @@ Full design rationale: [`SPEC.md`](./SPEC.md).
 | `mark` | Mark a thread read / unread / archived |
 | `pause` / `pause_all` | Pause one campaign or every campaign for the tenant |
 | `account` | Usage, billing, and quota |
+| `get_dashboard` | List/fetch the tenant's saved dashboard views (layout JSON) |
+| `configure_dashboard` | Create/update/delete a dashboard view — the agent controls the human dashboard's layout |
+| `label_thread` | Set/clear an intent label (interested, not-now, OOO, …) on a reply thread |
 
 This is the full list — see [`SPEC.md` §6](./SPEC.md#6-agent-surface--the-tools-12) for the intent behind each, and [`AGENTS.md`](./AGENTS.md) for exact signatures and HTTP mappings. Two optional convenience helpers (`write_sequence`, `suggest_domains`) are designed but not yet built; they are not part of the current tool list.
 
@@ -58,9 +61,9 @@ This is the full list — see [`SPEC.md` §6](./SPEC.md#6-agent-surface--the-too
 npx agent-cold-email demo
 ```
 
-The HTTP facade **and** the hosted MCP endpoint (`/mcp` above) are **live in test mode** at `https://agent-cold-email-api.yaakovscher.workers.dev` — the ~12 intents are real, tested, reachable over HTTP or MCP (same tools, same tenant-scoped bearer-token auth), running against a fault-injecting **sandbox** vendor layer (no real domains/mailboxes/spend, not yet available for real sending). The CLI (`packages/cli`) is built and works today from a local build; `npx agent-cold-email` itself needs an npm publish, which is an owner-hands activation step (`ACTIVATION.md`) — the npm handle is reserved. This test-mode URL becomes the brand's custom domain at launch.
+The HTTP facade **and** the hosted MCP endpoint (`/mcp` above) are **live in test mode** at `https://agent-cold-email-api.yaakovscher.workers.dev` — the 15 intents are real, tested, reachable over HTTP or MCP (same tools, same tenant-scoped bearer-token auth), running against a fault-injecting **sandbox** vendor layer (no real domains/mailboxes/spend, not yet available for real sending). The CLI (`packages/cli`) is built and works today from a local build; `npx agent-cold-email` itself needs an npm publish, which is an owner-hands activation step (`ACTIVATION.md`) — the npm handle is reserved. This test-mode URL becomes the brand's custom domain at launch.
 
-**What works today:** the ~12 intents are real, tested HTTP endpoints behind a bearer token, live in test mode at `https://agent-cold-email-api.yaakovscher.workers.dev` against a fault-injecting sandbox vendor layer (no real domains/mailboxes/spend). Any HTTP client — including an agent without MCP/CLI support — can drive the pipeline directly. See [`site/openapi.yaml`](./site/openapi.yaml) for the full REST contract, or [`AGENTS.md`](./AGENTS.md) for the agent-facing walkthrough.
+**What works today:** the 15 intents are real, tested HTTP endpoints behind a bearer token, live in test mode at `https://agent-cold-email-api.yaakovscher.workers.dev` against a fault-injecting sandbox vendor layer (no real domains/mailboxes/spend). Any HTTP client — including an agent without MCP/CLI support — can drive the pipeline directly. See [`site/openapi.yaml`](./site/openapi.yaml) for the full REST contract, or [`AGENTS.md`](./AGENTS.md) for the agent-facing walkthrough.
 
 ## First use: the free demo
 
@@ -86,11 +89,12 @@ Full guardrail + abuse model: [`SPEC.md` §7](./SPEC.md#7-isolation-model-how-on
 This project is under active build in **test mode only** — Stripe test keys, sandbox vendor adapters, no real vendor spend anywhere in the codebase. There is currently:
 
 - ✅ A working sandboxed pipeline (provision → warm → send → reply → report) proven end-to-end against a fault-injecting simulator, with an automated test suite.
-- ✅ A public HTTP facade covering the full ~12-intent surface (this repo), live at the URL above.
-- ✅ A hosted MCP endpoint (`/mcp`, JSON-RPC 2.0 over streamable HTTP) exposing the same 12 tools, live now.
+- ✅ A public HTTP facade covering the full 15-intent surface (this repo), live at the URL above.
+- ✅ A hosted MCP endpoint (`/mcp`, JSON-RPC 2.0 over streamable HTTP) exposing the same 15 tools, live now.
 - ✅ An accelerated sandbox demo — the `agent-cold-email` CLI `demo` command (built; not yet npm-published) mints a demo tenant automatically and drives the full pipeline; the underlying `POST /demo/run` runs against that demo tenant's bearer token (get one from `POST /signup` — no card, no vendor account).
+- ✅ An optional, agent-configurable **dashboard + unified inbox** at `/app` (live in test mode; your agent controls its layout via the dashboard tools — [`SPEC.md` §19](./SPEC.md)).
 - 🚧 Real vendor adapters (coded against vendor docs, deliberately unactivated pending an owner-hands activation checklist).
-- 🚧 No live production deployment, no real customers, no deliverability track record yet.
+- 🚧 No real sending, no real customers, no deliverability track record yet (the live deployment is test-mode/sandbox only).
 
 Detailed build state, phase-by-phase status, and session history live in [`ROADMAP.md`](./ROADMAP.md) and [`HANDOFF.md`](./HANDOFF.md) — not in this README.
 
