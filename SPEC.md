@@ -277,6 +277,121 @@ Prior art note: `sales-smartlead` and `open-salesblink/skill` already exist — 
 
 ---
 
+## 19. Dashboard + Unified Inbox — the optional human surface (spec locked 2026-07-12; adversarial verdict SHIP, two rounds — record: `docs/adversarial/dashboard-spec-review-2026-07-12.md`)
+
+> Grounded in: priorart Launchpad `agent-controlled-dashboard-unified-inbox-coldrig-2026-07-12.md`, repo map (2026-07-12), premium-b2b design archive 2026-06-04, adversarial verdict r1.
+
+## 19.0 Positioning — the dashboard is optional, and the agent runs it
+
+Product thesis stays agent-first ("no dashboard required"). This surface is the **optional human window** onto an agent-run system; its differentiator is that it is **AI-native**: the customer's agent can configure it — layout, visible widgets, saved views, notes, thread triage — via the same MCP/API surface it already uses. Agent-layout-control is in scope by **founder directive 2026-07-12** (supersedes the YAGNI objection; recorded here and in ROADMAP). [F8]
+
+**Parity law (hard invariant):** every dashboard capability remains available via MCP/CLI; every dashboard mutation calls the same TenantDO methods MCP calls. Dashboard-originated state is only (a) views/layout, (b) thread labels — both agent-readable/writable via MCP. The dashboard may never become the required path for anything.
+
+## 19.1 Architecture
+
+- **App**: `apps/dashboard/` — Vite + React + React Router SPA (pattern: cloudflare/agentic-inbox, Mail-0/Zero `apps/mail`). Gets its own `README.md` at creation (repo law), wired into root CI scripts (typecheck + test + build). [F10]
+- **Serving (exact config)** [F3]: built with Vite `base: '/app/'` into `apps/platform/public/app/`; platform Worker `wrangler.toml` gains:
+  ```toml
+  [assets]
+  directory = "public"
+  binding = "ASSETS"
+  not_found_handling = "single-page-application"
+  run_worker_first = ["/*", "!/app/*"]
+  ```
+  Intended behavior: every non-`/app` path hits the Worker exactly as today (API untouched, no CORS changes — same origin); `/app/*` serves static assets with SPA fallback for client routes. **M1 gate: a `wrangler dev` spike proving `/inbox`→JSON, `/app/inbox`→index.html, `/app` (no trailing slash)→redirect or SPA (not a Worker 404), and unknown API path→JSON 404** — the last requires adding a JSON `app.notFound()` handler to the Hono app (none exists today; Hono defaults to text/plain). favicon/manifest live under `/app/` (Worker owns all non-/app paths, so no root-level static files). [NEW-4] If the declarative config can't scope the fallback cleanly, fall back to a Worker-side `ASSETS.fetch` shim for `/app/*` (decision recorded in spike result). No D1 migration and no DO-class migration is needed for new tables — TenantDO creates them via `CREATE TABLE IF NOT EXISTS` on next wake (constructor bootstrap); the new mailbox column ships via the existing `ensureColumnMigrations` path. [F3, F7]
+- **Auth (v1 = httpOnly cookie session, opaque id)** [F1, NEW-1]: token-gate screen POSTs the pasted tenant bearer to `POST /dashboard/session` → verified via the normal token hash → creates a server-side session (D1 migration `0006_dashboard_sessions`: `session_hash` (SHA-256+pepper of a random 256-bit id), `tenant_id`, `created_at`, `expires_at` TTL 30d) → response sets `Secure; HttpOnly; SameSite=Strict; Path=/` cookie carrying the OPAQUE session id — the cookie is never the raw credential. SPA never stores the token in JS-readable storage (no localStorage, never in URLs/fragments). `requireAuth` gains a cookie fallback (session lookup → tenant) when no `Authorization` header is present, and exposes WHICH method authenticated (`authVia: 'bearer' | 'cookie'`) for provenance stamping [NEW-5]. **CSRF posture (global, not per-route)** [NEW-1]: SameSite=Strict is same-SITE-scoped (eTLD+1) — once app and marketing site share `coldrig.dev` at activation it no longer isolates them — so a middleware on the ENTIRE authed surface enforces: auth came via cookie AND method is not GET/HEAD ⇒ require header `X-Coldstart-Client: dashboard`, else 403. This covers every legacy destructive route (`/cancel`, `/checkout`, `/campaigns`, `/threads/*`), not just `/dashboard/*`; DoD includes a test that a cookie-authed `POST /cancel` WITHOUT the header returns 403. `POST /dashboard/logout` deletes the session row + clears the cookie. Token revocation/suspension mid-session → API 401s → SPA drops to the token-gate screen with an explanatory state (suspended vs invalid). [F10]
+- **Data fetching**: TanStack Query (interval polling + refetch-on-focus; per-widget `refreshSeconds` in layout JSON). No SSE in v1 (recorded as later upgrade).
+- **Rendering stack**: Tailwind (tokens extended from `site/assets/style.css`, incl. dark mode) + minimal copied shadcn-style primitives + TanStack Virtual (thread list) + cmdk (palette). System font stack (no external CDN/fonts); tabular-nums on all numerics; KPI-hero/data-table/chip patterns per premium-b2b archive. Perf budget: initial JS ≤ 200 KB gzip, route-split; Lighthouse mobile perf ≥ 85 on the dashboard route (sandbox data). [F10]
+- **Content safety — ONE pipeline for ALL untrusted rendered content** [F1]: two classes, both specified:
+  1. **Email message HTML** (activation-era; sandbox is text): DOMPurify strict pre-pass → iframe `srcdoc` + `sandbox` (NO `allow-scripts`) + injected `<meta http-equiv="Content-Security-Policy" content="script-src 'none'">` + `<base target="_blank">`.
+  2. **Agent-authored strings** (agent_note markdown, labels, view names, edited_by_note, widget string props) — treated as UNTRUSTED (the agent reads attacker-controlled inbound mail and may echo it): labels/names/notes render as `textContent` only (plain text, no HTML path exists); `agent_note` markdown renders through a restricted renderer with raw-HTML pass-through DISABLED → DOMPurify strict allowlist (no images in v1) → link `href` scheme allowlist (`https:`, `mailto:` only) → single sanctioned render node. `dangerouslySetInnerHTML` is banned outside the two sanctioned sinks above (CI grep guard). Layout JSON is data, never interpolated into markup; widget props are zod-validated typed values.
+
+## 19.2 Data model (TenantDO SQLite additions; constructor bootstrap, no migration) [F3]
+
+```sql
+CREATE TABLE IF NOT EXISTS dashboard_views (
+  id TEXT PRIMARY KEY,              -- slug
+  name TEXT NOT NULL,
+  is_default INTEGER NOT NULL DEFAULT 0,
+  rev INTEGER NOT NULL DEFAULT 1,   -- row version for optimistic concurrency [F5]
+  layout_json TEXT NOT NULL,        -- zod-validated (packages/shared)
+  layout_schema_version INTEGER NOT NULL DEFAULT 1,
+  edited_by TEXT NOT NULL,          -- transport-derived: 'dashboard' | 'mcp' | 'api' [F4]
+  edited_by_note TEXT,
+  updated_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS thread_labels (
+  thread_id TEXT PRIMARY KEY,
+  label TEXT NOT NULL,              -- free-form; canonical set styled in UI, not enforced
+  source TEXT NOT NULL,             -- transport-derived: 'dashboard' | 'mcp' | 'api'
+  updated_at TEXT NOT NULL
+);
+-- mailboxes: ADD COLUMN last_polled_at TEXT (via ensureColumnMigrations); set by runPollInbox
+-- on every poll incl. sandbox — backs the per-mailbox last-sync UI claim. [F7]
+```
+
+Canonical label set (recommended): `interested`, `meeting_booked`, `not_now`, `out_of_office`, `wrong_person`, `do_not_contact`. Classification is the customer agent's job (agent labels via MCP; humans override; source tracked).
+
+**Default-view lifecycle** [F6]: first `GET /dashboard/views*` lazily seeds view `default` (starter layout, `is_default=1`, `edited_by='api'`) — a fresh tenant always renders. Exactly one default enforced transactionally: `POST .../:id/default` promotes and demotes the previous atomically; `POST` create → non-default unless it's the only view; `DELETE` refuses the default view (promote another first) and the last view.
+
+## 19.3 Layout-as-data schema (packages/shared, zod)
+
+As r1 (12-col `gridPos`, `visible`, typed `props`; mobile = single column ordered by (y,x)). Widget registry v1: `kpi_row`, `mailbox_health`, `campaign_performance`, `activity_feed`, `inbox_preview`, `agent_log`, `agent_note`, `quota_usage`. Unknown type/invalid props ⇒ 422 with a structured, agent-repairable error listing valid types + schemas; stored-but-unknown type renders a graceful "unsupported widget" card. Every widget defines **loading skeleton, error, and empty states** (design-reviewed, not just empty). [F10]
+
+## 19.4 API additions (tenant auth = bearer OR dashboard cookie)
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/dashboard/session` · `/dashboard/logout` | cookie exchange / clear [F1] |
+| GET | `/dashboard/views` | list (id, name, is_default, rev, edited_by, updated_at) |
+| GET | `/dashboard/views/:id` | full layout + rev |
+| PUT | `/dashboard/views/:id` | full-layout upsert; **requires `rev`; mismatch ⇒ 409 {currentRev, currentLayout}** [F5] |
+| POST | `/dashboard/views` · `/dashboard/views/:id/default` · DELETE `/dashboard/views/:id` | lifecycle per §19.2 [F6] |
+| GET | `/campaigns` | NEW DO method `listCampaigns` (id, name, status, counts) — acknowledged new work, not a wrapper [F9] |
+| GET | `/activity` | NEW DO method merging `events` + `deliverability_actions`, cursor-paginated [F9] |
+| POST | `/threads/:id/label` | set/clear label |
+| GET | `/inbox` **v2** | **cursor pagination (`limit` default 50, `cursor`), filters (`mailbox`, `campaign`, `label`, `read`, `include_nonreply` for bounces/OOO), single JOINed query (kills the N+1), row fields: threadId, subject, snippet, leadEmail, mailboxEmail + deliv_status, campaignId + campaign name, label + source, lastEventType/Ts, markStatus** [F2]. **Cursor is composite `(lastEventTs, rowid)` matching `ORDER BY lastEventTs DESC, rowid DESC`** — same-ts ties are routine (send + simulated reply share ts); DoD includes a pagination test crossing a same-ts page boundary without loss/duplication [NEW-2]. subject/snippet are not columns: resolved via `json_extract` from `campaigns.sequence_json` (per-step subject) and `events.metadata_json` body — builder verifies per-step resolution [NEW-3]. MCP `inbox` tool gains the same optional params (shared DO method — agents get filters too). Backward-compatible defaults. |
+
+Provenance is **server-derived from transport** — cookie-authed = `dashboard`, MCP = `mcp`, bearer HTTP = `api`; no client-supplied actor header exists. Plumbing [NEW-5]: `requireAuth` exposes `authVia`; each route maps transport → `source` and passes it as an explicit param to the DO method (MCP handler passes `'mcp'`). The lazy-seeded default view is stamped `'system'` (badge suppressed — it was not agent-configured). UI badge: `mcp`/`api` → "Configured by your agent — <note>"; `dashboard` → "by you"; `system` → none. Documented as advisory-truthful (an agent could perform the cookie exchange; the badge reflects transport, which only an interactive paste normally establishes). [F4]
+
+## 19.5 MCP additions (tools 13–15)
+
+`get_dashboard` (list/fetch views incl. rev) · `configure_dashboard` (create/update/delete/promote view; same rev-precondition semantics, 409-equivalent structured error with currentRev+layout so the agent can rebase; optional `note`) · `label_thread`. All record provenance `mcp`.
+
+## 19.6 Inbox UX spec
+
+As r1 (3-pane keyboard-first desktop: j/k, Enter, e, r, l, u, Cmd+K, auto-advance; single-pane gesture-first mobile with bottom tabs) with these additions:
+- Swipe actions get a **5-second UNDO toast** (mis-swipe recovery). [F10]
+- Filters bar + palette expose mailbox/campaign/label/read + the explicit **"Bounces & OOO" toggle** (backed by `include_nonreply` server param). [F2]
+- List is server-paginated (infinite scroll via cursor) + client-virtualized. [F2]
+- Health surfacing: persistent banner when any mailbox `paused`/`throttled`; Settings→Mailboxes shows per-mailbox `last_polled_at` + warmup + deliv_status. [F7]
+- **A11y floor**: full keyboard traversal across panes, visible focus rings, ARIA roles on list/detail/palette/tabs, focus trap + restore in dialogs/sheets, WCAG AA contrast in both themes. [F10]
+- Timestamps render browser-local with ISO-8601 tooltip. [F10]
+- 401 mid-session → token-gate screen with suspended-vs-invalid explanation. [F10]
+
+## 19.7 Definition of done (v1)
+
+1. Unit: layout validation (valid/invalid/unknown-type), label flows, view lifecycle (seed stamped `system`, single-default, 409 on stale rev, delete guards), cookie session (opaque id, TTL, logout deletes row; **cookie-authed `POST /cancel` without `X-Coldstart-Client` → 403** [NEW-1]), inbox v2 (pagination/filters/fields, no N+1 — query-count asserted; **same-ts cursor-boundary test** [NEW-2]), auth 401s. Full suite stays green (148+ maintained).
+2. Serving spike evidence: `/inbox`→JSON, `/app/inbox`→index.html, unknown API→JSON 404 (wrangler dev). [F3]
+3. Live drive (sandbox): signup → demo/run → dashboard populated (KPIs, mailboxes w/ last-poll, campaigns, threads); first-load with fresh tenant renders seeded default view (no empty crash). [F6]
+4. **Agent-control proof**: MCP `configure_dashboard` reorders/hides widgets + writes agent_note → UI reflects on next poll with "Configured by your agent" badge; `label_thread` → label chip appears; human override flips source; stale-rev write → structured 409 the agent can repair. [F4, F5]
+5. Playwright CLI screenshots: 1440px & 390px × dashboard, inbox, thread, composer × light & dark; design-review loop until clean.
+6. Security checks in-suite: agent_note with `<script>`/`javascript:` link/`<img onerror>` renders inert; label with HTML renders as text; no `dangerouslySetInnerHTML` outside sanctioned sinks (grep guard in CI). [F1]
+7. Fresh-context adversarial re-attack CLEAN. SPEC §0 intact (zero real vendor spend; sandbox data only).
+
+## 19.8 Build order
+
+- **M1 backend** (spec-builder, sonnet high): serving spike FIRST (gate, incl. JSON notFound + `/app` no-slash handling) → TenantDO schema bootstrap + `last_polled_at` → shared zod layout schema/registry types → inbox v2 DO method + route (composite cursor) → listCampaigns/activity → views CRUD + lifecycle + rev CAS → D1 `0006_dashboard_sessions` + cookie session (opaque id) + `authVia` + GLOBAL CSRF middleware → MCP tools 13–15.
+- **M2 dashboard SPA shell + widgets** (design-builder + spec-builder): tokens, grid renderer, widget registry v1 with skeleton/error/empty states, provenance badges, Settings.
+- **M3 inbox** (design-builder + spec-builder): virtualized paginated list, filters, thread detail, composer, labels, keyboard + swipe + undo, Cmd+K.
+- **M4 agent-control e2e + saved views + dark mode + a11y pass** (spec-builder).
+- **M5 perfection loop**: screenshot 1440/390 → design-review/impeccable → design-builder fixes → repeat until clean; verifier battery; adversary re-attack gate.
+
+Out of scope v1 (recorded): SSE/delta streaming, snippets/templates, multi-user assignment, push notifications, drag-and-drop human layout editing (humans get show/hide + reorder; the AGENT is the primary layout editor — the product bet), our-own-AI reply classifier (the customer's agent classifies).
+
+---
+
 ## Appendix — verified facts & sources
 
 - Cold email is BANNED on shared-pool ESPs (SES/SendGrid/Mailgun/Postmark) → must use own SMTP or Google/MS mailboxes.

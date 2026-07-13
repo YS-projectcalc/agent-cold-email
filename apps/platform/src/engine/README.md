@@ -18,7 +18,9 @@ into a god file:
   buys domains, DNS, provisions mailboxes, starts warmup) + `infrastructure_status`.
 - `campaigns.ts` — `launch_campaign` (schedules every sequence step for
   every non-suppressed lead up front; `is_demo` marks demo-run campaigns) +
-  `pause`/`pause_all`. The tick is the actual send-time guard, not launch.
+  `pause`/`pause_all` + `listCampaigns` (SPEC.md §19.4 `GET /campaigns`: id/
+  name/status/counts, two queries total regardless of campaign count). The
+  tick is the actual send-time guard, not launch.
 - `tick.ts` — the engine tick: runs the deliverability sweep FIRST (so a
   degrading mailbox is throttled/paused before it sends more this tick), then
   sends every due `scheduled_send`, enforcing per-mailbox daily caps AND, at
@@ -48,12 +50,33 @@ into a god file:
   rate-capped per window so a replacement that also burns can't spawn forever.
 - `demo.ts` — `demo_run`: the sandbox accelerated pipeline. Resets prior demo
   state each run so DO storage stays bounded; per-tenant throttled in `tenant-do.ts`.
-- `threads.ts` — `inbox()` / `thread(id)` / `reply(thread, body)` /
-  `mark(thread, status)`.
+- `threads.ts` — `thread(id)` / `reply(thread, body)` / `mark(thread,
+  status)` + `lookupThreadRef` (shared by `reply-processor.ts`,
+  `thread-labels.ts`, and `inbox.ts`). `listInbox()` (v1) used to live here —
+  moved to `inbox.ts` (below) for SPEC.md §19.4's v2 rewrite.
+- `inbox.ts` — SPEC.md §19.4 (M1 dashboard+inbox brief) `GET /inbox` v2 /
+  the MCP `inbox` tool: a single JOINed+CTE query (kills v1's per-row N+1),
+  cursor-paginated (composite `(lastEventTs, rowid)` cursor — same-ts ties
+  are routine here, see the file doc), filterable (mailbox/campaign/label/
+  read/include_nonreply). Subject/snippet are resolved via `json_extract`
+  against `campaigns.sequence_json` / `events.metadata_json`, not columns.
+- `thread-labels.ts` — `setThreadLabel` (`POST /threads/:id/label` + the MCP
+  `label_thread` tool): free-form label set/clear, source stamped from
+  transport (never a client claim).
+- `dashboard-views.ts` — SPEC.md §19.2/§19.4/§19.5 agent-controlled saved
+  dashboard views: lazy-seeded `default` view (stamped `system`), rev-CAS
+  update (`RevConflictError` on a stale write), single-default-view
+  invariant (atomic promote/demote), delete guards (can't delete the default
+  or the last view). Backs both `routes/dashboard.ts` and the MCP
+  `get_dashboard`/`configure_dashboard` tools — parity law, §19.0.
+- `activity.ts` — SPEC.md §19.4 `GET /activity`: merges `events` +
+  `deliverability_actions` into one chronological, cursor-paginated feed
+  (one UNION-ALL query, not two round trips merged in JS).
 - `reporting.ts` — `campaign_results()` / `metrics()` / `account()`. Opens
   are never tracked anywhere in the schema (SPEC.md §6: opens OFF by
   default), so there is nothing to leak. Also exports
-  `getDeliverabilitySummary` for reuse by `ops-summary.ts`.
+  `getDeliverabilitySummary` (reused by `ops-summary.ts`) and
+  `emptyEventCounts` (reused by `campaigns.ts`'s `listCampaigns`).
 - `ops-summary.ts` — D2/D6 admin surface: `getOpsSummary(ctx, sinceMs)`
   returns one tenant's plan/billing/usage/deliverability rollup +
   windowed deliverability-action counts. Dispatched via

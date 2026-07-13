@@ -15,6 +15,13 @@ export const campaignsRoute = new Hono<{ Bindings: Env; Variables: AuthedVariabl
     const result = await c.get("tenantStub").launchCampaign(parsed.data, c.req.header("Idempotency-Key"));
     return c.json(result, 201);
   })
+  // §19.4 — NEW DO method listCampaigns (id, name, status, counts), not a
+  // wrapper over an existing intent. Same path as the POST above (launch);
+  // distinct method.
+  .get("/campaigns", async (c) => {
+    const result = await c.get("tenantStub").campaigns();
+    return c.json(result);
+  })
   .get("/campaigns/:id/results", async (c) => {
     const result = await c.get("tenantStub").campaignResults(c.req.param("id"));
     return c.json(result);

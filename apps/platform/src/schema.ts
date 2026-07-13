@@ -307,6 +307,41 @@ CREATE TABLE IF NOT EXISTS demo_run_state (
   run_count INTEGER NOT NULL DEFAULT 0,
   last_run_at INTEGER NOT NULL DEFAULT 0
 );
+
+-- SPEC.md §19.2 (M1 dashboard+inbox brief) — agent-controlled dashboard
+-- layouts. 'rev' is the row version for optimistic concurrency: a PUT must
+-- present the rev it read; a mismatch is a structured 409 (engine/
+-- dashboard-views.ts) so a concurrent agent/human edit can never silently
+-- clobber the other. 'edited_by' is server-derived from the request
+-- transport ('dashboard' | 'mcp' | 'api'), NEVER a client-supplied actor
+-- claim (§19.4) — the lazy-seeded starter view is stamped 'system'. Exactly
+-- one row per tenant may have is_default = 1 (enforced in application code,
+-- transactionally, not a partial UNIQUE index — SQLite has no WHERE-clause
+-- unique constraint that a plain CREATE TABLE IF NOT EXISTS can express
+-- portably here).
+CREATE TABLE IF NOT EXISTS dashboard_views (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  is_default INTEGER NOT NULL DEFAULT 0,
+  rev INTEGER NOT NULL DEFAULT 1,
+  layout_json TEXT NOT NULL,
+  layout_schema_version INTEGER NOT NULL DEFAULT 1,
+  edited_by TEXT NOT NULL,
+  edited_by_note TEXT,
+  updated_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+-- SPEC.md §19.2 — human/agent thread triage. 'label' is free-form (a
+-- recommended canonical set is styled in the UI, not enforced server-side —
+-- see packages/shared's CANONICAL_THREAD_LABELS); 'source' is server-derived
+-- from transport exactly like dashboard_views.edited_by.
+CREATE TABLE IF NOT EXISTS thread_labels (
+  thread_id TEXT PRIMARY KEY,
+  label TEXT NOT NULL,
+  source TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 `;
 
 export function newId(prefix: string): string {

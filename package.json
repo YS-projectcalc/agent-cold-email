@@ -9,7 +9,8 @@
   "scripts": {
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "build": "npm run build --workspaces --if-present"
+    "build": "npm run build --workspaces --if-present",
+    "check:dangerous-html": "npm run check:dangerous-html --workspace apps/dashboard"
   },
   "engines": {
     "node": ">=24"

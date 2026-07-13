@@ -1,5 +1,17 @@
 import { DurableObject } from "cloudflare:workers";
-import type { CheckoutInput, LaunchCampaignInput, SetupInfrastructureInput, TenantPlan } from "@coldstart/shared";
+import type {
+  ActivityQueryInput,
+  CheckoutInput,
+  DashboardLayout,
+  InboxQueryInput,
+  LaunchCampaignInput,
+  Provenance,
+  SetupInfrastructureInput,
+  TenantPlan,
+} from "@coldstart/shared";
+// Not type-only: demoRun()'s default parameter value needs the runtime
+// schema (`DemoRunInput.parse({})`), not just the inferred type.
+import { DemoRunInput } from "@coldstart/shared";
 import { RateLimitError, TenantIsolationError } from "@coldstart/shared";
 import { RealClock, VirtualClock } from "./clock.js";
 import type { StripeEventInput } from "./billing/stripe-webhook.js";
@@ -15,12 +27,25 @@ import {
 import { runDemo, type DemoRunSummary } from "./engine/demo.js";
 import { cancelTenant, terminateTenant, type CancelResult, type TerminateResult } from "./engine/lifecycle.js";
 import { getInfrastructureStatus, runSetupInfrastructure } from "./engine/provisioning.js";
-import { launchCampaign, pauseAllCampaigns, pauseCampaign } from "./engine/campaigns.js";
+import { launchCampaign, listCampaigns, pauseAllCampaigns, pauseCampaign, type CampaignListItem } from "./engine/campaigns.js";
 import { runTick } from "./engine/tick.js";
 import { withRequestIdempotency } from "./engine/idempotency.js";
 import { runDeliverabilitySweep } from "./engine/deliverability-actions.js";
 import { runPollInbox } from "./engine/reply-processor.js";
-import { getThread, listInbox, markThread, replyToThread } from "./engine/threads.js";
+import { getThread, markThread, replyToThread } from "./engine/threads.js";
+import { listInbox, type InboxPage } from "./engine/inbox.js";
+import { getActivityFeed, type ActivityPage } from "./engine/activity.js";
+import { setThreadLabel, type ThreadLabelResult } from "./engine/thread-labels.js";
+import {
+  createDashboardView,
+  deleteDashboardView,
+  getDashboardView,
+  listDashboardViews,
+  promoteDashboardViewDefault,
+  updateDashboardView,
+  type DashboardViewDetail,
+  type DashboardViewSummary,
+} from "./engine/dashboard-views.js";
 import { getAccount, getCampaignResults, getMetrics } from "./engine/reporting.js";
 import { getOpsSummary, suspendTenant, type TenantOpsSummary } from "./engine/ops-summary.js";
 import { newId, TENANT_DO_SCHEMA } from "./schema.js";
@@ -91,6 +116,10 @@ export class TenantDO extends DurableObject<Env> {
     this.addColumnIfMissing("scheduled_sends", "attempts", "INTEGER NOT NULL DEFAULT 0");
     // A5 (CLASS A) — last charge decline code for dunning severity (see schema.ts).
     this.addColumnIfMissing("tenant_profile", "last_decline_code", "TEXT");
+    // SPEC.md §19.2 (M1 dashboard+inbox) — per-mailbox last-sync marker, set by
+    // runPollInbox on every poll (engine/reply-processor.ts). Backs the
+    // Settings→Mailboxes "last polled" UI claim (§19.6).
+    this.addColumnIfMissing("mailboxes", "last_polled_at", "INTEGER");
     // Created here, not in TENANT_DO_SCHEMA, so they run only after the columns
     // above are guaranteed to exist (safe for DOs that predate the column). Each
     // collapses any pre-existing rows that would violate the unique key BEFORE
@@ -229,12 +258,65 @@ export class TenantDO extends DurableObject<Env> {
     return getMetrics(this.requireContext());
   }
 
-  inbox() {
-    return listInbox(this.requireContext());
+  // SPEC.md §19.4 — v2: cursor-paginated, filterable. `query` defaults
+  // (InboxQueryInput.parse({})) preserve the exact pre-v2 GET /inbox shape
+  // for a caller that passes nothing (backward-compatible default — see
+  // engine/inbox.ts). Shared by the HTTP route AND the MCP `inbox` tool.
+  inbox(query: InboxQueryInput): InboxPage {
+    return listInbox(this.requireContext(), query);
+  }
+
+  // GET /campaigns (§19.4) — NEW DO method, not a wrapper.
+  campaigns(): CampaignListItem[] {
+    return listCampaigns(this.requireContext());
+  }
+
+  // GET /activity (§19.4) — NEW DO method merging events + deliverability_actions.
+  activity(query: ActivityQueryInput): ActivityPage {
+    return getActivityFeed(this.requireContext(), query);
   }
 
   thread(threadId: string) {
     return getThread(this.requireContext(), threadId);
+  }
+
+  // POST /threads/:id/label (§19.2/§19.4/§19.5) — `source` is server-derived
+  // from transport by the caller (route/tool), never a client-supplied claim.
+  labelThread(threadId: string, label: string | null, source: Provenance): ThreadLabelResult {
+    return setThreadLabel(this.requireContext(), threadId, label, source);
+  }
+
+  // --- SPEC.md §19.2/§19.4/§19.5 — agent-controlled dashboard saved views.
+  // Parity law (§19.0): these are the SAME methods both the dashboard HTTP
+  // routes (routes/dashboard.ts) and the MCP get_dashboard/configure_dashboard
+  // tools call — no dashboard-only state exists outside this facade. ---
+
+  dashboardViews(): DashboardViewSummary[] {
+    return listDashboardViews(this.requireContext());
+  }
+
+  dashboardView(id: string): DashboardViewDetail {
+    return getDashboardView(this.requireContext(), id);
+  }
+
+  createDashboardView(input: { name: string; layout: DashboardLayout; note?: string }, source: Provenance): DashboardViewDetail {
+    return createDashboardView(this.requireContext(), input, source);
+  }
+
+  updateDashboardView(
+    id: string,
+    input: { rev: number; layout: DashboardLayout; name?: string; note?: string },
+    source: Provenance,
+  ): DashboardViewDetail {
+    return updateDashboardView(this.requireContext(), id, input, source);
+  }
+
+  promoteDashboardViewDefault(id: string, source: Provenance): DashboardViewSummary[] {
+    return promoteDashboardViewDefault(this.requireContext(), id, source);
+  }
+
+  deleteDashboardView(id: string): { deleted: true } {
+    return deleteDashboardView(this.requireContext(), id);
   }
 
   async reply(threadId: string, body: string, idempotencyKey?: string) {
@@ -331,14 +413,17 @@ export class TenantDO extends DurableObject<Env> {
 
   // --- POST /demo/run (B5) — sandbox-only, structurally gated to demo/free plans ---
 
-  async demoRun(): Promise<DemoRunSummary> {
+  // `params` defaults to DemoRunInput's own defaults (leads=3, campaigns=1) —
+  // the exact original shape — so direct DO-RPC callers (test/demo-run.test.ts
+  // calls `instance.demoRun()` with no argument) keep working unchanged.
+  async demoRun(params: DemoRunInput = DemoRunInput.parse({})): Promise<DemoRunSummary> {
     if (this.plan !== "demo" && this.plan !== "free") {
       throw new TenantIsolationError(
         "demo run is a sandbox-only surface, unavailable for this tenant's plan — see ARCHITECTURE.md #8",
       );
     }
     this.enforceDemoRunThrottle();
-    return runDemo(this.requireContext());
+    return runDemo(this.requireContext(), params);
   }
 
   // Per-tenant /demo/run throttle (adversarial panel-02): a single free token

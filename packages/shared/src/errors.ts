@@ -76,6 +76,26 @@ export class NotFoundError extends Error {
 }
 
 /**
+ * SPEC.md §19.2/§19.4/§19.5 — optimistic-concurrency conflict on a
+ * `dashboard_views` write (PUT /dashboard/views/:id, MCP `configure_dashboard`):
+ * the caller's `rev` didn't match the row's current `rev`. Carries the CURRENT
+ * rev + layout so the caller (an agent) can rebase its edit onto the latest
+ * state and retry, rather than just being told "try again" — the Worker's
+ * onError maps this to HTTP 409 with a structured `{ currentRev, currentLayout }`
+ * body (not just `{ error }`), and the MCP tool surfaces the same fields.
+ */
+export class RevConflictError extends Error {
+  constructor(
+    message: string,
+    public readonly currentRev: number,
+    public readonly currentLayout: unknown,
+  ) {
+    super(message);
+    this.name = "RevConflictError";
+  }
+}
+
+/**
  * Thrown when a mutating intent is retried with the same Idempotency-Key while
  * the FIRST call for that key is still executing — a 'pending' claim row exists
  * (engine/idempotency.ts's claim-then-execute). RETRYABLE by design: the client

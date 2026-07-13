@@ -27,3 +27,12 @@ jobs:
 
       - name: Test (all workspaces)
         run: npm test
+
+      - name: Build (all workspaces)
+        run: npm run build
+
+      # SPEC.md §19.1 — dangerouslySetInnerHTML is banned outside the
+      # sanctioned agent_note sanitization sink (apps/dashboard/src/widgets/
+      # AgentNote.tsx); this guard fails the build if any other file uses it.
+      - name: Dashboard content-safety guard (dangerouslySetInnerHTML sink)
+        run: npm run check:dangerous-html --workspace apps/dashboard

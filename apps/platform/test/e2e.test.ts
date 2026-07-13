@@ -125,10 +125,11 @@ describe("B0 walking skeleton — signup through reply/bounce handling", () => {
     expect(results.body.bounce).toBe(1);
 
     // 7. inbox() shows 3 threads; thread(id) shows the exchange; reply() sends.
-    const inbox = await api<InboxThread[]>("/inbox", { token });
-    expect(inbox.body).toHaveLength(3);
-    const replyThread = inbox.body.find((t) => t.leadEmail === "reply.prospect@leads-test.com");
-    const bounceThread = inbox.body.find((t) => t.leadEmail === "bounce.prospect@leads-test.com");
+    const inbox = await api<{ threads: InboxThread[]; nextCursor: string | null }>("/inbox", { token });
+    expect(inbox.body.threads).toHaveLength(3);
+    expect(inbox.body.nextCursor).toBeNull();
+    const replyThread = inbox.body.threads.find((t) => t.leadEmail === "reply.prospect@leads-test.com");
+    const bounceThread = inbox.body.threads.find((t) => t.leadEmail === "bounce.prospect@leads-test.com");
     expect(replyThread?.lastEventType).toBe("reply");
     expect(bounceThread?.lastEventType).toBe("bounce");
 

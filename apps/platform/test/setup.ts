@@ -7,6 +7,7 @@ import migration2Sql from "../migrations/0002_admin_ops.sql?raw";
 import migration3Sql from "../migrations/0003_lifecycle.sql?raw";
 import migration4Sql from "../migrations/0004_waitlist.sql?raw";
 import migration5Sql from "../migrations/0005_support_dedupe.sql?raw";
+import migration6Sql from "../migrations/0006_dashboard_sessions.sql?raw";
 
 function statementsOf(sql: string): string[] {
   return sql
@@ -24,6 +25,7 @@ for (const statement of [
   ...statementsOf(migration3Sql),
   ...statementsOf(migration4Sql),
   ...statementsOf(migration5Sql),
+  ...statementsOf(migration6Sql),
 ]) {
   await env.DB.prepare(statement).run();
 }

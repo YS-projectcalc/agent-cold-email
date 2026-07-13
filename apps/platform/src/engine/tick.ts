@@ -6,6 +6,7 @@ import { isLifecycleFrozen } from "./billing-state.js";
 import { runDeliverabilitySweep } from "./deliverability-actions.js";
 import { refreshMailboxWarmupState } from "./mailbox-state.js";
 import { isWithinSendWindow, pickMailboxWithCapacity, type SendWindow } from "./scheduler.js";
+import { renderTemplate } from "./template.js";
 
 interface DueSend {
   id: string;
@@ -14,6 +15,8 @@ interface DueSend {
   step: number;
   thread_id: string;
   lead_email: string;
+  lead_first_name: string;
+  lead_company: string;
   lead_status: string;
   campaign_status: string;
   sequence_json: string;
@@ -98,7 +101,8 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
   const due = ctx.sql
     .exec<DueSend>(
       `SELECT ss.id, ss.campaign_id, ss.lead_id, ss.step, ss.thread_id, ss.attempts,
-              l.email as lead_email, l.global_status as lead_status,
+              l.email as lead_email, l.first_name as lead_first_name, l.company as lead_company,
+              l.global_status as lead_status,
               c.status as campaign_status, c.sequence_json, c.send_window_json,
               CASE WHEN sup.email IS NOT NULL THEN 1 ELSE 0 END as suppressed
        FROM scheduled_sends ss
@@ -153,6 +157,15 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
       continue;
     }
 
+    // SPEC.md §19.4 [NEW-3] root cause fix (backend gaps brief item 5): render
+    // the sequence step's `{{firstName}}`/`{{company}}` template against THIS
+    // lead's own fields — this is the ONLY place a step's raw template is
+    // turned into what a real recipient sees, so both the vendor send AND the
+    // 'sent' event's own recorded metadata (read back by thread detail/inbox
+    // v2 below) get the rendered value, never the literal template.
+    const renderedSubject = renderTemplate(step.subject, { firstName: row.lead_first_name, company: row.lead_company });
+    const renderedBody = renderTemplate(step.body, { firstName: row.lead_first_name, company: row.lead_company });
+
     // Atomic claim BEFORE the network await: another concurrent/retried tick
     // that reads this row as still 'pending' will fail this conditional UPDATE
     // (rowsWritten === 0) and skip it, so the row is sent exactly once even
@@ -167,8 +180,8 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
       {
         fromEmail: picked.email,
         toEmail: row.lead_email,
-        subject: step.subject,
-        body: step.body,
+        subject: renderedSubject,
+        body: renderedBody,
         threadId: row.thread_id,
         inReplyToMessageId: null,
         listUnsubscribe: buildListUnsubscribe(picked.email, row.thread_id),
@@ -254,7 +267,7 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
       result.messageId,
       row.thread_id,
       result.sentAt,
-      JSON.stringify({ fromEmail: picked.email, toEmail: row.lead_email, subject: step.subject, body: step.body }),
+      JSON.stringify({ fromEmail: picked.email, toEmail: row.lead_email, subject: renderedSubject, body: renderedBody }),
     );
     ctx.sql.exec(
       `INSERT OR IGNORE INTO ledger_entries (id, tenant_id, kind, amount_cents, description, ts, source_send_id)

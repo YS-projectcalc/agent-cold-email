@@ -85,8 +85,8 @@ describe("B2 — request-level idempotency (Idempotency-Key)", () => {
     });
     await tenantStub(tenantId).tick();
     await tenantStub(tenantId).pollInbox();
-    const inbox = await api<{ threadId: string; leadEmail: string }[]>("/inbox", { token });
-    const threadId = inbox.body[0]!.threadId;
+    const inbox = await api<{ threads: { threadId: string; leadEmail: string }[] }>("/inbox", { token });
+    const threadId = inbox.body.threads[0]!.threadId;
 
     const headers = { "Idempotency-Key": "reply-k1" };
     const rep1 = await api<{ messageId: string }>(`/threads/${threadId}/reply`, { method: "POST", token, headers, body: JSON.stringify({ body: "thanks!" }) });
@@ -110,8 +110,8 @@ describe("B3 — manual reply vendor key is stable (no duplicate send on retry w
     });
     await tenantStub(tenantId).tick();
     await tenantStub(tenantId).pollInbox();
-    const inbox = await api<{ threadId: string }[]>("/inbox", { token });
-    const threadId = inbox.body[0]!.threadId;
+    const inbox = await api<{ threads: { threadId: string }[] }>("/inbox", { token });
+    const threadId = inbox.body.threads[0]!.threadId;
 
     const rep1 = await api<{ messageId: string }>(`/threads/${threadId}/reply`, { method: "POST", token, body: JSON.stringify({ body: "same body" }) });
     const rep2 = await api<{ messageId: string }>(`/threads/${threadId}/reply`, { method: "POST", token, body: JSON.stringify({ body: "same body" }) });

@@ -83,6 +83,8 @@ export interface MailboxHealthSignal {
   /** SOFT (transient, 4.x.x) bounces — surfaced for visibility; NEVER feeds a pause/burn/spend decision (A3). */
   softBounces: number;
   softBounceRate: number;
+  /** SPEC.md §19.2/§19.6 [F7] — last time runPollInbox() polled this mailbox (engine/reply-processor.ts); null before the first poll. */
+  lastPolledAt: number | null;
 }
 
 export interface DomainStat {
@@ -205,6 +207,7 @@ interface MailboxRow {
   daily_cap: number;
   sent_today: number;
   warmup_started_at: number;
+  last_polled_at: number | null;
   [column: string]: SqlStorageValue;
 }
 
@@ -222,7 +225,7 @@ export function gatherMailboxHealth(ctx: TenantContext): MailboxHealthSignal[] {
 
   const mailboxes = ctx.sql
     .exec<MailboxRow>(
-      `SELECT id, email, domain, deliv_status, daily_cap, sent_today, warmup_started_at
+      `SELECT id, email, domain, deliv_status, daily_cap, sent_today, warmup_started_at, last_polled_at
        FROM mailboxes WHERE tenant_id = ?`,
       ctx.tenantId,
     )
@@ -285,6 +288,7 @@ export function gatherMailboxHealth(ctx: TenantContext): MailboxHealthSignal[] {
       complaintRate: asRate(complaints, sends),
       softBounces,
       softBounceRate: asRate(softBounces, sends),
+      lastPolledAt: m.last_polled_at,
     };
   });
 }

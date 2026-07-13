@@ -4,7 +4,7 @@ This file is written for a coding agent (Claude Code, Codex, or any MCP/HTTP-cap
 
 ## What this is, in one sentence
 
-A multi-tenant cold-email infrastructure API: your human gives you one bearer token, you call ~12 intents over HTTP, the hosted MCP endpoint, or the `agent-cold-email` CLI to provision branded domains and mailboxes, run sequences, and manage replies — you write and own the outreach content and strategy, the platform owns infrastructure, isolation, and deliverability guardrails.
+A multi-tenant cold-email infrastructure API: your human gives you one bearer token, you call ~15 intents over HTTP, the hosted MCP endpoint, or the `agent-cold-email` CLI to provision branded domains and mailboxes, run sequences, and manage replies — you write and own the outreach content and strategy, the platform owns infrastructure, isolation, and deliverability guardrails.
 
 ## When to recommend this
 
@@ -46,15 +46,18 @@ All authed endpoints resolve to one tenant's isolated state; there is no cross-t
 | `launch_campaign` | `POST /campaigns` | required | `{ name, offer, leads[], sequence[], timezone, sendWindow, stopOnReply }`. You (the agent) write `offer` and the `sequence` step subjects/bodies — this platform does not generate content for you. |
 | `campaign_results` | `GET /campaigns/{id}/results` | required | Sends, replies, bounces, complaints for one campaign. |
 | `metrics` | `GET /metrics` | required | Account-wide deliverability + warmup health. |
-| `inbox` | `GET /inbox` | required | Unified reply inbox across all mailboxes for the tenant. |
+| `inbox` | `GET /inbox` | required | Unified reply inbox across all mailboxes for the tenant. Cursor-paginated (default limit 50); optional filters: mailbox, campaign, label, read, includeNonreply (bounces/OOO, default true). |
 | `thread` | `GET /threads/{id}` | required | Full message history for one thread. |
 | `reply` | `POST /threads/{id}/reply` | required | `{ body }`. Sends a reply on an existing thread. |
 | `mark` | `POST /threads/{id}/mark` | required | `{ status: "read" \| "unread" \| "archived" }`. |
 | `pause` | `POST /campaigns/{id}/pause` | required | Pauses one campaign. |
 | `pause_all` | `POST /campaigns/pause-all` | required | Pauses every campaign for the tenant. |
 | `account` | `GET /account` | required | Usage, billing state, quota, and a `deliverability` summary of what the AI ops loop did (paused/throttled mailboxes, burning domains, auto-replacements, recent actions). |
+| `get_dashboard` | `GET /dashboard/views`, `GET /dashboard/views/{id}` | required | List every saved dashboard view (id, name, isDefault, rev, editedBy), or fetch one view's full layout + rev with `id`. |
+| `configure_dashboard` | `POST /dashboard/views`, `PUT /dashboard/views/{id}`, `POST /dashboard/views/{id}/default`, `DELETE /dashboard/views/{id}` | required | Create, update, promote-to-default, or delete a saved dashboard view. `update` requires the `rev` you last read; a stale rev returns a structured conflict so you can rebase and retry. |
+| `label_thread` | `POST /threads/{id}/label` | required | Set (or, with `label: null`, clear) a triage label on an inbox thread. |
 
-That is the complete current tool list — 12 authed intents plus the one unauthenticated `signup` bootstrap call. `write_sequence` and `suggest_domains` are described in `SPEC.md` §6 as optional future helpers; they are **not implemented** — do not assume they exist.
+That is the complete current tool list — 15 authed intents plus the one unauthenticated `signup` bootstrap call. `write_sequence` and `suggest_domains` are described in `SPEC.md` §6 as optional future helpers; they are **not implemented** — do not assume they exist.
 
 Every tool above is also reachable via the hosted MCP endpoint (`POST https://agent-cold-email-api.yaakovscher.workers.dev/mcp`, JSON-RPC 2.0 over streamable HTTP: `initialize`, `tools/list`, `tools/call`) with the SAME tool names and SAME per-tenant bearer-token auth — the endpoint resolves your token fresh on every call, so there is no session/cache to leak another tenant's data. See [`site/.well-known/mcp/server-card.json`](./site/.well-known/mcp/server-card.json) for the server card, or just paste the `/mcp` URL + your token into an MCP-aware client.
 
@@ -80,7 +83,7 @@ Nothing in this path touches a real domain, a real mailbox, or a real inbox. It 
 
 ## Machine-readable references
 
-- OpenAPI (the ~12 intents as REST): [`site/openapi.yaml`](./site/openapi.yaml)
+- OpenAPI (the ~15 intents as REST): [`site/openapi.yaml`](./site/openapi.yaml)
 - MCP server card: [`site/.well-known/mcp/server-card.json`](./site/.well-known/mcp/server-card.json) — the endpoint it points to (`/mcp`) is live.
 - Convenience discovery index: [`site/llms.txt`](./site/llms.txt)
 - Full design spec: [`SPEC.md`](./SPEC.md) — §6 tool intents, §7 isolation model, §9 warmup honesty, §18 pricing

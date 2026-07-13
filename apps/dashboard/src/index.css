@@ -1,0 +1,156 @@
+/* Dashboard SPA design tokens (SPEC.md §19.1) — the SAME custom properties
+   as site/assets/style.css (light + dark via prefers-color-scheme), extended
+   here into Tailwind v4 theme variables so the SPA never invents its own
+   palette. Chip semantics (danger/success/warning/info/neutral) are new
+   here — the marketing site has no data-table/status-chip surface — sourced
+   from the premium-b2b analytics archive, WCAG-AA-checked in both themes. */
+
+@import "tailwindcss";
+
+:root {
+  --bg: #ffffff;
+  --bg-subtle: #f6f7f9;
+  --bg-inset: #eef0f3;
+  --text: #16181d;
+  --text-muted: #565d6b;
+  --border: #dfe3e8;
+  --accent: #1a5fb4;
+  --accent-contrast: #ffffff;
+  --ok: #146c2e;
+  --warn-bg: #fff6e5;
+  --warn-border: #e8c468;
+  --warn-text: #6b4d00;
+
+  --chip-danger-bg: #fff1f2;
+  --chip-danger-text: #be123c;
+  --chip-success-bg: #ecfdf5;
+  --chip-success-text: #047857;
+  --chip-warning-bg: #fffbeb;
+  --chip-warning-text: #b45309;
+  --chip-info-bg: #eff6ff;
+  --chip-info-text: #1d4ed8;
+  --chip-neutral-bg: #f1f5f9;
+  --chip-neutral-text: #475569;
+
+  /* M5 R2 item 4 — the "there's more below" scrim used by .scroll-fade-b. */
+  --scroll-shadow: rgba(15, 17, 21, 0.12);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1115;
+    --bg-subtle: #161920;
+    --bg-inset: #1c2029;
+    --text: #e7e9ee;
+    --text-muted: #9aa2b1;
+    --border: #2a2f3a;
+    --accent: #6fa8ea;
+    --accent-contrast: #08131f;
+    --ok: #6fd08a;
+    --warn-bg: #2a230f;
+    --warn-border: #6b5316;
+    --warn-text: #e8c468;
+
+    --chip-danger-bg: #3a141d;
+    --chip-danger-text: #fca5b1;
+    --chip-success-bg: #0e2a1e;
+    --chip-success-text: #6fd08a;
+    --chip-warning-bg: #2a230f;
+    --chip-warning-text: #e8c468;
+    --chip-info-bg: #12233b;
+    --chip-info-text: #8ab8f2;
+    --chip-neutral-bg: #1c2029;
+    --chip-neutral-text: #9aa2b1;
+
+    --scroll-shadow: rgba(0, 0, 0, 0.45);
+  }
+}
+
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  --color-canvas: var(--bg);
+  --color-surface: var(--bg-subtle);
+  --color-surface-inset: var(--bg-inset);
+  --color-ink: var(--text);
+  --color-ink-muted: var(--text-muted);
+  --color-line: var(--border);
+  --color-accent: var(--accent);
+  --color-accent-contrast: var(--accent-contrast);
+  --color-ok: var(--ok);
+  --color-warn-bg: var(--warn-bg);
+  --color-warn-border: var(--warn-border);
+  --color-warn-text: var(--warn-text);
+
+  --color-chip-danger-bg: var(--chip-danger-bg);
+  --color-chip-danger-text: var(--chip-danger-text);
+  --color-chip-success-bg: var(--chip-success-bg);
+  --color-chip-success-text: var(--chip-success-text);
+  --color-chip-warning-bg: var(--chip-warning-bg);
+  --color-chip-warning-text: var(--chip-warning-text);
+  --color-chip-info-bg: var(--chip-info-bg);
+  --color-chip-info-text: var(--chip-info-text);
+  --color-chip-neutral-bg: var(--chip-neutral-bg);
+  --color-chip-neutral-text: var(--chip-neutral-text);
+
+  --radius-card: 8px;
+  /* KPI-hero + data-table type scale (premium-b2b archive): 11px uppercase
+     tracked labels, 32px/600 KPI values — layered on top of Tailwind's
+     default scale, not replacing it. */
+  --text-label: 0.6875rem;
+  --text-label--line-height: 1.3;
+  --text-kpi: 2rem;
+  --text-kpi--line-height: 1.15;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  -webkit-text-size-adjust: 100%;
+}
+
+/* Visible focus ring everywhere (§19.6 a11y floor) — never rely on the
+   browser default alone, but never suppress it either. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+::selection {
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+}
+
+/* M5 R2 item 4 — CSS-only "more content below" affordance for a widget's
+   internally-scrolling container (WidgetChrome's overflow-y-auto sink).
+   Classic dual-layer scroll-shadow technique (Lea Verou): a same-color COVER
+   anchored to the scrollable CONTENT's true bottom edge (`background-
+   attachment: local`, so it scrolls away with the content whenever more of
+   it remains below) sits on top of a translucent SHADOW anchored to the
+   VIEWPORT's bottom edge (`background-attachment: scroll`, always painted
+   there). The two only coincide — the opaque cover hiding the shadow — once
+   scrolled to the true end, which is what makes the fade "disappear at
+   scroll-end" with zero JS/scroll-event wiring. A no-op whenever content
+   doesn't overflow (content's bottom IS the viewport's bottom, so the cover
+   already sits over the shadow from the first paint). */
+.scroll-fade-b {
+  background-image: linear-gradient(to bottom, transparent, var(--bg-subtle) 100%), linear-gradient(to bottom, transparent, var(--scroll-shadow) 100%);
+  background-repeat: no-repeat;
+  background-position: bottom, bottom;
+  background-size: 100% 24px, 100% 12px;
+  background-attachment: local, scroll;
+}
