@@ -27,6 +27,13 @@ declare global {
       // for a deployed environment, or `.dev.vars` locally (see
       // .dev.vars.example) — CLAUDE.md rule g: never in code or git.
       ADMIN_TOKEN?: string;
+      // SPEC.md §19.1 — the dashboard SPA's static asset bundle (public/app/),
+      // served by Cloudflare's own asset layer via [assets] in wrangler.toml.
+      // Not fetched from Worker code today (run_worker_first excludes /app/*
+      // so the asset layer serves it directly) — typed here so a future
+      // Worker-side ASSETS.fetch shim (the spec's documented fallback if the
+      // declarative [assets] config can't scope cleanly) has a binding ready.
+      ASSETS: Fetcher;
     }
   }
 }

@@ -98,7 +98,7 @@ export async function handleMcpRequest(env: Env, authHeader: string | null, raw:
     case "tools/call": {
       const token = extractBearerToken(authHeader);
       const resolved = await resolveTenantFromToken(env, token);
-      if (!resolved) return rpcError(id, -32001, "missing or invalid bearer token", 401);
+      if (!resolved.ok) return rpcError(id, -32001, resolved.message, 401);
 
       const params = req.params;
       const toolName = typeof params === "object" && params !== null && "name" in params ? (params as { name: unknown }).name : undefined;
@@ -115,9 +115,27 @@ export async function handleMcpRequest(env: Env, authHeader: string | null, raw:
       }
 
       try {
-        const toolResult = await matched.call(resolved.tenantStub, parsedArgs.data);
+        const toolResult = await matched.call(resolved.tenant.tenantStub, parsedArgs.data);
         return result(id, { content: [{ type: "text", text: JSON.stringify(toolResult) }] });
       } catch (err) {
+        // SPEC.md §19.5 — configure_dashboard's stale-rev conflict is the
+        // MCP-transport equivalent of the HTTP 409 (index.ts onError):
+        // structured, carrying currentRev/currentLayout so the agent can
+        // rebase, not just a stringified message. Checked via `err.name`
+        // (NOT `instanceof`) — a DO method call crosses a Workers RPC
+        // boundary, which reconstructs a thrown Error's name/message/own
+        // properties on this side WITHOUT preserving its original prototype
+        // chain, so `instanceof RevConflictError` never matches here (the
+        // same reason index.ts's onError already string-compares `err.name`
+        // for every error class, not just this one).
+        const name = err instanceof Error ? err.name : "";
+        if (name === "RevConflictError") {
+          const conflict = err as Error & { currentRev: number; currentLayout: unknown };
+          return result(id, {
+            content: [{ type: "text", text: JSON.stringify({ error: conflict.message, currentRev: conflict.currentRev, currentLayout: conflict.currentLayout }) }],
+            isError: true,
+          });
+        }
         const message = err instanceof Error ? err.message : String(err);
         return result(id, { content: [{ type: "text", text: message }], isError: true });
       }

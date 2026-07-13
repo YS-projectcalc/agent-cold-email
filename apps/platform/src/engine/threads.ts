@@ -26,49 +26,11 @@ export function lookupThreadRef(ctx: TenantContext, threadId: string): ThreadRef
     .toArray()[0];
 }
 
-export interface ThreadSummary {
-  threadId: string;
-  campaignId: string;
-  leadEmail: string;
-  lastEventType: string;
-  lastEventTs: number;
-  markStatus: string;
-}
-
-// Picks exactly one row per thread — the last-inserted event (ties on `ts`,
-// which the sandbox simulator can produce for a send + its immediate
-// simulated reply/bounce, broken by `rowid`, i.e. true insertion order).
-// Deliberately NOT a GROUP BY + MAX(ts) bare-column trick: that's ambiguous
-// on ties, which this schema hits routinely.
-export function listInbox(ctx: TenantContext): ThreadSummary[] {
-  const rows = ctx.sql
-    .exec<{
-      threadId: string;
-      campaignId: string;
-      leadEmail: string;
-      lastEventType: string;
-      lastEventTs: number;
-    }>(
-      `SELECT e.thread_id as threadId, e.campaign_id as campaignId, l.email as leadEmail,
-              e.type as lastEventType, e.ts as lastEventTs
-       FROM events e
-       JOIN leads l ON l.id = e.lead_id
-       WHERE e.tenant_id = ?
-         AND e.rowid = (
-           SELECT e2.rowid FROM events e2
-           WHERE e2.thread_id = e.thread_id AND e2.tenant_id = e.tenant_id
-           ORDER BY e2.ts DESC, e2.rowid DESC LIMIT 1
-         )
-       ORDER BY lastEventTs DESC`,
-      ctx.tenantId,
-    )
-    .toArray();
-
-  return rows.map((row) => ({
-    ...row,
-    markStatus: ctx.sql.exec<{ status: string }>(`SELECT status FROM thread_marks WHERE thread_id = ?`, row.threadId).toArray()[0]?.status ?? "unread",
-  }));
-}
+// v1's listInbox() lived here (last-event-per-thread + a per-row markStatus
+// lookup — an N+1, one query per thread). Replaced by the single-JOINed
+// `engine/inbox.ts` listInbox() (SPEC.md §19.4, M1) — moved to its own file
+// since it also needs campaigns/mailboxes/thread_labels joins this file has
+// no other reason to import.
 
 export interface ThreadMessage {
   type: string;
@@ -82,6 +44,12 @@ export interface ThreadDetail {
   campaignId: string;
   leadId: string;
   leadEmail: string;
+  /** Backend gaps brief item 2 / M4 — the mailbox that sent this thread's
+   * last step (same resolution replyToThread already uses for its own
+   * "reply from" address); null before any step has sent. Lets the composer
+   * show "Replying from X" on a deep-linked thread (?thread=<id>) that never
+   * went through the inbox LIST row this used to depend on. */
+  mailboxEmail: string | null;
   messages: ThreadMessage[];
 }
 
@@ -92,6 +60,8 @@ export function getThread(ctx: TenantContext, threadId: string): ThreadDetail {
   const leadEmail = ctx.sql
     .exec<{ email: string }>(`SELECT email FROM leads WHERE id = ? AND tenant_id = ?`, ref.lead_id, ctx.tenantId)
     .one().email;
+
+  const mailboxEmail = resolveSendingMailboxEmail(ctx, threadId) ?? null;
 
   const events = ctx.sql
     .exec<{ type: string; ts: number; message_id: string | null; metadata_json: string }>(
@@ -106,6 +76,7 @@ export function getThread(ctx: TenantContext, threadId: string): ThreadDetail {
     campaignId: ref.campaign_id,
     leadId: ref.lead_id,
     leadEmail,
+    mailboxEmail,
     messages: events.map((e) => ({
       type: e.type,
       ts: e.ts,
@@ -113,6 +84,21 @@ export function getThread(ctx: TenantContext, threadId: string): ThreadDetail {
       metadata: JSON.parse(e.metadata_json) as Record<string, unknown>,
     })),
   };
+}
+
+/** The mailbox that sent this thread's last step so far — shared by
+ * `getThread` (mailboxEmail, backend gaps brief item 2) and `replyToThread`
+ * (its own "reply from" address), so there's exactly one join, not two. */
+function resolveSendingMailboxEmail(ctx: TenantContext, threadId: string): string | undefined {
+  return ctx.sql
+    .exec<{ email: string }>(
+      `SELECT m.email as email FROM scheduled_sends ss
+       JOIN mailboxes m ON m.id = ss.mailbox_id
+       WHERE ss.thread_id = ? AND ss.tenant_id = ? AND ss.mailbox_id IS NOT NULL LIMIT 1`,
+      threadId,
+      ctx.tenantId,
+    )
+    .toArray()[0]?.email;
 }
 
 /** SHA-256 hex of a UTF-8 string — the stable content component of a manual
@@ -135,15 +121,7 @@ export async function replyToThread(
     .exec<{ email: string }>(`SELECT email FROM leads WHERE id = ? AND tenant_id = ?`, ref.lead_id, ctx.tenantId)
     .one().email;
 
-  const mailboxEmail = ctx.sql
-    .exec<{ email: string }>(
-      `SELECT m.email as email FROM scheduled_sends ss
-       JOIN mailboxes m ON m.id = ss.mailbox_id
-       WHERE ss.thread_id = ? AND ss.tenant_id = ? AND ss.mailbox_id IS NOT NULL LIMIT 1`,
-      threadId,
-      ctx.tenantId,
-    )
-    .toArray()[0]?.email;
+  const mailboxEmail = resolveSendingMailboxEmail(ctx, threadId);
   if (!mailboxEmail) throw new NotFoundError(`no sending mailbox on record for thread ${threadId}`);
 
   // B3 (CLASS B): the vendor-send idempotency key must derive from STABLE

@@ -4,3 +4,4 @@ export * from "./errors.js";
 export * from "./vendor-ports.js";
 export * from "./intents.js";
 export * from "./pricing.js";
+export * from "./dashboard.js";

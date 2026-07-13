@@ -3,6 +3,7 @@ import { NotFoundError } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
 import { assertNotLifecycleFrozen } from "./billing-state.js";
+import { type EventCounts, emptyEventCounts } from "./reporting.js";
 import { ONE_DAY_MS } from "./warmup.js";
 
 /**
@@ -105,4 +106,47 @@ export function pauseAllCampaigns(ctx: TenantContext): void {
     `UPDATE campaigns SET status = 'paused' WHERE tenant_id = ? AND status = 'active'`,
     ctx.tenantId,
   );
+}
+
+export interface CampaignListItem {
+  campaignId: string;
+  name: string;
+  status: string;
+  counts: EventCounts;
+}
+
+/**
+ * GET /campaigns (§19.4, NEW DO method — not a wrapper over an existing one
+ * [F9]). Two queries total regardless of campaign count (the campaign rows,
+ * then one GROUP BY over `events` for every campaign's counts at once) —
+ * never one events query PER campaign.
+ */
+export function listCampaigns(ctx: TenantContext): CampaignListItem[] {
+  const campaigns = ctx.sql
+    .exec<{ id: string; name: string; status: string }>(
+      `SELECT id, name, status FROM campaigns WHERE tenant_id = ? ORDER BY created_at DESC`,
+      ctx.tenantId,
+    )
+    .toArray();
+
+  const countRows = ctx.sql
+    .exec<{ campaign_id: string; type: keyof EventCounts; n: number }>(
+      `SELECT campaign_id, type, COUNT(*) as n FROM events WHERE tenant_id = ? GROUP BY campaign_id, type`,
+      ctx.tenantId,
+    )
+    .toArray();
+
+  const countsByCampaign = new Map<string, EventCounts>();
+  for (const row of countRows) {
+    const counts = countsByCampaign.get(row.campaign_id) ?? emptyEventCounts();
+    counts[row.type] = row.n;
+    countsByCampaign.set(row.campaign_id, counts);
+  }
+
+  return campaigns.map((c) => ({
+    campaignId: c.id,
+    name: c.name,
+    status: c.status,
+    counts: countsByCampaign.get(c.id) ?? emptyEventCounts(),
+  }));
 }

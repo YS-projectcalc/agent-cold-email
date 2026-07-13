@@ -227,9 +227,13 @@ export async function runPollInbox(
   let replies = 0;
   let bounces = 0;
   let complaints = 0;
+  const now = ctx.clock.now();
 
   for (const mailbox of mailboxes) {
     const events = await ctx.adapters.email.poll(mailbox.email);
+    // SPEC.md §19.2/§19.6 (M1) — every poll, including a zero-event one,
+    // stamps this mailbox's last-sync marker (Settings→Mailboxes UI claim).
+    ctx.sql.exec(`UPDATE mailboxes SET last_polled_at = ? WHERE email = ? AND tenant_id = ?`, now, mailbox.email, ctx.tenantId);
     for (const ev of events) {
       const ref = lookupThreadRef(ctx, ev.threadId);
       if (!ref) continue; // defensive: unknown thread, nothing to attribute it to

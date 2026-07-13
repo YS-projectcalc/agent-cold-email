@@ -61,8 +61,9 @@ describe("tenant isolation — a second tenant cannot see the first tenant's dat
     expect(tenant1Account.body.leads).toBe(1);
 
     // tenant2's inbox must be empty, not tenant1's threads.
-    const tenant2Inbox = await api<unknown[]>("/inbox", { token: tenant2.token });
-    expect(tenant2Inbox.body).toEqual([]);
+    const tenant2Inbox = await api<{ threads: unknown[]; nextCursor: string | null }>("/inbox", { token: tenant2.token });
+    expect(tenant2Inbox.body.threads).toEqual([]);
+    expect(tenant2Inbox.body.nextCursor).toBeNull();
 
     // tenant2 using tenant1's campaign id must NOT reach tenant1's data —
     // it 404s because that campaign id doesn't exist in tenant2's own DO storage.

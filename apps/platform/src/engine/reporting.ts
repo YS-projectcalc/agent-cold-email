@@ -18,7 +18,10 @@ export interface EventCounts {
   soft_bounce: number;
 }
 
-function emptyCounts(): EventCounts {
+// Exported so engine/campaigns.ts's listCampaigns() (§19.4 GET /campaigns)
+// can build a zero-filled row for a campaign with no events yet, matching
+// this file's own shape (CLAUDE.md rule c: one definition of "empty counts").
+export function emptyEventCounts(): EventCounts {
   return { sent: 0, reply: 0, bounce: 0, complaint: 0, unsubscribe: 0, failed: 0, soft_bounce: 0 };
 }
 
@@ -38,7 +41,7 @@ function countEvents(ctx: TenantContext, campaignId?: string): EventCounts {
         )
         .toArray();
 
-  const counts = emptyCounts();
+  const counts = emptyEventCounts();
   for (const row of rows) counts[row.type] = row.n;
   return counts;
 }

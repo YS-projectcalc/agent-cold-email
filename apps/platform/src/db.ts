@@ -29,6 +29,52 @@ export async function lookupTenantByTokenHash(env: Env, tokenHash: string): Prom
   return row ?? null;
 }
 
+/** Looked up by id (not token hash) — the only thing a resolved dashboard
+ * cookie session carries is a tenant id (see dashboard-session helpers below),
+ * so the suspended/inactive check needs its own by-id lookup. */
+export async function lookupTenantById(env: Env, id: string): Promise<TenantIndexRow | null> {
+  const row = await env.DB.prepare(`SELECT id, brand, plan, status FROM tenants_index WHERE id = ?`)
+    .bind(id)
+    .first<TenantIndexRow>();
+  return row ?? null;
+}
+
+// --- SPEC.md §19.1 (M1) — dashboard cookie sessions (migrations/0006). The
+// opaque session id itself lives ONLY in the httpOnly cookie; only its
+// SHA-256(+pepper) hash (src/auth.ts) is ever persisted here — the same
+// never-store-the-plaintext-credential discipline as tenants_index's bearer
+// token hash (CLAUDE.md rule g). ---
+
+export async function insertDashboardSession(
+  env: Env,
+  params: { sessionHash: string; tenantId: string; createdAt: number; expiresAt: number },
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO dashboard_sessions (session_hash, tenant_id, created_at, expires_at) VALUES (?, ?, ?, ?)`,
+  )
+    .bind(params.sessionHash, params.tenantId, params.createdAt, params.expiresAt)
+    .run();
+}
+
+export interface DashboardSessionRow {
+  tenant_id: string;
+  expires_at: number;
+}
+
+export async function lookupDashboardSession(env: Env, sessionHash: string): Promise<DashboardSessionRow | null> {
+  const row = await env.DB.prepare(`SELECT tenant_id, expires_at FROM dashboard_sessions WHERE session_hash = ?`)
+    .bind(sessionHash)
+    .first<DashboardSessionRow>();
+  return row ?? null;
+}
+
+/** POST /dashboard/logout — deletes the session row so the cookie (once the
+ * client also clears it) can never be replayed. Idempotent: deleting an
+ * already-gone/never-existed hash is a silent no-op. */
+export async function deleteDashboardSession(env: Env, sessionHash: string): Promise<void> {
+  await env.DB.prepare(`DELETE FROM dashboard_sessions WHERE session_hash = ?`).bind(sessionHash).run();
+}
+
 /**
  * Flips a tenant's control-plane index status (D5 abuse offboarding). Setting
  * it to anything but 'active' makes `resolveTenantFromToken` reject the

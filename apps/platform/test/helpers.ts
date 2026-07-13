@@ -160,3 +160,57 @@ export async function mintTenant(brand: string, plan: TenantPlan): Promise<{ ten
   await stub.initTenant({ tenantId, brand, plan });
   return { tenantId, token };
 }
+
+// --- SPEC.md §19.1 (M1 dashboard+inbox) — dashboard cookie-session test
+// helpers. `SELF.fetch` here is the test harness's fetch (not a browser
+// fetch), so `Set-Cookie` on the response is plainly readable — no browser
+// cookie-jar/security filtering to work around. ---
+
+export interface DashboardSession {
+  /** A ready-to-send `Cookie:` header value, e.g. "cs_dashboard_session=<id>". */
+  cookie: string;
+  tenantId: string;
+}
+
+/** Exchanges a bearer token for a dashboard cookie session via POST
+ * /dashboard/session, mirroring the real token-gate-screen flow. */
+export async function createDashboardSession(token: string): Promise<DashboardSession> {
+  const res = await SELF.fetch("https://example.com/dashboard/session", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+  if (res.status !== 200) throw new Error(`dashboard session create failed: ${res.status} ${await res.text()}`);
+  const setCookie = res.headers.get("set-cookie");
+  if (!setCookie) throw new Error("no Set-Cookie header returned from POST /dashboard/session");
+  const match = /^cs_dashboard_session=([^;]+)/.exec(setCookie);
+  if (!match) throw new Error(`could not parse session cookie from Set-Cookie: ${setCookie}`);
+  const body = (await res.json()) as { tenantId: string };
+  return { cookie: `cs_dashboard_session=${match[1]}`, tenantId: body.tenantId };
+}
+
+/** Like `api()`, but cookie-authed instead of bearer-authed. `csrf: true`
+ * attaches the `X-Coldstart-Client: dashboard` header the global CSRF guard
+ * requires on a cookie-authed non-GET/HEAD request (csrf-guard.ts). */
+export async function cookieApi<T = unknown>(
+  path: string,
+  session: DashboardSession,
+  init: (RequestInit & { csrf?: boolean }) | undefined = {},
+): Promise<ApiResult<T>> {
+  const { csrf, headers, ...rest } = init;
+  const finalHeaders: Record<string, string> = {
+    "content-type": "application/json",
+    cookie: session.cookie,
+    ...(headers as Record<string, string> | undefined),
+  };
+  if (csrf) finalHeaders["X-Coldstart-Client"] = "dashboard";
+  const res = await SELF.fetch(`https://example.com${path}`, { ...rest, headers: finalHeaders });
+  const text = await res.text();
+  let body: unknown;
+  try {
+    body = text ? JSON.parse(text) : undefined;
+  } catch {
+    body = text;
+  }
+  return { status: res.status, body: body as T };
+}

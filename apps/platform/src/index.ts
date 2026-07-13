@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Env } from "./env.js";
 import { requireAdminAuth } from "./require-admin-auth.js";
 import { requireAuth, type AuthedVariables } from "./require-auth.js";
+import { csrfGuard } from "./csrf-guard.js";
 import { signupRoute } from "./routes/signup.js";
 import { infrastructureRoute } from "./routes/infrastructure.js";
 import { campaignsRoute } from "./routes/campaigns.js";
@@ -16,6 +17,9 @@ import { waitlistRoute } from "./routes/waitlist.js";
 import { adminSupportRoute } from "./routes/admin-support.js";
 import { adminOpsRoute } from "./routes/admin-ops.js";
 import { statusRoute } from "./routes/status.js";
+import { dashboardSessionRoute } from "./routes/dashboard-session.js";
+import { dashboardRoute } from "./routes/dashboard.js";
+import { activityRoute } from "./routes/activity.js";
 import { runScheduledOpsSweep } from "./scheduled.js";
 
 export { TenantDO } from "./tenant-do.js";
@@ -36,6 +40,13 @@ app.route("/", checkoutSimulateRoute);
 app.route("/", webhooksRoute);
 // GET /status — public, no tenant/admin data (see routes/status.ts).
 app.route("/", statusRoute);
+// POST /dashboard/session — UNAUTHENTICATED (SPEC.md §19.1): the token-gate
+// screen POSTs the pasted tenant bearer token in the JSON BODY (there is no
+// Authorization header yet at this point in the flow), verifies it itself,
+// then mints the cookie session — the same reason /checkout/simulate and
+// /webhooks/stripe are unauthenticated (their own credential lives somewhere
+// other than a bearer header).
+app.route("/", dashboardSessionRoute);
 
 // D1/D2/D6 admin surface (src/admin/README.md) — gated by a SEPARATE
 // ADMIN_TOKEN secret bearer, never the per-tenant token below: these routes
@@ -52,8 +63,41 @@ admin.route("/", adminSupportRoute);
 admin.route("/", adminOpsRoute);
 app.route("/", admin);
 
+// Every literal top-level path this API exposes behind requireAuth (bearer OR
+// dashboard cookie — SPEC.md §19.1). An EXPLICIT list, not a blanket "*",
+// mirrors the admin scoping above and for the SAME reason: Hono composes
+// every middleware whose PATTERN matches a request path into one chain
+// regardless of whether any route ultimately handles it, so a blanket "*"
+// here would swallow a genuinely-unknown path (e.g. GET /zzz) into this
+// middleware's 401 before it ever reaches app.notFound() below — proven live
+// by the M1 serving-spike gate (§19.1), which requires an unknown API path to
+// 404, not 401 (this was a real, previously-undetected gap: every path used
+// to 401 here, unknown or not). Adding a new authed route anywhere below MUST
+// add its path pattern here too, or it will 404 instead of resolving.
+const AUTHED_PATH_PATTERNS = [
+  "/setup-infrastructure",
+  "/infrastructure-status",
+  "/campaigns",
+  "/campaigns/*",
+  "/metrics",
+  "/inbox",
+  "/threads/*",
+  "/account",
+  "/checkout",
+  "/cancel",
+  "/demo/run",
+  "/dashboard/logout",
+  "/dashboard/views",
+  "/dashboard/views/*",
+  "/activity",
+];
+
 const authed = new Hono<{ Bindings: Env; Variables: AuthedVariables }>();
-authed.use("*", requireAuth);
+// GLOBAL CSRF guard (§19.1 NEW-1) runs immediately after requireAuth (reads
+// `authVia` off the context) on the SAME explicit surface — covers every
+// legacy destructive route (/cancel, /checkout, /campaigns, /threads/*), not
+// just /dashboard/*, per the spec's hard requirement.
+for (const pattern of AUTHED_PATH_PATTERNS) authed.use(pattern, requireAuth, csrfGuard);
 authed.route("/", infrastructureRoute);
 authed.route("/", campaignsRoute);
 authed.route("/", inboxRoute);
@@ -61,7 +105,15 @@ authed.route("/", accountRoute);
 authed.route("/", checkoutRoute);
 authed.route("/", lifecycleRoute);
 authed.route("/", demoRoute);
+authed.route("/", dashboardRoute);
+authed.route("/", activityRoute);
 app.route("/", authed);
+
+// SPEC.md §19.1 (M1 serving spike) — Hono's default 404 is `text/plain`
+// ("404 Not Found"); every other response on this API is JSON, so an unknown
+// API path (anything NOT under /app/*, which `run_worker_first` already
+// routes around this Worker entirely) must 404 as JSON too.
+app.notFound((c) => c.json({ error: "not found" }, 404));
 
 app.onError((err, c) => {
   const name = err instanceof Error ? err.name : "";
@@ -70,6 +122,13 @@ app.onError((err, c) => {
   if (name === "TenantIsolationError") return c.json({ error: err.message }, 403);
   if (name === "RateLimitError") return c.json({ error: err.message }, 429);
   if (name === "RequestInProgressError") return c.json({ error: err.message }, 409);
+  // SPEC.md §19.4 [F5] — a stale dashboard-view rev is a STRUCTURED 409: the
+  // agent needs currentRev + currentLayout to rebase its edit, not just an
+  // opaque "conflict" string.
+  if (name === "RevConflictError") {
+    const conflict = err as Error & { currentRev: number; currentLayout: unknown };
+    return c.json({ error: err.message, currentRev: conflict.currentRev, currentLayout: conflict.currentLayout }, 409);
+  }
   console.error(err);
   return c.json({ error: "internal error" }, 500);
 });

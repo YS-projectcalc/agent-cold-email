@@ -172,6 +172,8 @@ export interface MailboxHealthReport {
   softBounceRate: number;
   reputationScore: number;
   placementRate: number;
+  /** SPEC.md §19.2/§19.6 [F7] — last time runPollInbox() polled this mailbox (engine/reply-processor.ts); null before the first poll. Backs the Settings→Mailboxes "last polled" UI claim. */
+  lastPolledAt: number | null;
 }
 
 export interface InfrastructureStatus {
@@ -208,6 +210,7 @@ export async function getInfrastructureStatus(ctx: TenantContext): Promise<Infra
         softBounceRate: s.softBounceRate,
         reputationScore: vendor.reputationScore,
         placementRate: vendor.placementRate,
+        lastPolledAt: s.lastPolledAt,
       };
     }),
   );

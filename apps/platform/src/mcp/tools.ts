@@ -1,13 +1,18 @@
-// The 12 MCP tools (AGENTS.md tool list — names match exactly). Each tool
-// dispatches to the SAME TenantDO method the equivalent HTTP route calls
-// (src/routes/*.ts) — the MCP surface is a second transport onto the exact
-// same facade, never a parallel implementation (CLAUDE.md rule c).
+// The 15 MCP tools (AGENTS.md tool list — names match exactly; tools 13-15
+// added by SPEC.md §19.5). Each tool dispatches to the SAME TenantDO method
+// the equivalent HTTP route calls (src/routes/*.ts) — the MCP surface is a
+// second transport onto the exact same facade, never a parallel
+// implementation (CLAUDE.md rule c).
 
 import type { ZodType } from "zod";
+import { InboxQueryInput } from "@coldstart/shared";
 import type { TenantDO } from "../tenant-do.js";
 import {
   CampaignIdInput,
+  ConfigureDashboardInput,
   EmptyInput,
+  GetDashboardInput,
+  LabelThreadInput,
   LaunchCampaignToolInput,
   SetupInfrastructureToolInput,
   ThreadIdInput,
@@ -57,7 +62,12 @@ export const MCP_TOOLS: McpTool<any>[] = [
     (stub, args) => stub.campaignResults(args.campaignId),
   ),
   tool("metrics", "Account-wide deliverability + warmup health.", EmptyInput, (stub) => stub.metrics()),
-  tool("inbox", "Unified reply inbox across all mailboxes for the tenant.", EmptyInput, (stub) => stub.inbox()),
+  tool(
+    "inbox",
+    "Unified reply inbox across all mailboxes for the tenant. Cursor-paginated (limit default 50); optional filters: mailbox, campaign, label, read, includeNonreply (bounces/OOO, default true), archived ('exclude' default | 'include' | 'only').",
+    InboxQueryInput,
+    (stub, args) => stub.inbox(args),
+  ),
   tool("thread", "Full message history for one thread.", ThreadIdInput, (stub, args) => stub.thread(args.threadId)),
   tool(
     "reply",
@@ -82,5 +92,40 @@ export const MCP_TOOLS: McpTool<any>[] = [
     "Usage, billing state, quota, and what the AI deliverability control loop has done (paused/throttled mailboxes, burning domains, auto-replacements, recent actions).",
     EmptyInput,
     (stub) => stub.account(),
+  ),
+  // --- SPEC.md §19.5 (M1 dashboard+inbox) — tools 13-15. Parity law (§19.0):
+  // the agent can read/write every bit of dashboard state a human can. ---
+  tool(
+    "get_dashboard",
+    "List every saved dashboard view (id, name, isDefault, rev, editedBy) or, with `id`, fetch one view's full layout + rev.",
+    GetDashboardInput,
+    (stub, args) => (args.id ? stub.dashboardView(args.id) : stub.dashboardViews()),
+  ),
+  tool(
+    "configure_dashboard",
+    "Create, update, promote-to-default, or delete a dashboard saved view. `update` requires the `rev` you last read; a stale rev returns a structured conflict (currentRev + currentLayout) so you can rebase and retry. `update` also accepts an optional `name` to rename the view (same rev-CAS semantics; omit to leave the name unchanged). Pass an optional `note` to record why you made the change.",
+    ConfigureDashboardInput,
+    (stub, args) => {
+      // The schema's `.refine()` (schemas.ts) already guarantees these fields
+      // are present for the matched action — it just can't narrow the TS type
+      // per-branch the way z.discriminatedUnion would (see schemas.ts's doc
+      // for why this isn't a discriminatedUnion).
+      switch (args.action) {
+        case "create":
+          return stub.createDashboardView({ name: args.name!, layout: args.layout!, note: args.note }, "mcp");
+        case "update":
+          return stub.updateDashboardView(args.id!, { rev: args.rev!, layout: args.layout!, name: args.name, note: args.note }, "mcp");
+        case "promote":
+          return stub.promoteDashboardViewDefault(args.id!, "mcp");
+        case "delete":
+          return stub.deleteDashboardView(args.id!);
+      }
+    },
+  ),
+  tool(
+    "label_thread",
+    "Set (or, with label: null, clear) a triage label on an inbox thread — the same labels the dashboard UI shows as chips.",
+    LabelThreadInput,
+    (stub, args) => stub.labelThread(args.threadId, args.label, "mcp"),
   ),
 ];

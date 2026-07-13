@@ -87,6 +87,18 @@ export const CancelInput = z.object({
 });
 export type CancelInput = z.infer<typeof CancelInput>;
 
+// Backend gaps brief item 3 — POST /demo/run's optional sandbox-seed-variety
+// params. Both default to the platform's ORIGINAL single-campaign, 3-lead
+// shape, so an empty/omitted body is byte-for-byte unchanged (engine/
+// demo-seed.ts's buildDemoLeads/splitIntoCampaignBatches guarantee this at
+// the generation layer). Bounded (<=200 leads, <=3 campaigns) — sandbox-only,
+// but still a per-tenant DO SQLite/compute cost or a body someone could hammer.
+export const DemoRunInput = z.object({
+  leads: z.number().int().min(1).max(200).default(3),
+  campaigns: z.number().int().min(1).max(3).default(1),
+});
+export type DemoRunInput = z.infer<typeof DemoRunInput>;
+
 // D5 lifecycle — abuse offboarding (POST /admin/tenants/:id/terminate,
 // ADMIN_TOKEN-authed). The terminal rung of the AUP consequence ladder
 // (site/aup.html §7). `reason` + `evidence` are recorded to enforcement_actions

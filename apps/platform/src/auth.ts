@@ -26,3 +26,14 @@ export function extractBearerToken(authHeader: string | undefined | null): strin
   const match = /^Bearer\s+(\S+)$/i.exec(authHeader.trim());
   return match?.[1] ?? null;
 }
+
+// SPEC.md §19.1 (M1) — the dashboard cookie session's opaque id. A random
+// 256-bit value, same entropy source as `generateApiToken`, but deliberately
+// NOT bearer-token-shaped (no `cs_test_` prefix) so it's never mistaken for
+// one if it ever leaked into a log line. The cookie carries this raw id; only
+// its `hashApiToken`-computed hash is ever persisted (D1 `dashboard_sessions`),
+// mirroring how the bearer token itself is never stored in plaintext.
+export function generateDashboardSessionId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
