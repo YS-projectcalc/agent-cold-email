@@ -4,8 +4,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>agent-cold-email — agent-native cold-email infrastructure</title>
-<meta name="description" content="Agent-native cold-email infrastructure, run entirely by your coding agent. One token, ~12 tools, isolated domains and mailboxes per customer. Early access, no deliverability guarantees.">
+<meta name="description" content="Agent-native cold-email infrastructure, run entirely by your coding agent. One token, ~17 tools, isolated domains and mailboxes per customer. Early access, no deliverability guarantees.">
 <link rel="canonical" href="https://agent-cold-email.pages.dev/">
+<meta property="og:title" content="agent-cold-email — agent-native cold-email infrastructure">
+<meta property="og:description" content="Agent-native cold-email infrastructure, run entirely by your coding agent. One token, ~17 tools, isolated domains and mailboxes per customer. Early access, no deliverability guarantees.">
+<meta property="og:url" content="https://agent-cold-email.pages.dev/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="agent-cold-email">
+<meta property="og:image" content="https://agent-cold-email.pages.dev/assets/og-image.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://agent-cold-email.pages.dev/assets/og-image.png">
 <link rel="stylesheet" href="assets/style.css">
 <script src="assets/brand.js" defer></script>
 <script src="assets/waitlist.js" defer></script>
@@ -18,7 +26,7 @@
   "applicationCategory": "BusinessApplication",
   "applicationSubCategory": "Cold email infrastructure / sales engagement",
   "operatingSystem": "Any (hosted API, MCP server, CLI)",
-  "description": "Multi-tenant cold-email infrastructure platform operated by the customer's own coding agent (Claude Code, Codex) via ~12 curated MCP/HTTP tools. Provisions isolated branded domains and mailboxes, runs sequences, manages replies. Early access; not yet available for real sending; no deliverability guarantees.",
+  "description": "Multi-tenant cold-email infrastructure platform operated by the customer's own coding agent (Claude Code, Codex) via ~17 curated MCP/HTTP tools. Provisions isolated branded domains and mailboxes, runs sequences, manages replies, and optionally configures a human-facing dashboard. Early access; not yet available for real sending; no deliverability guarantees.",
   "url": "https://agent-cold-email.pages.dev/",
   "softwareHelp": "https://agent-cold-email.pages.dev/docs",
   "offers": [
@@ -124,7 +132,7 @@
   <section class="hero">
     <span class="badge">Early access — not yet available for real sending</span>
     <h1>Agent-native cold-email infrastructure — run entirely by your coding agent.</h1>
-    <p class="lede">Strap this to your Claude Code or Codex session and it has what it needs: one signup, one token, and ~12 curated tools that provision isolated branded domains and mailboxes, run sequences, and manage replies. Your agent stays the brain — it writes the content and drives the tools. We run the infrastructure underneath.</p>
+    <p class="lede">Strap this to your Claude Code or Codex session and it has what it needs: one signup, one token, and ~17 curated tools that provision isolated branded domains and mailboxes, run sequences, and manage replies. Your agent stays the brain — it writes the content and drives the tools. We run the infrastructure underneath.</p>
     <div class="cta-row">
       <a class="btn primary" href="#waitlist">Join the waitlist</a>
       <a class="btn" href="/docs">Read the docs</a>
@@ -146,7 +154,7 @@
       </div>
       <div class="card">
         <h3>2. Your agent drives it</h3>
-        <p>Paste the MCP config or run the CLI. Your coding agent calls <code>setup_infrastructure</code>, <code>launch_campaign</code>, <code>inbox</code>, and the rest — the same ~12 tools, whether it's Claude Code, Codex, or a plain HTTP client.</p>
+        <p>Paste the MCP config or run the CLI. Your coding agent calls <code>setup_infrastructure</code>, <code>launch_campaign</code>, <code>inbox</code>, and the rest — the same ~17 tools, whether it's Claude Code, Codex, or a plain HTTP client.</p>
       </div>
       <div class="card">
         <h3>3. We run the infrastructure</h3>
@@ -160,7 +168,7 @@
   </section>
 
   <section id="tools">
-    <h2>The ~12 tools</h2>
+    <h2>The ~17 tools</h2>
     <p>Deliberately small. Incumbent cold-email MCP servers expose 100+ tools re-exporting vendor complexity; this is a curated, high-level surface designed to keep MCP token cost negligible and to hide vendor plumbing your agent shouldn't need to hold in context.</p>
     <table>
       <thead><tr><th>Tool</th><th>What it does</th></tr></thead>
@@ -168,12 +176,13 @@
         <tr><td><code>setup_infrastructure</code></td><td>Buy branded lookalike domains, provision mailboxes, start warmup</td></tr>
         <tr><td><code>infrastructure_status</code></td><td>Provisioning + warmup progress, per-mailbox health</td></tr>
         <tr><td><code>launch_campaign</code></td><td>Create and activate a sequence against a lead list</td></tr>
-        <tr><td><code>campaign_results</code></td><td>Per-campaign sends, replies, bounces, complaints</td></tr>
-        <tr><td><code>metrics</code></td><td>Account-wide deliverability and warmup health</td></tr>
+        <tr><td><code>campaign_results</code> / <code>list_campaigns</code></td><td>Per-campaign sends/replies/bounces, or every campaign at a glance</td></tr>
+        <tr><td><code>metrics</code> / <code>activity</code></td><td>Account-wide deliverability health, or a chronological events + control-loop feed</td></tr>
         <tr><td><code>inbox</code> / <code>thread</code></td><td>Unified reply inbox and per-thread history</td></tr>
-        <tr><td><code>reply</code> / <code>mark</code></td><td>Reply to a thread; mark read/unread/archived</td></tr>
+        <tr><td><code>reply</code> / <code>mark</code> / <code>label_thread</code></td><td>Reply to a thread; mark read/unread/archived; set a triage label</td></tr>
         <tr><td><code>pause</code> / <code>pause_all</code></td><td>Pause one campaign, or every campaign</td></tr>
         <tr><td><code>account</code></td><td>Usage, billing, and quota</td></tr>
+        <tr><td><code>get_dashboard</code> / <code>configure_dashboard</code></td><td>Read or edit the optional human dashboard's saved layout — your agent controls what the human sees</td></tr>
       </tbody>
     </table>
     <p><a href="/docs#tools">Full tool reference with signatures →</a></p>

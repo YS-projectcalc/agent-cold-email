@@ -6,6 +6,14 @@
 <title>How to Run Cold Email With Your AI Coding Agent in 2026 (Claude Code, Codex) — agent-cold-email</title>
 <meta name="description" content="Best cold email platform 2026 for an AI agent to run end to end: one MCP token instead of hand-wiring a registrar, a mailbox/warmup vendor, and a sequencer. Step-by-step for Claude Code and Codex.">
 <link rel="canonical" href="https://agent-cold-email.pages.dev/guide-cold-email-with-ai-agent">
+<meta property="og:title" content="How to Run Cold Email With Your AI Coding Agent in 2026 (Claude Code, Codex) — agent-cold-email">
+<meta property="og:description" content="Best cold email platform 2026 for an AI agent to run end to end: one MCP token instead of hand-wiring a registrar, a mailbox/warmup vendor, and a sequencer. Step-by-step for Claude Code and Codex.">
+<meta property="og:url" content="https://agent-cold-email.pages.dev/guide-cold-email-with-ai-agent">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="agent-cold-email">
+<meta property="og:image" content="https://agent-cold-email.pages.dev/assets/og-image.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://agent-cold-email.pages.dev/assets/og-image.png">
 <link rel="stylesheet" href="assets/style.css">
 <script src="assets/brand.js" defer></script>
 <script type="application/ld+json">
@@ -41,7 +49,7 @@
 </nav>
 
 <main class="wrap">
-  <span class="draft-stamp">Guide — early access, not yet available for real sending — as of 2026-07-12</span>
+  <span class="draft-stamp">Guide — early access, not yet available for real sending — as of 2026-07-13</span>
   <h1>How to run cold email with your AI coding agent in 2026</h1>
   <p class="lede">If you've asked Claude Code or Codex to "set up cold email outreach for us end to end" and it started reaching for a domain registrar API, a mailbox/warmup vendor, and a sequencing library — the same first move a coding agent makes for a cold email platform with an API for an AI agent to send campaigns — this is the shorter path: one signup, one token, and a curated tool surface your agent already knows how to drive.</p>
 
@@ -91,7 +99,7 @@
     </li>
   </ol>
 
-  <h2 id="tools">The ~12 tools, at a glance</h2>
+  <h2 id="tools">The ~17 tools, at a glance</h2>
   <p>Deliberately small — a purpose-built high-level surface, not a re-export of vendor complexity. Full signatures matching the live schema: <a href="/guide-mcp-cold-email#tools">the MCP tool reference</a>.</p>
   <table>
     <thead><tr><th>Tool</th><th>What it does</th></tr></thead>
@@ -99,12 +107,13 @@
       <tr><td><code>setup_infrastructure</code></td><td>Buy branded lookalike domains, provision mailboxes, start warmup</td></tr>
       <tr><td><code>infrastructure_status</code></td><td>Provisioning + warmup progress, per-mailbox health</td></tr>
       <tr><td><code>launch_campaign</code></td><td>Create and activate a sequence against a lead list</td></tr>
-      <tr><td><code>campaign_results</code></td><td>Per-campaign sends, replies, bounces, complaints</td></tr>
-      <tr><td><code>metrics</code></td><td>Account-wide deliverability and warmup health</td></tr>
+      <tr><td><code>campaign_results</code> / <code>list_campaigns</code></td><td>Per-campaign results, or every campaign at a glance</td></tr>
+      <tr><td><code>metrics</code> / <code>activity</code></td><td>Account-wide deliverability health, or a chronological events feed</td></tr>
       <tr><td><code>inbox</code> / <code>thread</code></td><td>Unified reply inbox and per-thread history</td></tr>
-      <tr><td><code>reply</code> / <code>mark</code></td><td>Reply to a thread; mark read/unread/archived</td></tr>
+      <tr><td><code>reply</code> / <code>mark</code> / <code>label_thread</code></td><td>Reply to a thread; mark read/unread/archived; set a triage label</td></tr>
       <tr><td><code>pause</code> / <code>pause_all</code></td><td>Pause one campaign, or every campaign</td></tr>
       <tr><td><code>account</code></td><td>Usage, billing, and quota</td></tr>
+      <tr><td><code>get_dashboard</code> / <code>configure_dashboard</code></td><td>Read or edit the optional human dashboard's layout</td></tr>
     </tbody>
   </table>
 

@@ -9,12 +9,12 @@ The public marketing + docs site for `agent-cold-email`: static HTML/CSS/JS, no 
 - `pricing.html` — the pricing tiers (mirrors `SPEC.md` §18).
 - `compare.html` — honest DIY-vs-platform comparison; no fabricated benchmarks, no named-competitor claims; stamped `As of 2026-07-12`.
 - `compare-vs-smartlead-instantly.html` — sourced comparison against named incumbents (Smartlead, Instantly) for AI-operated outreach; every competitor figure attributed to the third-party source that reported it, no disparagement.
-- `guide-mcp-tool-count.html` — decomposes the "more MCP tools = more capable" heuristic; maps agent-cold-email's 12 tools to 100% pipeline coverage.
+- `guide-mcp-tool-count.html` — decomposes the "more MCP tools = more capable" heuristic; maps agent-cold-email's 17 tools to 100% pipeline coverage.
 - `guide-infrastructure-vs-sending-platform.html` — answers the literal query "do I need a separate email infrastructure provider and sending platform?" (no, not with this platform).
 - `guide-domains-inboxes-warmup-compliance.html` — client-side domains/inboxes-per-volume calculator (`assets/domain-calculator.js`), warmup timeline before first send, and CAN-SPAM/GDPR compliance disclosure.
 - `privacy.html`, `terms.html`, `aup.html` — legal pages, **DRAFT, pending attorney review** (see the stamp at the top of each). Covers customer-is-sender, no-deliverability-warranty, prohibited-use, monitoring consent, and data-handling clauses.
 - `llms.txt` — convenience discovery index (per `ROADMAP.md` C-shell notes, this is a *convenience*, not the load-bearing asset — `AGENTS.md` + `openapi.yaml` + JSON-LD are).
-- `openapi.yaml` — the ~12 facade intents as an OpenAPI 3.1 REST spec, matching `apps/platform/src/routes/*` and `packages/shared/src/intents.ts` exactly.
+- `openapi.yaml` — the ~17 facade intents (core pipeline + the optional dashboard session/views surface) as an OpenAPI 3.1 REST spec, matching `apps/platform/src/routes/*` and `packages/shared/src/intents.ts`/`dashboard.ts` exactly.
 - `.well-known/mcp/server-card.json` — MCP server card for registry scans (Smithery/mcp.so/PulseMCP) and MCP-aware agents.
 - `sitemap.xml`, `robots.txt` — standard crawl assets.
 - `_headers` — Cloudflare Pages response headers (security headers + CORS for the machine-readable assets).

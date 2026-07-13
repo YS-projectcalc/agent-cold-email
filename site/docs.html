@@ -6,8 +6,26 @@
 <title>Docs — agent-cold-email</title>
 <meta name="description" content="Quickstart, MCP setup, CLI usage, and the full tool reference for agent-cold-email, agent-native cold-email infrastructure.">
 <link rel="canonical" href="https://agent-cold-email.pages.dev/docs">
+<meta property="og:title" content="Docs — agent-cold-email">
+<meta property="og:description" content="Quickstart, MCP setup, CLI usage, and the full tool reference for agent-cold-email, agent-native cold-email infrastructure.">
+<meta property="og:url" content="https://agent-cold-email.pages.dev/docs">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="agent-cold-email">
+<meta property="og:image" content="https://agent-cold-email.pages.dev/assets/og-image.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://agent-cold-email.pages.dev/assets/og-image.png">
 <link rel="stylesheet" href="assets/style.css">
 <script src="assets/brand.js" defer></script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "Docs — agent-cold-email",
+  "description": "Quickstart, MCP setup, CLI usage, and the full tool reference for agent-cold-email, agent-native cold-email infrastructure.",
+  "dateModified": "2026-07-13",
+  "about": { "@type": "SoftwareApplication", "name": "agent-cold-email", "applicationCategory": "BusinessApplication" }
+}
+</script>
 </head>
 <body>
 <nav class="site-nav">
@@ -84,7 +102,7 @@ npx agent-cold-email campaign launch --file campaign.json</code></pre>
   <p><code>POST /signup</code> mints a <code>demo</code>-plan tenant that is structurally incapable of reaching a real vendor adapter — enforced at the type level and covered by a test that fails if the guard is ever bypassed, not just documented policy. Every domain purchase, mailbox provisioning step, warmup tick, and send in demo mode runs against a fault-injecting sandbox: simulated rate limits, timeouts, bounces, and asynchronous replies, on a virtual clock so a multi-week warmup ramp resolves in the same session instead of in real time. This is the safe way to see the whole pipeline — provision, warm, send, reply, report — before anyone pays for anything.</p>
 
   <h2 id="tools">Tool reference</h2>
-  <p>All 12 authed intents, plus the one unauthenticated bootstrap call. Full JSON Schemas: <a href="openapi.yaml">openapi.yaml</a>.</p>
+  <p>All 17 authed intents, plus the one unauthenticated bootstrap call. Full JSON Schemas: <a href="openapi.yaml">openapi.yaml</a>.</p>
   <table>
     <thead><tr><th>Tool</th><th>HTTP</th><th>Body / params</th></tr></thead>
     <tbody>
@@ -93,14 +111,19 @@ npx agent-cold-email campaign launch --file campaign.json</code></pre>
       <tr><td><code>infrastructure_status</code></td><td><code>GET /infrastructure-status</code></td><td>—</td></tr>
       <tr><td><code>launch_campaign</code></td><td><code>POST /campaigns</code></td><td><code>{ name, offer, leads[], sequence[], timezone, sendWindow, stopOnReply }</code></td></tr>
       <tr><td><code>campaign_results</code></td><td><code>GET /campaigns/{id}/results</code></td><td>—</td></tr>
+      <tr><td><code>list_campaigns</code></td><td><code>GET /campaigns</code></td><td>—</td></tr>
       <tr><td><code>pause</code></td><td><code>POST /campaigns/{id}/pause</code></td><td>—</td></tr>
       <tr><td><code>pause_all</code></td><td><code>POST /campaigns/pause-all</code></td><td>—</td></tr>
       <tr><td><code>metrics</code></td><td><code>GET /metrics</code></td><td>—</td></tr>
+      <tr><td><code>activity</code></td><td><code>GET /activity</code></td><td><code>?limit&cursor&kind=event|deliverability</code> (all optional)</td></tr>
       <tr><td><code>inbox</code></td><td><code>GET /inbox</code></td><td>—</td></tr>
       <tr><td><code>thread</code></td><td><code>GET /threads/{id}</code></td><td>—</td></tr>
       <tr><td><code>reply</code></td><td><code>POST /threads/{id}/reply</code></td><td><code>{ body }</code></td></tr>
       <tr><td><code>mark</code></td><td><code>POST /threads/{id}/mark</code></td><td><code>{ status: "read"|"unread"|"archived" }</code></td></tr>
+      <tr><td><code>label_thread</code></td><td><code>POST /threads/{id}/label</code></td><td><code>{ label: string|null }</code></td></tr>
       <tr><td><code>account</code></td><td><code>GET /account</code></td><td>—</td></tr>
+      <tr><td><code>get_dashboard</code></td><td><code>GET /dashboard/views</code>, <code>GET /dashboard/views/{id}</code></td><td>—</td></tr>
+      <tr><td><code>configure_dashboard</code></td><td><code>POST/PUT/DELETE /dashboard/views[/{id}]</code>, <code>POST /dashboard/views/{id}/default</code></td><td><code>{ name, layout, note }</code> (per action)</td></tr>
     </tbody>
   </table>
   <p>Two optional helpers (<code>write_sequence</code>, <code>suggest_domains</code>) are designed but not yet built — do not assume they exist today.</p>

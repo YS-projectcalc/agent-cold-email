@@ -42,6 +42,9 @@ const EXPECTED_TOOL_NAMES = [
   "get_dashboard",
   "configure_dashboard",
   "label_thread",
+  // SPEC.md §19.0 parity-gap follow-up — tools 16-17.
+  "list_campaigns",
+  "activity",
 ];
 
 describe("POST /mcp — hosted MCP JSON-RPC 2.0 endpoint", () => {
@@ -72,12 +75,12 @@ describe("POST /mcp — hosted MCP JSON-RPC 2.0 endpoint", () => {
     expect(res.body).toBeUndefined();
   });
 
-  it("tools/list returns exactly the 15 AGENTS.md tools with a JSON-Schema inputSchema each — no auth required", async () => {
+  it("tools/list returns exactly the 17 AGENTS.md tools with a JSON-Schema inputSchema each — no auth required", async () => {
     const res = await api<JsonRpcSuccess<ToolListResult>>("/mcp", { method: "POST", body: rpc("tools/list") });
     expect(res.status).toBe(200);
     const names = res.body.result.tools.map((t) => t.name);
     expect(names).toEqual(EXPECTED_TOOL_NAMES);
-    expect(res.body.result.tools).toHaveLength(15);
+    expect(res.body.result.tools).toHaveLength(17);
     for (const t of res.body.result.tools) {
       expect(typeof t.description).toBe("string");
       expect(t.description.length).toBeGreaterThan(0);

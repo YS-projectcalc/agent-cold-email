@@ -20,3 +20,9 @@
 /.well-known/mcp/server-card.json
   Access-Control-Allow-Origin: *
   Content-Type: application/json; charset=utf-8
+
+# Shared Open Graph / Twitter card image (1200x630) referenced by every
+# page's og:image/twitter:image meta tags — explicit Content-Type since
+# social-card crawlers (not just browsers) fetch this directly.
+/assets/og-image.png
+  Content-Type: image/png

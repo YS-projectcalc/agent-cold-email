@@ -1,11 +1,11 @@
-// The 15 MCP tools (AGENTS.md tool list — names match exactly; tools 13-15
-// added by SPEC.md §19.5). Each tool dispatches to the SAME TenantDO method
-// the equivalent HTTP route calls (src/routes/*.ts) — the MCP surface is a
-// second transport onto the exact same facade, never a parallel
-// implementation (CLAUDE.md rule c).
+// The 17 MCP tools (AGENTS.md tool list — names match exactly; tools 13-15
+// added by SPEC.md §19.5, tools 16-17 by the §19.0 parity-gap follow-up).
+// Each tool dispatches to the SAME TenantDO method the equivalent HTTP route
+// calls (src/routes/*.ts) — the MCP surface is a second transport onto the
+// exact same facade, never a parallel implementation (CLAUDE.md rule c).
 
 import type { ZodType } from "zod";
-import { InboxQueryInput } from "@coldstart/shared";
+import { ActivityQueryInput, InboxQueryInput } from "@coldstart/shared";
 import type { TenantDO } from "../tenant-do.js";
 import {
   CampaignIdInput,
@@ -127,5 +127,20 @@ export const MCP_TOOLS: McpTool<any>[] = [
     "Set (or, with label: null, clear) a triage label on an inbox thread — the same labels the dashboard UI shows as chips.",
     LabelThreadInput,
     (stub, args) => stub.labelThread(args.threadId, args.label, "mcp"),
+  ),
+  // --- Parity gap follow-up (SPEC.md §19.0) — tools 16-17. GET /campaigns and
+  // GET /activity (§19.4) were dashboard-only until now; thin wrappers over
+  // the same TenantDO methods the HTTP routes call. ---
+  tool(
+    "list_campaigns",
+    "List every campaign for the tenant with id, name, status, and event counts (sent/reply/bounce/...) — no per-campaign lookup needed.",
+    EmptyInput,
+    (stub) => stub.campaigns(),
+  ),
+  tool(
+    "activity",
+    "Unified, chronological activity feed merging campaign events (sent/reply/bounce/...) with deliverability control-loop actions (pause/throttle/...). Cursor-paginated (limit default 50, max 200); optional `kind` filter ('event' | 'deliverability').",
+    ActivityQueryInput,
+    (stub, args) => stub.activity(args),
   ),
 ];

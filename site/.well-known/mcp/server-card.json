@@ -3,7 +3,7 @@
   "name": "agent-cold-email",
   "displayName": "agent-cold-email",
   "version": "0.1.0",
-  "description": "Agent-native cold-email infrastructure. One bearer token, ~12 curated tools provision isolated branded domains and mailboxes, run sequences, and manage replies. Early access — not yet available for real sending; no deliverability guarantees.",
+  "description": "Agent-native cold-email infrastructure. One bearer token, ~17 curated tools provision isolated branded domains and mailboxes, run sequences, manage replies, and (optionally) configure a human-facing dashboard + unified inbox. Early access — not yet available for real sending; no deliverability guarantees.",
   "homepage": "https://agent-cold-email.pages.dev/",
   "documentation": "https://agent-cold-email.pages.dev/docs.html",
   "license": "MIT",
@@ -38,7 +38,12 @@
     { "name": "mark", "description": "Mark a thread read, unread, or archived." },
     { "name": "pause", "description": "Pause one campaign." },
     { "name": "pause_all", "description": "Pause every campaign for the tenant." },
-    { "name": "account", "description": "Usage, billing, and quota." }
+    { "name": "account", "description": "Usage, billing state, quota, and what the AI deliverability control loop has done." },
+    { "name": "get_dashboard", "description": "List every saved dashboard view, or fetch one view's full layout + rev." },
+    { "name": "configure_dashboard", "description": "Create, update, promote-to-default, or delete a dashboard saved view." },
+    { "name": "label_thread", "description": "Set or clear a triage label on an inbox thread." },
+    { "name": "list_campaigns", "description": "List every campaign with id, name, status, and event counts." },
+    { "name": "activity", "description": "Unified, chronological feed of campaign events + deliverability control-loop actions." }
   ],
   "guardrails": [
     "per-tenant domain and mailbox isolation",

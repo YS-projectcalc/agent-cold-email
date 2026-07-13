@@ -3,12 +3,15 @@ info:
   title: agent-cold-email API
   version: "0.1.0"
   description: >
-    Agent-native cold-email infrastructure. ~12 curated intents behind one
-    bearer token per tenant. Content generation is the caller's job; this
-    API owns infrastructure provisioning, sequencing, isolation, and
-    compliance guardrails. Early access — this spec documents the intended
-    contract; see the repository ROADMAP.md for what is live vs. in build.
-    No deliverability or inbox-placement guarantees are made by this API.
+    Agent-native cold-email infrastructure. ~17 curated intents behind one
+    bearer token per tenant (a subset — the /dashboard/* session + views
+    endpoints — also accept an httpOnly session cookie minted by
+    POST /dashboard/session, for the optional human dashboard SPA; see
+    SPEC.md §19). Content generation is the caller's job; this API owns
+    infrastructure provisioning, sequencing, isolation, and compliance
+    guardrails. Early access — this spec documents the intended contract;
+    see the repository ROADMAP.md for what is live vs. in build. No
+    deliverability or inbox-placement guarantees are made by this API.
   contact:
     name: EpiphanyMade
     email: support@epiphanymade.com
@@ -27,6 +30,7 @@ tags:
   - name: campaigns
   - name: inbox
   - name: account
+  - name: dashboard
 
 paths:
   /signup:
@@ -130,6 +134,24 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
+    get:
+      operationId: list_campaigns
+      tags: [campaigns]
+      summary: List every campaign for the tenant with id, name, status, and event counts.
+      description: >
+        No N+1: one query for the campaign rows, one GROUP BY for every
+        campaign's event counts. A campaign with zero events still reports
+        zero-filled counts (never missing keys).
+      responses:
+        '200':
+          description: Campaign list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CampaignListItem' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
 
   /campaigns/{id}/results:
     get:
@@ -206,6 +228,39 @@ paths:
       operationId: inbox
       tags: [inbox]
       summary: Unified reply inbox across all mailboxes for the tenant.
+      description: >
+        v2: cursor-paginated, filterable. A bare GET /inbox (no query params)
+        preserves the exact pre-v2 shape — every thread, bounces/OOO
+        included, page 1 of 50.
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: cursor
+          in: query
+          schema: { type: string, minLength: 1, maxLength: 500 }
+        - name: mailbox
+          in: query
+          schema: { type: string, minLength: 1, maxLength: 320 }
+        - name: campaign
+          in: query
+          schema: { type: string, minLength: 1, maxLength: 200 }
+        - name: label
+          in: query
+          schema: { type: string, minLength: 1, maxLength: 100 }
+        - name: read
+          in: query
+          schema: { type: boolean }
+        - name: include_nonreply
+          in: query
+          description: >
+            Include bounces/OOO/other non-reply threads. Default true
+            (matches the pre-v2 GET /inbox shape); the dashboard UI's
+            default view sets this false.
+          schema: { type: boolean, default: true }
+        - name: archived
+          in: query
+          schema: { type: string, enum: [exclude, include, only], default: exclude }
       responses:
         '200':
           description: Inbox listing.
@@ -289,6 +344,71 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /threads/{id}/label:
+    post:
+      operationId: label_thread
+      tags: [inbox]
+      summary: Set (or, with label null, clear) a triage label on an inbox thread.
+      parameters:
+        - $ref: '#/components/parameters/ThreadId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ThreadLabelInput'
+      responses:
+        '200':
+          description: Label set/cleared.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  threadId: { type: string }
+                  label: { type: string, nullable: true }
+                  source:
+                    type: string
+                    nullable: true
+                    enum: [dashboard, mcp, api, system]
+                required: [threadId, label, source]
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /activity:
+    get:
+      operationId: activity
+      tags: [inbox]
+      summary: Unified, chronological feed of campaign events + deliverability control-loop actions.
+      description: >
+        Merges the `events` table (sends/replies/bounces/complaints) with
+        `deliverability_actions` (pause/throttle/rotate/replace-domain) into
+        one cursor-paginated feed, one query.
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: cursor
+          in: query
+          schema: { type: string, minLength: 1, maxLength: 500 }
+        - name: kind
+          in: query
+          description: Omit for every kind (backward-compatible default).
+          schema: { type: string, enum: [event, deliverability] }
+      responses:
+        '200':
+          description: Activity feed page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActivityPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /account:
     get:
       operationId: account
@@ -305,12 +425,240 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /dashboard/session:
+    post:
+      operationId: dashboard_login
+      tags: [dashboard]
+      summary: Exchange a tenant bearer token for an httpOnly dashboard session cookie.
+      description: >
+        Unauthenticated (there is no Authorization header at this point in
+        the flow) — the pasted tenant bearer token travels in the JSON body
+        instead and is verified here via the same resolver `requireAuth`
+        uses. On success, sets an httpOnly/Secure/SameSite=Strict session
+        cookie; the SPA never sees the bearer token or the session id in
+        JS-readable storage.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DashboardSessionInput'
+      responses:
+        '200':
+          description: Session cookie set.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tenantId: { type: string }
+                required: [tenantId]
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /dashboard/logout:
+    post:
+      operationId: dashboard_logout
+      tags: [dashboard]
+      summary: Revoke the current dashboard session cookie.
+      security:
+        - bearerAuth: []
+        - dashboardSessionCookie: []
+      responses:
+        '200':
+          description: Logged out.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { loggedOut: { type: boolean } }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /dashboard/views:
+    get:
+      operationId: get_dashboard
+      tags: [dashboard]
+      summary: List every saved dashboard view (summary — id, name, isDefault, rev, editedBy).
+      security:
+        - bearerAuth: []
+        - dashboardSessionCookie: []
+      responses:
+        '200':
+          description: Saved-view summaries; lazy-seeds the `default` view for a brand-new tenant.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/DashboardViewSummary' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      operationId: configure_dashboard_create
+      tags: [dashboard]
+      summary: Create a dashboard saved view.
+      security:
+        - bearerAuth: []
+        - dashboardSessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DashboardViewCreateInput'
+      responses:
+        '201':
+          description: View created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardViewDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          description: Invalid/unknown widget type or props (syntactically valid JSON, semantically invalid).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { error: { type: string }, issues: { type: array, items: { type: object } } }
+
+  /dashboard/views/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: get_dashboard_view
+      tags: [dashboard]
+      summary: Fetch one saved view's full layout + rev.
+      security:
+        - bearerAuth: []
+        - dashboardSessionCookie: []
+      responses:
+        '200':
+          description: View detail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardViewDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      operationId: configure_dashboard_update
+      tags: [dashboard]
+      summary: Update a saved view's layout (rev-CAS) and/or rename it.
+      description: >
+        `rev` must match the view's current rev; a stale rev returns 409
+        with a structured conflict (currentRev + currentLayout) so the
+        caller can rebase and retry. Omitting `name` leaves it unchanged.
+      security:
+        - bearerAuth: []
+        - dashboardSessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DashboardViewUpdateInput'
+      responses:
+        '200':
+          description: View updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardViewDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Stale rev — structured conflict to rebase onto.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+                  currentRev: { type: integer }
+                  currentLayout: { $ref: '#/components/schemas/DashboardLayout' }
+                required: [error, currentRev, currentLayout]
+        '422':
+          description: Invalid/unknown widget type or props.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { error: { type: string }, issues: { type: array, items: { type: object } } }
+    delete:
+      operationId: configure_dashboard_delete
+      tags: [dashboard]
+      summary: Delete a saved view (cannot delete the default view or the last remaining view).
+      security:
+        - bearerAuth: []
+        - dashboardSessionCookie: []
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { deleted: { type: boolean } }
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /dashboard/views/{id}/default:
+    post:
+      operationId: configure_dashboard_promote
+      tags: [dashboard]
+      summary: Promote a saved view to be the tenant's default.
+      security:
+        - bearerAuth: []
+        - dashboardSessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Every saved-view summary, with the promoted view's isDefault now true.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/DashboardViewSummary' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
       description: Token returned by POST /signup. One token = one isolated tenant.
+    dashboardSessionCookie:
+      type: apiKey
+      in: cookie
+      name: cs_dashboard_session
+      description: >
+        httpOnly session cookie minted by POST /dashboard/session (30-day
+        TTL). Alternative to bearerAuth for /dashboard/* routes only, used by
+        the optional human dashboard SPA. A cookie-authed mutating request
+        (any method other than GET/HEAD) must also send the
+        `X-Coldstart-Client: dashboard` header (global CSRF guard,
+        SPEC.md §19.1) — bearer-authed requests are exempt.
 
   parameters:
     CampaignId:
@@ -428,3 +776,131 @@ components:
       required: [status]
       properties:
         status: { type: string, enum: [read, unread, archived] }
+
+    ThreadLabelInput:
+      type: object
+      properties:
+        label:
+          type: string
+          minLength: 1
+          maxLength: 100
+          nullable: true
+          default: null
+          description: Free-form (a UI-recommended taxonomy, not a server-enforced enum). null clears the label.
+
+    EventCounts:
+      type: object
+      properties:
+        sent: { type: integer }
+        reply: { type: integer }
+        bounce: { type: integer, description: "HARD (permanent 5.x.x) bounces." }
+        complaint: { type: integer }
+        unsubscribe: { type: integer }
+        failed: { type: integer }
+        soft_bounce: { type: integer, description: "SOFT (transient 4.x.x) bounces — tallied, not a permanent suppression." }
+      required: [sent, reply, bounce, complaint, unsubscribe, failed, soft_bounce]
+
+    CampaignListItem:
+      type: object
+      required: [campaignId, name, status, counts]
+      properties:
+        campaignId: { type: string }
+        name: { type: string }
+        status: { type: string }
+        counts: { $ref: '#/components/schemas/EventCounts' }
+
+    ActivityItem:
+      type: object
+      required: [id, kind, label, ts, target, detail]
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [event, deliverability] }
+        label: { type: string }
+        ts: { type: integer }
+        target: { type: string, nullable: true }
+        detail: { type: object, additionalProperties: true }
+
+    ActivityPage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ActivityItem' }
+        nextCursor: { type: string, nullable: true }
+
+    DashboardSessionInput:
+      type: object
+      required: [token]
+      properties:
+        token: { type: string, minLength: 1, maxLength: 500, description: "The tenant bearer token from POST /signup." }
+
+    # Widget layout (SPEC.md §19.3) — the widget registry's per-type `props`
+    # are validated server-side against 8 discriminated schemas
+    # (packages/shared/src/dashboard.ts); documented here at the outer-shape
+    # level only (type/gridPos/visible + a generic props object) to avoid
+    # duplicating that full union into this spec.
+    DashboardLayout:
+      type: object
+      required: [schemaVersion, widgets]
+      properties:
+        schemaVersion: { type: integer, enum: [1] }
+        widgets:
+          type: array
+          maxItems: 50
+          items:
+            type: object
+            required: [id, type, gridPos, visible, props]
+            properties:
+              id: { type: string, minLength: 1, maxLength: 100 }
+              type:
+                type: string
+                enum: [kpi_row, mailbox_health, campaign_performance, activity_feed, inbox_preview, agent_log, agent_note, quota_usage]
+              gridPos:
+                type: object
+                required: [x, y, w, h]
+                properties:
+                  x: { type: integer, minimum: 0, maximum: 11 }
+                  y: { type: integer, minimum: 0, maximum: 1000 }
+                  w: { type: integer, minimum: 1, maximum: 12 }
+                  h: { type: integer, minimum: 1, maximum: 20 }
+              visible: { type: boolean, default: true }
+              props: { type: object, additionalProperties: true }
+
+    DashboardViewSummary:
+      type: object
+      required: [id, name, isDefault, rev, editedBy, editedByNote, updatedAt]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        isDefault: { type: boolean }
+        rev: { type: integer }
+        editedBy: { type: string, enum: [dashboard, mcp, api, system] }
+        editedByNote: { type: string, nullable: true }
+        updatedAt: { type: string }
+
+    DashboardViewDetail:
+      allOf:
+        - $ref: '#/components/schemas/DashboardViewSummary'
+        - type: object
+          required: [layout, createdAt]
+          properties:
+            layout: { $ref: '#/components/schemas/DashboardLayout' }
+            createdAt: { type: string }
+
+    DashboardViewCreateInput:
+      type: object
+      required: [name, layout]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        layout: { $ref: '#/components/schemas/DashboardLayout' }
+        note: { type: string, maxLength: 2000 }
+
+    DashboardViewUpdateInput:
+      type: object
+      required: [rev, layout]
+      properties:
+        rev: { type: integer, minimum: 1, description: "Must match the view's current rev (rev-CAS)." }
+        layout: { $ref: '#/components/schemas/DashboardLayout' }
+        name: { type: string, minLength: 1, maxLength: 200, description: "Optional rename; omit to leave unchanged." }
+        note: { type: string, maxLength: 2000 }
