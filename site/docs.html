@@ -14,6 +14,9 @@
 <meta property="og:image" content="https://coldrig.dev/assets/og-image.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="https://coldrig.dev/assets/og-image.png">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="stylesheet" href="assets/style.css">
 <script src="assets/brand.js" defer></script>
 <script type="application/ld+json">
@@ -22,7 +25,7 @@
   "@type": "TechArticle",
   "headline": "Docs — Coldrig",
   "description": "Quickstart, MCP setup, CLI usage, and the full tool reference for agent-cold-email, agent-native cold-email infrastructure.",
-  "dateModified": "2026-07-13",
+  "dateModified": "2026-07-14",
   "about": { "@type": "SoftwareApplication", "name": "agent-cold-email", "applicationCategory": "BusinessApplication" }
 }
 </script>
@@ -48,7 +51,7 @@
 
   <div class="callout">
     <strong>Early access</strong>
-    The hosted MCP endpoint (<code>/mcp</code>) is live now at <code>https://agent-cold-email-api.yaakovscher.workers.dev</code> — in test mode: sandbox vendor adapters only, no real sends. The npm-published CLI and real sending are the remaining activation steps.
+    The hosted MCP endpoint, HTTP API, npm CLI, and fault-injecting sandbox are live. Real sending is not active: every public signup creates an isolated demo tenant that cannot reach vendor adapters.
   </div>
 
   <div class="doc-toc">
@@ -87,16 +90,15 @@
     }
   }
 }</code></pre>
-  <p>The hosted MCP server is streamable-HTTP, per-token scoped — one config line, no OAuth dance. It is live now in test mode (sandbox vendors, no real sends); see the status banner above.</p>
+  <p>The hosted MCP server is streamable-HTTP and per-token scoped — one config line, no OAuth dance. It is live against sandbox vendors; see the status banner above.</p>
 
   <h2 id="cli">CLI usage</h2>
-  <pre><code># once published:
-npx agent-cold-email demo                 # run the full pipeline against the live sandbox, no signup
+  <pre><code>npx agent-cold-email demo                 # run the full pipeline against the live sandbox, no signup
 npx agent-cold-email signup --brand Acme --email you@acme.com
 npx agent-cold-email setup --brand Acme --primary-domain acme.com --domains 2 --inboxes-each 3
 npx agent-cold-email status
 npx agent-cold-email campaign launch --file campaign.json</code></pre>
-  <p>The CLI is a thin twin over the same HTTP facade documented below — every subcommand maps 1:1 to a tool in the <a href="#tools">tool reference</a>. The npm package name <code>agent-cold-email</code> is reserved (the permanent keyword handle — see the home page FAQ on naming); publishing is one of the last steps before general availability.</p>
+  <p>The CLI is published on npm (v0.1.0 registry-verified 2026-07-14) and is a thin twin over the same HTTP facade documented below. Every subcommand maps to a tool in the <a href="#tools">tool reference</a>; the package remains the permanent machine handle for Coldrig.</p>
 
   <h2 id="demo">The free demo</h2>
   <p><code>POST /signup</code> mints a <code>demo</code>-plan tenant that is structurally incapable of reaching a real vendor adapter — enforced at the type level and covered by a test that fails if the guard is ever bypassed, not just documented policy. Every domain purchase, mailbox provisioning step, warmup tick, and send in demo mode runs against a fault-injecting sandbox: simulated rate limits, timeouts, bounces, and asynchronous replies, on a virtual clock so a multi-week warmup ramp resolves in the same session instead of in real time. This is the safe way to see the whole pipeline — provision, warm, send, reply, report — before anyone pays for anything.</p>
@@ -127,6 +129,7 @@ npx agent-cold-email campaign launch --file campaign.json</code></pre>
     </tbody>
   </table>
   <p>Two optional helpers (<code>write_sequence</code>, <code>suggest_domains</code>) are designed but not yet built — do not assume they exist today.</p>
+  <p><strong>Webhook boundary:</strong> <code>activity</code> can be polled for campaign, reply, bounce, and deliverability events. The current public API does not expose push webhook subscriptions; treat webhooks as unavailable if they are a hard integration requirement.</p>
 
   <h2 id="auth">Auth model</h2>
   <p>One bearer token per tenant, minted at signup. Every authed call:</p>

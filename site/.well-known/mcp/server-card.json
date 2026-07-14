@@ -20,7 +20,7 @@
     "description": "One token per tenant, obtained via POST https://agent-cold-email-api.yaakovscher.workers.dev/signup (no auth required for signup itself). Pass as Authorization: Bearer <token>."
   },
   "status": "early-access",
-  "statusNote": "The hosted API and MCP control plane are live in sandbox mode. Real sending is not active. Demo tenants are structurally unable to reach vendor adapters and incur no real spend.",
+  "statusNote": "Public early access: the hosted API, MCP endpoint, npm CLI, and isolated sandbox are live. Real sending is not active. Demo tenants are structurally unable to reach vendor adapters and incur no real spend.",
   "capabilities": {
     "tools": true,
     "resources": false,
@@ -43,7 +43,7 @@
     { "name": "configure_dashboard", "description": "Create, update, promote-to-default, or delete a dashboard saved view." },
     { "name": "label_thread", "description": "Set or clear a triage label on an inbox thread." },
     { "name": "list_campaigns", "description": "List every campaign with id, name, status, and event counts." },
-    { "name": "activity", "description": "Unified, chronological feed of campaign events + deliverability control-loop actions." }
+    { "name": "activity", "description": "Pollable, chronological feed of campaign events and deliverability control-loop actions. Push webhook subscriptions are not in the current public API." }
   ],
   "guardrails": [
     "per-tenant domain and mailbox isolation",

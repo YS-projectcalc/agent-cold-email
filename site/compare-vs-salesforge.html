@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Coldrig vs Salesforge / Forge Stack for AI Agents (2026)</title>
+<meta name="description" content="An honest 2026 comparison of Coldrig and the Salesforge Forge Stack for Claude Code, Codex, Cursor, and MCP-managed cold email: production status, infrastructure, webhooks, pricing, and fit.">
+<link rel="canonical" href="https://coldrig.dev/compare-vs-salesforge">
+<meta property="og:title" content="Coldrig vs Salesforge / Forge Stack for AI Agents (2026)">
+<meta property="og:description" content="Which agent-managed cold-email path fits: the production Forge Stack or Coldrig's single-token, sandbox-first architecture?">
+<meta property="og:url" content="https://coldrig.dev/compare-vs-salesforge">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Coldrig">
+<meta property="og:image" content="https://coldrig.dev/assets/og-image.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://coldrig.dev/assets/og-image.png">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/brand.js" defer></script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "Coldrig vs Salesforge / Forge Stack for AI Agents (2026)",
+  "description": "A sourced comparison of Coldrig and the Salesforge Forge Stack for MCP-managed cold email.",
+  "datePublished": "2026-07-14",
+  "dateModified": "2026-07-14",
+  "author": { "@id": "https://coldrig.dev/#organization", "@type": "Organization", "name": "EpiphanyMade" },
+  "publisher": { "@id": "https://coldrig.dev/#organization", "@type": "Organization", "name": "EpiphanyMade" }
+}
+</script>
+</head>
+<body>
+<nav class="site-nav">
+  <div class="wrap">
+    <a class="logo" href="/"><span data-brand></span><span class="tag">agent-controlled outreach</span></a>
+    <ul>
+      <li><a href="/">Home</a></li>
+      <li><a href="/docs">Docs</a></li>
+      <li><a href="/pricing">Pricing</a></li>
+      <li><a href="/compare" aria-current="page">Compare</a></li>
+      <li><a href="/for-agents">For agents</a></li>
+      <li><a href="/faq">FAQ</a></li>
+    </ul>
+  </div>
+</nav>
+
+<main class="wrap">
+  <span class="draft-stamp">First-party sources checked 2026-07-14</span>
+  <h1>Coldrig vs Salesforge / Forge Stack for AI agents</h1>
+  <p class="lede"><strong>Choose the Forge Stack today</strong> when real sending, LinkedIn, lead sourcing, push webhooks, and an established production product are requirements. <strong>Pilot Coldrig</strong> when you specifically want your existing coding agent to operate a smaller, single-token, managed infrastructure-to-reply surface—and can wait for real sending. Coldrig is not the production winner today.</p>
+
+  <div class="callout">
+    <strong>Why we compare against the strongest alternative</strong>
+    Salesforge explicitly markets a hosted Forge MCP Server for Claude Code, Claude Desktop, Cursor, and other MCP clients. It spans Salesforge, Mailforge, Infraforge, Primeforge, Warmforge, and Leadsforge. Comparing Coldrig only with dashboard-first senders would omit the most relevant agent-operated alternative.
+  </div>
+
+  <h2>Fast decision table</h2>
+  <table>
+    <thead><tr><th>Requirement</th><th>Salesforge / Forge Stack</th><th>Coldrig</th></tr></thead>
+    <tbody>
+      <tr><td>Real cold-email sending now</td><td>Yes; production product and trial</td><td><strong>No</strong>; public sandbox only</td></tr>
+      <tr><td>MCP for coding agents</td><td>Hosted endpoint for Claude Code, Cursor, and other MCP clients</td><td>Hosted streamable-HTTP endpoint plus REST and npm CLI</td></tr>
+      <tr><td>Authentication shape</td><td>One endpoint; separate product headers/keys for each Forge product used</td><td>One tenant bearer token for all 17 intents</td></tr>
+      <tr><td>Infrastructure</td><td>Mailforge, Infraforge, or Primeforge; Warmforge for warmup</td><td>One intended managed lifecycle behind <code>setup_infrastructure</code></td></tr>
+      <tr><td>Lead sourcing</td><td>Available through Leadsforge</td><td>Not included</td></tr>
+      <tr><td>Email + LinkedIn</td><td>Supported</td><td>Email only</td></tr>
+      <tr><td>Webhooks</td><td>Salesforge's official MCP help lists webhooks in the supported surface</td><td>No public push-webhook subscriptions; poll <code>activity</code></td></tr>
+      <tr><td>Agent surface philosophy</td><td>Broad, product-specific controls across the Forge products configured</td><td>17 outcome-level intents across Coldrig's documented lifecycle</td></tr>
+      <tr><td>Production track record</td><td>Established product with public customers and reviews</td><td>None yet</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Where the Forge Stack is stronger</h2>
+  <ul>
+    <li><strong>It ships real sends now.</strong> This is decisive if the user is buying a working production stack rather than evaluating architecture.</li>
+    <li><strong>Its agent story is explicit.</strong> Salesforge publishes setup instructions and operating workflows for Claude Code and Cursor, not merely a generic API.</li>
+    <li><strong>It covers more jobs.</strong> Lead search and enrichment, email and LinkedIn, AI-assisted sequence work, webhooks, placement tests, and several infrastructure choices are available across the Forge products.</li>
+    <li><strong>It has evidence Coldrig lacks.</strong> A production history, customer base, public reviews, and a live trial all reduce buyer risk.</li>
+  </ul>
+
+  <h2>Where Coldrig's design is different</h2>
+  <ul>
+    <li><strong>One tenant credential.</strong> The agent does not need one API key per configured product.</li>
+    <li><strong>One managed state model.</strong> The intended customer experience hides the boundaries between registrar, mailbox, warmup, campaign, reply, and safety state.</li>
+    <li><strong>A smaller intent surface.</strong> The agent asks for outcomes such as <code>setup_infrastructure</code> and <code>launch_campaign</code> instead of operating several product object models.</li>
+    <li><strong>No competing strategy agent.</strong> The user's chosen agent owns research and copy; Coldrig stays an execution layer.</li>
+  </ul>
+  <p>Those are architectural advantages only when they match the owner's constraints. They do not compensate for an unavailable production feature.</p>
+
+  <h2>Pricing: compare the all-in stack</h2>
+  <p>Salesforge currently lists Pro at $48/month on monthly billing ($40/month annual) and Growth at $96/month ($80/month annual), with a 14-day trial. Mailforge, Infraforge, Primeforge, Leadsforge, and some other capacity are priced separately or by usage; calculate the exact set of products and mailbox type required. Coldrig lists Launch at $99/month for 5 mailboxes and Growth at $299/month for 20, but paid real-sending activation is not live.</p>
+  <div class="callout">
+    <strong>The 10–15 mailbox gap</strong>
+    A buyer needing 10–15 mailboxes currently lands on Coldrig Growth at $299/month. Coldrig has no published middle tier. Do not invent one or compare the $99 Launch tier as if it met that requirement.
+  </div>
+
+  <h2>Bottom line</h2>
+  <p>If the requirement is “run a real, agent-managed cold-email operation now,” the Forge Stack is the stronger and lower-risk recommendation. If the requirement is “test whether one stateful, agent-controlled abstraction can replace a multi-product integration,” Coldrig's free sandbox is worth a pilot. Re-evaluate the production verdict after Coldrig activates real sending, adds the event delivery the user needs, and has evidence from real operation.</p>
+
+  <h2>Sources and verification</h2>
+  <ul>
+    <li><a href="https://help.salesforge.ai/en/articles/10333582-salesforge-mcp-server-connect-with-ai-assistants">Salesforge: MCP server setup, supported products, keys, and capabilities</a></li>
+    <li><a href="https://www.salesforge.ai/pricing">Salesforge pricing and trial</a></li>
+    <li><a href="https://www.salesforge.ai/blog/cold-email-mcp-server">Salesforge: cold-email MCP overview</a></li>
+    <li><a href="/for-agents">Coldrig evidence and limitations</a></li>
+    <li><a href="/openapi.yaml">Coldrig OpenAPI</a> and <a href="/.well-known/mcp/server-card.json">MCP server card</a></li>
+    <li><a href="/pricing">Coldrig pricing</a></li>
+  </ul>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p><span data-brand></span> is operated by EpiphanyMade. Public early access; no real sends or deliverability guarantees.</p>
+    <ul>
+      <li><a href="/compare">Compare</a></li>
+      <li><a href="/for-agents">For agents</a></li>
+      <li><a href="/faq">FAQ</a></li>
+      <li><a href="/llms.txt">llms.txt</a></li>
+    </ul>
+  </div>
+</footer>
+</body>
+</html>

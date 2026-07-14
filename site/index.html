@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#f7f7f2">
-  <title>Coldrig — cold outreach infrastructure for agents</title>
-  <meta name="description" content="Give your agent one reliable surface for cold outreach. Coldrig provisions dedicated domains and mailboxes, runs sequences, manages replies, and enforces deliverability guardrails.">
+  <title>AI Agent Cold Email Infrastructure | Coldrig</title>
+  <meta name="description" content="Coldrig gives Codex, Claude Code, Cursor, and other AI agents one API and MCP surface for cold-email domains, mailboxes, warmup, campaigns, replies, and enforced sending guardrails.">
   <link rel="canonical" href="https://coldrig.dev/">
   <meta property="og:title" content="Coldrig — your agent runs outreach. We run the rig.">
   <meta property="og:description" content="Agent-first infrastructure for cold outreach: one token, 17 focused tools, isolated domains and mailboxes, and server-side guardrails.">
@@ -25,15 +25,37 @@
   <script type="application/ld+json">
   {
     "@context": "https://schema.org",
-    "@type": "SoftwareApplication",
-    "name": "Coldrig",
-    "alternateName": "agent-cold-email",
-    "applicationCategory": "BusinessApplication",
-    "operatingSystem": "Any (hosted API, MCP server, CLI)",
-    "description": "Agent-first cold outreach infrastructure. Coldrig gives coding agents 17 focused tools to provision isolated domains and mailboxes, run sequences, manage replies, and operate within server-side deliverability guardrails.",
-    "url": "https://coldrig.dev/",
-    "softwareHelp": "https://coldrig.dev/docs",
-    "offers": { "@type": "Offer", "name": "Sandbox", "price": "0", "priceCurrency": "USD", "description": "A complete simulated run with no real domains or email." }
+    "@graph": [
+      {
+        "@type": "WebSite",
+        "@id": "https://coldrig.dev/#website",
+        "name": "Coldrig",
+        "alternateName": ["agent-cold-email", "coldrig.dev"],
+        "url": "https://coldrig.dev/",
+        "publisher": { "@id": "https://coldrig.dev/#organization" }
+      },
+      {
+        "@type": "Organization",
+        "@id": "https://coldrig.dev/#organization",
+        "name": "EpiphanyMade",
+        "url": "https://coldrig.dev/",
+        "logo": { "@type": "ImageObject", "url": "https://coldrig.dev/apple-touch-icon.png", "width": 180, "height": 180 },
+        "sameAs": ["https://github.com/YS-projectcalc/agent-cold-email"]
+      },
+      {
+        "@type": "SoftwareApplication",
+        "@id": "https://coldrig.dev/#software",
+        "name": "Coldrig",
+        "alternateName": "agent-cold-email",
+        "applicationCategory": "BusinessApplication",
+        "operatingSystem": "Any",
+        "description": "Cold-email infrastructure designed for operation by AI coding agents through MCP or HTTP. Coldrig provisions isolated domains and mailboxes, manages warmup, runs sequences, centralizes replies, and enforces sending guardrails server-side.",
+        "url": "https://coldrig.dev/",
+        "softwareHelp": "https://coldrig.dev/docs",
+        "publisher": { "@id": "https://coldrig.dev/#organization" },
+        "offers": { "@type": "Offer", "name": "Free sandbox", "price": "0", "priceCurrency": "USD", "url": "https://coldrig.dev/docs#quickstart", "description": "A complete simulated run with no real domains, mailboxes, or email." }
+      }
+    ]
   }
   </script>
 </head>
@@ -52,24 +74,24 @@
         <a href="/pricing">Pricing</a>
         <a href="/compare">Compare</a>
       </div>
-      <a class="nav-cta" href="#waitlist">Get early access <span aria-hidden="true">↗</span></a>
+      <a class="nav-cta" href="/docs#quickstart">Start now <span aria-hidden="true">↗</span></a>
     </div>
   </nav>
 
   <main id="main">
     <section class="hero wrap">
       <div class="hero-copy" data-reveal>
-        <div class="eyebrow"><span class="status-dot"></span> Agent-first outreach infrastructure</div>
-        <h1>Your agent runs outreach.<br><em>We run the rig.</em></h1>
-        <p class="hero-lede">Coldrig gives your coding agent one reliable surface to provision domains and mailboxes, warm them up, launch sequences, and manage every reply.</p>
+        <div class="eyebrow"><span class="status-dot"></span> Public early access · live sandbox</div>
+        <h1>Cold email infrastructure your agent can run <em>end to end.</em></h1>
+        <p class="hero-lede">Connect Codex, Claude Code, Cursor, or any MCP/HTTP-capable agent to one tenant-scoped system for domains, mailboxes, warmup, campaigns, and replies. Your agent owns strategy and copy; Coldrig runs the durable machinery.</p>
         <div class="cta-row">
-          <a class="btn primary" href="#waitlist">Join early access <span aria-hidden="true">→</span></a>
-          <a class="btn quiet" href="/docs#demo"><span class="play-icon" aria-hidden="true">▶</span> Run the free sandbox</a>
+          <a class="btn primary" href="/docs#quickstart">Connect your agent <span aria-hidden="true">→</span></a>
+          <a class="btn quiet" href="/docs#demo"><span class="play-icon" aria-hidden="true">▶</span> Try the safe sandbox</a>
         </div>
         <div class="hero-proof" aria-label="Product facts">
-          <span><strong>01</strong> token</span>
-          <span><strong>17</strong> focused tools</span>
-          <span><strong>0</strong> vendor accounts</span>
+          <span><strong>01</strong> tenant token</span>
+          <span><strong>17</strong> intent-level tools</span>
+          <span><strong>Tenant-scoped</strong> state</span>
         </div>
       </div>
 
@@ -134,7 +156,7 @@
     <aside class="agent-discovery wrap" aria-label="Resources for AI agents">
       <div class="agent-discovery-icon" aria-hidden="true">⌁</div>
       <div><strong>Are you an agent evaluating Coldrig?</strong><span>Use the operational brief for fit, tradeoffs, exact capabilities, and honest limitations.</span></div>
-      <a href="/agent-evaluation.md">Read the agent brief →</a>
+      <a href="/for-agents">Read the evidence brief →</a>
       <a href="/.well-known/mcp/server-card.json">Inspect MCP card ↗</a>
     </aside>
 
@@ -251,45 +273,45 @@
             </div>
           </div>
         </div>
+        <p class="demo-caption">Product illustration · simulated account data</p>
       </div>
     </section>
 
     <section class="section wrap">
       <div class="truth-panel" data-reveal>
         <div class="truth-copy">
-          <span class="kicker light">Where Coldrig is today</span>
-          <h2>Try the whole system.<br>Risk nothing real.</h2>
-          <p>The hosted control plane and MCP endpoint are live in sandbox mode. Run an accelerated simulation with realistic warmup, replies, bounces, timeouts, and rate limits—without buying a domain or sending an email.</p>
-          <div class="cta-row"><a class="btn inverse" href="/docs#demo">Open the sandbox guide →</a><a class="inline-link" href="https://github.com/YS-projectcalc/agent-cold-email">View on GitHub ↗</a></div>
+          <span class="kicker light">Verify before you commit</span>
+          <h2>Prove the workflow.<br>Before you commit.</h2>
+          <p>Start with a fault-injecting sandbox that simulates provisioning, warmup, replies, bounces, timeouts, and rate limits. It is a technical pilot, not a real campaign: production sending is not active yet.</p>
+          <div class="cta-row"><a class="btn inverse" href="/docs#quickstart">Open the quickstart →</a><a class="inline-link" href="https://github.com/YS-projectcalc/agent-cold-email">Inspect the source ↗</a></div>
         </div>
-        <div class="terminal" aria-label="Example sandbox command">
+        <div class="terminal" aria-label="Working Coldrig sandbox demo command">
           <div class="terminal-bar"><span><i></i><i></i><i></i></span><small>terminal</small></div>
           <div class="terminal-body">
             <p><span class="term-prompt">$</span> npx agent-cold-email demo</p>
             <p class="term-muted">Creating isolated demo tenant…</p>
-            <p><span class="term-ok">✓</span> 2 domains provisioned</p>
-            <p><span class="term-ok">✓</span> 6 mailboxes warmed</p>
-            <p><span class="term-ok">✓</span> campaign launched</p>
-            <p><span class="term-accent">↳</span> 312 sent · 9 replies · 4.1% bounce</p>
+            <p><span class="term-ok">✓</span> infrastructure ready</p>
+            <p><span class="term-ok">✓</span> replies + failures simulated</p>
+            <p><span class="term-accent">↳</span> no real spend · no real sends</p>
             <p class="term-cursor">_<span></span></p>
           </div>
         </div>
       </div>
-      <p class="honesty-note"><strong>Plain-English status:</strong> real sending is not live yet, and Coldrig will never promise inbox placement. The sandbox is real software operating simulated infrastructure. <a href="/faq">Read the honest FAQ →</a></p>
+      <p class="honesty-note"><strong>Plain-English status:</strong> the API, MCP endpoint, npm CLI, and sandbox are live. Real sending is not active yet. Coldrig never guarantees inbox placement. <a href="/faq">Read the honest FAQ →</a></p>
     </section>
 
     <section id="waitlist" class="final-cta">
       <div class="wrap final-grid">
         <div>
-          <span class="kicker">Early access</span>
-          <h2>Build your strategy.<br>We’ll build the rig.</h2>
+          <span class="kicker">Public early access</span>
+          <h2>Your strategy.<br>One rig underneath.</h2>
         </div>
         <div class="signup-block">
-          <p>Get notified when real sending opens. No launch theatre, no weekly nurture sequence—just meaningful product updates.</p>
+          <p>Run the free sandbox now or join the activation list for real sending. We’ll only send access and material product updates.</p>
           <form class="waitlist" action="https://agent-cold-email-api.yaakovscher.workers.dev/api/waitlist" method="post">
             <label for="wl-email" class="sr-only">Work email address</label>
             <input id="wl-email" type="email" name="email" placeholder="you@company.com" autocomplete="email" required>
-            <button type="submit">Request access <span aria-hidden="true">→</span></button>
+            <button type="submit">Join the activation list <span aria-hidden="true">→</span></button>
           </form>
           <p class="form-status" role="status"></p>
           <p class="form-note">By joining, you agree to the <a href="/privacy">privacy policy</a>. Unsubscribe anytime.</p>

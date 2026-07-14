@@ -14,6 +14,9 @@
 <meta property="og:image" content="https://coldrig.dev/assets/og-image.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="https://coldrig.dev/assets/og-image.png">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="stylesheet" href="assets/style.css">
 <script src="assets/brand.js" defer></script>
 <script type="application/ld+json">
@@ -45,7 +48,7 @@
 <main class="wrap">
   <span class="draft-stamp">As of 2026-07-13</span>
   <h1>What is a cold email MCP server? The cold-email MCP server for coding agents</h1>
-  <p class="lede">A hosted, streamable-HTTP MCP server exposing 17 curated cold-email infrastructure tools, per-tenant bearer-token scoped, live in test mode now. This page documents the exact tool surface — verified against the live <code>tools/list</code> response, not aspirational.</p>
+  <p class="lede">A hosted, streamable-HTTP MCP server exposing 17 intent-level cold-email infrastructure tools, scoped by per-tenant bearer token and live against an isolated sandbox. This page documents the exact tool surface — verified against the live <code>tools/list</code> response, not aspirational.</p>
 
   <div class="callout">
     <strong>Live and test-mode</strong>
@@ -164,7 +167,7 @@
 }</code></pre>
 
   <h2 id="demo">The no-signup CLI demo</h2>
-  <p><code>npx agent-cold-email demo</code> mints a demo tenant, provisions sample infrastructure, and runs the accelerated sandbox pipeline end to end (warmup, sends, replies, bounces, stop-on-reply) in one command — no signup or token-wrangling required. <strong>The CLI is not yet published to npm</strong> — until it is, drive the same 17 tools over the hosted MCP endpoint above or directly over HTTP (<a href="/docs#quickstart">quickstart</a>). The npm package name is reserved as the permanent keyword handle; publishing is one of the remaining activation steps (see <a href="/faq">FAQ</a>).</p>
+  <p><code>npx agent-cold-email demo</code> mints a demo tenant, provisions sample infrastructure, and runs the accelerated sandbox pipeline end to end (warmup, sends, replies, bounces, stop-on-reply) in one command — no signup or token-wrangling required. The npm CLI is live at v0.1.0 (registry-verified 2026-07-14). The same 17 tools are available over the hosted MCP endpoint or directly over HTTP (<a href="/docs#quickstart">quickstart</a>). Every public path remains sandboxed; real sending is not active.</p>
 
   <h2 id="auth">Auth model</h2>
   <p>One bearer token per tenant, minted by the unauthenticated <code>POST /signup</code> bootstrap call. Every other tool call requires <code>Authorization: Bearer &lt;token&gt;</code> and resolves server-side to exactly one tenant's isolated state — there is no cross-tenant data access at any layer.</p>
@@ -172,7 +175,7 @@
   <h2>Related</h2>
   <ul>
     <li><a href="/guide-cold-email-with-ai-agent">How to run cold email with your AI coding agent</a> — the full step-by-step walkthrough.</li>
-    <li><a href="/guide-mcp-tool-count">Smartlead vs Instantly MCP tool coverage</a> — why 17 curated tools cover 100% of the pipeline.</li>
+    <li><a href="/guide-mcp-tool-count">17 intent-level tools vs larger vendor MCP surfaces</a> — lifecycle coverage and control tradeoffs.</li>
     <li><a href="/compare-vs-smartlead-instantly">Smartlead vs Instantly vs agent-cold-email</a>.</li>
     <li><a href="/docs">Docs</a> — quickstart, CLI usage, auth model.</li>
     <li><a href="openapi.yaml">openapi.yaml</a> — the same 17 intents as REST.</li>

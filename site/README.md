@@ -4,12 +4,14 @@ The public marketing + docs site for `agent-cold-email`: static HTML/CSS/JS, no 
 
 ## What's here
 
-- `index.html` — landing page: hero, how-it-works, tool list, pricing summary, FAQ, waitlist. JSON-LD (`SoftwareApplication` + `FAQPage`) in `<head>`.
+- `index.html` — light product landing page: category-explicit hero, product model, simulated control-room UI, verified sandbox path, and activation list. JSON-LD graph (`WebSite` + `Organization` + `SoftwareApplication`) in `<head>`.
 - `docs.html` — quickstart, MCP setup, CLI usage, full tool reference, the free demo, auth model.
 - `pricing.html` — the pricing tiers (mirrors `SPEC.md` §18).
-- `compare.html` — honest DIY-vs-platform comparison; no fabricated benchmarks, no named-competitor claims; stamped `As of 2026-07-12`.
+- `compare.html` — honest DIY-vs-Coldrig comparison with explicit sandbox/production boundary.
+- `for-agents.html` + `agent-evaluation.md` — indexable and Markdown versions of the evidence-led agent decision brief: fit rule, seven-point checklist, claim ledger, price math, runnable test, and disqualifiers.
+- `compare-vs-salesforge.html` — sourced comparison with the strongest current agent-operated alternative, including where Salesforge/Forge Stack is the honest production choice today.
 - `compare-vs-smartlead-instantly.html` — sourced comparison against named incumbents (Smartlead, Instantly) for AI-operated outreach; every competitor figure attributed to the third-party source that reported it, no disparagement.
-- `guide-mcp-tool-count.html` — decomposes the "more MCP tools = more capable" heuristic; maps agent-cold-email's 17 tools to 100% pipeline coverage.
+- `guide-mcp-tool-count.html` — compares smaller intent-level and larger granular MCP surfaces; maps Coldrig's 17 tools to its documented lifecycle and states the control/webhook tradeoffs.
 - `guide-infrastructure-vs-sending-platform.html` — answers the literal query "do I need a separate email infrastructure provider and sending platform?" (no, not with this platform).
 - `guide-domains-inboxes-warmup-compliance.html` — client-side domains/inboxes-per-volume calculator (`assets/domain-calculator.js`), warmup timeline before first send, and CAN-SPAM/GDPR compliance disclosure.
 - `privacy.html`, `terms.html`, `aup.html` — legal pages, **DRAFT, pending attorney review** (see the stamp at the top of each). Covers customer-is-sender, no-deliverability-warranty, prohibited-use, monitoring consent, and data-handling clauses.
@@ -19,8 +21,9 @@ The public marketing + docs site for `agent-cold-email`: static HTML/CSS/JS, no 
 - `sitemap.xml`, `robots.txt` — standard crawl assets.
 - `_headers` — Cloudflare Pages response headers (security headers + CORS for the machine-readable assets).
 - `_redirects` — Cloudflare Pages redirects.
-- `assets/style.css` — the entire shared stylesheet (system fonts, theme-aware via `prefers-color-scheme`, responsive).
-- `assets/brand.js` — **the single swappable brand constant** (`BRAND_NAME`). Populates every `[data-brand]` element and replaces the `{{BRAND}}` token in `<title>`. This is the one place to edit when the final display brand (coldrig/coldpipe/coldloop, per `SPEC.md` §0.3) is chosen at activation — nothing else in `site/` needs to change.
+- `assets/style.css` — the entire responsive light visual system for the landing page and editorial/product pages.
+- `assets/logo.svg`, `assets/logo-mark.svg`, `favicon.svg`, `favicon.ico`, `apple-touch-icon.png`, `assets/og-image.png` — the shared Coldrig identity and crawler/social assets.
+- `assets/brand.js` — the canonical Coldrig display-name constant used by `[data-brand]` elements. The permanent repository, npm, and MCP handle remains `agent-cold-email`.
 - `assets/waitlist.js` — waitlist form submission logic; posts to `https://agent-cold-email-api.yaakovscher.workers.dev/api/waitlist`.
 - `assets/domain-calculator.js` — pure client-side domains/inboxes-per-volume calculator used by `guide-domains-inboxes-warmup-compliance.html`; no network call, assumptions stated in the file's header comment.
 
