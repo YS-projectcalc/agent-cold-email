@@ -41,3 +41,6 @@ Adversarial panels apply to what is REAL: control plane, auth, tenancy, billing,
 - [ ] 2026-07-13 [ASK] A5 engine-spike findings F1-F4 (List-Unsubscribe header on `SendEmailInput`, hard/soft bounce flag on `PolledBounce`, real-IMAP `threadId` reconstruction via Message-ID, inbound event dedupe on `message_id`) — recorded unchecked in the 2026-07-12 session-log entry (archive/ROADMAP-done.md), but a later 2026-07-12 entry ("Engine correctness increment SHIPPED — commit `d342cd0`") appears to close these without the checklist ever being updated — verify and reconcile before treating as open work.
 
 > Done items live in archive/ROADMAP-done.md (self-draining at handoff).
+- [ ] 2026-07-14 [ASK] BYO-domain flow: define/spec what happens when a customer brings an existing domain (accept? DNS delegation? reputation intake checks? refuse-and-isolate?) — Yaakov question, needs SPEC ruling.
+- [ ] 2026-07-14 [ASK] Pre-warmed inventory evaluation: can/should we pre-warm domain+mailbox stock ahead of signup (cost carry, brand-mismatch, reassignment ToS/deliverability risk) — Yaakov question, needs economics + SPEC ruling.
+- [ ] 2026-07-14 [ASK] Competitive check: Mordy's sending-infra decision in the outreach-gigs gig-layer build vs coldrig — would coldrig compete/serve that lane? (answer drafted in-session 07-14; fold verdict here)
