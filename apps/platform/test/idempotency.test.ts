@@ -31,6 +31,20 @@ function rowCount(tenantId: string, sql: string, ...binds: unknown[]): Promise<n
   );
 }
 
+// The tenant's actual ctx.clock.now() (clock_base + clock_offset), reconstructed
+// from tenant_profile — NOT real Date.now(). setupReadyTenant() fast-forwards
+// the tenant's VIRTUAL clock by a warmup ramp (engine/idempotency.ts's staleness
+// check reads created_at against ctx.clock.now()), so a row stamped with real
+// Date.now() would already read as ~29 virtual days old — always "stale"
+// regardless of intent. Simulated claim rows must be stamped on this same clock
+// base to mean what a test says they mean ("fresh" vs "stale").
+function currentClockMs(state: DurableObjectState): number {
+  const row = state.storage.sql
+    .exec<{ clock_base: number; clock_offset: number }>(`SELECT clock_base, clock_offset FROM tenant_profile LIMIT 1`)
+    .one();
+  return row.clock_base + row.clock_offset;
+}
+
 // G1 / B2 — a retried mutating request carrying the same Idempotency-Key must
 // leave IDENTICAL end state (no second campaign / provision / send).
 describe("B2 — request-level idempotency (Idempotency-Key)", () => {
@@ -206,11 +220,13 @@ describe("NB2 — claim-then-execute idempotency", () => {
   it("rejects a concurrent same-key call while the first is still pending (claim)", async () => {
     const { tenantId } = await setupReadyTenant("Claim Co", "claimco.com");
     await runInDurableObject(tenantStub(tenantId), async (instance, state) => {
-      // Simulate an in-flight first call: a 'pending' claim already exists.
+      // Simulate an in-flight first call: a fresh 'pending' claim already
+      // exists (stamped on the tenant's own virtual clock, not real
+      // Date.now() — see currentClockMs()'s doc).
       state.storage.sql.exec(
         `INSERT INTO request_idempotency (key, status, response_json, created_at) VALUES (?, 'pending', NULL, ?)`,
         "launch_campaign:inflight",
-        Date.now(),
+        currentClockMs(state),
       );
       await expect(instance.launchCampaign(LAUNCH_INPUT("l@claimco-leads.com"), "inflight")).rejects.toThrow(/in progress/i);
       // The blocked call executed nothing — no campaign row was created.
@@ -229,6 +245,102 @@ describe("NB2 — claim-then-execute idempotency", () => {
       ).toBe(0); // claim cleared
       // The retry re-runs fn and throws again — a cached success would resolve instead.
       await expect(instance.reply("missing_thread", "hi", "failk")).rejects.toThrow();
+    });
+  });
+});
+
+async function replyReadyThread(brand: string, primaryDomain: string, leadEmail: string) {
+  const { tenantId, token } = await setupReadyTenant(brand, primaryDomain);
+  await api("/campaigns", {
+    method: "POST",
+    token,
+    body: JSON.stringify({ name: "r", offer: "x", leads: [{ email: leadEmail, firstName: "R", company: "Co" }], sequence: ONE_STEP, stopOnReply: true }),
+  });
+  await tenantStub(tenantId).tick();
+  await tenantStub(tenantId).pollInbox();
+  const inbox = await api<{ threads: { threadId: string }[] }>("/inbox", { token });
+  return { tenantId, threadId: inbox.body.threads[0]!.threadId };
+}
+
+// NB6 — ACTIVATION.md Gate 2 / d342cd0's liveness note: a DO that dies mid-fn
+// (after its claim is durable, before the UPDATE/DELETE) leaves a PERMANENT
+// 'pending' row that would 409 every retry of that key forever — write-time
+// eviction (NB1) only ever removes 'done' rows. A 'pending' claim past
+// REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS is presumed dead and reclaimable by
+// a retry of the SAME key.
+describe("NB6 — stale 'pending' claim reclaim (ACTIVATION.md Gate 2)", () => {
+  it("a fresh 'pending' claim (within the TTL) still 409s — genuine concurrent-duplicate protection is unweakened", async () => {
+    const { tenantId, threadId } = await replyReadyThread("Fresh Pending Co", "freshpending.com", "reply.prospect@freshpending-leads.com");
+    await runInDurableObject(tenantStub(tenantId), async (instance, state) => {
+      const key = `reply:${threadId}:fresh-key`;
+      state.storage.sql.exec(
+        `INSERT INTO request_idempotency (key, status, response_json, created_at) VALUES (?, 'pending', NULL, ?)`,
+        key,
+        currentClockMs(state), // just claimed — well within the TTL
+      );
+      await expect(instance.reply(threadId, "body", "fresh-key")).rejects.toThrow(/in progress/i);
+      // The blocked retry executed nothing — no second 'sent' event landed.
+      expect(
+        state.storage.sql.exec<{ n: number }>(`SELECT COUNT(*) as n FROM events WHERE thread_id = ? AND type = 'sent'`, threadId).one().n,
+      ).toBe(1); // only the step-1 campaign send
+    });
+  });
+
+  it("a stale 'pending' claim (past the TTL) is reclaimed — the retry executes and completes", async () => {
+    const { tenantId, threadId } = await replyReadyThread("Stale Pending Co", "stalepending.com", "reply.prospect@stalepending-leads.com");
+    await runInDurableObject(tenantStub(tenantId), async (instance, state) => {
+      const key = `reply:${threadId}:stale-key`;
+      // A claim from a DO that died mid-fn, long past any legitimate fn()
+      // duration (created_at = 0 is billions of ms before the tenant's own
+      // clock_base, so it's stale under any realistic TTL).
+      state.storage.sql.exec(
+        `INSERT INTO request_idempotency (key, status, response_json, created_at) VALUES (?, 'pending', NULL, 0)`,
+        key,
+      );
+      const result = await instance.reply(threadId, "reclaimed body", "stale-key");
+      expect(result.messageId).toBeTruthy();
+      // step-1 campaign send + exactly ONE manual reply send.
+      expect(
+        state.storage.sql.exec<{ n: number }>(`SELECT COUNT(*) as n FROM events WHERE thread_id = ? AND type = 'sent'`, threadId).one().n,
+      ).toBe(2);
+      const row = state.storage.sql
+        .exec<{ status: string; response_json: string | null }>(`SELECT status, response_json FROM request_idempotency WHERE key = ?`, key)
+        .one();
+      expect(row.status).toBe("done");
+      expect(JSON.parse(row.response_json!)).toEqual(result);
+    });
+  });
+
+  // Two retries of the SAME stale key, launched concurrently against the same
+  // DO instance (Promise.all, same pattern as tick-correctness.test.ts's
+  // "processes a due row exactly once" — an honest race via the DO's own
+  // serial-execution/input-gate semantics, not a faked/manually-stepped one):
+  // exactly one must reclaim and run fn(); the other must see the
+  // freshly-reclaimed (no-longer-stale) row and 409, never double-send.
+  it("reclaim is atomic under a concurrent retry race — exactly one retry wins", async () => {
+    const { tenantId, threadId } = await replyReadyThread("Race Co", "raceco.com", "reply.prospect@raceco-leads.com");
+    await runInDurableObject(tenantStub(tenantId), async (instance, state) => {
+      const key = `reply:${threadId}:race-key`;
+      state.storage.sql.exec(
+        `INSERT INTO request_idempotency (key, status, response_json, created_at) VALUES (?, 'pending', NULL, 0)`,
+        key,
+      );
+      const [a, b] = await Promise.allSettled([
+        instance.reply(threadId, "race body", "race-key"),
+        instance.reply(threadId, "race body", "race-key"),
+      ]);
+      const fulfilled = [a, b].filter((r) => r.status === "fulfilled");
+      const rejected = [a, b].filter((r): r is PromiseRejectedResult => r.status === "rejected");
+      expect(fulfilled.length).toBe(1); // exactly one retry actually ran fn()
+      expect(rejected.length).toBe(1);
+      expect(rejected[0]!.reason).toMatchObject({ message: expect.stringMatching(/in progress/i) });
+      // step-1 campaign send + exactly ONE manual reply send — never two.
+      expect(
+        state.storage.sql.exec<{ n: number }>(`SELECT COUNT(*) as n FROM events WHERE thread_id = ? AND type = 'sent'`, threadId).one().n,
+      ).toBe(2);
+      expect(state.storage.sql.exec<{ status: string }>(`SELECT status FROM request_idempotency WHERE key = ?`, key).one().status).toBe(
+        "done",
+      );
     });
   });
 });
