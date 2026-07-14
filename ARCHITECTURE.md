@@ -24,9 +24,9 @@ The panel killed the "pure Cloudflare-first" proposal: a cold-email product's co
                                         │  Worker↔engine boundary contract (designed now)
                                         ▼
    ┌──────────── EXTERNAL ENGINE (activation-hosted; sandbox = native in-Worker) ────────┐
-   │  Go daemon (forked cold-cli) on a VM/container: 24/7 SMTP send + IMAP poll,          │
-   │  bounce/reply/thread/unsub detection, per-mailbox caps, rotation, A/B.               │
-   │  Host decided at activation (Cloudflare Containers vs small VPS); real-adapter only. │
+   │  Node daemon (apps/engine — nodemailer/imapflow): 24/7 SMTP send + IMAP poll,        │
+   │  bounce/reply/thread detection, HTTP boundary (/health, /v1/send, /v1/poll).         │
+   │  Host: single droplet per ACTIVATION Gate-2 runbook; real-adapter only.              │
    └─────────────────────────────────────────────────────────────────────────────────────┘
                                         │
                     registrar API (Porkbun) · mailbox vendor API (Inboxkit primary)
@@ -45,7 +45,7 @@ The panel killed the "pure Cloudflare-first" proposal: a cold-email product's co
 
 5. **Idempotency keys on every side-effecting `VendorPort` op.** At-least-once Queues + retried DO alarms on money/provisioning ops is a correctness trap otherwise. The sandbox simulates duplicate delivery + mid-step crash so idempotency is exercised in test mode.
 
-6. **Engine is out of Worker scope.** IMAP/SMTP long-lived connections belong to the Go daemon. Build phase implements the engine natively in-Worker against the boundary contract; the Go fork + host is an activation concern. cold-cli is MIT (verified 2026-07-09) — clean to fork.
+6. **Engine is out of Worker scope.** IMAP/SMTP long-lived connections belong to an external daemon. Built as **Node** (`apps/engine/`, committed `eb8ee42` after re-attack #3 SHIP) on the A5-validated nodemailer/imapflow/mailparser stack — Node-over-Go ratified 2026-07-14 (buildable-today; the original plan was a Go cold-cli fork, MIT-verified 2026-07-09, kept as fallback). Host = single droplet per ACTIVATION Gate-2 runbook; scale-out swaps the in-memory in-flight claim for a shared store (documented in `apps/engine/src/store.ts`).
 
 7. **MCP via Agents SDK `McpAgent`** (streamable HTTP, per-token auth). The paste-one-token remote-MCP config must be verified to actually connect in both Claude Code and Codex (distribution-critical; screenshot gate in Phase C).
 

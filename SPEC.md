@@ -170,12 +170,31 @@ This turns the "perpetual specialist ops" burden into an **automated control loo
 
 ---
 
-## 12. Economics (wholesale; verified 2026-07-09 — primary sources, see docs/research/vendor-tos-economics-2026-07-09.md)
+## 12. Economics (wholesale; verified 2026-07-09, cost basis CORRECTED 2026-07-12 — primary sources: `docs/research/vendor-tos-economics-2026-07-09.md`, `docs/research/vendor-costs-mailforge-inboxkit-2026-07-12.md`, `docs/research/warmforge-bundle-verification-2026-07-12.md`)
 
 - Domains (Porkbun, primary): **.com $11.08/yr**, .net $12.52, .io $28→$52 renewal, .co $16→$31 renewal. Default lookalikes to **.com** (no renewal cliff; burn-replacements pay full renewal). Maildoso/Mailforge bundle domains at $12–14/yr.
-- Mailboxes (all-in = mailbox + warmup): **Inboxkit** $3.1/$2.7/$2.5 per mbx/mo (Pro/Agency/Ent) **+ $3/mbx/mo warmup ≈ $5.5–6.1 all-in**, API on all paid tiers. **Maildoso** $2.5→$0.5/mbx (30→1000, cheapest at volume). **Mailforge** $3/mbx yearly (shared IP; billed on slots). **Mailreef** server-based $240–249/mo ~150 mbx/server, +$0.001/send. **Zapmail** ~$3–3.5/mbx, API gated to $299 tier.
+- Mailboxes (all-in = mailbox + warmup), **DECIDED real-adapter path = Mailforge** (ToS-clean resale, §13 RESALE-PERMISSION GATE): slot **$3.00/mo**. The advertised $3/mbx headline does NOT include warmup — that's the separate Warmforge product (**$10/slot/mo**, first slot free), and the hoped-for "unlimited" Salesforge→Warmforge bundle does **NOT** hold at reseller scale (ToS Art. 3.5 discretionary 99-connected-account cap + Whitelabel FAQ excludes Warmforge outright — `docs/research/warmforge-bundle-verification-2026-07-12.md:9-11`). Real basis is **ramp-only** standalone Warmforge, sized to the ONBOARDING RATE (not the whole fleet) since warmup is front-loaded to the first ~3–4 weeks/mailbox (§9): illustration — 200 active mbx onboarding ~20–30/mo → ~$200–300/mo warmup fleet → **~$1–1.50/active-mailbox amortized**. **Mailforge-path all-in ≈ $3.00 slot + $1–1.50 ramp warmup + ~$0.50 domains ≈ $4.50–5.00/mbx** (`docs/research/warmforge-bundle-verification-2026-07-12.md:19`). **Inboxkit** (alternative path / Dedicated-tier basis, §13 option-c management-service): $3.1/$2.7/$2.5 per mbx/mo (Pro/Agency/Ent) + $3/mbx/mo warmup add-on; at the 10-mailbox Professional tier that's $61/mo all-in = **$6.10/mbx** (`docs/research/vendor-costs-mailforge-inboxkit-2026-07-12.md:39`), API on all paid tiers. **Maildoso** $2.5→$0.5/mbx (30→1000, cheapest at volume). **Mailreef** server-based $240–249/mo ~150 mbx/server, +$0.001/send. **Zapmail** ~$3–3.5/mbx, API gated to $299 tier.
 - **Stripe:** 2.9% + 30¢ domestic; ~$15/dispute (cold-email = high-chargeback category → dunning + dispute lane required).
-- Fully-loaded cost/mailbox ≈ **$7/mo** (mailbox+warmup+domain amortization+8–18%/mo burn replacement+Stripe). Retail per-mailbox line (§18) at $13–15 clears the **2.5–3x** target. **Margin** = retail − wholesale; **quota lever** = mailbox/domain/lead allocations per tenant + per-tenant spend caps.
+- Fully-loaded cost/mailbox ≈ **$4.50–5.00/mo on the DECIDED Mailforge path** (slot + ramp-only warmup + domain amortization; burn-replacement and Stripe layer on top per-transaction, same as before) — **~$6/mo on the Inboxkit alternative path**. **CORRECTED 2026-07-12**, superseding the earlier $7/mo estimate (`vendor-tos-economics-2026-07-09.md`), which was Inboxkit-derived and still roughly holds for that path (refined to $6.10 above); the $7 figure no longer applies to the Mailforge path, which is ~30% cheaper once warmup is modeled ramp-only instead of per-active-mailbox. Retail per-mailbox line (§18) at $13–15 clears **~2.6–3.3x on Mailforge, ~2.1–2.5x on Inboxkit** — both still clear a sane self-serve margin; Mailforge stays the decided default. **Margin** = retail − wholesale; **quota lever** = mailbox/domain/lead allocations per tenant + per-tenant spend caps.
+- ⚠️ **Pricing-model revision pending founder ruling 2026-07-14** ($49 platform + $10/active mailbox, 5-mbx minimum — see ROADMAP.md `## Open` "PRICING RULING PENDING"). Not applied here; §18 below still reflects the live Launch/Growth/Scale/Custom ladder, with the corrected cost basis only.
+
+### 12.1 Pre-warmed inventory evaluation (RULING-PENDING — founder; Yaakov's question, 2026-07-14)
+
+Can/should we pre-warm domain+mailbox stock ahead of signup so new tenants skip the ~4-week warmup (§9)? Decision input only — not a decision.
+
+**(a) Carry cost per pre-warmed unit-month** (Mailforge-path basis, §12 above):
+| Phase | Composition | Cost |
+|---|---|---|
+| Warm-up build (~3–4 wks, one-time per unit) | slot $3.00 + standalone Warmforge $10.00 (no active-fleet amortization — this box has no tenant yet) + domain ~$0.50 | **~$13.50/mbx/mo** — matches the *standalone* (non-ramp, non-bundled) Mailforge all-in COGS independently derived in `docs/research/vendor-costs-mailforge-inboxkit-2026-07-12.md:26` ($13.47–13.58/mbx at 10 slots) — same math, two routes, cross-checks clean. |
+| Shelf (warmed, unassigned, awaiting a tenant) | slot $3.00 + domain ~$0.50; ongoing trickle-send needed to *hold* warmth is **UNKNOWN** (no source addresses idle-box reputation decay) | **~$3.50/mbx/mo** (floor — likely understates if trickle-maintenance turns out to be required) |
+
+**(b) Brand-mismatch.** Pre-warmed stock is necessarily on vendor-owned/generic domains (built before a tenant exists to brand it). Per SPEC §20 (BYO-domain, ruled 2026-07-14), tenants may bring **any** domain including primary, and the whole BYO intake ladder exists precisely because tenant-adjacent domains are what a sender wants. `docs/research/byo-domain-verification-2026-07-14.md:15` shows Instantly ships "Pre-Warmed Domains & Accounts" **alongside**, not instead of, BYO-connect/DFY-fresh — i.e. even the incumbent that sells this treats it as a narrow add-on for buyers who don't care about domain branding, not a general default. **No research doc sizes what fraction of the buyer market that narrow segment is** — flagged UNKNOWN, do not assert a number. Structurally, pre-warmed inventory can only serve the §20 "we-manage-zone, no existing domain" baseline path, never a BYO tenant.
+
+**(c) Reassignment risk.** The captured Mailforge/Warmforge ToS excerpts (Art. 3.1 sub-account/reseller terms, Art. 3.5 the 99-cap) say nothing about transferring a warmed slot/mailbox between end-customers — **UNKNOWN, not researched**; do not assume permission or prohibition. Deliverability implication is **not vendor-ToS-grounded** either; the only basis in this repo is SPEC §9/§10's own graph-topology/pattern-change reasoning (a sudden shift in send identity/content/DKIM-From on an already-"warmed" mailbox is the kind of anomaly that reasoning flags as risky) — stated here as a plausible inference from our own design principles, not an established vendor fact.
+
+**(d) Competitor precedent.** Instantly's "Pre-Warmed Domains & Accounts" (`byo-domain-verification-2026-07-14.md:15`) is the only precedent in the research corpus — confirms the product category exists and is viable to ship, offered as a supplement to (not replacement for) BYO/DFY-fresh, consistent with (b)'s narrow-segment reading.
+
+**(e) Recommendation (input to the founder ruling, not a decision).** Given (a) ~$13.50 one-time build + ~$3.50/mo shelf carry against a $13–15 retail line and ~$8–10/mo gross margin per mailbox (§12 Mailforge basis): the one-time build cost alone consumes over a month of one mailbox's margin, and (c)'s unresolved reassignment risk means an unsold unit may not be cleanly re-homed to a different tenant if the first doesn't convert. **Break-even framing: pre-warm only in small batches sized to near-certain near-term demand (e.g., signups already in the pipeline), and only for the no-existing-domain segment (b) — iff expected sell-through < ~4–6 weeks (the build cost's own payback window).** Do not pre-warm speculative/general float given (c)'s open ToS/deliverability question; resolve (c) with the vendor before committing to volume.
 
 ---
 
@@ -195,19 +214,21 @@ This turns the "perpetual specialist ops" burden into an **automated control loo
 
 ---
 
-## 18. Pricing (delegated design authority, 2026-07-09 — canonical; drives Stripe test-mode products + site pricing page)
+## 18. Pricing (delegated design authority, 2026-07-09 — canonical; drives Stripe test-mode products + site pricing page; cost-basis columns CORRECTED 2026-07-12, see §12)
 
 Value metric = **per-mailbox/mo** (tracks our cost) + a platform fee (control plane, agent surface, deliverability loop, AI support). Domains bundled (needed for the mailboxes anyway). Sends are naturally bounded by deliverability caps (~40–50/mbx/day) so no separate send meter — simpler for an agent to reason about. Packaged bundles (agents pick clean options):
 
-| Tier | Price/mo | Mailboxes | Domains | ~Sends/mo | Fully-loaded cost | Gross margin |
+⚠️ **Pricing-model revision pending founder ruling 2026-07-14** ($49 platform + $10/active mailbox, 5-mbx minimum — see ROADMAP.md `## Open` "PRICING RULING PENDING"). The tiers/prices below are the still-live ladder; NOT rewritten here — only the cost/margin columns are corrected.
+
+| Tier | Price/mo | Mailboxes | Domains | ~Sends/mo | Fully-loaded cost (Mailforge path) | Gross margin |
 |---|---|---|---|---|---|---|
 | **Free / Demo** | $0 | 0 (sandbox dry-run, NO real sends) | — | 0 real | ~$0 | the abuse-proof first-use (`npx agent-cold-email demo`) |
-| **Launch** | $99 | 5 | 2 | ~1,000 | ~$36 | ~64% |
-| **Growth** ⭐ | $299 | 20 | 6 | ~6,000 | ~$138 | ~54% |
-| **Scale** | $799 | 60 | 18 | ~20,000 | ~$409 | ~49% |
+| **Launch** | $99 | 5 | 2 | ~1,000 | ~$24 | ~76% |
+| **Growth** ⭐ | $299 | 20 | 6 | ~6,000 | ~$95 | ~68% |
+| **Scale** | $799 | 60 | 18 | ~20,000 | ~$285 | ~64% |
 | **Custom** | platform $49 + $13/mbx/mo | 60+ | ⅓ of mbx | metered | — | negotiated (reseller wholesale improves it) |
 
-All paid tiers clear the 2.5–3x per-mailbox target ($13–15 retail vs ~$6 wholesale). **Free/Demo is structurally sandbox-only** (type-guarded, tested) — abuse-proof. Card-on-file at signup; auto-renew with ROSCA/state-ARL disclosure + easy-cancel. Numbers stay adjustable in Stripe test mode until activation.
+Fully-loaded cost = mailboxes × **$4.75/mbx** (Mailforge-path midpoint of the corrected $4.50–5.00 range, §12); burn-replacement and Stripe fees layer on top per-transaction, same convention as before, not included in this column. **On the Inboxkit alternative path** (§12, ~$6.10/mbx) the same tiers cost ~$31/$122/$366 and clear ~69%/59%/54% — still comfortably above the margin floor, just thinner than Mailforge. All paid tiers clear a **2.5–3x+ per-mailbox target** ($13–15 retail vs $4.50–6/mbx wholesale, corrected — previously miscited here as "~$6" while the table math still ran on the stale $7 basis; both now consistent). **Free/Demo is structurally sandbox-only** (type-guarded, tested) — abuse-proof. Card-on-file at signup; auto-renew with ROSCA/state-ARL disclosure + easy-cancel. Numbers stay adjustable in Stripe test mode until activation.
 
 ---
 
