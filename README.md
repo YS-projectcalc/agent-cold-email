@@ -100,7 +100,7 @@ This project is under active build in **test mode only** — Stripe test keys, s
 
 Detailed build state, phase-by-phase status, and session history live in [`ROADMAP.md`](./ROADMAP.md) and [`HANDOFF.md`](./HANDOFF.md) — not in this README.
 
-**Where this stands today (2026-07-14):** the site is LIVE at [coldrig.dev](https://coldrig.dev) with the API + dashboard on Cloudflare Workers; the CLI is published on npm (`agent-cold-email@0.1.0`) and the MCP server is listed in the official MCP Registry (`io.github.YS-projectcalc/agent-cold-email`). Still test-mode: **Stripe cannot take money** (live key unset — checkout is simulated) and there is **no human self-serve signup or billing UI** (the product is agent-operated by design; the human dashboard is read-only). The real send/receive engine is built but not yet shipped (see `ROADMAP.md`).
+**Where this stands today (2026-07-14):** the site is LIVE at [coldrig.dev](https://coldrig.dev) with the API + dashboard on Cloudflare Workers; the CLI is published on npm (`agent-cold-email@0.1.0`) and the MCP server is listed in the official MCP Registry (`io.github.YS-projectcalc/agent-cold-email`). Still test-mode: **Stripe cannot take money** (live key unset — checkout is simulated) and there is **no human self-serve signup or billing UI** (the product is agent-operated by design; the human dashboard is read-only). The real send/receive engine is committed (shipped dark, flag-gated) after a clean adversarial re-attack, but not yet armed — arming is an owner-hands step in `ACTIVATION.md` (see `HANDOFF.md`).
 
 Want to be notified when real sending goes live? Join the waitlist at [coldrig.dev](https://coldrig.dev).
 
