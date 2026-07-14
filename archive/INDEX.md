@@ -1,1 +1,3 @@
 - 2026-07-13-dashboard-inbox-ship/prior-HANDOFF.md — HANDOFF.md as of the dashboard-lane deploy session close (pre-rewrite snapshot), stashed by /handoff 2026-07-13.
+- 2026-07-14 `2026-07-14-activation-day/` — activation day: npm + official MCP Registry published, coldrig.dev live + host-swap, SPEC §20 (BYO domains) shipped, waitlist form fixed, engine built dark. Holds `prior-HANDOFF.md` (pre-overwrite resume state) + `INDEX-notes.md`.
+- 2026-07-14 `ROADMAP-done.md` — 15 completed ledger lines drained at this handoff (append-only).

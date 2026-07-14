@@ -63,7 +63,7 @@ This is the full list — see [`SPEC.md` §6](./SPEC.md#6-agent-surface--the-too
 npx agent-cold-email demo
 ```
 
-The HTTP facade **and** the hosted MCP endpoint (`/mcp` above) are **live in test mode** at `https://agent-cold-email-api.yaakovscher.workers.dev` — the 17 intents are real, tested, reachable over HTTP or MCP (same tools, same tenant-scoped bearer-token auth), running against a fault-injecting **sandbox** vendor layer (no real domains/mailboxes/spend, not yet available for real sending). The CLI (`packages/cli`) is built and works today from a local build; `npx agent-cold-email` itself needs an npm publish, which is an owner-hands activation step (`ACTIVATION.md`) — the npm handle is reserved. This test-mode URL becomes the brand's custom domain at launch.
+The HTTP facade **and** the hosted MCP endpoint (`/mcp` above) are **live in test mode** at `https://agent-cold-email-api.yaakovscher.workers.dev` — the 17 intents are real, tested, reachable over HTTP or MCP (same tools, same tenant-scoped bearer-token auth), running against a fault-injecting **sandbox** vendor layer (no real domains/mailboxes/spend, not yet available for real sending). The CLI (`packages/cli`) is built and works today from a local build; `npx agent-cold-email` itself is published as of 2026-07-14 (`agent-cold-email@0.1.0`) (`ACTIVATION.md`) — the npm handle is live. This test-mode URL becomes the brand's custom domain at launch.
 
 **What works today:** the 17 intents are real, tested HTTP endpoints behind a bearer token, live in test mode at `https://agent-cold-email-api.yaakovscher.workers.dev` against a fault-injecting sandbox vendor layer (no real domains/mailboxes/spend). Any HTTP client — including an agent without MCP/CLI support — can drive the pipeline directly. See [`site/openapi.yaml`](./site/openapi.yaml) for the full REST contract, or [`AGENTS.md`](./AGENTS.md) for the agent-facing walkthrough.
 
@@ -93,14 +93,16 @@ This project is under active build in **test mode only** — Stripe test keys, s
 - ✅ A working sandboxed pipeline (provision → warm → send → reply → report) proven end-to-end against a fault-injecting simulator, with an automated test suite.
 - ✅ A public HTTP facade covering the full 17-intent surface (this repo), live at the URL above.
 - ✅ A hosted MCP endpoint (`/mcp`, JSON-RPC 2.0 over streamable HTTP) exposing the same 17 tools, live now.
-- ✅ An accelerated sandbox demo — the `agent-cold-email` CLI `demo` command (built; not yet npm-published) mints a demo tenant automatically and drives the full pipeline; the underlying `POST /demo/run` runs against that demo tenant's bearer token (get one from `POST /signup` — no card, no vendor account).
+- ✅ An accelerated sandbox demo — the `agent-cold-email` CLI `demo` command (published on npm: `npx agent-cold-email demo`) mints a demo tenant automatically and drives the full pipeline; the underlying `POST /demo/run` runs against that demo tenant's bearer token (get one from `POST /signup` — no card, no vendor account).
 - ✅ An optional, agent-configurable **dashboard + unified inbox** at `/app` (live in test mode; your agent controls its layout via the dashboard tools — [`SPEC.md` §19](./SPEC.md)).
 - 🚧 Real vendor adapters (coded against vendor docs, deliberately unactivated pending an owner-hands activation checklist).
 - 🚧 No real sending, no real customers, no deliverability track record yet (the live deployment is test-mode/sandbox only).
 
 Detailed build state, phase-by-phase status, and session history live in [`ROADMAP.md`](./ROADMAP.md) and [`HANDOFF.md`](./HANDOFF.md) — not in this README.
 
-Want to be notified when real sending goes live? Join the waitlist on the [marketing site](./site/index.html) once deployed (`site/index.html` → Cloudflare Pages).
+**Where this stands today (2026-07-14):** the site is LIVE at [coldrig.dev](https://coldrig.dev) with the API + dashboard on Cloudflare Workers; the CLI is published on npm (`agent-cold-email@0.1.0`) and the MCP server is listed in the official MCP Registry (`io.github.YS-projectcalc/agent-cold-email`). Still test-mode: **Stripe cannot take money** (live key unset — checkout is simulated) and there is **no human self-serve signup or billing UI** (the product is agent-operated by design; the human dashboard is read-only). The real send/receive engine is built but not yet shipped (see `ROADMAP.md`).
+
+Want to be notified when real sending goes live? Join the waitlist at [coldrig.dev](https://coldrig.dev).
 
 ## License
 
