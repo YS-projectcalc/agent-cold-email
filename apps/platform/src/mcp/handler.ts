@@ -111,7 +111,19 @@ export async function handleMcpRequest(env: Env, authHeader: string | null, raw:
         typeof params === "object" && params !== null && "arguments" in params ? (params as { arguments: unknown }).arguments : {};
       const parsedArgs = matched.schema.safeParse(rawArgs ?? {});
       if (!parsedArgs.success) {
-        return rpcError(id, -32602, `invalid params for '${toolName}': ${parsedArgs.error.issues.map((i) => i.message).join("; ")}`);
+        // Bare zod messages ("Invalid input: expected number, received
+        // undefined") don't say WHICH field failed — prefix each issue with
+        // its dot-path (z.core.toDotPath, e.g. "sendWindow.startHour") so an
+        // agent driving this over MCP (no REST JSON body to eyeball) can
+        // fix the call without re-deriving the schema from AGENTS.md. The
+        // REST facade's shared parseJsonBody() (../validate.ts) already
+        // returns the raw `issues` array with each issue's `path` intact —
+        // this is a divergent presentation of the same information for the
+        // MCP transport, which has only a single error `message` string.
+        const details = parsedArgs.error.issues
+          .map((i) => (i.path.length > 0 ? `${z.core.toDotPath(i.path)}: ${i.message}` : i.message))
+          .join("; ");
+        return rpcError(id, -32602, `invalid params for '${toolName}': ${details}`);
       }
 
       try {

@@ -154,6 +154,34 @@ describe("POST /mcp — hosted MCP JSON-RPC 2.0 endpoint", () => {
       body: rpc("tools/call", { name: "thread", arguments: {} }), // missing required threadId
     });
     expect(badArgs.body.error.code).toBe(-32602);
+    // The bare zod message alone ("Invalid input: expected string, received
+    // undefined") doesn't say WHICH field failed — the error must name it.
+    expect(badArgs.body.error.message).toContain("threadId");
+  });
+
+  it("tools/call invalid-params errors name EVERY failing field's dot-path, not just the first", async () => {
+    const { token } = await signup("MCP Bad Nested Args Co", "badnestedargs@mcp-test.example");
+
+    const res = await api<JsonRpcFailure>("/mcp", {
+      method: "POST",
+      token,
+      body: rpc("tools/call", {
+        name: "launch_campaign",
+        // Two bad fields at once: a top-level required field missing
+        // (`name`) and a nested-object field with the wrong type
+        // (`sendWindow.startHour` as a string instead of a number) —
+        // regression coverage for the "twice concatenated, no path" bug.
+        arguments: {
+          offer: "offer",
+          leads: [{ email: "a@example.com", firstName: "A" }],
+          sequence: [{ step: 1, subject: "s", body: "b", delayDays: 0 }],
+          sendWindow: { startHour: "09:00", endHour: 17 },
+        },
+      }),
+    });
+    expect(res.body.error.code).toBe(-32602);
+    expect(res.body.error.message).toContain("name:");
+    expect(res.body.error.message).toContain("sendWindow.startHour:");
   });
 
   it("tools/call dispatches to the SAME TenantDO methods the HTTP facade uses, and surfaces tool errors via isError", async () => {

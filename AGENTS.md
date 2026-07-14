@@ -41,10 +41,10 @@ All authed endpoints resolve to one tenant's isolated state; there is no cross-t
 
 | Tool | HTTP | Auth | Notes |
 |---|---|---|---|
-| `setup_infrastructure` | `POST /setup-infrastructure` | required | `{ brand, primaryDomain, domains, inboxesEach, persona, physicalAddress, senderIdentity }` — kicks off async domain purchase + DNS + mailbox provisioning + warmup. Returns `202` immediately; poll `infrastructure_status`. |
+| `setup_infrastructure` | `POST /setup-infrastructure` | required | `{ brand, primaryDomain, domains, inboxesEach, persona, physicalAddress, senderIdentity }` — kicks off async domain purchase + DNS + mailbox provisioning + warmup. Returns `202` immediately; poll `infrastructure_status`. `senderIdentity` is a plain string, e.g. `"Jane Doe, Founder"` — NOT an object. |
 | `infrastructure_status` | `GET /infrastructure-status` | required | Provisioning progress, warmup day, per-mailbox health (warmup + deliverability: throttle/pause state, complaint/bounce rates, vendor reputation/placement), send-readiness estimate. |
-| `launch_campaign` | `POST /campaigns` | required | `{ name, offer, leads[], sequence[], timezone, sendWindow, stopOnReply }`. You (the agent) write `offer` and the `sequence` step subjects/bodies — this platform does not generate content for you. |
-| `campaign_results` | `GET /campaigns/{id}/results` | required | Sends, replies, bounces, complaints for one campaign. |
+| `launch_campaign` | `POST /campaigns` | required | `{ name, offer, leads[], sequence[], timezone, sendWindow, stopOnReply }`. You (the agent) write `offer` and the `sequence` step subjects/bodies — this platform does not generate content for you. `sendWindow` is `{ startHour: 9, endHour: 17 }`, integer hours (0-23) — NOT `"09:00"`-style strings. |
+| `campaign_results` | `GET /campaigns/{id}/results` | required | Sends, replies, bounces, complaints for one campaign. The `id` URL param is the same value the MCP tool takes as the `campaignId` argument. |
 | `metrics` | `GET /metrics` | required | Account-wide deliverability + warmup health. |
 | `inbox` | `GET /inbox` | required | Unified reply inbox across all mailboxes for the tenant. Cursor-paginated (default limit 50); optional filters: mailbox, campaign, label, read, includeNonreply (bounces/OOO, default true). |
 | `thread` | `GET /threads/{id}` | required | Full message history for one thread. |
