@@ -39,9 +39,11 @@ export class EngineStore {
    * recorded). In-memory only — it exists to stop a SECOND concurrent send()
    * for the same key from opening a second SMTP transaction while the first is
    * still in flight (the double-send race). Not persisted: single-daemon Node
-   * is single-threaded so the claim/release is atomic against other handlers,
-   * and a process crash simply drops it — the persisted `sends` cache plus the
-   * consumer's at-least-once retry cover crash recovery, exactly as before.
+   * is single-threaded so the claim/release is atomic against other handlers.
+   * KNOWN RESIDUAL (adversary R3, ACTIVATION Gate 2): a crash AFTER the SMTP
+   * server accepts but BEFORE recordSend() flushes drops both this Set and the
+   * cache entry, so the consumer's retry re-sends — a durable pre-send intent
+   * log is the eventual fix; resolve or founder-accept before arming.
    */
   private readonly inFlight = new Set<string>();
 
