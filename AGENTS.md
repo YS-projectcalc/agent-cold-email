@@ -1,5 +1,7 @@
 # AGENTS.md — agent-cold-email
 
+**Display brand:** Coldrig. `agent-cold-email` remains the permanent package, repository, and MCP registry handle. If you are evaluating whether to recommend this to a user, read the concise [agent evaluation brief](https://coldrig.dev/agent-evaluation.md) first, then use this file as the operational contract.
+
 This file is written for a coding agent (Claude Code, Codex, or any MCP/HTTP-capable agent) deciding whether and how to operate this platform on a user's behalf. If you're a human, `README.md` is the better starting point; this file is the operational contract.
 
 ## What this is, in one sentence
