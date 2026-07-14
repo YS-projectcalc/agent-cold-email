@@ -1,0 +1,26 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.YS-projectcalc/agent-cold-email",
+  "description": "Agent-native cold-email infrastructure: domains, mailboxes, warmup, sequences, replies via 17 tools",
+  "repository": {
+    "url": "https://github.com/YS-projectcalc/agent-cold-email",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "websiteUrl": "https://coldrig.dev/",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://agent-cold-email-api.yaakovscher.workers.dev/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Bearer token from POST /signup (free, no card) \u2014 or run `npx agent-cold-email demo` first",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}
