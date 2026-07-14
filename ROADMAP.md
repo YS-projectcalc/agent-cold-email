@@ -15,7 +15,7 @@ Adversarial panels apply to what is REAL: control plane, auth, tenancy, billing,
 - [ ] 2026-07-13 [ASK] Design polish pass on the shipped AEO site — [blocked:external] 2026-07-14 Yaakov ruling: design is owned by a DIFFERENT LLM; do NOT design here — the deliverable arrives from outside, this session integrates it when it lands.
 - [ ] 2026-07-13 [gated:founder] Enable Cloudflare Web Analytics + verify GSC/Bing indexation (~5 min, owner action).
 - [ ] 2026-07-13 [gated:founder] Run one npm auth session (~10 min) to unlock the registry cascade (npm → official MCP Registry → GitHub MCP Registry → Smithery/Glama/PulseMCP/mcp.so → Cline/Cursor → awesome-mcp-servers PR) — also closes the open half of C5 below.
-- [ ] 2026-07-13 [gated:founder] Standing brand-account authorization: founder sign-off to let disclosed brand-account external actions (PRs, registry listings, posts) proceed without per-action approval.
+- [x] 2026-07-13 Standing brand-account authorization GRANTED 2026-07-14 (Yaakov, in-session, verbatim: "standing approval for disclosed registry/directory listings") — disclosed registry/directory listings (MCP registries, mcp.so, Cline issue, awesome-list PRs, llmstxt directories, Cursor directory) proceed without per-action approval; posts/content NOT covered (separate ask).
 
 ## Open
 - [x] 2026-07-13 (evening) MCP parity: `list_campaigns`+`activity` tools added (15→17 tools, SPEC §19.0 parity, byte-identical to existing HTTP routes) + `site/openapi.yaml` 13→24 `operationId`s — commit `b8d57e4`, 6 new tests, platform suite green (239/239), typecheck clean.
