@@ -7,15 +7,33 @@ Implements the `VendorPort` interfaces from `@coldstart/shared` twice:
   `sandbox/email-port.ts` decides bounce/reply/silence by the recipient
   local-part (`bounce`/`reply` substrings) — see the comment at the top of
   that file for the exact contract; it's what the E2E tests key off of.
-- `real/` — **typed stubs only**. Every method throws `NotActivatedError`
-  immediately. Coded against the vendor shapes now so a later real
-  implementation is a drop-in, but nothing here ever makes a network call.
+- `real/` — mostly **typed stubs**: domain/mailbox/billing/metrics every
+  method throws `NotActivatedError` immediately (coded against the vendor
+  shapes now so a later real implementation is a drop-in, but nothing there
+  ever makes a network call). `real/email-port.ts`'s `RealEmailPort` is the
+  one exception — a genuine HTTP client to the external engine (`apps/engine`)
+  — but it too stays dark (`NotActivatedError`) until `ENGINE_BASE_URL`/
+  `ENGINE_AUTH_SECRET` are set AND the factory's ENGINE_TENANTS gate below
+  admits the tenant.
 
 `factory.ts` is the single choke point that decides which bundle a tenant
-gets (`createVendorAdapters(plan, clock, realAdaptersActivated)`). Demo/free
-plans are forced to `sandbox` unconditionally, before the activation flag is
-even consulted — see `test/demo-adapter-guard.test.ts` in `apps/platform`
-for the guardrail test that fails if this is ever weakened.
+gets (`createVendorAdapters(plan, clock, realAdaptersActivated, engineConfig?,
+tenantId?, engineTenantsRaw?)`). Demo/free plans are forced to `sandbox`
+unconditionally, before the activation flag is even consulted — see
+`test/demo-adapter-guard.test.ts` in `apps/platform` for the guardrail test
+that fails if this is ever weakened.
+
+`ENGINE_TENANTS` (ROADMAP "Mordy-pilot activation lane") layers a second,
+narrower gate scoped to the EmailPort only: a tenant reaches `RealEmailPort`
+solely when `realAdaptersActivated` is on, its `tenantId` (the DO's own
+verified identity, never request-supplied) is an exact member of the parsed
+`ENGINE_TENANTS` allowlist, its plan is non-demo/free, AND `engineConfig` is
+present. Being allowlisted also pins that tenant's domain/mailbox/billing/
+metrics to sandbox regardless of the global flag — there is no per-port
+activation for those ports yet (EmailPort-only, this phase). Default-empty
+and fail-closed: unset/malformed `ENGINE_TENANTS` activates nobody, ever (no
+wildcard syntax, exact string match only). See
+`test/engine-tenants-allowlist.test.ts` for the five guards this proves.
 
 ## How to run
 

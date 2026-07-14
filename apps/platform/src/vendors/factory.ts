@@ -13,7 +13,43 @@ import { RealMetricsPort } from "./real/metrics-port.js";
 export type VendorAdapterKind = "sandbox" | "real";
 
 export interface VendorAdapterBundle extends VendorAdapters {
+  /**
+   * Reflects domain/mailbox/billing/metrics only (the ENGINE_TENANTS
+   * comped-pilot lane below can hand out a real `email` port while this
+   * still reads "sandbox" — check `bundle.email`'s own class if you need the
+   * email port's real/sandbox status specifically).
+   */
   readonly kind: VendorAdapterKind;
+}
+
+/**
+ * Parses `ENGINE_TENANTS` (a comma-separated allowlist of exact tenant IDs)
+ * into a Set for membership lookup. Total and fail-closed by construction:
+ *  - unset/empty -> empty Set. Default-empty means NOBODY is allowlisted,
+ *    ever — there is no way to spell "activate everyone" here.
+ *  - each entry is trimmed; blank tokens (whitespace, empty segments from a
+ *    trailing/duplicate comma) are DROPPED rather than throwing.
+ *  - a token containing `*` or `?` is dropped too: this allowlist has no
+ *    wildcard/prefix syntax, so a literal "*" can never mean "match every
+ *    tenant" — it's just another malformed entry that matches nothing.
+ * Malformed entries are dropped INDIVIDUALLY rather than blanking the whole
+ * variable on any bad token. That's the safer choice, not just the more
+ * convenient one: a dropped entry is inert (Set membership below is exact
+ * string equality, so it can only ever narrow, never widen, who matches) —
+ * whereas "one bad token empties the whole list" would ALSO revoke every
+ * OTHER correctly-specified tenant in the same var for zero extra safety
+ * margin, which is a strictly worse operational footgun for the same
+ * fail-closed guarantee.
+ */
+export function parseEngineTenants(raw: string | undefined): ReadonlySet<string> {
+  const ids = new Set<string>();
+  if (!raw) return ids;
+  for (const token of raw.split(",")) {
+    const id = token.trim();
+    if (!id || id.includes("*") || id.includes("?")) continue;
+    ids.add(id);
+  }
+  return ids;
 }
 
 /**
@@ -23,35 +59,59 @@ export interface VendorAdapterBundle extends VendorAdapters {
  * (ACTIVATION.md); it is always `false` for now — nothing in this build can
  * set it true. Even if it somehow were true, a demo/free-plan tenant STILL
  * gets sandbox: the plan check is unconditional and comes first.
+ *
+ * ENGINE_TENANTS (ROADMAP "Mordy-pilot activation lane") layers a SECOND,
+ * narrower gate on top, scoped to the EmailPort only: `tenantId` (the DO's
+ * own verified identity — see tenant-do.ts) must be an exact member of the
+ * parsed `engineTenantsRaw` allowlist. A tenant only ever reaches
+ * RealEmailPort when ALL FOUR hold — global flag on, allowlisted, non-demo/
+ * free plan, and `engineConfig` present (the last is enforced by
+ * RealEmailPort's own dark-until-configured check, same as every other
+ * activation-gated port). The allowlist can only ever narrow relative to the
+ * base decision, never widen it: with `realAdaptersActivated` false, an
+ * allowlisted paid tenant is still fully sandbox.
+ *
+ * Being on the allowlist ALSO pins domain/mailbox/billing/metrics to sandbox
+ * for that tenant, regardless of `realAdaptersActivated` — there is no
+ * per-port activation for those ports yet (YAGNI/EmailPort-only, this
+ * phase), so the comped-pilot shape must not accidentally hand them a real
+ * adapter as a side effect of being allowlisted for email.
  */
 export function createVendorAdapters(
   plan: TenantPlan,
   clock: Clock,
   realAdaptersActivated: boolean,
   engineConfig?: EngineClientConfig,
+  tenantId?: string,
+  engineTenantsRaw?: string,
 ): VendorAdapterBundle {
   const isDemoOrFree = plan === "demo" || plan === "free";
-  const useSandbox = isDemoOrFree || !realAdaptersActivated;
+  const isEngineAllowlisted = tenantId !== undefined && parseEngineTenants(engineTenantsRaw).has(tenantId);
+
+  const useSandbox = isDemoOrFree || !realAdaptersActivated || isEngineAllowlisted;
+  const useRealEmail = !isDemoOrFree && realAdaptersActivated && isEngineAllowlisted;
+
+  // `engineConfig` is the external email engine's address/secret (env-derived,
+  // see tenant-do.ts). Absent -> RealEmailPort stays dark (NotActivatedError),
+  // matching the coded-but-unactivated posture of every other real/ adapter.
+  const email = useRealEmail ? new RealEmailPort(engineConfig) : new SandboxEmailPort(clock);
 
   if (useSandbox) {
     return {
       kind: "sandbox",
       domain: new SandboxDomainPort(clock),
       mailbox: new SandboxMailboxPort(clock),
-      email: new SandboxEmailPort(clock),
+      email,
       billing: new SandboxBillingPort(clock),
       metrics: new SandboxMetricsPort(clock),
     };
   }
 
-  // `engineConfig` is the external email engine's address/secret (env-derived,
-  // see tenant-do.ts). Absent -> RealEmailPort stays dark (NotActivatedError),
-  // matching the coded-but-unactivated posture of every other real/ adapter.
   return {
     kind: "real",
     domain: new RealDomainPort(),
     mailbox: new RealMailboxPort(),
-    email: new RealEmailPort(engineConfig),
+    email,
     billing: new RealBillingPort(),
     metrics: new RealMetricsPort(),
   };

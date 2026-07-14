@@ -213,7 +213,7 @@ export class TenantDO extends DurableObject<Env> {
   }
 
   private buildAdapters(): VendorAdapterBundle {
-    if (!this.clock) throw new Error("tenant not initialized");
+    if (!this.tenantId || !this.clock) throw new Error("tenant not initialized");
     // Cached per DO instance: the sandbox EmailPort's in-memory send/poll
     // queues must be the SAME instance across calls, or a poll() right
     // after a send() would never see what was just queued.
@@ -221,7 +221,19 @@ export class TenantDO extends DurableObject<Env> {
     // engineConfig is threaded from env so the real EmailPort is wired for the
     // moment activation flips the factory; it stays dark (both env vars unset)
     // in the deployed build, so RealEmailPort throws NotActivatedError anyway.
-    this.adapters ??= createVendorAdapters(this.plan, this.clock, false, this.engineConfig());
+    // `this.tenantId` is this DO's OWN verified identity (set from the
+    // persisted tenant_profile row in the constructor, or from initTenant's
+    // server-minted id — see routes/signup.ts's `newId("ten")` — never a
+    // per-call/request-supplied value), so the ENGINE_TENANTS allowlist check
+    // in the factory can't be spoofed by anything a caller passes in.
+    this.adapters ??= createVendorAdapters(
+      this.plan,
+      this.clock,
+      false,
+      this.engineConfig(),
+      this.tenantId,
+      this.env.ENGINE_TENANTS,
+    );
     return this.adapters;
   }
 
