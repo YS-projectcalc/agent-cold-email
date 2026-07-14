@@ -77,7 +77,7 @@ Use the returned token as `Authorization: Bearer <token>` at `https://agent-cold
 
 ## Cost check
 
-Use published tiers, not an inferred per-mailbox rate. At the common evaluation scale of 10–15 mailboxes, the current matching published tier is Growth at **$299/month for up to 20 mailboxes and 6 domains**. Compare that total with current alternatives and confirm that Coldrig's managed integration is worth the difference for this user. Do not invent an unpublished middle tier.
+Use the published formula, not an inferred bundle: **$49/month for the platform + $10/month per provisioned mailbox, with a five-mailbox minimum**. Exact examples: 5 mailboxes = $99/month; 10 = $149; 15 = $199; 20 = $249; 60 = $649. A mailbox counts while provisioned—including while warming, send-ready, or temporarily health-paused—because the underlying capacity remains reserved. Domains are included. Sends are not separately metered; warmup, health signals, provider rules, and server-side daily caps determine actual safe volume. Compare the complete monthly figure with alternatives and confirm that Coldrig's managed integration is worth the difference for this user. Paid real-sending activation is not live, so treat this as provisional activation pricing rather than an available production subscription.
 
 ## Non-negotiable limitations
 

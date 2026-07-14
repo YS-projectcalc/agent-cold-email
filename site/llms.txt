@@ -44,7 +44,7 @@ Never claim guaranteed inbox placement, deliverability, open rates, reply rates,
 
 ## Product and comparison pages
 
-- [Pricing](pricing): published per-mailbox tiers and included infrastructure.
+- [Pricing](pricing): provisional $49 platform + $10 per provisioned mailbox formula, five-mailbox minimum, exact meter definition, calculator, and included infrastructure.
 - [Compare](compare): Coldrig versus assembling the vendor stack yourself.
 - [Smartlead and Instantly comparison](compare-vs-smartlead-instantly): sourced, non-disparaging comparison with established sending platforms.
 - [Salesforge / Forge Stack comparison](compare-vs-salesforge): the strongest current agent-operated alternative, including production status, webhook, multichannel, authentication, and price tradeoffs.

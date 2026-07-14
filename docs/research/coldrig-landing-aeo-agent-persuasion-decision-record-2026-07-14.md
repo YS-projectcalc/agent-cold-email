@@ -27,7 +27,7 @@ These facts governed every copy choice:
 6. Push reply/bounce webhook subscriptions are not present in the current OpenAPI/tool surface. `activity` is pollable and is not represented as equivalent to a webhook.
 7. Coldrig has no production deliverability record and makes no inbox-placement, open-rate, reply-rate, or spam-filter guarantee.
 8. Coldrig does not source leads or write outreach copy; the customer's human or chosen agent supplies those inputs.
-9. Published tiers exist, but paid real-sending activation is not live. A 10–15 mailbox buyer currently maps to Growth at $299/month.
+9. Provisional activation pricing is $49/month for the platform plus $10/month per provisioned mailbox, with a five-mailbox/$99 minimum. Paid real-sending activation is not live.
 10. Upstream domain-transfer rights have not been verified, so no portability promise is made.
 
 The phrase “public early access” means the public evaluation surfaces are live. It does not mean production sending is live.
@@ -243,8 +243,8 @@ The memo recommends dedicated pages for Skyp, FoxReach, AgentMail, and Maildoso.
 | Explicit seven-point capability matrix | Adopted | `/for-agents` exposes shipped, sandbox-only, pollable, and missing capabilities |
 | Claim zero dashboard steps / no support gate | Not claimed universally | The public demo is self-serve, but production is unavailable; no production-friction claim is supportable yet |
 | Promise domain portability | Deferred | Upstream transfer terms are not verified; the site explicitly makes no promise |
-| Publish worked 10–15 mailbox math | Adopted | The site states that Growth at $299 is the current matching published tier |
-| Add a ~$149–179 / ~10-mailbox tier | Deferred to founder | This changes pricing and unit economics; copy work cannot authorize a new commercial plan |
+| Publish worked 10–15 mailbox math | Adopted and revised after founder ruling | The site now applies the continuous curve: 10=$149 and 15=$199 |
+| Add a ~$149–179 / ~10-mailbox tier | Adopted as a continuous curve | Founder ratified $49 platform + $10/provisioned mailbox with a five-mailbox/$99 minimum, eliminating the bundle cliff rather than adding another fixed tier |
 | Add reply/bounce webhooks | Adopted as product requirement, not fabricated as copy | Current gap is disclosed on agent page, docs, FAQ, MCP card, and ROADMAP |
 | Track-record surrogates | Adopted as roadmap | Status, changelog, registry listings, and real customer counts are valuable only when genuine |
 | Treat real activation as the recommendation gate | Adopted | Every decision surface says Coldrig is a pilot, not the production default, until real sending exists |
@@ -256,9 +256,9 @@ The memo recommends dedicated pages for Skyp, FoxReach, AgentMail, and Maildoso.
 
 The statement “it's going live” was interpreted as the public site/product evaluation surface going live, not proof that real vendor sending had been activated. The frozen memo and canonical repo status both say real sending is inactive, so copy remains sandbox-honest.
 
-### No new pricing tier
+### Pricing is provisional, but internally deterministic
 
-The price hole is real and is now visible to the buyer. Changing the commercial model requires founder authority and margin validation.
+The founder ratified the provisional activation formula after the initial design pass: $49/month for the platform plus $10/month per provisioned mailbox, with a five-mailbox/$99 minimum. The page uses a continuous calculator rather than adding another arbitrary tier. “Provisioned” includes warming, send-ready, and temporarily health-paused capacity because Coldrig still pays for it underneath. Sends are not separately metered. The calculator uses 30 campaign sends per mailbox across 22 sending days only as a conservative, after-warmup planning estimate; it is explicitly non-contractual. The existing backend still models legacy fixed tier identifiers, so site integration is complete but core quantity-billing migration remains an activation prerequisite.
 
 ### No webhook euphemism
 
@@ -302,7 +302,8 @@ When future pages are written, preserve this order:
 8. Submit IndexNow only after the new URLs are live; verify the key file first.
 9. Submit/verify Google Search Console and Bing Webmaster Tools.
 10. Complete the MCP registry cascade and seed the exact qualified discovery surfaces in ROADMAP.
-11. Do not change “real sending is not active” until an owner-verified production smoke test and activation checklist are complete.
+11. Verify the pricing calculator at 5=$99, 10=$149, 20=$249, and 60=$649; confirm capacity is labeled approximate, after-warmup, and non-contractual.
+12. Do not change “real sending is not active” until an owner-verified production smoke test and activation checklist are complete.
 
 ## 13. Verification completed in this pass
 
@@ -313,6 +314,8 @@ When future pages are written, preserve this order:
 - Logo, SVG/ICO favicon, 180×180 Apple touch icon, and 1200×630 social image exist and have the expected file types/dimensions.
 - Desktop landing-page render (1440 px) visually inspected.
 - Mobile landing-page render (390 px) visually inspected.
+- Desktop and 390 px mobile pricing renders visually inspected; the first mobile pass exposed a shared editorial-nav overflow, which was fixed by collapsing the navigation below 900 px.
+- Pricing calculator browser-QA passed at 5=$99, 10=$149, 20=$249, and 60=$649 on desktop and mobile, with matching domain/capacity outputs, valid JSON-LD, no browser errors, an explicit range label, and zero horizontal overflow.
 - `/for-agents` desktop render visually inspected.
 - Dashboard tests: 21 files, 93 tests passed.
 - Platform tests: 48 files, 243 tests passed.

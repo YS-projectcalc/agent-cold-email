@@ -1,5 +1,13 @@
 # ColdStart — Handoff
 
+## 2026-07-14 design-lane addendum — read this before the older handoff below
+
+- Founder ratified **provisional activation pricing**: **$49/month platform + $10/month per provisioned mailbox, five-mailbox/$99 minimum**. Exact examples: 10=$149, 20=$249, 60=$649. This supersedes the older $99/$299/$799 bundles described later in this historical handoff.
+- The `coldrig-human-interface` worktree now integrates the formula across `site/pricing.html`, the interactive calculator, FAQ JSON-LD and visible copy, `/for-agents`, `/agent-evaluation.md`, `llms.txt`, the Salesforge comparison, SPEC §18, ROADMAP, and the design decision record.
+- Billing meter definition: a mailbox counts while provisioned and retained, including warming, send-ready, or temporarily health-paused. Domains are included. Sends are not separately metered. Calculator capacity assumes 30 campaign sends/mailbox × 22 sending days only for conservative after-warmup planning; it is non-contractual.
+- **Core implementation is not migrated.** `packages/shared/src/pricing.ts`, checkout schemas, Stripe test products, plan enums, quota enforcement, webhooks, and dashboard billing still use legacy `launch`/`growth`/`scale` tiers. The core chat must implement quantity-based mailbox billing, quote-before-provision, owner spend ceilings, downgrade/cancel semantics, migrations, and tests before paid activation. Do not interpret site copy as proof the checkout supports the new model.
+- Current design commits before this addendum: `86de90e` and `edffa9b`. Inspect the current branch tip for the pricing commit before integrating.
+
 Agent-operated cold-email platform, BUILT + LIVE in test mode. Live: API + dashboard https://agent-cold-email-api.yaakovscher.workers.dev (dashboard at `/app`) · site https://agent-cold-email.pages.dev · repo https://github.com/YS-projectcalc/agent-cold-email · Code: `~/dev/coldstart/`
 
 > **You are resuming ColdStart with zero prior context. Re-orient from the `## Resume` step below, then VERIFY its preconditions still hold.** If they hold and the step is non-destructive, proceed — don't ask open-endedly what to work on. If anything has CHANGED, surface exactly what and ask before acting. **STOP and confirm before any destructive/irreversible/founder-owned step** (deploy · push · real vendor spend · npm publish · external send) — SPEC §0 locks NO real vendor spend until the owner works `ACTIVATION.md`.

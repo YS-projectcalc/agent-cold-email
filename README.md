@@ -77,7 +77,7 @@ Built into the platform, not just promised in a policy:
 
 - **Per-tenant isolation** — every tenant's domains, mailboxes, and data live in their own isolated state; one tenant's abuse cannot burn another tenant's reputation.
 - **Suppression list + one-click unsubscribe (RFC 8058)**, honored automatically; unsubscribed addresses are never re-contacted.
-- **Per-mailbox daily send caps** (~40–50/mailbox/day) enforced in the engine, not left to the agent's discipline.
+- **Health-based per-mailbox daily send caps** enforced in the engine, not left to the agent's discipline. Public planning uses a conservative 30 campaign sends/mailbox/day after warmup; actual caps vary with warmup stage, health signals, and provider policy.
 - **Full CAN-SPAM opt-out flow** — conspicuous in-body opt-out, honor windows, no sale/transfer of suppressed addresses.
 - **Per-tenant physical postal address + verified sender identity** injected into every message footer — each customer is registered and identifiable as the actual sender, not EpiphanyMade.
 - **Complaint-rate auto-pause** — a mailbox degrading toward Gmail's 0.30% ineligibility threshold is throttled or paused automatically.

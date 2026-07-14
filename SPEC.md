@@ -195,19 +195,26 @@ This turns the "perpetual specialist ops" burden into an **automated control loo
 
 ---
 
-## 18. Pricing (delegated design authority, 2026-07-09 — canonical; drives Stripe test-mode products + site pricing page)
+## 18. Pricing (founder-ratified provisional curve, 2026-07-14 — canonical product intent; core billing migration pending)
 
-Value metric = **per-mailbox/mo** (tracks our cost) + a platform fee (control plane, agent surface, deliverability loop, AI support). Domains bundled (needed for the mailboxes anyway). Sends are naturally bounded by deliverability caps (~40–50/mbx/day) so no separate send meter — simpler for an agent to reason about. Packaged bundles (agents pick clean options):
+Value metric = **provisioned mailbox/month** (tracks reserved underlying capacity) + a **$49/month platform fee** (control plane, agent surface, deliverability loop, and support). The paid minimum is five provisioned mailboxes. Every additional mailbox is $10/month:
 
-| Tier | Price/mo | Mailboxes | Domains | ~Sends/mo | Fully-loaded cost | Gross margin |
-|---|---|---|---|---|---|---|
-| **Free / Demo** | $0 | 0 (sandbox dry-run, NO real sends) | — | 0 real | ~$0 | the abuse-proof first-use (`npx agent-cold-email demo`) |
-| **Launch** | $99 | 5 | 2 | ~1,000 | ~$36 | ~64% |
-| **Growth** ⭐ | $299 | 20 | 6 | ~6,000 | ~$138 | ~54% |
-| **Scale** | $799 | 60 | 18 | ~20,000 | ~$409 | ~49% |
-| **Custom** | platform $49 + $13/mbx/mo | 60+ | ⅓ of mbx | metered | — | negotiated (reseller wholesale improves it) |
+> **Monthly price = $49 + ($10 × provisioned mailboxes), minimum 5 mailboxes / $99.**
 
-All paid tiers clear the 2.5–3x per-mailbox target ($13–15 retail vs ~$6 wholesale). **Free/Demo is structurally sandbox-only** (type-guarded, tested) — abuse-proof. Card-on-file at signup; auto-renew with ROSCA/state-ARL disclosure + easy-cancel. Numbers stay adjustable in Stripe test mode until activation.
+“Provisioned mailbox” is the billing meter. A mailbox counts while configured and retained for the tenant—including while warming, send-ready, or temporarily health-paused—because Coldrig still pays for that reserved capacity. A fully deprovisioned mailbox no longer counts. Before any mailbox addition, both the agent response and billing UI must return the proposed new count and projected monthly price; no silent capacity addition.
+
+Domains are bundled and operationally allocated at roughly one domain per two to three mailboxes. Sends are **not** a billing meter. Warmup stage, mailbox health, upstream-provider rules, and server-enforced daily caps determine actual safe volume. For UI planning only, use a conservative post-warmup estimate of 30 campaign sends/mailbox on 22 sending days/month; label every capacity figure approximate, after-warmup, and non-contractual.
+
+| Reference size | Price/mo | Approx. domains | Planning capacity after warmup | Estimated mailbox COGS | Estimated gross margin |
+|---|---:|---:|---:|---:|---:|
+| **Free / Demo** | $0 | 0 real | 0 real sends | ~$0 | abuse-proof first use (`npx agent-cold-email demo`) |
+| **5 mailboxes (minimum)** | $99 | ~2 | ~3,300 sends/mo | ~$24–32 | ~68–76% |
+| **10 mailboxes** | $149 | ~4 | ~6,600 sends/mo | ~$48–63 | ~58–68% |
+| **20 mailboxes** | $249 | ~7 | ~13,200 sends/mo | ~$96–126 | ~49–61% |
+| **60 mailboxes** | $649 | ~20 | ~39,600 sends/mo | ~$288–378 | ~42–56% |
+| **Custom** | quote from the published curve | 61+ | health-limited | verified before quote | negotiated; no automatic volume discount |
+
+The continuous curve removes the old $99→$299 bundle cliff and lands the common 10-mailbox evaluation at $149. The $49 embedded platform fee supports strong entry economics; marginal margin compresses at larger counts, so do not stack an automatic volume discount on top. **Free/Demo remains structurally sandbox-only** (type-guarded, tested). Paid real-sending activation is not live. Card-on-file, quantity-based billing, quote-before-provision, auto-renew disclosure, easy cancellation, and owner spend ceilings must be implemented and verified before activation. The current code still models legacy `launch`/`growth`/`scale` fixed tiers; that implementation is stale relative to this product decision and must not be treated as the final billing contract.
 
 ---
 
