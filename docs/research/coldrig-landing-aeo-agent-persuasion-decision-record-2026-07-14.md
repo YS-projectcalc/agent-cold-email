@@ -102,10 +102,10 @@ The hero answers, in order:
 2. Who operates it? The user's coding agent.
 3. What is unified? Domains, mailboxes, warmup, campaigns, and replies.
 4. Who owns intelligence? The user's agent.
-5. What can I do now? Connect to the live sandbox through docs/MCP/CLI.
+5. What can I do now? Create a sandbox and connect my existing agent.
 6. What cannot I do now? Send a real campaign.
 
-The status line is “Public early access · live sandbox,” which is accurate and compact. The primary call to action opens the quickstart; the secondary action goes to the safe demo.
+The status line is “Public early access · live sandbox,” which is accurate and compact. The primary call to action opens the client-specific connection guide; the secondary action opens the human sandbox-start path. Both lead into the same real Worker-hosted signup rather than a decorative marketing form.
 
 ### Product narrative
 
@@ -124,7 +124,27 @@ The high-contrast verification panel is deliberately prominent. It gives the shi
 
 ### Final conversion
 
-The final form is an activation list, not a production signup. The confirmation message and surrounding copy use the same language. This avoids collecting an email under a false implication that production access is immediate.
+The page now offers two distinct conversions: “Create free sandbox” opens a real isolated demo tenant, while the activation-list form is only for future real sending. The confirmation message and surrounding copy use the same language. This avoids collecting an email under a false implication that production access is immediate.
+
+### Complete human journey
+
+The landing page is no longer the only designed human surface. The same light visual and verbal system now covers:
+
+- `/signup`: pre-signup explanation and a direct route to the real dashboard signup;
+- `/connect`: current Codex, Claude Code, Cursor, and Cline setup, plus a safe evaluation prompt;
+- `/app/signup`: working `POST /signup`, one-time token display, secure-save acknowledgment, and browser-session handoff;
+- `/app/setup`: readiness checklist, client configuration, and owner-visible safety boundary;
+- `/app/billing`: the ratified mailbox price curve, approximate capacity, current account state, and an owner-ceiling preview;
+- `/security`, `/status`, and `/support`: inspectable trust claims, explicit release state, access/recovery, and abuse paths;
+- `/replies` and `/byo-domain`: the two product decisions buyers most need explained before activation;
+- `/unsubscribe` and `/why-email`: recipient transparency previews, deliberately noindexed and explicitly non-production;
+- `/404`: a branded recovery route.
+
+This sequence was chosen because a human buyer has four different jobs: classify the product, prove it safely, retain control after delegating operation, and understand what happens when something goes wrong. A single “agent-first” landing page does not complete any of those jobs by itself.
+
+The billing interface is complete as a planning and information design, but its payment, cancellation, quantity persistence, and spend-ceiling controls remain visibly disabled. Enabling a button that cannot yet complete a deterministic backend mutation would be less complete—not more—because it would break the owner-control promise.
+
+Token recovery follows the same rule. The service stores a hash, so the UI says the old token cannot be read back and offers a fresh sandbox/support path; it does not pretend that an email can reveal the original secret.
 
 ## 6. Agent-persuasion reasoning
 
@@ -294,7 +314,7 @@ When future pages are written, preserve this order:
 
 1. Merge or deploy the `coldrig-human-interface` worktree changes through the owner's normal release flow.
 2. Verify all HTML, CSS, SVG, PNG, ICO, Markdown, YAML, JSON, sitemap, headers, and redirect files are included in the deployed `site/` output.
-3. Check live 200 responses for `/`, `/for-agents`, `/docs`, `/pricing`, `/faq`, `/compare-vs-salesforge`, `/llms.txt`, `/agent-evaluation.md`, `/openapi.yaml`, and `/.well-known/mcp/server-card.json`.
+3. Check live 200 responses for `/`, `/signup`, `/connect`, `/security`, `/status`, `/support`, `/replies`, `/byo-domain`, `/for-agents`, `/docs`, `/pricing`, `/faq`, `/compare-vs-salesforge`, `/llms.txt`, `/agent-evaluation.md`, `/openapi.yaml`, and `/.well-known/mcp/server-card.json`.
 4. Run `npx agent-cold-email demo` from a clean environment.
 5. Call the live MCP endpoint and verify `tools/list` returns exactly 17 tools.
 6. Validate structured data and social preview assets on the deployed hostname.
@@ -304,25 +324,29 @@ When future pages are written, preserve this order:
 10. Complete the MCP registry cascade and seed the exact qualified discovery surfaces in ROADMAP.
 11. Verify the pricing calculator at 5=$99, 10=$149, 20=$249, and 60=$649; confirm capacity is labeled approximate, after-warmup, and non-contractual.
 12. Do not change “real sending is not active” until an owner-verified production smoke test and activation checklist are complete.
+13. Verify `support@`, `security@`, and `abuse@` inbound routing before treating the published support center as production-operational.
+14. Test the deployed `/app/signup` → token-save → `/app/setup` → `/app/billing` journey; confirm the paid controls remain disabled until quantity billing is truly migrated.
 
 ## 13. Verification completed in this pass
 
 - All JSON-LD blocks parse as valid JSON.
 - The MCP server card parses as valid JSON.
 - The sitemap parses as valid XML.
-- Internal links and local assets resolve across all 18 HTML pages.
+- Internal links and local assets resolve across all 28 HTML pages; every indexable page has a canonical URL and every sitemap target exists.
 - Logo, SVG/ICO favicon, 180×180 Apple touch icon, and 1200×630 social image exist and have the expected file types/dimensions.
 - Desktop landing-page render (1440 px) visually inspected.
 - Mobile landing-page render (390 px) visually inspected.
 - Desktop and 390 px mobile pricing renders visually inspected; the first mobile pass exposed a shared editorial-nav overflow, which was fixed by collapsing the navigation below 900 px.
 - Pricing calculator browser-QA passed at 5=$99, 10=$149, 20=$249, and 60=$649 on desktop and mobile, with matching domain/capacity outputs, valid JSON-LD, no browser errors, an explicit range label, and zero horizontal overflow.
 - `/for-agents` desktop render visually inspected.
-- Dashboard tests: 21 files, 93 tests passed.
+- Dashboard tests: 23 files, 99 tests passed, including the real signup request/one-time-token screen and canonical mailbox quote cases.
 - Platform tests: 48 files, 243 tests passed.
-- Total automated tests: 336 passed.
+- Total dashboard + platform automated tests: 342 passed.
 - TypeScript typecheck passed across dashboard, platform, CLI, and shared workspaces.
 - Production build/dry-run passed, including dashboard assets, Worker bundle, and CLI build.
 - Dangerous-HTML sink check passed.
+- Public browser QA passed across landing, signup, connect, support, status, security, replies, BYO-domain, unsubscribe, recipient-transparency, and 404 pages at 1440×1000 and 390×844, with no horizontal overflow, missing images, or browser errors. Client tabs and the explicitly simulated unsubscribe interaction were exercised.
+- Real local product QA passed through the actual Worker routes: human signup returned a tenant token, the token was shown once, the saved-token acknowledgment gated entry, a browser session opened `/app/setup`, the agent-client tabs worked, and `/app/billing` quoted 20 mailboxes at $249. Setup and billing passed mobile overflow checks.
 - Clean external command `npx --yes agent-cold-email@0.1.0 demo` completed against the live sandbox: 2 simulated domains, 4 simulated mailboxes, 4 simulated sends, 1 reply, 1 bounce, 0 complaints, and stop-on-reply cancellation; the CLI explicitly confirmed no real resources or email were used.
 
 ## 14. Primary external guidance used
@@ -334,6 +358,10 @@ When future pages are written, preserve this order:
 - Google SoftwareApplication structured data: `https://developers.google.com/search/docs/appearance/structured-data/software-app`
 - Bing sitemap/AI discoverability guidance: `https://blogs.bing.com/webmaster/July-2025/Keeping-Content-Discoverable-with-Sitemaps-in-AI-Powered-Search`
 - OpenAI publisher and crawler FAQ: `https://help.openai.com/en/articles/12627856-publishers-and-developers-faq`
+- OpenAI Codex MCP configuration manual: `https://learn.chatgpt.com/docs/extend/mcp.md`
+- Anthropic Claude Code MCP documentation: `https://docs.anthropic.com/en/docs/claude-code/mcp`
+- Cursor MCP documentation: `https://docs.cursor.com/context/model-context-protocol`
+- Cline MCP documentation: `https://docs.cline.bot/mcp/mcp-overview`
 - Salesforge official MCP setup and supported-product reference: `https://help.salesforge.ai/en/articles/10333582-salesforge-mcp-server-connect-with-ai-assistants`
 - Salesforge official pricing: `https://www.salesforge.ai/pricing`
 - Salesforge official cold-email MCP guide: `https://www.salesforge.ai/blog/cold-email-mcp-server`

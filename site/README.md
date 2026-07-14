@@ -5,8 +5,14 @@ The public marketing + docs site for `agent-cold-email`: static HTML/CSS/JS, no 
 ## What's here
 
 - `index.html` — light product landing page: category-explicit hero, product model, simulated control-room UI, verified sandbox path, and activation list. JSON-LD graph (`WebSite` + `Organization` + `SoftwareApplication`) in `<head>`.
+- `signup.html` — human conversion path into the real same-origin dashboard signup at the Worker (`/app/signup`), with sandbox and credential boundaries stated before the click.
+- `connect.html` — current remote-MCP setup for Codex, Claude Code, Cursor, and Cline, including copyable configuration and a safe evaluation prompt.
+- `replies.html`, `byo-domain.html` — product explainers for the reply lifecycle and customer-owned domain risk/consent model.
+- `security.html`, `status.html`, `support.html` — public trust and support surfaces. Status is a release-boundary board with a live health link, not an automated uptime-history product.
+- `unsubscribe.html`, `why-email.html` — noindex recipient-experience previews. They deliberately do not claim a real suppression record while production sending is inactive.
+- `404.html` — branded not-found route with recovery paths.
 - `docs.html` — quickstart, MCP setup, CLI usage, full tool reference, the free demo, auth model.
-- `pricing.html` — the pricing tiers (mirrors `SPEC.md` §18).
+- `pricing.html` — provisional quantity-price calculator: $49 platform + $10/provisioned mailbox, five-mailbox/$99 minimum (mirrors current `SPEC.md` §18 copy; backend quantity billing is still activation-gated).
 - `compare.html` — honest DIY-vs-Coldrig comparison with explicit sandbox/production boundary.
 - `for-agents.html` + `agent-evaluation.md` — indexable and Markdown versions of the evidence-led agent decision brief: fit rule, seven-point checklist, claim ledger, price math, runnable test, and disqualifiers.
 - `compare-vs-salesforge.html` — sourced comparison with the strongest current agent-operated alternative, including where Salesforge/Forge Stack is the honest production choice today.
@@ -25,6 +31,7 @@ The public marketing + docs site for `agent-cold-email`: static HTML/CSS/JS, no 
 - `assets/logo.svg`, `assets/logo-mark.svg`, `favicon.svg`, `favicon.ico`, `apple-touch-icon.png`, `assets/og-image.png` — the shared Coldrig identity and crawler/social assets.
 - `assets/brand.js` — the canonical Coldrig display-name constant used by `[data-brand]` elements. The permanent repository, npm, and MCP handle remains `agent-cold-email`.
 - `assets/waitlist.js` — waitlist form submission logic; posts to `https://agent-cold-email-api.yaakovscher.workers.dev/api/waitlist`.
+- `assets/human-pages.js` — progressive enhancement for client tabs, copy buttons, safe query-string labels on recipient previews, and explicitly simulated recipient form confirmation.
 - `assets/domain-calculator.js` — pure client-side domains/inboxes-per-volume calculator used by `guide-domains-inboxes-warmup-compliance.html`; no network call, assumptions stated in the file's header comment.
 
 ## The site host
@@ -50,4 +57,4 @@ npx serve site
 
 ## Depends on
 
-Nothing outside this directory at runtime (self-contained CSS/JS, no external requests except the `https://agent-cold-email-api.yaakovscher.workers.dev` waitlist POST). Content here should stay in sync with `packages/shared/src/intents.ts` and `apps/platform/src/routes/*` (the tool reference and OpenAPI spec) and with `SPEC.md` §18 (pricing) — if either changes, update this directory in the same change.
+Nothing outside this directory at runtime (self-contained CSS/JS, no external requests except the waitlist POST and deliberate links to the same-origin Worker dashboard/health endpoint). Content here should stay in sync with `packages/shared/src/intents.ts` and `apps/platform/src/routes/*` (the tool reference and OpenAPI spec), `packages/shared/src/pricing.ts`, and `SPEC.md` §18 — if any changes, update this directory in the same change.

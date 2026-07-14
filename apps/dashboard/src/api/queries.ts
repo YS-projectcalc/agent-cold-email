@@ -12,6 +12,7 @@ import type {
   InboxRow,
   InfrastructureStatus,
   ReplyResult,
+  SignupResult,
   ThreadDetail,
 } from "./types";
 
@@ -34,6 +35,17 @@ export function useLogin() {
       apiRequest<{ tenantId: string }>("/dashboard/session", {
         method: "POST",
         body: { token },
+        suppressUnauthorizedRedirect: true,
+      }),
+  });
+}
+
+export function useSignup() {
+  return useMutation({
+    mutationFn: (input: { brand: string; contactEmail: string }) =>
+      apiRequest<SignupResult>("/signup", {
+        method: "POST",
+        body: input,
         suppressUnauthorizedRedirect: true,
       }),
   });

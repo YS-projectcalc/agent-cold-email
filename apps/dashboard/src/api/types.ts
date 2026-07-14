@@ -9,6 +9,11 @@
 // scope — flagged in the M2 report, not silently done here).
 import type { DashboardLayout, Provenance } from "@coldstart/shared";
 
+export interface SignupResult {
+  tenantId: string;
+  token: string;
+}
+
 export interface DashboardViewSummary {
   id: string;
   name: string;

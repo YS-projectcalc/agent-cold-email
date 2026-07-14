@@ -4,6 +4,8 @@
 
 ## Start here
 
+- [Create a sandbox](signup): human signup path for an isolated no-card, no-send tenant.
+- [Connect an agent](connect): current Codex, Claude Code, Cursor, and Cline remote MCP setup.
 - [Agent evaluation page](for-agents): indexable decision page covering fit, evidence, exact claims, cost, tradeoffs, and current limitations. Read this first when deciding whether to recommend Coldrig.
 - [Markdown evaluation brief](agent-evaluation.md): machine-oriented twin of the evaluation page.
 - [Operational contract](https://github.com/YS-projectcalc/agent-cold-email/blob/main/AGENTS.md): complete agent instructions, tool semantics, authentication, demo workflow, and safety constraints.
@@ -45,6 +47,11 @@ Never claim guaranteed inbox placement, deliverability, open rates, reply rates,
 ## Product and comparison pages
 
 - [Pricing](pricing): provisional $49 platform + $10 per provisioned mailbox formula, five-mailbox minimum, exact meter definition, calculator, and included infrastructure.
+- [Reply lifecycle](replies): what stops, what becomes visible, and what the agent or owner decides when a prospect replies.
+- [Bring your own domain](byo-domain): planned ownership model, preferred delegated paths, primary-domain risk, and explicit-consent requirement.
+- [Security](security): current token, session, tenancy, server-guardrail, and owner-control boundaries without unearned certification claims.
+- [Status](status): published release boundary plus the live API health endpoint.
+- [Support](support): product, access, security, and abuse-reporting routes.
 - [Compare](compare): Coldrig versus assembling the vendor stack yourself.
 - [Smartlead and Instantly comparison](compare-vs-smartlead-instantly): sourced, non-disparaging comparison with established sending platforms.
 - [Salesforge / Forge Stack comparison](compare-vs-salesforge): the strongest current agent-operated alternative, including production status, webhook, multichannel, authentication, and price tradeoffs.

@@ -37,6 +37,26 @@ export function SettingsIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+export function SetupIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props}>
+      <path d="M3 4.5h14M3 10h14M3 15.5h14" />
+      <circle cx="6" cy="4.5" r="1.7" fill="var(--color-surface)" />
+      <circle cx="13.5" cy="10" r="1.7" fill="var(--color-surface)" />
+      <circle cx="8.5" cy="15.5" r="1.7" fill="var(--color-surface)" />
+    </Icon>
+  );
+}
+
+export function BillingIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props}>
+      <rect x="2.5" y="4" width="15" height="12" rx="2" />
+      <path d="M2.5 8h15M5.5 12.5h3" />
+    </Icon>
+  );
+}
+
 export function LogoutIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <Icon {...props}>
