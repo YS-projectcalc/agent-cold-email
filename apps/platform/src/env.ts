@@ -27,6 +27,16 @@ declare global {
       // for a deployed environment, or `.dev.vars` locally (see
       // .dev.vars.example) — CLAUDE.md rule g: never in code or git.
       ADMIN_TOKEN?: string;
+      // External email engine (apps/engine — ARCHITECTURE.md #6). BOTH must be
+      // set to activate the real EmailPort; either unset keeps RealEmailPort
+      // dark (it throws NotActivatedError), so the deployed default cannot reach
+      // a live mail server (CLAUDE.md rule g: the secret is a wrangler secret,
+      // never in code/git; see ACTIVATION.md Gate 2 "Go-engine host"). Note:
+      // even with both set, the adapter factory (vendors/factory.ts) still only
+      // hands the real adapter to an activated paid tenant — a demo/free tenant
+      // is forced to sandbox first, unconditionally.
+      ENGINE_BASE_URL?: string;
+      ENGINE_AUTH_SECRET?: string;
       // SPEC.md §19.1 — the dashboard SPA's static asset bundle (public/app/),
       // served by Cloudflare's own asset layer via [assets] in wrangler.toml.
       // Not fetched from Worker code today (run_worker_first excludes /app/*

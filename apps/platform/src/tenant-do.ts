@@ -51,6 +51,7 @@ import { getOpsSummary, suspendTenant, type TenantOpsSummary } from "./engine/op
 import { newId, TENANT_DO_SCHEMA } from "./schema.js";
 import type { TenantContext } from "./tenant-context.js";
 import { createVendorAdapters, type VendorAdapterBundle } from "./vendors/factory.js";
+import type { EngineClientConfig } from "./vendors/real/email-port.js";
 
 export interface InitTenantInput {
   tenantId: string;
@@ -114,12 +115,19 @@ export class TenantDO extends DurableObject<Env> {
     this.addColumnIfMissing("mailboxes", "released_at", "INTEGER");
     // A4 (CLASS A) — per-send retry counter (see schema.ts).
     this.addColumnIfMissing("scheduled_sends", "attempts", "INTEGER NOT NULL DEFAULT 0");
+    // Stuck-'sending' reclaim marker (persist-before-confirm class; see
+    // schema.ts + engine/tick.ts). Nullable — set on claim, cleared on terminal.
+    this.addColumnIfMissing("scheduled_sends", "sending_since", "INTEGER");
     // A5 (CLASS A) — last charge decline code for dunning severity (see schema.ts).
     this.addColumnIfMissing("tenant_profile", "last_decline_code", "TEXT");
     // SPEC.md §19.2 (M1 dashboard+inbox) — per-mailbox last-sync marker, set by
     // runPollInbox on every poll (engine/reply-processor.ts). Backs the
     // Settings→Mailboxes "last polled" UI claim (§19.6).
     this.addColumnIfMissing("mailboxes", "last_polled_at", "INTEGER");
+    // Consumer-owned IMAP poll cursor (persist-after-confirm class fix; see
+    // schema.ts + engine/reply-processor.ts). DEFAULT 0 so a DO that predates
+    // the column starts from the beginning of the mailbox.
+    this.addColumnIfMissing("mailboxes", "poll_cursor", "INTEGER NOT NULL DEFAULT 0");
     // Created here, not in TENANT_DO_SCHEMA, so they run only after the columns
     // above are guaranteed to exist (safe for DOs that predate the column). Each
     // collapses any pre-existing rows that would violate the unique key BEFORE
@@ -210,8 +218,17 @@ export class TenantDO extends DurableObject<Env> {
     // queues must be the SAME instance across calls, or a poll() right
     // after a send() would never see what was just queued.
     // realAdaptersActivated is always false in this build — see vendors/factory.ts.
-    this.adapters ??= createVendorAdapters(this.plan, this.clock, false);
+    // engineConfig is threaded from env so the real EmailPort is wired for the
+    // moment activation flips the factory; it stays dark (both env vars unset)
+    // in the deployed build, so RealEmailPort throws NotActivatedError anyway.
+    this.adapters ??= createVendorAdapters(this.plan, this.clock, false, this.engineConfig());
     return this.adapters;
+  }
+
+  private engineConfig(): EngineClientConfig | undefined {
+    const baseUrl = this.env.ENGINE_BASE_URL;
+    const authSecret = this.env.ENGINE_AUTH_SECRET;
+    return baseUrl && authSecret ? { baseUrl, authSecret } : undefined;
   }
 
   private requireContext(): TenantContext {

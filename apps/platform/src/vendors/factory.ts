@@ -6,7 +6,7 @@ import { SandboxMailboxPort } from "./sandbox/mailbox-port.js";
 import { SandboxMetricsPort } from "./sandbox/metrics-port.js";
 import { RealBillingPort } from "./real/billing-port.js";
 import { RealDomainPort } from "./real/domain-port.js";
-import { RealEmailPort } from "./real/email-port.js";
+import { RealEmailPort, type EngineClientConfig } from "./real/email-port.js";
 import { RealMailboxPort } from "./real/mailbox-port.js";
 import { RealMetricsPort } from "./real/metrics-port.js";
 
@@ -28,6 +28,7 @@ export function createVendorAdapters(
   plan: TenantPlan,
   clock: Clock,
   realAdaptersActivated: boolean,
+  engineConfig?: EngineClientConfig,
 ): VendorAdapterBundle {
   const isDemoOrFree = plan === "demo" || plan === "free";
   const useSandbox = isDemoOrFree || !realAdaptersActivated;
@@ -43,11 +44,14 @@ export function createVendorAdapters(
     };
   }
 
+  // `engineConfig` is the external email engine's address/secret (env-derived,
+  // see tenant-do.ts). Absent -> RealEmailPort stays dark (NotActivatedError),
+  // matching the coded-but-unactivated posture of every other real/ adapter.
   return {
     kind: "real",
     domain: new RealDomainPort(),
     mailbox: new RealMailboxPort(),
-    email: new RealEmailPort(),
+    email: new RealEmailPort(engineConfig),
     billing: new RealBillingPort(),
     metrics: new RealMetricsPort(),
   };

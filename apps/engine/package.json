@@ -1,0 +1,27 @@
+{
+  "name": "@coldstart/engine",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "ColdStart external email engine — the 24/7 Node SMTP/IMAP daemon that becomes the production EmailPort (ARCHITECTURE.md #6). Runs off-Worker on a VM/container; the Worker's RealEmailPort speaks the HTTP boundary contract to it. Uses the exact libraries the A5 spike validated against real GreenMail.",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "imapflow": "^1.0.191",
+    "mailparser": "^3.7.4",
+    "nodemailer": "^7.0.9",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@coldstart/shared": "*",
+    "@types/mailparser": "^3.4.4",
+    "@types/node": "^24.0.0",
+    "@types/nodemailer": "^6.4.15",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}

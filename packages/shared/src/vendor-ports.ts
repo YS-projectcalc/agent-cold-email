@@ -151,20 +151,37 @@ export interface PolledComplaint {
 
 export type PolledEvent = PolledReply | PolledBounce | PolledComplaint;
 
+/**
+ * Result of one poll. `cursor` is an OPAQUE monotonic position the CONSUMER
+ * owns and persists: the consumer passes its stored cursor as `poll`'s
+ * `sinceCursor`, processes `events`, then persists the returned `cursor` — the
+ * persist landing in the SAME transaction as the event processing. For the real
+ * IMAP engine `cursor` is the mailbox's UID high-water mark; the engine holds no
+ * cursor state of its own, so a lost poll response (the events never reach the
+ * consumer) leaves the consumer's cursor un-advanced and the next poll
+ * redelivers the exact same events (CLASS: state must not advance before the
+ * cross-boundary effect is confirmed). The sandbox is in-process (no lost-
+ * response window) so it round-trips the cursor unchanged.
+ */
+export interface PollResult {
+  events: PolledEvent[];
+  cursor: number;
+}
+
 export interface EmailPort {
   send(input: SendEmailInput, idempotencyKey: string): Promise<SendEmailResult>;
   /**
-   * New replies/bounces/complaints observed for this mailbox. AT-LEAST-ONCE
-   * (A5 spike finding): the sandbox "returns and clears", but a real IMAP
-   * adapter has no such atomic clear — a re-poll after a crash, or overlapping
-   * poll cycles, WILL re-deliver an event already processed. The consumer
-   * (engine/reply-processor.ts) therefore dedupes on the event's messageId
-   * (events unique index + INSERT OR IGNORE), applying each event's side
-   * effects at most once. Every returned event carries a real RFC 5322
-   * `messageId`/`originalMessageId` (see SendEmailResult) so that dedupe key is
-   * stable across re-polls.
+   * Replies/bounces/complaints observed for this mailbox with position >
+   * `sinceCursor`. AT-LEAST-ONCE (A5 spike finding): a real IMAP adapter has no
+   * atomic "returns and clears" — a re-poll after a crash, or overlapping poll
+   * cycles, WILL re-deliver an event already processed. Because the CONSUMER
+   * (engine/reply-processor.ts) owns the cursor and only advances it AFTER
+   * transactionally processing the events, a redelivery is expected and safe:
+   * every event carries a stable RFC 5322 `messageId`/`originalMessageId` (see
+   * SendEmailResult) and the consumer dedupes on it (events unique index +
+   * INSERT OR IGNORE), applying each side effect at most once.
    */
-  poll(mailboxEmail: string): Promise<PolledEvent[]>;
+  poll(mailboxEmail: string, sinceCursor: number): Promise<PollResult>;
 }
 
 export interface BillingCustomer {

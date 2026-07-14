@@ -1,6 +1,6 @@
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { PolledEvent } from "@coldstart/shared";
+import type { PollResult } from "@coldstart/shared";
 import { ONE_DAY_MS, WARMUP_RAMP_DAYS } from "../src/engine/warmup.js";
 import { api, signup, tenantStub } from "./helpers.js";
 
@@ -155,13 +155,15 @@ describe("B1 — inbound event idempotency across an at-least-once re-poll (G3 a
       await instance.tick(); // sends step 1, queues a sandbox reply for the mailbox
 
       // Make the port RE-DELIVER: each mailbox's first real poll is captured and
-      // replayed verbatim on every subsequent poll (an at-least-once IMAP re-poll
-      // with no atomic clear).
-      const emailPort = (instance as unknown as { adapters: { email: { poll: (m: string) => Promise<PolledEvent[]> } } }).adapters.email;
+      // replayed verbatim on every subsequent poll — exactly the consumer-owned-
+      // cursor failure mode (the cursor never advanced, so the same batch comes
+      // back). This is the end-to-end proof that redelivery is SAFE: the Worker
+      // dedupes on the event's stable Message-ID (events unique index).
+      const emailPort = (instance as unknown as { adapters: { email: { poll: (m: string, c: number) => Promise<PollResult> } } }).adapters.email;
       const realPoll = emailPort.poll.bind(emailPort);
-      const captured = new Map<string, PolledEvent[]>();
-      emailPort.poll = async (mbx: string) => {
-        if (!captured.has(mbx)) captured.set(mbx, await realPoll(mbx));
+      const captured = new Map<string, PollResult>();
+      emailPort.poll = async (mbx: string, sinceCursor: number) => {
+        if (!captured.has(mbx)) captured.set(mbx, await realPoll(mbx, sinceCursor));
         return captured.get(mbx)!;
       };
 
@@ -373,6 +375,48 @@ describe("NB4 — reply content-hash dedupe survives a cold DO", () => {
       expect(
         state.storage.sql.exec<{ n: number }>(`SELECT COUNT(*) as n FROM events WHERE thread_id = ? AND type = 'sent'`, threadId).one().n,
       ).toBe(2);
+    });
+  });
+});
+
+// Consumer-owned cursor: the DO must PERSIST the cursor the engine returns and
+// pass its STORED cursor as sinceCursor on the next poll — so the engine can be
+// cursor-stateless and a lost response redelivers instead of skipping events.
+describe("poll cursor is owned + persisted by the consumer DO", () => {
+  it("stores the returned cursor and passes it as sinceCursor on the next poll", async () => {
+    const { tenantId } = await setupReadyTenant("Cursor Co", "cursor.com");
+
+    await runInDurableObject(tenantStub(tenantId), async (instance, state) => {
+      await instance.launchCampaign({
+        name: "cursor",
+        offer: "x",
+        leads: [{ email: "reply.prospect@cursor-leads.com", firstName: "R", company: "Co" }],
+        sequence: ONE_STEP,
+        timezone: "UTC",
+        sendWindow: { startHour: 0, endHour: 23 },
+        stopOnReply: true,
+      });
+      await instance.tick();
+
+      // Stub the port to record the sinceCursor it receives and return an
+      // advancing cursor, so we can assert the DO round-trips it.
+      const seen: number[] = [];
+      const port = (instance as unknown as { adapters: { email: { poll: (m: string, c: number) => Promise<PollResult> } } }).adapters.email;
+      port.poll = async (_m: string, sinceCursor: number) => {
+        seen.push(sinceCursor);
+        return { events: [], cursor: sinceCursor + 10 };
+      };
+
+      const cursorOf = () =>
+        state.storage.sql.exec<{ poll_cursor: number }>(`SELECT poll_cursor FROM mailboxes LIMIT 1`).one().poll_cursor;
+
+      expect(cursorOf()).toBe(0); // fresh mailbox
+      await instance.pollInbox();
+      expect(cursorOf()).toBe(10); // persisted the returned cursor
+      await instance.pollInbox();
+      expect(cursorOf()).toBe(20);
+      // The DO passed its STORED cursor each time (0 then 10), never a fixed 0.
+      expect(seen).toEqual([0, 10]);
     });
   });
 });

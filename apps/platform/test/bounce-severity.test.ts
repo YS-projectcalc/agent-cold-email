@@ -1,6 +1,6 @@
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { PolledEvent } from "@coldstart/shared";
+import type { PollResult, PolledEvent } from "@coldstart/shared";
 import { SandboxEmailPort } from "../src/vendors/sandbox/email-port.js";
 import { VirtualClock } from "../src/clock.js";
 import { ONE_DAY_MS, WARMUP_RAMP_DAYS } from "../src/engine/warmup.js";
@@ -72,7 +72,7 @@ describe("sandbox EmailPort emits both hard and soft bounce branches (A1 / G2)",
 
     await port.send({ ...base, fromEmail: "s@a.com", toEmail: "softbounce@x.com" }, "k-soft");
     await port.send({ ...base, fromEmail: "s@a.com", toEmail: "bounce@x.com" }, "k-hard");
-    const events = await port.poll("s@a.com");
+    const { events } = await port.poll("s@a.com", 0);
 
     const soft = events.find((e) => e.kind === "bounce" && e.toEmail === "softbounce@x.com");
     const hard = events.find((e) => e.kind === "bounce" && e.toEmail === "bounce@x.com");
@@ -200,8 +200,8 @@ describe("A2 — a single soft bounce is tallied, not permanently suppressed (G3
       };
       const scripted: PolledEvent[][] = [[soft(1)], [soft(2)], [reply], [soft(3)]];
       let i = 0;
-      const port = (instance as unknown as { adapters: { email: { poll: (m: string) => Promise<PolledEvent[]> } } }).adapters.email;
-      port.poll = async () => scripted[i++] ?? [];
+      const port = (instance as unknown as { adapters: { email: { poll: (m: string, c: number) => Promise<PollResult> } } }).adapters.email;
+      port.poll = async () => ({ events: scripted[i++] ?? [], cursor: 0 });
 
       const streak = () =>
         state.storage.sql.exec<{ n: number }>(`SELECT COALESCE((SELECT streak FROM soft_bounces WHERE email = ?), 0) as n`, email).one().n;

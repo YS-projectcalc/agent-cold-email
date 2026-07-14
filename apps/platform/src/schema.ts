@@ -77,6 +77,12 @@ CREATE TABLE IF NOT EXISTS mailboxes (
   -- loop, semantically distinct). Teardown also sets deliv_status='paused' so
   -- the tick's capacity picker stops sending from it immediately.
   released_at INTEGER,
+  -- Consumer-owned IMAP poll cursor (high-water UID). The engine is cursor-
+  -- stateless; runPollInbox passes this as EmailPort.poll's sinceCursor and,
+  -- AFTER transactionally processing the returned events, advances it to the
+  -- returned cursor. A lost poll response leaves this un-advanced so the next
+  -- poll redelivers (deduped on events.message_id) — no silent event loss.
+  poll_cursor INTEGER NOT NULL DEFAULT 0,
   warmup_started_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL
 );
@@ -123,7 +129,13 @@ CREATE TABLE IF NOT EXISTS scheduled_sends (
   -- reverts the row to 'pending' and increments this; at the cap the row is
   -- marked status='failed' (ops-visible) instead of retried forever. A
   -- non-retryable VendorError skips straight to 'failed'. NULL/0 on a clean send.
-  attempts INTEGER NOT NULL DEFAULT 0
+  attempts INTEGER NOT NULL DEFAULT 0,
+  -- When the row was claimed into 'sending' (engine/tick.ts). A DO that dies
+  -- between the claim and the terminal update leaves the row stuck 'sending';
+  -- a later tick reclaims one whose sending_since is older than SEND_CLAIM_TTL_MS
+  -- back to 'pending' (send is idempotent on its key). NULL in every non-'sending'
+  -- state.
+  sending_since INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS events (

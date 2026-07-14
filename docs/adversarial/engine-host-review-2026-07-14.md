@@ -14,3 +14,47 @@ Fresh-context adversary, two rounds, against the UNCOMMITTED engine diff (`apps/
 **TO SHIP:** bound the in-flight send well under the TTL (explicit nodemailer connection/greeting/socket timeouts + an `AbortSignal` on the Worker fetch) and/or give the engine send-store a claim-then-execute in-flight row mirroring `withRequestIdempotency`. Ship a test that FAILS on current code (stalled send + reclaim ⇒ two SMTP sends).
 
 **NON-BLOCKING (landmines):** `ACTIVATION.md:42` step 6 instructs `ENGINE_BASE_URL=http://$IP:8080`, which the new https guard rejects as PERMANENT ⇒ every due send is marked terminal `'failed'` on attempt 1, and `'failed'` has NO requeue path (written `tick.ts:241/:289`, read only by ops-summary COUNT) — an operator following the runbook verbatim burns the whole queue. A 422 UnknownMailbox (operator-fixable) is likewise graded lead-permanent → terminal. The TTL reclaim does not bump `attempts`, so an orphan-reclaim loop has no ceiling.
+
+## Re-attack #3 — 2026-07-14 (fix round for the R2 double-send blocker) — **SHIP**
+
+Fresh context. Ground: `git rev-parse HEAD` = `54455f86bb4eed2092508b5b9e8b36acd9666011` (moved since R2/R3; sibling commits touched only `site/` + docs). Whole engine arc still one uncommitted diff. Judged against the R2 checklist: (1) is the double-send race genuinely fixed, and (2) are the two self-flagged residuals ledger-able for the single-daemon Gate-2 shape.
+
+### The R2 blocker is genuinely closed — PROVEN by revert-fail
+Root fix is the engine in-flight claim (`apps/engine/src/store.ts` `inFlight` Set + `claimSend`/`releaseSend`; `engine.ts:45-76`): `getSend()` miss → `claimSend()` with **no await between** (same input-gate turn) → `await smtp.send()` inside a `try` whose `finally` always releases. A second same-key `send()` arriving while the first is in flight sees the claim, throws `SendInProgressError` (409, `errors.ts:57-63`), graded retryable, and its later retry hits the now-populated cache → same Message-ID, **one** SMTP transaction.
+
+Revert-fail run in a sandbox copy (`scratchpad/engine-revert`, repo `node_modules` symlinked, type-only `@coldstart/shared` imports erased by esbuild): FIXED code → `engine.test.ts` 6/6 pass; with `claimSend` patched to always-true (models the old bare check-then-act) → the race test **FAILS** `AssertionError: expected [ …2 items ] to have a length of 1 but got 2` — i.e. two SMTP sends, exactly the R2 harm. Test is non-vacuous; the fix is real.
+
+Why the claim holds across the Worker abort (the load-bearing detail): the engine HTTP server (`index.ts`, raw `node:http`) never wires client-disconnect to cancel the handler or abort the SMTP, so a Worker `fetch` abort at 180s leaves `engine.send()` running with the claim still held — a reclaim/retry that races the still-live send gets a 409, never a second SMTP.
+
+### Attacks attempted that FAILED (the claim held)
+- **await between the miss-check and the claim** — none (`engine.ts:45→58` is sync); claim is check-and-set atomic in single-threaded Node. HELD.
+- **a throw path that leaks the claim** — every post-claim throw (`resolve()` UnknownMailbox `:62`, `smtp.send` `:64`, `recordSend` `:69`) is inside the `try`; `finally` `:71-76` always releases. The 409 throw is *before* the claim (nothing to release). HELD.
+- **429/reclaim double-send** — the fetch AbortSignal (`ENGINE_REQUEST_TIMEOUT_MS=180s`, asserted an `AbortSignal` instance in the workers pool) settles the row via the tick's own retryable catch *before* the 300s reclaim can fire; the reclaim only handles DO-death orphans. A subsequent re-send of a still-live engine send → 409. HELD.
+- **error-grade regression** — `RETRYABLE_ENGINE_STATUSES={409,422}`, all other 4xx permanent, 5xx/network retryable; `statusFor` maps only UnknownMailbox→422 and SendInProgress→409, no accidental collision. All directly asserted (`real-email-port.test.ts`: 409/422/400/5xx/network/AbortSignal/https/localhost/malformed). HELD.
+- **infinite hot-retry / double-count** — capped at `MAX_SEND_ATTEMPTS=5` (one attempt/tick/row → 'failed' + ops event); usage key `usage:tenant:row.id` idempotent + ledger `INSERT OR IGNORE ON source_send_id`, so a cache-hit re-send never double-bills. HELD.
+- **reclaim lost-update** — reclaim SELECT + loop are one synchronous DO stretch (no await), so the status-guard-less UPDATE can't race a concurrent tick; N = orphans only. HELD.
+- **consumer-owned cursor (R1) regressed?** — intact: `reply-processor.ts` advances `poll_cursor` in the same sync stretch as event processing; new `idempotency.test.ts` proves `seen===[0,10]`, cursor `0→10→20`; redelivery deduped on Message-ID. HELD.
+- **§0 safety** — `realAdaptersActivated` hard-`false` ⇒ `useSandbox` always true ⇒ the real branch (which is where `engineConfig` threads) is unreachable; `demo-adapter-guard.test.ts` forces activated=true for demo/free → sandbox, and a genuine real bundle throws `NotActivatedError`. `engineConfig()` needs BOTH env vars. HELD (263 platform tests green).
+- **class-sweep one layer up** — the sibling TTL-reclaim (`idempotency.ts` `REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS=10min`, unchanged/committed baseline, not in this diff) is covered by the same engine in-flight claim on the email path and by vendor idempotency keys on provisioning; no new member. HELD.
+
+### Suite evidence (independently re-run)
+- Engine: `npm run typecheck` exit 0; `vitest run` → **30 passed / 3 skipped** (6 files + Docker-gated greenmail e2e skipped).
+- Platform: `npm run typecheck` exit 0; `vitest run` → **263 passed / 49 files**, exit 0 (the stderr "uncaught exception" lines are test-asserted error paths). `vitest.config.ts fileParallelism:false` left untouched.
+- Revert-fail proof: see above (2-sends on defeated claim, 1 on restored).
+
+### Ruling on the two self-flagged residuals — both LEDGER-ABLE for single-daemon
+- **(a) crash-after-`smtp.send()`-accept-before-`recordSend()`-flush ⇒ redelivery double-send.** Real and genuinely NOT covered by the in-memory claim (a crash drops the Set; if the SMTP server accepted the message but the key never reached disk, a retry re-sends). Requires a durable pre-send intent log — correctly deferred. Narrow crash-timing window; harm = one duplicate cold email; only reachable once the real port is armed. **Ledger-able** — but per this project's OWN convention (the stale-`'pending'` idempotency reclaim was tracked as a Gate-2 residual in `ACTIVATION.md` before being fixed), residual (a) MUST be added to `ACTIVATION.md` Gate 2 before the engine is armed. NON-BLOCKING for the commit (code is dark + correct); MUST-DO-before-arm. `store.ts:41-44`'s "the persisted `sends` cache … cover crash recovery, exactly as before" comment slightly understates this window.
+- **(b) in-memory claim doesn't coordinate multi-instance.** Structurally N/A for the deployment shape — the runbook (`ACTIVATION.md:37-41`) provisions ONE droplet, ONE container; `store.ts:18-32` + `apps/engine/README.md` both document the single-daemon topology and the interface swap point for scale-out. **Ledger-able**, applicable only when they scale.
+
+### NON-BLOCKING findings
+1. **Doc/code drift (lens 1/4):** `apps/engine/README.md` boundary-contract table lists `422 | permanent` and omits `409`, but the code now grades both **retryable** (`RETRYABLE_ENGINE_STATUSES`). Update the table with the commit.
+2. **Overstated timeout comment (lens 2):** `smtp.ts:16-19` + `smtp.test.ts:44` frame connect+greeting+socket ≈ 100s as the "worst-case in-flight time." `socketTimeout` is a per-inactivity timeout, not a total-transaction bound, so a slow multi-roundtrip or a dribbling server can exceed 100s (and even the 180s fetch abort). This does NOT reopen the double-send — the in-flight claim, not the timeout, is the correctness guarantee — but the "worst-case" framing overstates what the constants buy.
+3. **Pathological-server false-`'failed'` (lens 5/7):** a send that stays in-flight past the 180s fetch abort triggers retries that each 409 and bump `attempts` (plus a possible reclaim+409 double-bump within one tick), so a genuinely-delivered-but-slow send can be mis-graded terminal `'failed'` after 5 attempts (email went out once, row says failed, unbilled). Exactly-once HOLDS; only the terminal grade is wrong, and only against a pathological/dribbling SMTP server.
+
+### UNVERIFIABLE
+- Real nodemailer/imapflow wire behavior against a live SMTP/IMAP server: `greenmail.e2e.test.ts` is Docker-gated (`ENGINE_E2E=1`), 3 skipped in default CI, not runnable in this sandbox (no Docker). Resolution: run it once at host stand-up (`ACTIVATION.md` step 7). Same standing gap as R1/R3 — not new.
+
+### NEW (out of scope, no verdict weight)
+- `ROADMAP.md` still carries the R2 NO-SHIP + R3 landmine entries as open, and `ACTIVATION.md` Gate-2 line 23 still marks the engine "⛔ DO NOT PROVISION YET — NO-SHIP." On this SHIP verdict, main-loop bookkeeping should flip those and fold in residual (a) as a Gate-2 residual + the README 422 table fix. (The R3 landmines themselves — http:// runbook, 422-lead-permanent, no-attempts-bump — are all CODE-FIXED this round: `ACTIVATION.md:42-43` now forbids plain http, 422 is retryable, reclaim bumps+caps `attempts`.)
+
+VERDICT: SHIP

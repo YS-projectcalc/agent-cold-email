@@ -1,4 +1,4 @@
-import type { Clock, EmailPort, PolledEvent, SendEmailInput, SendEmailResult } from "@coldstart/shared";
+import type { Clock, EmailPort, PollResult, PolledEvent, SendEmailInput, SendEmailResult } from "@coldstart/shared";
 
 /**
  * Sandbox EmailPort — the send/poll simulator the walking-skeleton test
@@ -86,10 +86,14 @@ export class SandboxEmailPort implements EmailPort {
     return result;
   }
 
-  async poll(mailboxEmail: string): Promise<PolledEvent[]> {
+  async poll(mailboxEmail: string, sinceCursor: number): Promise<PollResult> {
+    // In-process: there is no cross-boundary lost-response window (unlike the
+    // real HTTP engine), so the sandbox needs no durable cursor — it returns
+    // and clears, and round-trips `sinceCursor` unchanged. The consumer stores
+    // that unchanged cursor and never re-requests already-cleared events.
     const events = this.pendingByMailbox.get(mailboxEmail) ?? [];
     this.pendingByMailbox.set(mailboxEmail, []);
-    return events;
+    return { events, cursor: sinceCursor };
   }
 
   private enqueue(mailboxEmail: string, event: PolledEvent): void {

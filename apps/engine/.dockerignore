@@ -1,0 +1,8 @@
+node_modules
+src
+test
+state
+tsconfig*.json
+vitest.config.ts
+*.md
+.dev.vars*

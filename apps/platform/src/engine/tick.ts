@@ -33,6 +33,15 @@ const SEND_USAGE_FEE_CENTS = 2;
 // reverted-to-pending forever, so no infinite-retry path survives.
 const MAX_SEND_ATTEMPTS = 5;
 
+// Stuck-'sending' reclaim TTL (persist-before-confirm class). A row claimed
+// 'sending' is only held across ONE send()+billing round trip (seconds); a DO
+// that dies in that window leaves the row stuck 'sending' with no in-tick catch
+// to grade it. A later tick reclaims a 'sending' row older than this back to
+// 'pending' (send is idempotent on its key, so a re-send is a no-op). Sized far
+// above a legitimate in-flight send yet well under the idempotency 'pending'
+// reclaim window, so a genuinely orphaned row unblocks promptly.
+const SEND_CLAIM_TTL_MS = 5 * 60 * 1000;
+
 /**
  * RFC 8058 List-Unsubscribe header value (SPEC.md §0.8 / ARCHITECTURE.md #8).
  * The `mailto:` opt-out is expressible today (the sending mailbox is a real,
@@ -97,6 +106,57 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
   // the capacity picker query, which realizes the ROTATE reroute.
   await runDeliverabilitySweep(ctx);
   const now = ctx.clock.now();
+
+  // Reclaim rows orphaned in 'sending' — a DO that died between the claim and
+  // the terminal update (no in-tick catch ran to grade them), or an engine send
+  // that stalled past the reclaim TTL. TTL-bounded like the idempotency
+  // 'pending' reclaim (engine/idempotency.ts). Each reclaim BUMPS attempts and
+  // is capped by MAX_SEND_ATTEMPTS: without the bump an endlessly-orphaned row
+  // would reclaim→retry forever with no ceiling (engine-host-review-2026-07-14).
+  // Under the cap the row reverts to 'pending' for a later tick — email.send is
+  // idempotent on its key, and the engine's in-flight claim (apps/engine/src/
+  // engine.ts) makes a re-send that races a still-live send safe, so a re-send
+  // of one that DID go out is a no-op; at the cap it is graded 'failed' with an
+  // ops-visible 'failed' event, exactly like the in-tick send-failure taxonomy
+  // below (a 'failed' row with no event would be invisible to campaign_results).
+  const orphaned = ctx.sql
+    .exec<{ id: string; campaign_id: string; lead_id: string; step: number; thread_id: string; attempts: number }>(
+      `SELECT id, campaign_id, lead_id, step, thread_id, attempts FROM scheduled_sends
+       WHERE tenant_id = ? AND status = 'sending' AND sending_since IS NOT NULL AND sending_since < ?`,
+      ctx.tenantId,
+      now - SEND_CLAIM_TTL_MS,
+    )
+    .toArray();
+  for (const orphan of orphaned) {
+    const nextAttempts = orphan.attempts + 1;
+    if (nextAttempts < MAX_SEND_ATTEMPTS) {
+      ctx.sql.exec(
+        `UPDATE scheduled_sends SET status = 'pending', sending_since = NULL, attempts = ? WHERE id = ?`,
+        nextAttempts,
+        orphan.id,
+      );
+      continue;
+    }
+    // At the cap — stop reclaiming and fail the row (ops-visible). message_id is
+    // NULL: we don't know whether the orphaned send actually went out.
+    ctx.sql.exec(
+      `UPDATE scheduled_sends SET status = 'failed', sending_since = NULL, attempts = ? WHERE id = ?`,
+      nextAttempts,
+      orphan.id,
+    );
+    ctx.sql.exec(
+      `INSERT OR IGNORE INTO events (id, tenant_id, campaign_id, lead_id, type, step, message_id, thread_id, ts, metadata_json)
+       VALUES (?, ?, ?, ?, 'failed', ?, NULL, ?, ?, ?)`,
+      newId("evt"),
+      ctx.tenantId,
+      orphan.campaign_id,
+      orphan.lead_id,
+      orphan.step,
+      orphan.thread_id,
+      now,
+      JSON.stringify({ stage: "reclaim", reason: "orphaned in 'sending' past the reclaim cap", attempts: nextAttempts }),
+    );
+  }
 
   const due = ctx.sql
     .exec<DueSend>(
@@ -171,23 +231,69 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
     // (rowsWritten === 0) and skip it, so the row is sent exactly once even
     // when the real EmailPort's fetch() opens the DO input gate.
     const claim = ctx.sql.exec(
-      `UPDATE scheduled_sends SET status = 'sending' WHERE id = ? AND status = 'pending'`,
+      `UPDATE scheduled_sends SET status = 'sending', sending_since = ? WHERE id = ? AND status = 'pending'`,
+      now,
       row.id,
     );
     if (claim.rowsWritten !== 1) continue; // another tick already owns this row
 
-    const result = await ctx.adapters.email.send(
-      {
-        fromEmail: picked.email,
-        toEmail: row.lead_email,
-        subject: renderedSubject,
-        body: renderedBody,
-        threadId: row.thread_id,
-        inReplyToMessageId: null,
-        listUnsubscribe: buildListUnsubscribe(picked.email, row.thread_id),
-      },
-      `send:${ctx.tenantId}:${row.id}`,
-    );
+    // The send() network call can THROW with the real EmailPort (the sandbox
+    // never does): a transient VendorError (SMTP 4xx, engine 5xx, unreachable)
+    // or a permanent one (unknown mailbox, engine 4xx). An unguarded throw
+    // propagates out of runTick and leaves this row stuck 'sending' forever
+    // (only the TTL reclaim above would eventually free it). Grade it in place,
+    // mirroring the billing-failure taxonomy below: transient (or unknown, if
+    // under the attempt cap) reverts to 'pending' for a later tick; permanent
+    // or at-cap marks the row 'failed' (ops-visible). Either way the batch never
+    // throws. No message went out, so no 'sent' side effects run.
+    let result: Awaited<ReturnType<typeof ctx.adapters.email.send>>;
+    try {
+      result = await ctx.adapters.email.send(
+        {
+          fromEmail: picked.email,
+          toEmail: row.lead_email,
+          subject: renderedSubject,
+          body: renderedBody,
+          threadId: row.thread_id,
+          inReplyToMessageId: null,
+          listUnsubscribe: buildListUnsubscribe(picked.email, row.thread_id),
+        },
+        `send:${ctx.tenantId}:${row.id}`,
+      );
+    } catch (err) {
+      const retryable = err instanceof VendorError ? err.retryable : true;
+      const nextAttempts = row.attempts + 1;
+      if (retryable && nextAttempts < MAX_SEND_ATTEMPTS) {
+        ctx.sql.exec(
+          `UPDATE scheduled_sends SET status = 'pending', sending_since = NULL, attempts = ? WHERE id = ?`,
+          nextAttempts,
+          row.id,
+        );
+        deferred++; // left pending — a later tick retries this row
+        continue;
+      }
+      // Permanent, or the retry cap is reached: the email never went out, so
+      // mark the row 'failed' with an ops-visible 'failed' event (message_id
+      // NULL — there is no send result to key it on).
+      ctx.sql.exec(
+        `UPDATE scheduled_sends SET status = 'failed', sending_since = NULL, attempts = ? WHERE id = ?`,
+        nextAttempts,
+        row.id,
+      );
+      ctx.sql.exec(
+        `INSERT OR IGNORE INTO events (id, tenant_id, campaign_id, lead_id, type, step, message_id, thread_id, ts, metadata_json)
+         VALUES (?, ?, ?, ?, 'failed', ?, NULL, ?, ?, ?)`,
+        newId("evt"),
+        ctx.tenantId,
+        row.campaign_id,
+        row.lead_id,
+        row.step,
+        row.thread_id,
+        now,
+        JSON.stringify({ stage: "send", reason: err instanceof Error ? err.message : String(err), retryable, attempts: nextAttempts }),
+      );
+      continue;
+    }
 
     // Record usage BEFORE committing 'sent' + cap consumption, so a row is
     // never left sent-but-unbilled. Wrapped per-row: a billing failure is
@@ -209,7 +315,7 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
       const retryable = err instanceof VendorError ? err.retryable : true;
       const nextAttempts = row.attempts + 1;
       if (retryable && nextAttempts < MAX_SEND_ATTEMPTS) {
-        ctx.sql.exec(`UPDATE scheduled_sends SET status = 'pending', attempts = ? WHERE id = ?`, nextAttempts, row.id);
+        ctx.sql.exec(`UPDATE scheduled_sends SET status = 'pending', sending_since = NULL, attempts = ? WHERE id = ?`, nextAttempts, row.id);
         deferred++; // left pending — a later tick retries this row
         continue;
       }
@@ -218,7 +324,7 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
       // recorded — fail the row so ops sees the unbilled send, rather than an
       // infinite retry. metrics()/campaign_results surface the 'failed' event;
       // ops-summary counts the failed row.
-      ctx.sql.exec(`UPDATE scheduled_sends SET status = 'failed', attempts = ? WHERE id = ?`, nextAttempts, row.id);
+      ctx.sql.exec(`UPDATE scheduled_sends SET status = 'failed', sending_since = NULL, attempts = ? WHERE id = ?`, nextAttempts, row.id);
       ctx.sql.exec(
         `INSERT OR IGNORE INTO events (id, tenant_id, campaign_id, lead_id, type, step, message_id, thread_id, ts, metadata_json)
          VALUES (?, ?, ?, ?, 'failed', ?, ?, ?, ?, ?)`,
@@ -240,7 +346,7 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
     // within the DO they land as one unit. The ledger insert is idempotent on
     // source_send_id, a second defense against a double-counted usage entry.
     ctx.sql.exec(
-      `UPDATE scheduled_sends SET status = 'sent', mailbox_id = ?, message_id = ?, sent_at = ? WHERE id = ?`,
+      `UPDATE scheduled_sends SET status = 'sent', sending_since = NULL, mailbox_id = ?, message_id = ?, sent_at = ? WHERE id = ?`,
       picked.id,
       result.messageId,
       result.sentAt,

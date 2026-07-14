@@ -221,7 +221,7 @@ export async function runPollInbox(
   ctx: TenantContext,
 ): Promise<{ replies: number; bounces: number; complaints: number }> {
   const mailboxes = ctx.sql
-    .exec<{ email: string }>(`SELECT email FROM mailboxes WHERE tenant_id = ?`, ctx.tenantId)
+    .exec<{ email: string; poll_cursor: number }>(`SELECT email, poll_cursor FROM mailboxes WHERE tenant_id = ?`, ctx.tenantId)
     .toArray();
 
   let replies = 0;
@@ -230,10 +230,11 @@ export async function runPollInbox(
   const now = ctx.clock.now();
 
   for (const mailbox of mailboxes) {
-    const events = await ctx.adapters.email.poll(mailbox.email);
-    // SPEC.md §19.2/§19.6 (M1) — every poll, including a zero-event one,
-    // stamps this mailbox's last-sync marker (Settings→Mailboxes UI claim).
-    ctx.sql.exec(`UPDATE mailboxes SET last_polled_at = ? WHERE email = ? AND tenant_id = ?`, now, mailbox.email, ctx.tenantId);
+    // CONSUMER-OWNED CURSOR (persist-after-confirm class fix): pass our stored
+    // high-water, process, then advance it. The engine holds no cursor, so a
+    // lost poll response leaves poll_cursor un-advanced and the next poll
+    // redelivers the same events (deduped below on message_id).
+    const { events, cursor } = await ctx.adapters.email.poll(mailbox.email, mailbox.poll_cursor);
     for (const ev of events) {
       const ref = lookupThreadRef(ctx, ev.threadId);
       if (!ref) continue; // defensive: unknown thread, nothing to attribute it to
@@ -248,6 +249,18 @@ export async function runPollInbox(
         if (processComplaint(ctx, ev, ref)) complaints++;
       }
     }
+    // Advance the cursor + stamp last-sync in the SAME synchronous stretch as
+    // the event processing above (no await between) — the DO commits the event
+    // side effects and the cursor advance as one unit at the next await/return.
+    // SPEC.md §19.2/§19.6 (M1): every poll, including a zero-event one, stamps
+    // last_polled_at (Settings→Mailboxes UI claim).
+    ctx.sql.exec(
+      `UPDATE mailboxes SET last_polled_at = ?, poll_cursor = ? WHERE email = ? AND tenant_id = ?`,
+      now,
+      cursor,
+      mailbox.email,
+      ctx.tenantId,
+    );
   }
 
   return { replies, bounces, complaints };
