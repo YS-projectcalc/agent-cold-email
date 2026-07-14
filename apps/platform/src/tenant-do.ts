@@ -32,6 +32,7 @@ import { runTick } from "./engine/tick.js";
 import { withRequestIdempotency } from "./engine/idempotency.js";
 import { runDeliverabilitySweep } from "./engine/deliverability-actions.js";
 import { runPollInbox } from "./engine/reply-processor.js";
+import { unsubscribeEmail, type UnsubscribeResult } from "./engine/suppression.js";
 import { getThread, markThread, replyToThread } from "./engine/threads.js";
 import { listInbox, type InboxPage } from "./engine/inbox.js";
 import { getActivityFeed, type ActivityPage } from "./engine/activity.js";
@@ -394,6 +395,17 @@ export class TenantDO extends DurableObject<Env> {
     const result = applyStripeWebhookEvent(this.requireContext(), event);
     if (result.plan) this.plan = result.plan;
     return result;
+  }
+
+  // --- B4 opt-out: the hosted RFC 8058 one-click unsubscribe endpoint
+  // (routes/unsubscribe.ts). PUBLIC, unauthenticated — like checkout()/
+  // completeCheckoutSimulated() above, the credential is a signed token the
+  // ROUTE already verified (unsubscribe-token.ts) before ever resolving this
+  // tenant's stub, not a bearer token. ---
+
+  unsubscribeByEmail(email: string): UnsubscribeResult {
+    const ctx = this.requireContext();
+    return unsubscribeEmail(ctx, email, ctx.clock.now());
   }
 
   // --- D5 lifecycle: voluntary cancel (tenant-authed, POST /cancel) + abuse

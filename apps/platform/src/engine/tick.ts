@@ -1,6 +1,7 @@
 import { VendorError, type SequenceStep } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
+import { buildUnsubscribeUrl, signUnsubscribeToken } from "../unsubscribe-token.js";
 import { reportUsageToStripeIfConfigured } from "./billing.js";
 import { isLifecycleFrozen } from "./billing-state.js";
 import { runDeliverabilitySweep } from "./deliverability-actions.js";
@@ -42,17 +43,68 @@ const MAX_SEND_ATTEMPTS = 5;
 // reclaim window, so a genuinely orphaned row unblocks promptly.
 const SEND_CLAIM_TTL_MS = 5 * 60 * 1000;
 
+// B4 — the deployed API's own https origin, embedded in the hosted one-click
+// unsubscribe URL below. `env.PUBLIC_BASE_URL` (wrangler.toml `[vars]`, not a
+// secret) overrides this; this exact string is that var's own default value
+// (see wrangler.toml/env.ts), so an unconfigured local/test run still builds
+// a well-formed (if inert) link instead of throwing.
+const DEFAULT_PUBLIC_BASE_URL = "https://agent-cold-email-api.yaakovscher.workers.dev";
+
+interface ListUnsubscribe {
+  /** `List-Unsubscribe` header value — BOTH forms, per RFC 8058: the
+   * existing mailto (a real, polled inbox) and the new hosted https
+   * one-click URL, comma-separated, each angle-bracket-wrapped. */
+  header: string;
+  /** `List-Unsubscribe-Post` — set ONLY alongside an https form (SendEmailInput's
+   * own doc comment), so it always accompanies `header` here. */
+  post: string;
+  /** The bare https URL, reused as the in-body opt-out link (CAN-SPAM
+   * requires an opt-out mechanism IN the message itself, not only in a
+   * header a recipient never sees). */
+  url: string;
+}
+
 /**
- * RFC 8058 List-Unsubscribe header value (SPEC.md §0.8 / ARCHITECTURE.md #8).
- * The `mailto:` opt-out is expressible today (the sending mailbox is a real,
- * polled inbox). TODO(B4): the https one-click form + the matching
- * `List-Unsubscribe-Post: List-Unsubscribe=One-Click` header need the
- * hosted unsubscribe endpoint + inbound opt-out parsing built in the
- * "Sequencing + reply engine — full CAN-SPAM opt-out flow" lane (ROADMAP B4);
- * until then only the mailto form is populated (never a silent gap).
+ * RFC 8058 List-Unsubscribe (SPEC.md §0.8 / ARCHITECTURE.md #8; backend gaps
+ * brief item 3 / B4 TODO — this used to emit ONLY the mailto form). The https
+ * one-click URL is a STATELESS signed token (unsubscribe-token.ts) scoped to
+ * this exact (tenantId, leadEmail) pair — no per-send row to create, since an
+ * opt-out never expires and the same link is safe to reuse for every future
+ * step to this lead.
  */
-function buildListUnsubscribe(mailboxEmail: string, threadId: string): string {
-  return `<mailto:${mailboxEmail}?subject=${encodeURIComponent(`unsubscribe ${threadId}`)}>`;
+async function buildListUnsubscribe(
+  ctx: TenantContext,
+  mailboxEmail: string,
+  threadId: string,
+  leadEmail: string,
+): Promise<ListUnsubscribe> {
+  const sig = await signUnsubscribeToken(ctx.env.TOKEN_HASH_PEPPER, ctx.tenantId, leadEmail);
+  const baseUrl = ctx.env.PUBLIC_BASE_URL ?? DEFAULT_PUBLIC_BASE_URL;
+  const url = buildUnsubscribeUrl(baseUrl, ctx.tenantId, leadEmail, sig);
+  const mailto = `<mailto:${mailboxEmail}?subject=${encodeURIComponent(`unsubscribe ${threadId}`)}>`;
+  return { header: `${mailto}, <${url}>`, post: "List-Unsubscribe=One-Click", url };
+}
+
+/**
+ * CAN-SPAM footer (15 U.S.C. §7704(a)(5)): a required valid physical postal
+ * address, the sender identity captured at setup, and the opt-out mechanism
+ * — appended after template rendering so `{{firstName}}`/`{{company}}`
+ * substitution (above) never touches any of it. B4 fix-round: this used to
+ * append ONLY the unsubscribe link (the physical-address/sender-identity
+ * clause was a documented, deliberately-deferred gap — adversarial gate
+ * finding #1, 2026-07-14, blocked on the site copy asserting it was already
+ * done); both values now ride the same single per-tick `profile` read above.
+ * This remains the one per-send composition point in the send path (no
+ * separate footer-builder module exists to fold into — see runTick's
+ * caller-side comment for the empty-field fail-safe this pairs with).
+ */
+function appendComplianceFooter(
+  body: string,
+  senderIdentity: string,
+  physicalAddress: string,
+  unsubscribeUrl: string,
+): string {
+  return `${body}\n\n${senderIdentity}\n${physicalAddress}\n\nTo stop receiving these emails, click here: ${unsubscribeUrl}`;
 }
 
 const DEFAULT_SEND_WINDOW: SendWindow = { startHour: 0, endHour: 23 };
@@ -88,13 +140,18 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
   // deliverability sweep + the setup/launch guards (engine/billing-state.ts).
   // Reads state cheaply, no await added before it — the forced sync shape of
   // the send loop below is preserved.
-  const lifecycle = ctx.sql
-    .exec<{ status: string; billing_state: string }>(
-      `SELECT status, billing_state FROM tenant_profile WHERE id = ?`,
+  //
+  // B4 fix-round — physical_address/sender_identity ride along on this SAME
+  // single-row read (one query, not one per send): tenant_profile has
+  // exactly one row per tenant, and both columns are static for the whole
+  // tick, so there is nothing to gain from re-reading them per due row.
+  const profile = ctx.sql
+    .exec<{ status: string; billing_state: string; physical_address: string; sender_identity: string }>(
+      `SELECT status, billing_state, physical_address, sender_identity FROM tenant_profile WHERE id = ?`,
       ctx.tenantId,
     )
     .one();
-  if (isLifecycleFrozen(lifecycle.status, lifecycle.billing_state)) {
+  if (isLifecycleFrozen(profile.status, profile.billing_state)) {
     return { sent: 0, skipped: 0, deferred: 0 };
   }
 
@@ -229,13 +286,61 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
     // Atomic claim BEFORE the network await: another concurrent/retried tick
     // that reads this row as still 'pending' will fail this conditional UPDATE
     // (rowsWritten === 0) and skip it, so the row is sent exactly once even
-    // when the real EmailPort's fetch() opens the DO input gate.
+    // when the real EmailPort's fetch() opens the DO input gate. MUST stay
+    // the first `await`-free step after the SELECT above — B4's token signing
+    // below is itself async (crypto.subtle), so it runs AFTER this claim, not
+    // before, or a concurrent/retried tick could interleave between the
+    // SELECT and the claim and double-process the row.
     const claim = ctx.sql.exec(
       `UPDATE scheduled_sends SET status = 'sending', sending_since = ? WHERE id = ? AND status = 'pending'`,
       now,
       row.id,
     );
     if (claim.rowsWritten !== 1) continue; // another tick already owns this row
+
+    // B4 fix-round — CAN-SPAM fail-safe. physical_address/sender_identity are
+    // NOT NULL DEFAULT '' and only ever populated by setup_infrastructure,
+    // which validates both min(1) BEFORE any mailbox this tick could pick
+    // exists (schema.ts, packages/shared/src/intents.ts's
+    // SetupInfrastructureInput) — so this branch is not reachable through any
+    // real API path today. It exists anyway as a hard belt-and-suspenders
+    // gate: SEND TIME is the wrong moment to first discover a legally-
+    // mandatory field is blank, and refusing to send (failed + ops-visible,
+    // the SAME taxonomy as a permanent vendor-send failure below) is strictly
+    // safer than mailing a non-CAN-SPAM-compliant message. Checked AFTER the
+    // atomic claim (not hoisted above the loop) so a race between two
+    // concurrent ticks reaching the same un-claimed row can't double-insert
+    // this 'failed' event (message_id is NULL here, and the events dedupe
+    // index treats every NULL message_id as distinct — see tenant-do.ts's
+    // ensureDedupeIndex comment — so only the claim, not this check, is a
+    // safe race boundary).
+    if (!profile.physical_address || !profile.sender_identity) {
+      ctx.sql.exec(`UPDATE scheduled_sends SET status = 'failed', sending_since = NULL WHERE id = ?`, row.id);
+      ctx.sql.exec(
+        `INSERT OR IGNORE INTO events (id, tenant_id, campaign_id, lead_id, type, step, message_id, thread_id, ts, metadata_json)
+         VALUES (?, ?, ?, ?, 'failed', ?, NULL, ?, ?, ?)`,
+        newId("evt"),
+        ctx.tenantId,
+        row.campaign_id,
+        row.lead_id,
+        row.step,
+        row.thread_id,
+        now,
+        JSON.stringify({
+          stage: "compliance",
+          reason: "tenant_profile missing physical_address/sender_identity — refused to send a non-CAN-SPAM-compliant email",
+        }),
+      );
+      continue;
+    }
+
+    // B4 — the in-body footer becomes part of what's actually sent, so it
+    // must exist before the send() call below; the SAME rendered body (with
+    // footer) is what the 'sent' event records further down — matching the
+    // [NEW-3] rule that the send and its recorded metadata never diverge (see
+    // the renderTemplate comment above).
+    const listUnsub = await buildListUnsubscribe(ctx, picked.email, row.thread_id, row.lead_email);
+    const sentBody = appendComplianceFooter(renderedBody, profile.sender_identity, profile.physical_address, listUnsub.url);
 
     // The send() network call can THROW with the real EmailPort (the sandbox
     // never does): a transient VendorError (SMTP 4xx, engine 5xx, unreachable)
@@ -253,10 +358,11 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
           fromEmail: picked.email,
           toEmail: row.lead_email,
           subject: renderedSubject,
-          body: renderedBody,
+          body: sentBody,
           threadId: row.thread_id,
           inReplyToMessageId: null,
-          listUnsubscribe: buildListUnsubscribe(picked.email, row.thread_id),
+          listUnsubscribe: listUnsub.header,
+          listUnsubscribePost: listUnsub.post,
         },
         `send:${ctx.tenantId}:${row.id}`,
       );
@@ -373,7 +479,7 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
       result.messageId,
       row.thread_id,
       result.sentAt,
-      JSON.stringify({ fromEmail: picked.email, toEmail: row.lead_email, subject: renderedSubject, body: renderedBody }),
+      JSON.stringify({ fromEmail: picked.email, toEmail: row.lead_email, subject: renderedSubject, body: sentBody }),
     );
     ctx.sql.exec(
       `INSERT OR IGNORE INTO ledger_entries (id, tenant_id, kind, amount_cents, description, ts, source_send_id)

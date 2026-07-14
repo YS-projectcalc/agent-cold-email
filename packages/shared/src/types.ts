@@ -114,7 +114,15 @@ export interface PlatformEvent {
   metadata: Record<string, unknown>;
 }
 
-export type SuppressionReason = "bounce" | "complaint" | "unsubscribe" | "manual";
+// B4 opt-out: widened to add "soft_bounce" — reply-processor.ts's
+// SOFT_BOUNCE_SUPPRESS_THRESHOLD escalation already persisted this exact
+// string (engine/reply-processor.ts's processBounce), a real, already-stored
+// value this type had never declared. Surfaced now because engine/
+// suppression.ts's extracted `suppress()` (CLAUDE.md rule c — one shared
+// implementation, replacing reply-processor.ts's former private copy) takes
+// a typed `SuppressionReason` instead of a loose `string`, which would
+// otherwise reject that pre-existing call site.
+export type SuppressionReason = "bounce" | "soft_bounce" | "complaint" | "unsubscribe" | "manual";
 
 export interface Suppression {
   tenantId: string;

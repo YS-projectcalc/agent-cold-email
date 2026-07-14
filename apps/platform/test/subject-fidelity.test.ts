@@ -63,7 +63,11 @@ describe("template variable rendering at send time (SPEC.md §19.4 [NEW-3] root 
     const thread = await api<ThreadDetail>(`/threads/${threadId}`, { token });
     const sentMsg = thread.body.messages.find((m) => m.type === "sent")!;
     expect(sentMsg.metadata.subject).toBe("Quick question about Analytical Engines Inc");
-    expect(sentMsg.metadata.body).toBe("Hi Ada, quick question.");
+    // B4: the sent body now carries an appended compliance footer (sender identity, postal address, unsubscribe link)
+    // (engine/tick.ts's appendUnsubscribeFooter) — the rendered greeting
+    // itself is still the exact substitution this test is about.
+    expect(sentMsg.metadata.body).toContain("Hi Ada, quick question.");
+    expect(sentMsg.metadata.body).toContain("unsubscribe");
     expect(sentMsg.metadata.subject).not.toContain("{{");
   });
 

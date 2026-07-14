@@ -10,6 +10,13 @@ import type { Clock, EmailPort, PollResult, PolledEvent, SendEmailInput, SendEma
  *   - local-part contains "softbounce" -> a SOFT (transient, RFC 3464 4.x.x)
  *     bounce is queued — tallied but not permanently suppressed (A5 CLASS A)
  *   - local-part contains "bounce"     -> a HARD (permanent, 5.x.x) bounce
+ *   - local-part contains "unsubexact"  -> a reply is queued whose body is
+ *     exactly "unsubscribe" (B4 backend gaps brief item 3 test fixture — the
+ *     inbound typed-unsubscribe matcher, engine/reply-processor.ts's
+ *     isUnsubscribeIntentReply, should suppress on this)
+ *   - local-part contains "unsubmention" -> a reply is queued whose body
+ *     merely MENTIONS "unsubscribe" mid-sentence (the matcher's negative
+ *     case — must NOT suppress, must behave like an ordinary reply)
  *   - local-part contains "reply"      -> a reply is queued for that mailbox
  *   - anything else                    -> silence (the common real-world case)
  * This is a first-class, documented simulator contract, not a happy-path
@@ -72,6 +79,26 @@ export class SandboxEmailPort implements EmailPort {
         severity: "hard",
         receivedAt: result.sentAt,
       });
+    } else if (behavior === "unsub-exact") {
+      this.enqueue(input.fromEmail, {
+        kind: "reply",
+        mailboxEmail: input.fromEmail,
+        threadId: input.threadId,
+        messageId: sandboxMessageId(),
+        fromEmail: input.toEmail,
+        body: "unsubscribe",
+        receivedAt: result.sentAt,
+      });
+    } else if (behavior === "unsub-mention") {
+      this.enqueue(input.fromEmail, {
+        kind: "reply",
+        mailboxEmail: input.fromEmail,
+        threadId: input.threadId,
+        messageId: sandboxMessageId(),
+        fromEmail: input.toEmail,
+        body: "I tried to unsubscribe from a different list last month and nobody responded — can you help with that one too?",
+        receivedAt: result.sentAt,
+      });
     } else if (behavior === "reply") {
       this.enqueue(input.fromEmail, {
         kind: "reply",
@@ -108,7 +135,9 @@ function sandboxMessageId(): string {
   return `<${crypto.randomUUID()}@sandbox.local>`;
 }
 
-function classifyRecipient(toEmail: string): "complaint" | "softbounce" | "bounce" | "reply" | "none" {
+function classifyRecipient(
+  toEmail: string,
+): "complaint" | "softbounce" | "bounce" | "unsub-exact" | "unsub-mention" | "reply" | "none" {
   const local = (toEmail.split("@")[0] ?? "").toLowerCase();
   // "complaint" first: a complaint is the most severe signal and must not be
   // masked by an incidental "reply"/"bounce" substring in the same local-part.
@@ -117,6 +146,10 @@ function classifyRecipient(toEmail: string): "complaint" | "softbounce" | "bounc
   // specific soft variant must be matched first or every soft would read hard.
   if (local.includes("softbounce")) return "softbounce";
   if (local.includes("bounce")) return "bounce";
+  // "unsubexact"/"unsubmention" BEFORE the generic "reply" check below — B4
+  // backend gaps brief item 3 test fixtures (see the class doc comment above).
+  if (local.includes("unsubexact")) return "unsub-exact";
+  if (local.includes("unsubmention")) return "unsub-mention";
   if (local.includes("reply")) return "reply";
   return "none";
 }

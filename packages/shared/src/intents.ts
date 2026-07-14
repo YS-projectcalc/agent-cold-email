@@ -76,6 +76,20 @@ export const CheckoutSimulateQuery = z.object({
 });
 export type CheckoutSimulateQuery = z.infer<typeof CheckoutSimulateQuery>;
 
+// B4 opt-out — query params for the UNAUTHENTICATED GET/POST /unsubscribe
+// hosted RFC 8058 one-click endpoint. `sig` is a stateless HMAC over
+// `tenant:email` (apps/platform/src/unsubscribe-token.ts) — there is no
+// server-side row to look up (opt-outs never expire), so the three params
+// together ARE the credential, exactly like CheckoutSimulateQuery's session
+// id above. `email` is capped at 320 (RFC 5321 max mailbox length); `sig` at
+// 128 covers a hex-encoded SHA-256 HMAC (64 chars) with headroom.
+export const UnsubscribeQuery = z.object({
+  tenant: z.string().min(1).max(200),
+  email: z.string().min(1).max(320),
+  sig: z.string().min(1).max(128),
+});
+export type UnsubscribeQuery = z.infer<typeof UnsubscribeQuery>;
+
 // D5 lifecycle — voluntary cancellation (POST /cancel, tenant-authed).
 // `immediate` (default false) cancels the subscription now (billing_state ->
 // 'canceled'); the default schedules it for end-of-billing-period

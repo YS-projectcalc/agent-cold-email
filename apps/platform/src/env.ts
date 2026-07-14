@@ -54,6 +54,15 @@ declare global {
       // Worker-side ASSETS.fetch shim (the spec's documented fallback if the
       // declarative [assets] config can't scope cleanly) has a binding ready.
       ASSETS: Fetcher;
+      // B4 opt-out — the public https origin this Worker is reachable at,
+      // embedded in the RFC 8058 hosted one-click unsubscribe URL a tick
+      // builds (engine/tick.ts's buildListUnsubscribe). NOT a secret (this
+      // exact URL is already published in README.md/HANDOFF.md) — a plain
+      // `[vars]` entry in wrangler.toml, not a wrangler secret. Optional:
+      // engine/tick.ts falls back to the same real deployed URL as a
+      // code-literal default, so local dev/test needs no configuration and a
+      // missing binding never breaks the hosted link.
+      PUBLIC_BASE_URL?: string;
     }
   }
 }

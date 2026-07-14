@@ -1,6 +1,7 @@
 import type { PolledEvent } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
+import { cancelPendingSteps, suppress, unsubscribeEmail } from "./suppression.js";
 import { lookupThreadRef, type ThreadRef } from "./threads.js";
 
 // A2 (CLASS A) — a soft (transient 4.x.x) bounce is tallied, not permanently
@@ -14,13 +15,59 @@ import { lookupThreadRef, type ThreadRef } from "./threads.js";
 // as an effectively-dead mailbox.
 export const SOFT_BOUNCE_SUPPRESS_THRESHOLD = 3;
 
-/** Cancel every still-pending future step for a lead — the stop-on-reply / bounce-suppression guard. */
-function cancelPendingSteps(ctx: TenantContext, leadId: string): void {
-  ctx.sql.exec(
-    `UPDATE scheduled_sends SET status = 'skipped' WHERE lead_id = ? AND tenant_id = ? AND status = 'pending'`,
-    leadId,
-    ctx.tenantId,
-  );
+// backend gaps brief item 3 / B4 TODO (tick.ts:46-56) — this engine had ZERO
+// inbound opt-out parsing: a prospect typing "unsubscribe" landed as an
+// ordinary reply. Deliberately CONSERVATIVE (a false positive silently drops
+// a real, engaged lead — worse than missing an oddly-worded genuine opt-out,
+// which can always be retried via the hosted one-click link or a plainer
+// reply): matches ONLY when, after stripping quoted-reply noise and a
+// leading/trailing "please", the ENTIRE remaining reply body is exactly one
+// of these phrases — not merely a body that MENTIONS one of them.
+const UNSUBSCRIBE_INTENT_PHRASES = new Set([
+  "unsubscribe",
+  "unsubscribe me",
+  "remove me",
+  "remove me from this list",
+  "remove me from your list",
+  "remove me from this mailing list",
+  "remove me from your mailing list",
+  "opt out",
+  "opt-out",
+  "stop emailing me",
+  "take me off this list",
+  "take me off your list",
+  "take me off this mailing list",
+]);
+
+// Matches a standard top-posting quote header ("On <date>, <name> wrote:")
+// or a plain-text client's "-----Original Message-----" separator — either
+// marks the start of quoted history below the human's own typed reply.
+const QUOTE_HEADER_PATTERN = /^\s*on .+ wrote:\s*$/im;
+const ORIGINAL_MESSAGE_PATTERN = /^-{2,}\s*original message\s*-{2,}$/im;
+
+/**
+ * Conservative unsubscribe-INTENT matcher (see the phrase-set comment
+ * above). Exported for direct unit testing (test/unsubscribe-intent-
+ * matcher.test.ts) in addition to the end-to-end coverage through
+ * runPollInbox — the string-cleanup edge cases (quoting, punctuation,
+ * "please") are cheaper to prove exhaustively as a pure function.
+ */
+export function isUnsubscribeIntentReply(body: string): boolean {
+  let primary = body
+    .split(/\r?\n/)
+    // Drop quoted-reply lines (top-posting clients prefix quoted history
+    // with '>') before looking for a quote-header/separator line.
+    .filter((line) => !line.trim().startsWith(">"))
+    .join("\n")
+    .split(QUOTE_HEADER_PATTERN)[0]!
+    .split(ORIGINAL_MESSAGE_PATTERN)[0]!
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?,\s]+$/g, ""); // trailing punctuation/whitespace only
+
+  primary = primary.replace(/^please\s+/, "").replace(/\s+please$/, "");
+
+  return UNSUBSCRIBE_INTENT_PHRASES.has(primary);
 }
 
 /**
@@ -50,17 +97,6 @@ function recordEventIfNew(
   return res.rowsWritten > 0;
 }
 
-function suppress(ctx: TenantContext, email: string, reason: string, ts: number): void {
-  ctx.sql.exec(
-    `INSERT INTO suppressions (tenant_id, email, reason, ts) VALUES (?, ?, ?, ?)
-     ON CONFLICT (tenant_id, email) DO UPDATE SET reason = excluded.reason, ts = excluded.ts`,
-    ctx.tenantId,
-    email,
-    reason,
-    ts,
-  );
-}
-
 function processReply(ctx: TenantContext, ev: Extract<PolledEvent, { kind: "reply" }>, ref: ThreadRef): boolean {
   // Idempotency-first: a re-polled reply (same messageId) writes no second
   // event row and applies none of the side effects below a second time.
@@ -85,6 +121,19 @@ function processReply(ctx: TenantContext, ev: Extract<PolledEvent, { kind: "repl
     .toArray()[0]?.email;
   if (leadEmail) {
     ctx.sql.exec(`DELETE FROM soft_bounces WHERE tenant_id = ? AND email = ?`, ctx.tenantId, leadEmail);
+  }
+
+  // backend gaps brief item 3 / B4 TODO — a typed opt-out ALWAYS wins over
+  // stopOnReply (an explicit "unsubscribe" must stop future sends even on a
+  // campaign configured to keep sending through an OOO-style reply, unlike a
+  // generic reply where continuing is the customer's deliberate choice) and
+  // supersedes the unconditional 'replied' status below with the correct
+  // terminal 'suppressed' state (unsubscribeEmail sets it) — the same way a
+  // complaint/hard-bounce below never visit 'replied' either. The reply event
+  // itself is already durably recorded above regardless of this branch.
+  if (leadEmail && isUnsubscribeIntentReply(ev.body)) {
+    unsubscribeEmail(ctx, leadEmail, ev.receivedAt);
+    return true;
   }
 
   // Reply status is recorded unconditionally. Cancelling the remaining sequence

@@ -21,6 +21,15 @@ class_name = "RateLimiterDO"
 binding = "WAITLIST"
 id = "e2d5939d1fdc498d85b59cfc6a3e0187"
 
+# B4 opt-out — NOT a secret (already published in README.md/HANDOFF.md): the
+# public https origin embedded in the RFC 8058 hosted one-click unsubscribe
+# link (engine/tick.ts's buildListUnsubscribe). env.ts's PUBLIC_BASE_URL is
+# optional with this exact same value as its code-literal fallback, so this
+# entry is documentation/explicitness, not a hard requirement — update
+# alongside a custom-domain cutover at activation (ACTIVATION.md).
+[vars]
+PUBLIC_BASE_URL = "https://agent-cold-email-api.yaakovscher.workers.dev"
+
 # SPEC.md §19.1 (M1 serving spike, dashboard+inbox brief) — `/app/*` serves the
 # apps/dashboard SPA build (Vite `base: '/app/'` -> public/app/), everything
 # else still hits the Worker exactly as before (same origin, no CORS change).

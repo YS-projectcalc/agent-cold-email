@@ -31,6 +31,7 @@ tags:
   - name: inbox
   - name: account
   - name: dashboard
+  - name: compliance
 
 paths:
   /signup:
@@ -644,6 +645,70 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /unsubscribe:
+    get:
+      operationId: unsubscribe_confirm_page
+      tags: [compliance]
+      summary: Render a human confirm page for the in-body one-click unsubscribe link.
+      description: >
+        UNAUTHENTICATED — the signed `tenant`/`email`/`sig` triplet in the
+        query string (minted server-side into every sequence email's
+        List-Unsubscribe header and in-body opt-out link) is the credential;
+        there is no bearer token on this route. GET alone never suppresses
+        anything — it renders an HTML confirm page whose own form POSTs back
+        to this same URL. Intended for a human clicking the link inside the
+        email body, in a browser; a mail client's own automatic RFC 8058
+        one-click action POSTs directly (see below) and never hits this GET.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/UnsubscribeTenant'
+        - $ref: '#/components/parameters/UnsubscribeEmail'
+        - $ref: '#/components/parameters/UnsubscribeSig'
+      responses:
+        '200':
+          description: Confirm page (not yet unsubscribed).
+          content:
+            text/html:
+              schema: { type: string }
+        '400':
+          description: Missing/invalid query params or an invalid/tampered signature.
+          content:
+            text/html:
+              schema: { type: string }
+    post:
+      operationId: unsubscribe_confirm
+      tags: [compliance]
+      summary: Perform the RFC 8058 one-click unsubscribe (or confirm from the GET page).
+      description: >
+        UNAUTHENTICATED, same credential as the GET above. This is the exact
+        URL a compliant mail client POSTs to automatically for its own native
+        "Unsubscribe" action (`List-Unsubscribe-Post: List-Unsubscribe=One-Click`)
+        — no human interaction on this page in that flow — and is also what
+        the GET confirm page's own form submits to when a human clicks
+        through the in-body link instead. Suppresses the address tenant-wide
+        immediately (visible to the very next scheduling tick, not a CAN-SPAM-
+        style grace window) and cancels every pending scheduled send for every
+        lead sharing that email across every campaign. Idempotent: a repeat
+        call with the same valid token always 200s.
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/UnsubscribeTenant'
+        - $ref: '#/components/parameters/UnsubscribeEmail'
+        - $ref: '#/components/parameters/UnsubscribeSig'
+      responses:
+        '200':
+          description: Unsubscribed (or already was — idempotent).
+          content:
+            text/html:
+              schema: { type: string }
+        '400':
+          description: Missing/invalid query params or an invalid/tampered signature — no suppression applied.
+          content:
+            text/html:
+              schema: { type: string }
+        '413':
+          description: Request body too large.
+
 components:
   securitySchemes:
     bearerAuth:
@@ -676,6 +741,27 @@ components:
       in: path
       required: true
       schema: { type: string }
+    UnsubscribeTenant:
+      name: tenant
+      in: query
+      required: true
+      description: The tenant id this signed opt-out link belongs to.
+      schema: { type: string, minLength: 1, maxLength: 200 }
+    UnsubscribeEmail:
+      name: email
+      in: query
+      required: true
+      description: The recipient address this signed opt-out link covers.
+      schema: { type: string, minLength: 1, maxLength: 320, format: email }
+    UnsubscribeSig:
+      name: sig
+      in: query
+      required: true
+      description: >
+        HMAC-SHA256 over `tenant:email`, keyed off a server secret. There is
+        no per-send row backing this — the signature itself is the entire
+        credential, and it never expires (an opt-out doesn't need to).
+      schema: { type: string, minLength: 1, maxLength: 128 }
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -739,7 +825,7 @@ components:
           type: string
           minLength: 1
           maxLength: 200
-          description: Verified legal sender identity, injected into every message footer.
+          description: Legal sender identity captured at setup, injected into every message footer.
 
     SequenceStepInput:
       type: object

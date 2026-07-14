@@ -11,6 +11,7 @@ import { accountRoute } from "./routes/account.js";
 import { checkoutRoute, checkoutSimulateRoute } from "./routes/checkout.js";
 import { lifecycleRoute } from "./routes/lifecycle.js";
 import { webhooksRoute } from "./routes/webhooks.js";
+import { unsubscribeRoute } from "./routes/unsubscribe.js";
 import { demoRoute } from "./routes/demo.js";
 import { mcpRoute } from "./routes/mcp.js";
 import { waitlistRoute } from "./routes/waitlist.js";
@@ -30,14 +31,16 @@ const app = new Hono<{ Bindings: Env; Variables: AuthedVariables }>();
 app.route("/", signupRoute);
 // /mcp does its own per-JSON-RPC-method auth (see src/mcp/handler.ts) — not
 // mounted behind requireAuth. /api/waitlist is unauthenticated (public
-// form). /checkout/simulate and /webhooks/stripe are unauthenticated for the
-// same reason a real Stripe hosted checkout page / webhook caller can't
-// present our bearer token — see routes/checkout.ts and routes/webhooks.ts
-// for their own credential (session id / signature).
+// form). /checkout/simulate, /webhooks/stripe, and /unsubscribe are
+// unauthenticated for the same reason a real Stripe hosted checkout page /
+// webhook caller / mail client can't present our bearer token — see
+// routes/checkout.ts, routes/webhooks.ts, and routes/unsubscribe.ts for
+// their own credential (session id / signature / signed token).
 app.route("/", mcpRoute);
 app.route("/", waitlistRoute);
 app.route("/", checkoutSimulateRoute);
 app.route("/", webhooksRoute);
+app.route("/", unsubscribeRoute);
 // GET /status — public, no tenant/admin data (see routes/status.ts).
 app.route("/", statusRoute);
 // POST /dashboard/session — UNAUTHENTICATED (SPEC.md §19.1): the token-gate

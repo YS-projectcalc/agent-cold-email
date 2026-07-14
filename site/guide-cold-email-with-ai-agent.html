@@ -86,7 +86,7 @@
       <p>Streamable-HTTP, per-token scoped, one config line — no OAuth dance. Full MCP details: <a href="/guide-mcp-cold-email">the MCP guide</a>.</p>
     </li>
     <li>
-      <strong>Provision infrastructure.</strong> Have your agent call <code>setup_infrastructure</code> with your brand, primary domain, how many lookalike domains and mailboxes-per-domain you want, your sender persona, your physical postal address (CAN-SPAM requires it in every footer), and your verified sender identity. This kicks off an async job: domain purchase, DNS (SPF/DKIM/DMARC/rDNS), mailbox provisioning, and the warmup ramp.
+      <strong>Provision infrastructure.</strong> Have your agent call <code>setup_infrastructure</code> with your brand, primary domain, how many lookalike domains and mailboxes-per-domain you want, your sender persona, your physical postal address (CAN-SPAM requires it in every footer), and your sender identity. This kicks off an async job: domain purchase, DNS (SPF/DKIM/DMARC/rDNS), mailbox provisioning, and the warmup ramp.
     </li>
     <li>
       <strong>Poll for readiness.</strong> Call <code>infrastructure_status</code> to track provisioning and warmup progress per mailbox until the platform reports send-ready. Real warmup takes weeks — see <a href="/guide-cold-email-deliverability#warmup">the deliverability guide</a> for the honest timeline; the sandbox compresses this onto a virtual clock so you can see the whole shape of the process without waiting.
@@ -95,7 +95,7 @@
       <strong>Launch a campaign.</strong> Your agent writes the offer and sequence content — this platform does not generate outreach copy — and calls <code>launch_campaign</code> with that content plus a lead list.
     </li>
     <li>
-      <strong>Monitor and manage replies.</strong> <code>inbox</code> and <code>thread</code> surface a unified reply view across every mailbox; <code>reply</code> and <code>mark</code> manage individual threads; <code>campaign_results</code> and <code>metrics</code> report sends, replies, bounces, complaints, and warmup health. Suppression, a List-Unsubscribe header on every applicable message, and per-mailbox daily send caps are enforced server-side — your agent doesn't have to remember to implement them correctly (full RFC 8058 one-click unsubscribe is on the roadmap).
+      <strong>Monitor and manage replies.</strong> <code>inbox</code> and <code>thread</code> surface a unified reply view across every mailbox; <code>reply</code> and <code>mark</code> manage individual threads; <code>campaign_results</code> and <code>metrics</code> report sends, replies, bounces, complaints, and warmup health. Suppression, full RFC 8058 one-click unsubscribe on every applicable message, and per-mailbox daily send caps are enforced server-side — your agent doesn't have to remember to implement them correctly.
     </li>
   </ol>
 
@@ -123,7 +123,7 @@
   <h2 id="guardrails">Guardrails your agent doesn't have to build</h2>
   <ul>
     <li><strong>Isolation.</strong> Every customer gets dedicated domains and mailboxes — never shared with other tenants.</li>
-    <li><strong>Suppression and unsubscribe.</strong> A suppression list and a List-Unsubscribe header are enforced automatically on every applicable message; full RFC 8058 one-click unsubscribe is on the roadmap.</li>
+    <li><strong>Suppression and unsubscribe.</strong> A suppression list and full RFC 8058 one-click unsubscribe are enforced automatically on every applicable message, honored immediately.</li>
     <li><strong>Send caps and complaint response.</strong> Per-mailbox daily caps and automatic throttle/pause on rising complaint rates happen server-side.</li>
     <li><strong>Brand-only lookalikes.</strong> The domain generator hard-rejects a well-known-brand denylist and requires the asserted brand to correspond to your own primary domain — it cannot be used to impersonate a third party.</li>
   </ul>
