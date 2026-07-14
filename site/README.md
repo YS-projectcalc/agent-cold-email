@@ -24,14 +24,14 @@ The public marketing + docs site for `agent-cold-email`: static HTML/CSS/JS, no 
 - `assets/waitlist.js` — waitlist form submission logic; posts to `https://agent-cold-email-api.yaakovscher.workers.dev/api/waitlist`.
 - `assets/domain-calculator.js` — pure client-side domains/inboxes-per-volume calculator used by `guide-domains-inboxes-warmup-compliance.html`; no network call, assumptions stated in the file's header comment.
 
-## The `https://agent-cold-email.pages.dev` placeholder
+## The site host
 
-Every reference to the deployed API host — the waitlist POST target, MCP config URLs, OpenAPI `servers:`, the sitemap/robots/CSP entries, the JSON-LD `url` fields — uses the literal token `https://agent-cold-email.pages.dev`. Substitute it repo-wide (a single find-and-replace across `site/` and the repo root `README.md`/`AGENTS.md`) once the platform has a real deployed URL. There is intentionally only this one placeholder token; do not introduce a second one for the site's own origin.
+Every self-reference to this site — canonical links, `og:url`/`og:image`, the sitemap/robots entries, the JSON-LD `url` fields, and the MCP server card's `homepage`/`documentation`/`openapi` fields — points at `https://coldrig.dev` (host-swapped from the `agent-cold-email.pages.dev` placeholder once the Pages project got the custom domain attached). The API is a separate host, `https://agent-cold-email-api.yaakovscher.workers.dev` (see `assets/waitlist.js`, `openapi.yaml` `servers:`, and the server card's `transport.url`) — do not conflate the two when editing either.
 
 ## How to deploy
 
 ```bash
-# from the repo root, after substituting https://agent-cold-email.pages.dev:
+# from the repo root:
 npx wrangler pages deploy site --project-name=agent-cold-email
 ```
 
@@ -47,4 +47,4 @@ npx serve site
 
 ## Depends on
 
-Nothing outside this directory at runtime (self-contained CSS/JS, no external requests except the eventual `https://agent-cold-email.pages.dev` waitlist POST). Content here should stay in sync with `packages/shared/src/intents.ts` and `apps/platform/src/routes/*` (the tool reference and OpenAPI spec) and with `SPEC.md` §18 (pricing) — if either changes, update this directory in the same change.
+Nothing outside this directory at runtime (self-contained CSS/JS, no external requests except the `https://agent-cold-email-api.yaakovscher.workers.dev` waitlist POST). Content here should stay in sync with `packages/shared/src/intents.ts` and `apps/platform/src/routes/*` (the tool reference and OpenAPI spec) and with `SPEC.md` §18 (pricing) — if either changes, update this directory in the same change.

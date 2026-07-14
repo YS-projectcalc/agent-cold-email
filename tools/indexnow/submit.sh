@@ -4,12 +4,12 @@
 #   https://$HOST/$KEY.txt or engines reject the submission when they crawl it.
 # No account/auth involved; see docs/research/traffic-channels-selfserve-2026-07-13.md #1.
 #
-# Usage: ./submit.sh [host]   (default: agent-cold-email.pages.dev; pass the
-#        custom domain after activation's find-replace swaps the placeholder)
+# Usage: ./submit.sh [host]   (default: coldrig.dev; the key file serves
+#        from both the new host and the old pages.dev alias)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-HOST="${1:-agent-cold-email.pages.dev}"
+HOST="${1:-coldrig.dev}"
 KEY="a23dd986c5474f292aeddebefead63ee"
 
 if ! curl -sf "https://${HOST}/${KEY}.txt" | grep -q "^${KEY}$"; then
