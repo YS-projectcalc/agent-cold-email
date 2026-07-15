@@ -35,7 +35,7 @@ PUBLIC_BASE_URL = "https://agent-cold-email-api.yaakovscher.workers.dev"
 # watchtower/dunning/support code has a fixed recipient; the forward target
 # must also be VERIFIED in Email Routing before `message.forward` works
 # (ACTIVATION.md).
-OPS_ALERT_EMAIL = "jacob@epiphanymade.com"
+OPS_ALERT_EMAIL = "yaakovscher@gmail.com"
 
 # Cloudflare Email Service (2025) outbound binding — the OpsMailer's channel
 # (src/ops-mail/). NO api keys: the binding IS the credential. Ships DARK: this
