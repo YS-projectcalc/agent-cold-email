@@ -1,7 +1,8 @@
 {
   "name": "agent-cold-email",
-  "version": "0.1.0",
-  "description": "CLI for agent-cold-email, agent-native cold-email infrastructure: provision isolated branded domains and mailboxes, run sequences, and manage replies with one bearer token. Run `npx agent-cold-email demo` for a no-signup sandbox demo, no card, no real emails sent.",
+  "version": "0.2.0",
+  "mcpName": "io.github.YS-projectcalc/agent-cold-email",
+  "description": "CLI for agent-cold-email, agent-native cold-email infrastructure: provision isolated branded domains and mailboxes, run sequences, and manage replies with one bearer token. Run `npx agent-cold-email demo` for a no-signup sandbox demo, no card, no real emails sent. Also installable as a stdio MCP server (`agent-cold-email mcp`).",
   "type": "module",
   "bin": {
     "agent-cold-email": "dist/index.js"
@@ -33,10 +34,14 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test test/*.test.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
   }
 }

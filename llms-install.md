@@ -20,7 +20,34 @@ For any other MCP-aware client, point it at the same URL (`streamable-http`, JSO
 
 Every tool call requires a bearer token (see Auth below) — most MCP clients let you set an `Authorization: Bearer <token>` header on the connection.
 
-## Option B — CLI, no-signup sandbox demo
+## Option B — CLI, MCP over stdio
+
+```bash
+npx agent-cold-email mcp
+```
+
+Bridges MCP-over-stdio to the same hosted `/mcp` endpoint from Option A —
+useful for clients that only support launching a local process (`command`/`args`),
+not a remote URL. Example config:
+
+```json
+{
+  "mcpServers": {
+    "agent-cold-email": {
+      "command": "npx",
+      "args": ["-y", "agent-cold-email", "mcp"],
+      "env": { "AGENT_COLD_EMAIL_API_KEY": "<your bearer token>" }
+    }
+  }
+}
+```
+
+Without `AGENT_COLD_EMAIL_API_KEY`, `initialize`/`tools/list` still work (the
+hosted endpoint allows unauthenticated introspection) but `tools/call` fails
+with a JSON-RPC error until a key is set. Optional `AGENT_COLD_EMAIL_BASE_URL`
+overrides the API base URL.
+
+## Option C — CLI, no-signup sandbox demo
 
 ```bash
 npx agent-cold-email demo

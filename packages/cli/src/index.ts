@@ -6,6 +6,7 @@ import { runCampaign } from "./commands/campaign.js";
 import { runDemo } from "./commands/demo.js";
 import { runSetup, runStatus } from "./commands/infra.js";
 import { runInbox } from "./commands/inbox.js";
+import { runMcp } from "./commands/mcp.js";
 import { runMetrics } from "./commands/metrics.js";
 import { runPause } from "./commands/pause.js";
 import { runSignup } from "./commands/signup.js";
@@ -30,10 +31,13 @@ Commands:
   pause <campaignId>            Pause one campaign.
   pause --all                   Pause every campaign.
   account                       Usage, billing, and quota.
+  mcp                           Serve MCP over stdio, bridged to the hosted endpoint.
 
 Env:
-  AGENT_COLD_EMAIL_API       API base URL (default: https://agent-cold-email-api.yaakovscher.workers.dev)
-  AGENT_COLD_EMAIL_TOKEN     Bearer token (or pass --token per-command)
+  AGENT_COLD_EMAIL_API        API base URL (default: https://agent-cold-email-api.yaakovscher.workers.dev)
+  AGENT_COLD_EMAIL_TOKEN      Bearer token (or pass --token per-command)
+  AGENT_COLD_EMAIL_API_KEY    Bearer token for \`mcp\` mode
+  AGENT_COLD_EMAIL_BASE_URL   API base URL override for \`mcp\` mode
 `;
 
 async function main(): Promise<void> {
@@ -59,6 +63,8 @@ async function main(): Promise<void> {
       return runPause(args);
     case "account":
       return runAccount(args);
+    case "mcp":
+      return runMcp();
     case undefined:
     case "help":
     case "--help":

@@ -6,8 +6,34 @@
     "url": "https://github.com/YS-projectcalc/agent-cold-email",
     "source": "github"
   },
-  "version": "0.1.0",
+  "version": "0.2.0",
   "websiteUrl": "https://coldrig.dev/",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "agent-cold-email",
+      "version": "0.2.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "AGENT_COLD_EMAIL_API_KEY",
+          "description": "Bearer token from POST /signup (free, no card) — or run `npx agent-cold-email demo` first. Optional at startup: without it, `initialize`/`tools/list` still work (unauthenticated introspection), but every `tools/call` fails until a key is set.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "AGENT_COLD_EMAIL_BASE_URL",
+          "description": "Override the API base URL (default: https://agent-cold-email-api.yaakovscher.workers.dev)",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        }
+      ]
+    }
+  ],
   "remotes": [
     {
       "type": "streamable-http",
