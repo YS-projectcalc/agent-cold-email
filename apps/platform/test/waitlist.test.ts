@@ -2,10 +2,17 @@ import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { adminApi } from "./helpers.js";
 
-async function postWaitlist(email: unknown, ip?: string): Promise<Response> {
+async function postWaitlist(email: unknown, ip?: string, origin?: string): Promise<Response> {
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (ip) headers["CF-Connecting-IP"] = ip;
+  if (origin) headers["origin"] = origin;
   return SELF.fetch("https://example.com/api/waitlist", { method: "POST", headers, body: JSON.stringify({ email }) });
+}
+
+async function preflight(origin?: string): Promise<Response> {
+  const headers: Record<string, string> = { "Access-Control-Request-Method": "POST" };
+  if (origin) headers["origin"] = origin;
+  return SELF.fetch("https://example.com/api/waitlist", { method: "OPTIONS", headers });
 }
 
 async function waitlistRow(email: string): Promise<{ email: string; created_at: number } | null> {
@@ -116,18 +123,46 @@ describe("POST /api/waitlist — public waitlist form", () => {
     expect(results.filter((s) => s === 429).length).toBe(2);
   });
 
-  it("OPTIONS preflight returns CORS headers for the site origin", async () => {
-    const res = await SELF.fetch("https://example.com/api/waitlist", {
-      method: "OPTIONS",
-      headers: { origin: "https://agent-cold-email.pages.dev" },
-    });
+  // CORS custom-domain cutover: the endpoint must echo the CANONICAL
+  // coldrig.dev origin, not a single hardcoded pages.dev value. On the old code
+  // (ACAO hardcoded to https://agent-cold-email.pages.dev) the coldrig.dev
+  // assertions below FAIL: the preflight/POST return the pages.dev value, not
+  // coldrig.dev, and a disallowed origin still gets the pages.dev header
+  // instead of none.
+  it("OPTIONS preflight echoes the coldrig.dev origin (custom-domain cutover)", async () => {
+    const res = await preflight("https://coldrig.dev");
     expect(res.status).toBe(204);
-    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://agent-cold-email.pages.dev");
+    // FAILS on old code: old returns "https://agent-cold-email.pages.dev".
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://coldrig.dev");
     expect(res.headers.get("Access-Control-Allow-Methods")).toContain("POST");
+    expect(res.headers.get("Vary")).toContain("Origin");
   });
 
-  it("POST responses also carry the CORS header (not just preflight)", async () => {
-    const res = await postWaitlist(`cors-${crypto.randomUUID()}@waitlist-test.example`);
+  it("OPTIONS preflight still allows the pages.dev origin (allowlist, not a swap)", async () => {
+    const res = await preflight("https://agent-cold-email.pages.dev");
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://agent-cold-email.pages.dev");
+  });
+
+  it("OPTIONS preflight from a DISALLOWED origin gets no allow-origin header (never echoes unvalidated)", async () => {
+    const res = await preflight("https://evil.example");
+    expect(res.status).toBe(204);
+    // FAILS on old code: old returns the hardcoded pages.dev header for ANY origin.
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(res.headers.get("Vary")).toContain("Origin");
+  });
+
+  it("POST responses echo the allowed origin (not just preflight)", async () => {
+    // Unique IP so the shared per-IP rate-limit bucket (KV, not reset between
+    // tests) can't 429 this away.
+    const res = await postWaitlist(`cors-${crypto.randomUUID()}@waitlist-test.example`, "203.0.113.90", "https://coldrig.dev");
+    // FAILS on old code: old returns "https://agent-cold-email.pages.dev".
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://coldrig.dev");
+    expect(res.headers.get("Vary")).toContain("Origin");
+  });
+
+  it("POST from a disallowed origin gets no allow-origin header", async () => {
+    const res = await postWaitlist(`cors-evil-${crypto.randomUUID()}@waitlist-test.example`, "203.0.113.91", "https://evil.example");
+    expect(res.status).toBe(200); // the request still succeeds server-side; the browser is what enforces CORS
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
   });
 });

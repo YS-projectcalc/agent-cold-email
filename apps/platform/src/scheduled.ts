@@ -6,19 +6,26 @@
 // reachable by directly invoking `scheduled()` (e.g. `wrangler dev --test-scheduled`).
 //
 // What runs each tick: (1) the deliverability control loop for every
-// tenant, (2) the dunning sweep for every 'past_due' tenant, (3) the owner
-// digest, logged (not emailed — no outbound email channel exists yet; the
-// digest is also always available on-demand via GET /admin/ops/digest).
+// tenant, (2) the dunning sweep for every 'past_due' tenant (now emailing a
+// suspend notice via the OpsMailer), (3) the owner digest, logged, and (4) the
+// watchtower — health probes + the founder-alert state machine. The OpsMailer
+// is built ONCE and shared by the dunning sweep + watchtower; it is real in
+// production (dark until the domain is onboarded) and degrades gracefully — an
+// unsendable alert can never take down the sweep.
 import { RealClock } from "./clock.js";
 import type { Env } from "./env.js";
 import { buildOpsDigest, runDeliverabilitySweepAllTenants, runDunningSweep } from "./admin/ops-sweep.js";
+import { runWatchtower } from "./admin/watchtower.js";
+import { createOpsMailer } from "./ops-mail/ops-mailer.js";
 
 export async function runScheduledOpsSweep(env: Env): Promise<void> {
   const now = new RealClock().now();
+  const mailer = createOpsMailer(env);
 
   const deliverability = await runDeliverabilitySweepAllTenants(env);
-  const dunning = await runDunningSweep(env, now);
+  const dunning = await runDunningSweep(env, now, mailer);
   const digest = await buildOpsDigest(env, now, 24);
+  const watchtower = await runWatchtower(env, mailer, now);
 
-  console.log("scheduled ops sweep", JSON.stringify({ deliverability, dunning, digest }));
+  console.log("scheduled ops sweep", JSON.stringify({ deliverability, dunning, digest, watchtower }));
 }

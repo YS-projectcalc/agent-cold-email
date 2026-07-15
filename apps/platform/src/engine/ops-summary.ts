@@ -33,6 +33,11 @@ export interface TenantOpsSummary {
   deliverability: { pausedMailboxes: number; throttledMailboxes: number; burningDomains: number; domainsReplaced: number };
   /** Deliverability actions logged strictly since `sinceMs` — what the D6 digest windows over. */
   actionsInWindow: { paused: number; replaced: number };
+  /** Watchtower failure-signal scan — terminal-'failed' sends (includes CAN-SPAM
+   * compliance refusals, engine/tick.ts) + spam-complaint events (engine/
+   * reply-processor.ts) with `events`.ts >= sinceMs. Windowed so the watchtower
+   * alerts on NEW failures since its last sweep, not all-time totals. */
+  failureSignalsInWindow: { failed: number; complaints: number };
 }
 
 function countActionsInWindow(ctx: TenantContext, action: string, sinceMs: number): number {
@@ -120,6 +125,19 @@ export function getOpsSummary(ctx: TenantContext, sinceMs: number): TenantOpsSum
   const mrrCents =
     isPaidPlanTier(profile.plan) && profile.billing_state === "active" ? PLAN_QUOTAS[profile.plan].priceCents : 0;
 
+  // Windowed failure signals (watchtower). One GROUP-free aggregate over the
+  // events log: terminal-'failed' sends + spam complaints since `sinceMs`.
+  const failureSignals = ctx.sql
+    .exec<{ failed: number | null; complaints: number | null }>(
+      `SELECT
+         SUM(CASE WHEN type = 'failed' THEN 1 ELSE 0 END) AS failed,
+         SUM(CASE WHEN type = 'complaint' THEN 1 ELSE 0 END) AS complaints
+       FROM events WHERE tenant_id = ? AND ts >= ?`,
+      ctx.tenantId,
+      sinceMs,
+    )
+    .one();
+
   return {
     tenantId: ctx.tenantId,
     brand: profile.brand,
@@ -136,6 +154,10 @@ export function getOpsSummary(ctx: TenantContext, sinceMs: number): TenantOpsSum
     actionsInWindow: {
       paused: countActionsInWindow(ctx, "PAUSE", sinceMs),
       replaced: countActionsInWindow(ctx, "REPLACE_DOMAIN", sinceMs),
+    },
+    failureSignalsInWindow: {
+      failed: failureSignals.failed ?? 0,
+      complaints: failureSignals.complaints ?? 0,
     },
   };
 }

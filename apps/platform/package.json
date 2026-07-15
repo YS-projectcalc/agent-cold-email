@@ -13,6 +13,7 @@
   "dependencies": {
     "@coldstart/shared": "*",
     "hono": "^4.12.28",
+    "postal-mime": "^2.7.5",
     "zod": "^4.4.3"
   },
   "devDependencies": {

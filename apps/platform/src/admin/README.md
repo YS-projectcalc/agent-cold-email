@@ -46,7 +46,21 @@ closed (401 on every call) rather than falling open. Set it via
 - `ops-sweep.ts` — the actual cross-tenant iteration + aggregation logic
   (`runDunningSweep`, `runDeliverabilitySweepAllTenants`, `buildOpsDigest`),
   shared by `../routes/admin-ops.ts` (on-demand) AND `../scheduled.ts`
-  (cron) so the two can never drift (CLAUDE.md rule c).
+  (cron) so the two can never drift (CLAUDE.md rule c). `runDunningSweep` now
+  emails a suspend notice (tenant + founder copy) via the OpsMailer
+  (`../ops-mail/`) on a newly-applied suspend — best-effort, never blocking
+  the suspend.
+- `watchtower.ts` — **D2 monitoring**: health probes (D1, DO storage, engine
+  `/health` when configured, a cross-tenant failure-signal scan) + the
+  founder-alert STATE MACHINE (`reconcileAlerts`) — alerts on a health CHANGE,
+  re-alerts on persistence after a 6h cooldown, recovers on heal, never
+  storms. Dedupe state in D1 (`migrations/0008_watchtower.sql`). Runs on the
+  ops-sweep cron.
+- `support-inbound.ts` — **D1**: the inbound support@ handler
+  (`handleInboundSupportEmail`) wired to the Worker's `email()` export
+  (`../index.ts`). Parses the raw MIME (postal-mime), runs `support-kb.ts`
+  triage, persists an ops ticket, and forwards a copy to the founder. Never
+  auto-replies (triage drafts stay drafts).
 
 Routes live in `../routes/admin-support.ts` / `../routes/admin-ops.ts` (see
 `../routes/README.md`) — kept with the other route files so "one file per
@@ -72,19 +86,28 @@ already names the scale path as a D1/Analytics read-model fed by Queues
 (cross-tenant reporting + the abuse-aggregation loop), which is where this
 moves once tenant count makes a full fan-out slow.
 
-## What's armed at activation (not built as a real integration here)
+## What's built now, dark until the owner onboards the domain
 
-- **D1 real inbound email**: Cloudflare Email Routing -> `POST
-  /admin/support/triage`. The triage LOGIC is complete and callable now with
-  any `{from, subject, body}` payload; only the mailbox-forwarding wiring is
-  an owner-hands step.
-- **D2 real dunning emails**: the sweep computes and idempotently records
-  the correct retry/escalate/suspend action now (and `suspend` really does
-  flip the tenant's status), but no outbound email is sent — there is no
-  email-sending channel wired in this build.
-- **D2/D6 cron schedule**: `scheduled()` (`../scheduled.ts`) is implemented
-  and callable directly; the `[triggers]` block that makes Cloudflare
-  actually invoke it on a schedule is commented-out in `wrangler.toml`.
+The outbound/inbound email channel is now BUILT (Cloudflare Email Service — the
+`send_email` binding + Email Routing), not just documented. It ships DARK: the
+code degrades to log-only until the owner runs the ACTIVATION.md "Ops email +
+monitoring" runbook (`wrangler email sending enable coldrig.dev`, routing +
+verified destination, route support@). Nothing breaks pre-arming — an
+unsendable email is caught and logged.
+
+- **D1 inbound email**: the Worker's `email()` handler (`../index.ts` ->
+  `support-inbound.ts`) parses, triages, persists a ticket, and forwards to
+  the founder. Owner-hands step: enable Email Routing + route
+  `support@coldrig.dev` to this Worker + verify the forward destination.
+- **D2 dunning emails**: `runDunningSweep` sends a real suspend notice
+  (tenant + founder copy) via the OpsMailer. Owner-hands step: `wrangler email
+  sending enable coldrig.dev` so `OPS_EMAIL.send()` isn't `E_SENDER_NOT_VERIFIED`.
+- **D2 watchtower alerts**: `watchtower.ts` emails the founder on a health
+  state change. Same sending prerequisite as dunning + a 5-min EXTERNAL prober
+  (an in-CF watchtower can't report CF being down).
+- **D2/D6 cron schedule**: the `[triggers]` cron in `wrangler.toml` is now
+  ARMED (every 5 min). It goes live on the next deploy; the email legs stay
+  log-only until the sending domain is onboarded.
 
 ## How to run
 

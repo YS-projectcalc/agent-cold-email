@@ -5,8 +5,10 @@
 // tenants_index, dispatching into each tenant's own DO via RPC — see
 // admin/README.md for why this is the aggregation boundary.
 
-import { countWaitlistEmails } from "../db.js";
+import { countWaitlistEmails, lookupTenantContactEmail } from "../db.js";
 import type { Env } from "../env.js";
+import { escapeHtml } from "../html-escape.js";
+import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import { newId } from "../schema.js";
 import { countSupportTicketsByStatus, countTerminatedTenants, insertDunningEventIfNew, listAllTenantIds } from "./db.js";
 import { decideDunningAction } from "./dunning.js";
@@ -24,8 +26,16 @@ export interface DunningSweepSummary {
   results: DunningSweepResult[];
 }
 
-/** D2 dunning sweep — scans every tenant, actions only the 'past_due' ones, idempotent per (tenant, failure-count cycle). */
-export async function runDunningSweep(env: Env, nowMs: number): Promise<DunningSweepSummary> {
+/** D2 dunning sweep — scans every tenant, actions only the 'past_due' ones,
+ * idempotent per (tenant, failure-count cycle). On a NEWLY-applied suspend it
+ * emails the tenant a plain honest notice + the founder a copy via the
+ * OpsMailer (`mailer` is injectable for tests; production builds a real/dark
+ * one). Email failure NEVER blocks the suspend — the suspend commits first. */
+export async function runDunningSweep(
+  env: Env,
+  nowMs: number,
+  mailer: OpsMailer = createOpsMailer(env),
+): Promise<DunningSweepSummary> {
   const tenantIds = await listAllTenantIds(env);
   const results: DunningSweepResult[] = [];
 
@@ -47,12 +57,76 @@ export async function runDunningSweep(env: Env, nowMs: number): Promise<DunningS
       ts: nowMs,
     });
     if (applied && action === "suspend") {
+      // Suspend commits FIRST; the notice is strictly best-effort after it.
       await stub.suspendForDunning();
+      await sendDunningSuspendNotice(env, mailer, { tenantId, brand: summary.brand, cycle, declineCode: summary.lastDeclineCode });
     }
     results.push({ tenantId, cycle, action, applied });
   }
 
   return { scannedTenants: tenantIds.length, pastDueTenants: results.length, results };
+}
+
+/**
+ * Best-effort dunning-suspend notification: a plain honest notice to the
+ * tenant's contact email (from D1 — captured at signup, migrations/0007) plus
+ * a founder copy. If no contact email is on file (a tenant that predates the
+ * column, or the test-only mintTenant path) the tenant notice is FLAGGED, not
+ * faked — the founder copy still goes out and says so. Every send is wrapped:
+ * a dark/unconfigured OpsMailer must never break the sweep.
+ */
+async function sendDunningSuspendNotice(
+  env: Env,
+  mailer: OpsMailer,
+  params: { tenantId: string; brand: string; cycle: number; declineCode: string | null },
+): Promise<void> {
+  const { tenantId, brand, cycle, declineCode } = params;
+  let contactEmail: string | null = null;
+  try {
+    contactEmail = await lookupTenantContactEmail(env, tenantId);
+  } catch (err) {
+    console.error(`dunning notice: contact-email lookup failed for tenant ${tenantId}`, err);
+  }
+
+  if (contactEmail) {
+    const text =
+      `Your coldrig account "${brand}" has been suspended after ${cycle} failed payment attempt(s).\n\n` +
+      `Sending is paused. To restore your account, update your payment method and complete checkout again — ` +
+      `it reactivates automatically once payment succeeds.\n\n` +
+      `If you believe this is a mistake, reply to this email and it will reach our team.`;
+    await trySendNotice(mailer, {
+      to: contactEmail,
+      subject: `[coldrig] Your account "${brand}" has been suspended for non-payment`,
+      text,
+      html: `<p>Your coldrig account <strong>${escapeHtml(brand)}</strong> has been suspended after ${cycle} failed payment attempt(s).</p>` +
+        `<p>Sending is paused. To restore your account, update your payment method and complete checkout again — it reactivates automatically once payment succeeds.</p>` +
+        `<p>If you believe this is a mistake, reply to this email and it will reach our team.</p>`,
+    });
+  }
+
+  if (env.OPS_ALERT_EMAIL) {
+    const notified = contactEmail ? `tenant notified at ${contactEmail}` : `NO contact email on file — tenant NOT notified (flag)`;
+    const text =
+      `Tenant "${brand}" (${tenantId}) was suspended by the dunning sweep.\n` +
+      `Cycle: ${cycle}. Decline code: ${declineCode ?? "none/unknown"}.\n` +
+      `${notified}.`;
+    await trySendNotice(mailer, {
+      to: env.OPS_ALERT_EMAIL,
+      subject: `[coldrig] tenant "${brand}" suspended (dunning)`,
+      text,
+      html: `<p>Tenant <strong>${escapeHtml(brand)}</strong> (<code>${escapeHtml(tenantId)}</code>) was suspended by the dunning sweep.</p>` +
+        `<p>Cycle: ${cycle}. Decline code: ${escapeHtml(declineCode ?? "none/unknown")}.</p>` +
+        `<p>${escapeHtml(notified)}.</p>`,
+    });
+  }
+}
+
+async function trySendNotice(mailer: OpsMailer, msg: { to: string; subject: string; text: string; html: string }): Promise<void> {
+  try {
+    await mailer.send(msg);
+  } catch (err) {
+    console.error(`dunning notice: send to ${msg.to} failed (dark or transient)`, err);
+  }
 }
 
 export interface DeliverabilitySweepAllSummary {

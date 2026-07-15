@@ -47,6 +47,23 @@ declare global {
       // deployment (never in code/git — CLAUDE.md rule g), though the values
       // themselves are just tenant IDs, not credentials.
       ENGINE_TENANTS?: string;
+      // Ops email + monitoring (watchtower/dunning/support). The Cloudflare
+      // Email Service `send_email` binding (wrangler.toml `[[send_email]]`
+      // name = "OPS_EMAIL") — NO api keys, sends from a domain onboarded via
+      // `wrangler email sending enable coldrig.dev` (ACTIVATION.md, owner-
+      // hands). OPTIONAL/dark by design: absent (binding undeclared or the
+      // domain not yet onboarded) -> RealOpsMailer throws OpsMailNotConfigured
+      // which every caller catches-and-logs, so an unsendable alert can never
+      // take down a request path or the sweep. Present + domain live -> real
+      // sends. Never bound in tests/dev (the sandbox mailer records instead).
+      OPS_EMAIL?: SendEmail;
+      // Destination for founder ops alerts + the support@ inbound forward
+      // (src/admin/watchtower.ts, src/admin/support-inbound.ts). A plain
+      // `[vars]` entry (jacob@epiphanymade.com), NOT a secret — it is already
+      // public on the legal pages (site/privacy.html, site/terms.html). The
+      // forward target must additionally be a VERIFIED Email Routing
+      // destination before `message.forward` works (ACTIVATION.md arming step).
+      OPS_ALERT_EMAIL: string;
       // SPEC.md §19.1 — the dashboard SPA's static asset bundle (public/app/),
       // served by Cloudflare's own asset layer via [assets] in wrangler.toml.
       // Not fetched from Worker code today (run_worker_first excludes /app/*

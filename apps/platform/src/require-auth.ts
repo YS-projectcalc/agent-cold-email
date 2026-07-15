@@ -1,7 +1,7 @@
 import type { Context, Next } from "hono";
 import { getCookie } from "hono/cookie";
 import type { TenantDO } from "./tenant-do.js";
-import { extractBearerToken, hashApiToken } from "./auth.js";
+import { hashApiToken, resolveRequestToken } from "./auth.js";
 import { lookupDashboardSession, lookupTenantById, lookupTenantByTokenHash } from "./db.js";
 import type { Env } from "./env.js";
 
@@ -93,7 +93,11 @@ export async function resolveTenantFromDashboardSession(env: Env, sessionId: str
 }
 
 export async function requireAuth(c: Context<{ Bindings: Env; Variables: AuthedVariables }>, next: Next) {
-  const token = extractBearerToken(c.req.header("Authorization"));
+  // Accept the token from Authorization: Bearer OR X-API-Key (Authorization
+  // wins if both present — see resolveRequestToken). An X-API-Key credential
+  // is treated exactly like a bearer token (same resolution, same 'bearer'
+  // provenance, no CSRF requirement — it is an API credential, not a cookie).
+  const token = resolveRequestToken(c.req.header("Authorization"), c.req.header("X-API-Key"));
   if (token) {
     const resolved = await resolveTenantFromToken(c.env, token);
     if (!resolved.ok) return c.json({ error: resolved.message, code: resolved.code }, 401);
@@ -103,10 +107,10 @@ export async function requireAuth(c: Context<{ Bindings: Env; Variables: AuthedV
     return next();
   }
 
-  // Cookie fallback (§19.1 [NEW-1]) — only consulted when no Authorization
-  // header was presented at all, so a bearer-token caller's behavior is
-  // completely unchanged (an invalid bearer token still 401s immediately
-  // above, it never silently falls back to a cookie).
+  // Cookie fallback (§19.1 [NEW-1]) — only consulted when neither an
+  // Authorization header nor an X-API-Key produced a token, so a bearer-token
+  // caller's behavior is completely unchanged (an invalid bearer token still
+  // 401s immediately above, it never silently falls back to a cookie).
   const sessionId = getCookie(c, DASHBOARD_SESSION_COOKIE) ?? null;
   if (sessionId) {
     const resolved = await resolveTenantFromDashboardSession(c.env, sessionId);

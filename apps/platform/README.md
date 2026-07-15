@@ -8,7 +8,8 @@ repo root for what's in/out of scope at this phase.
 
 ## Layout
 
-- `src/index.ts` — the Hono app; mounts routes, exports `TenantDO`.
+- `src/index.ts` — the Hono app; mounts routes, exports `TenantDO`, the
+  `scheduled()` cron handler, and the `email()` inbound-support handler.
 - `src/tenant-do.ts` — the Durable Object class. No business logic; builds a
   `TenantContext` per call and dispatches into `src/engine/*.ts`.
 - `src/clock.ts` — `RealClock` + `VirtualClock` (see `src/clock.ts` for the
@@ -32,16 +33,24 @@ repo root for what's in/out of scope at this phase.
   `admin-ops.ts` (D1/D2/D6). See its README.
 - `src/mcp/` — the hosted MCP JSON-RPC 2.0 handler (B5). See its README.
 - `src/admin/` — the D1/D2/D6 owner/ops admin surface (support triage,
-  dunning sweep, business-health digest) — a SEPARATE `ADMIN_TOKEN`-gated
+  dunning sweep, business-health digest, `watchtower.ts` monitoring, the
+  `support-inbound.ts` `email()` handler) — a SEPARATE `ADMIN_TOKEN`-gated
   facade from the tenant one. See its README.
-- `src/scheduled.ts` — the Cron Trigger entry point (D2), exported from
+- `src/ops-mail/` — the OpsMailer port (Cloudflare Email Service `send_email`
+  binding): founder alerts, dunning notices. Real + sandbox impls + factory,
+  ships dark. See its README.
+- `src/scheduled.ts` — the Cron Trigger entry point (D2): deliverability +
+  dunning sweeps, owner digest, and the watchtower, exported from
   `src/index.ts`'s `scheduled()` handler.
 - `migrations/0001_init.sql` — the D1 schema (tenant index).
   `migrations/0002_admin_ops.sql` — D1 admin-surface tables (support
   tickets, dunning events). `migrations/0006_dashboard_sessions.sql` — the
-  dashboard cookie-session store (§19.1). `dashboard_views`/`thread_labels`
-  (§19.2) need NO D1 migration — they're TenantDO SQLite tables, created via
-  the `TENANT_DO_SCHEMA` constructor-bootstrap pattern (`src/schema.ts`).
+  dashboard cookie-session store (§19.1). `migrations/0007_tenant_contact.sql`
+  — `tenants_index.contact_email` (dunning notices).
+  `migrations/0008_watchtower.sql` — the watchtower alert dedupe state.
+  `dashboard_views`/`thread_labels` (§19.2) need NO D1 migration — they're
+  TenantDO SQLite tables, created via the `TENANT_DO_SCHEMA`
+  constructor-bootstrap pattern (`src/schema.ts`).
 - `public/app/` — the dashboard SPA's served static assets (SPEC.md §19.1):
   M1 ships only a placeholder `index.html` (proves the `/app/*` serving
   spike); the real `apps/dashboard` Vite build lands here in M2. See its
@@ -84,10 +93,13 @@ npm run dev -w apps/platform # wrangler dev (needs .dev.vars — copy .dev.vars.
   `src/admin/README.md`). No real vendor secrets exist anywhere in this app
   (CLAUDE.md rule g) — sandbox adapters need none, and `real/` adapters are
   unreachable stubs (see `src/vendors/README.md`).
-- The D2 ops-sweep Cron Trigger is commented-out in `wrangler.toml`
-  (`[triggers]` / `crons`) — armed at activation (`ACTIVATION.md`); the
-  `scheduled()` handler it will call is fully built and independently
-  callable now (`src/scheduled.ts`).
+- The D2 ops-sweep Cron Trigger is now ARMED in `wrangler.toml`
+  (`[triggers]` / `crons = ["*/5 * * * *"]`) — it goes live on the next
+  deploy. The `send_email` binding (`[[send_email]] name = "OPS_EMAIL"`) +
+  `OPS_ALERT_EMAIL` var are declared and dry-run-safe; the email legs stay
+  log-only (dark) until the owner onboards the sending domain (`ACTIVATION.md`
+  "Ops email + monitoring"). The `email()` handler needs Email Routing +
+  a support@ route (same runbook).
 
 ## Depends on
 

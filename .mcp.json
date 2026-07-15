@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "agent-cold-email": {
+      "type": "http",
+      "url": "https://agent-cold-email-api.yaakovscher.workers.dev/mcp",
+      "headers": {
+        "Authorization": "Bearer ${AGENT_COLD_EMAIL_API_KEY}"
+      }
+    }
+  }
+}

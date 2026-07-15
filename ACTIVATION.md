@@ -16,6 +16,7 @@
 - [ ] **Confirm Mailforge API availability/limits with their support before relying on it** — their pricing page omits API from included features while their ToS presupposes it exists.
 
 ## Gate 2 — Live keys & accounts (identity/KYC-gated)
+> **PREREQUISITE — monitoring must be live before real sending.** Do NOT flip any tenant onto the real EmailPort (Gate 2 "Go-engine host") until the Gate 4 **Ops email + monitoring (watchtower)** block below is armed AND verified: the founder-alert channel + the 5-minute external prober are how you learn a real send path broke. Arming real sending blind — with no way to be told it failed — is the one ordering that is not allowed.
 - [ ] **Stripe live KYC** — swap test keys for live; the billing/metering/dunning/dispute lanes are built against the real Stripe API in test mode, so this is a key swap + business verification.
 - [ ] **Set `STRIPE_WEBHOOK_SECRET`** (wrangler secret) — the `/webhooks/stripe` endpoint now **fails closed (503) until this is set** (a panel #3 security fix: without it, unsigned events could forge any tenant's plan/billing). Setting it enables the real webhook lane. Set the matching endpoint secret in the Stripe dashboard.
 - [ ] **Mailbox vendor account + card** (Mailforge — chosen start / Inboxkit — pending reseller deal) — real `MailboxPort` adapter is coded, throws `NotActivatedError` until wired.
@@ -64,9 +65,18 @@
 
 ## Gate 4 — Legal & ops arming
 - [ ] **Attorney review** of ToS / Privacy / AUP (built to the specified clause inventory, DRAFT-flagged) before real customers.
-- [ ] **Fill the CAN-SPAM mailing address** — replace `[EpiphanyMade mailing address — inserted at activation]` in `site/terms.html` §13 and `site/privacy.html` §12 (2 occurrences) before attorney sign-off / any real waitlist send.
-- [ ] **Arm email routing** for support@ + reply ingestion (Cloudflare Email Routing / vendor IMAP) — AI support triage lane is built, disarmed.
-- [ ] **Arm scheduled ops** — deliverability loop, dunning sweep, metrics digest crons (built, disabled in test mode).
+- [x] **CAN-SPAM mailing address — FILLED (founder-verified).** `EpiphanyMade, 209 Crest Hill Road, Toms River, NJ 08755, US` is live in `site/terms.html`, `site/privacy.html`, and `site/dpa.html` — the old `[… inserted at activation]` placeholder is gone. Kept as an arming record so attorney sign-off confirms the address is correct, not that it needs adding.
+- [ ] **Ops email + monitoring (watchtower) — CODE BUILT, needs owner arming.** The platform now emails the founder when a health check breaks, notifies tenants on a dunning suspend, and receives support@ inbound — all via Cloudflare Email Service, all shipping DARK (they degrade to log-only until the domain is onboarded, so nothing breaks pre-arming). Wiring already in the repo: `[[send_email]] name = "OPS_EMAIL"` + `OPS_ALERT_EMAIL` + the armed `[triggers] crons = ["*/5 * * * *"]` in `apps/platform/wrangler.toml`; the `email()` handler + watchtower + dunning notices in `src/`. **The current Cloudflare token lacks the `email_sending` / `email_routing` scopes (verified) — every step below needs a fresh `wrangler login`.** Owner-hands runbook:
+  1. **Refresh the token:** `npx wrangler login` (grant the email scopes when prompted).
+  2. **Enable sending on the domain** (lets `OPS_EMAIL.send()` work — founder alerts + dunning notices): `npx wrangler email sending enable coldrig.dev`, then `npx wrangler email sending dns get coldrig.dev` and add the SPF/DKIM records it prints (auto-added if the zone is on Cloudflare). Until this, `RealOpsMailer.send()` throws `E_SENDER_NOT_VERIFIED` and callers log-and-continue.
+  3. **Enable routing** (lets support@ reach the Worker + lets `message.forward` deliver): `npx wrangler email routing enable` (Dashboard toggle is equivalent).
+  4. **Verify the forward destination** — `message.forward` only delivers to a VERIFIED address: `npx wrangler email routing addresses create jacob@epiphanymade.com`, then click the verification link Cloudflare emails to that address. (This is the `OPS_ALERT_EMAIL` target.)
+  5. **Route support@ to the Worker:** `npx wrangler email routing rules create --to support@coldrig.dev --action worker --value agent-cold-email-api` (or Dashboard → Email Routing → Routing Rules → send `support@coldrig.dev` to the `agent-cold-email-api` Worker).
+  6. **Deploy** (`npm run deploy -w @coldstart/platform`) — this ships the `send_email` binding + the armed 5-min cron. The scheduled sweep + watchtower go live immediately; the email legs stay log-only until steps 2–5 are done.
+  7. **External prober (REQUIRED — an in-CF watchtower can't report Cloudflare being down):** create a free UptimeRobot or BetterStack monitor hitting `https://agent-cold-email-api.yaakovscher.workers.dev/status` every 5 min (it returns `{"status":"ok"}` / 503 `degraded`), with an email alert to `jacob@epiphanymade.com`. This is the out-of-band backstop the in-Worker cron structurally cannot be.
+  8. **Verify:** trigger a watchtower alert (e.g. temporarily point `ENGINE_BASE_URL` at an unreachable host and wait one cron tick, or send a test email to support@coldrig.dev) and confirm the founder email arrives + the ticket is recorded. Revert any test config.
+
+  ⚠️ **Adversary-ruled residual to carry into arming** (`docs/adversarial/watchtower-ops-email-review-2026-07-15.md` NB-2): a transient alert-email send failure on the exact healthy→unhealthy transition tick still advances `last_alert_ts`, so that alert is silently lost until the 6h cooldown re-fires (self-heals; not normal-path reachable). The step-7 external prober is the designed backstop — do not skip it.
 - [ ] **OFAC screening provider** key (if using a paid list) — screening hook is built; wire the data source.
 
 ## Cron watchdog note (session-scoped)

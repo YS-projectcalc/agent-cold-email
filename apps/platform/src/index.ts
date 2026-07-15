@@ -22,6 +22,7 @@ import { dashboardSessionRoute } from "./routes/dashboard-session.js";
 import { dashboardRoute } from "./routes/dashboard.js";
 import { activityRoute } from "./routes/activity.js";
 import { runScheduledOpsSweep } from "./scheduled.js";
+import { handleInboundSupportEmail } from "./admin/support-inbound.js";
 
 export { TenantDO } from "./tenant-do.js";
 export { RateLimiterDO } from "./rate-limiter-do.js";
@@ -138,9 +139,18 @@ app.onError((err, c) => {
 
 export default {
   fetch: app.fetch,
-  // Cron Trigger entry point (D2) — see scheduled.ts for what runs + why the
-  // wrangler.toml `[triggers]` block is commented-out (armed at activation).
+  // Cron Trigger entry point (D2) — see scheduled.ts for what runs. The
+  // wrangler.toml `[triggers]` cron is now armed (every 5 min).
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(runScheduledOpsSweep(env));
+  },
+  // Inbound support@ (D1) — Cloudflare Email Routing delivers a message here
+  // once support@coldrig.dev is routed to this Worker (ACTIVATION.md). Awaited
+  // (not waitUntil): the handler MUST consume `message.raw` and forward before
+  // returning, or Email Routing drops the message. A parse/persist failure
+  // surfaces (Email Routing retries); the forward leg catches its own errors.
+  async email(message: ForwardableEmailMessage, env: Env, _ctx: ExecutionContext): Promise<void> {
+    const outcome = await handleInboundSupportEmail(message, env);
+    console.log("inbound support email", JSON.stringify(outcome));
   },
 };

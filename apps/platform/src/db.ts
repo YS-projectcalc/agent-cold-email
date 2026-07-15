@@ -13,13 +13,23 @@ export interface TenantIndexRow {
 
 export async function insertTenantIndex(
   env: Env,
-  params: { id: string; apiTokenHash: string; brand: string; plan: string; createdAt: number },
+  params: { id: string; apiTokenHash: string; brand: string; plan: string; createdAt: number; contactEmail?: string | null },
 ): Promise<void> {
   await env.DB.prepare(
-    `INSERT INTO tenants_index (id, api_token_hash, brand, plan, status, created_at) VALUES (?, ?, ?, ?, 'active', ?)`,
+    `INSERT INTO tenants_index (id, api_token_hash, brand, plan, status, created_at, contact_email) VALUES (?, ?, ?, ?, 'active', ?, ?)`,
   )
-    .bind(params.id, params.apiTokenHash, params.brand, params.plan, params.createdAt)
+    .bind(params.id, params.apiTokenHash, params.brand, params.plan, params.createdAt, params.contactEmail ?? null)
     .run();
+}
+
+/** Dunning notices (D2) — the tenant's contact email captured at signup, or
+ * `null` for tenants that predate the column / the test-only `mintTenant`
+ * path. The suspend path flags a null address rather than inventing one. */
+export async function lookupTenantContactEmail(env: Env, id: string): Promise<string | null> {
+  const row = await env.DB.prepare(`SELECT contact_email FROM tenants_index WHERE id = ?`)
+    .bind(id)
+    .first<{ contact_email: string | null }>();
+  return row?.contact_email ?? null;
 }
 
 export async function lookupTenantByTokenHash(env: Env, tokenHash: string): Promise<TenantIndexRow | null> {

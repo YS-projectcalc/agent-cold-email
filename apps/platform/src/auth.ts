@@ -27,6 +27,33 @@ export function extractBearerToken(authHeader: string | undefined | null): strin
   return match?.[1] ?? null;
 }
 
+/**
+ * Resolve the API token from a request that may present EITHER an
+ * `Authorization: Bearer <token>` header OR an `X-API-Key: <token>` header.
+ * Authorization WINS if present at all — X-API-Key is consulted ONLY when no
+ * Authorization header was sent. This unblocks gateways (e.g. Smithery) that
+ * reserve the Authorization header for their own auth and cannot forward a
+ * bearer token, without changing behavior for any existing bearer caller.
+ *
+ * The returned token flows into the SAME hash+constant-time resolution path as
+ * a bearer token (resolveTenantFromToken) — X-API-Key is not a second
+ * credential type, just a second transport for the same token. Neither header
+ * value is logged. A garbage X-API-Key resolves to no tenant (401), exactly
+ * like a garbage bearer token.
+ */
+export function resolveRequestToken(
+  authHeader: string | undefined | null,
+  apiKeyHeader: string | undefined | null,
+): string | null {
+  const bearer = extractBearerToken(authHeader);
+  if (bearer) return bearer;
+  // Authorization present but not Bearer-shaped still "wins" (fail closed) —
+  // only a fully ABSENT Authorization header falls through to X-API-Key.
+  if (authHeader != null && authHeader.trim() !== "") return null;
+  const apiKey = apiKeyHeader?.trim();
+  return apiKey ? apiKey : null;
+}
+
 // SPEC.md §19.1 (M1) — the dashboard cookie session's opaque id. A random
 // 256-bit value, same entropy source as `generateApiToken`, but deliberately
 // NOT bearer-token-shaped (no `cs_test_` prefix) so it's never mistaken for

@@ -38,7 +38,12 @@ export const mcpRoute = new Hono<{ Bindings: Env }>()
       return jsonResponse({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error: invalid JSON body" } }, 400);
     }
 
-    const { status, body } = await handleMcpRequest(c.env, c.req.header("Authorization") ?? null, raw);
+    const { status, body } = await handleMcpRequest(
+      c.env,
+      c.req.header("Authorization") ?? null,
+      raw,
+      c.req.header("X-API-Key") ?? null,
+    );
     if (body === null) return new Response(null, { status });
     return jsonResponse(body, status);
   });

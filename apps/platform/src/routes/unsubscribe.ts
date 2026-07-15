@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { UnsubscribeQuery } from "@coldstart/shared";
 import type { Env } from "../env.js";
+import { escapeHtml } from "../html-escape.js";
 import { verifyUnsubscribeToken } from "../unsubscribe-token.js";
 import { SMALL_BODY_MAX_BYTES } from "../validate.js";
 
@@ -18,10 +19,6 @@ import { SMALL_BODY_MAX_BYTES } from "../validate.js";
 // share the exact same URL/token — the https form in the header and the
 // in-body link are the same link, differing only in which HTTP method the
 // caller happens to use.
-
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
 
 const PAGE_STYLE =
   "font-family: -apple-system, system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1.5rem; line-height: 1.5; color: #1a1a1a;";

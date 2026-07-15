@@ -8,6 +8,8 @@ import migration3Sql from "../migrations/0003_lifecycle.sql?raw";
 import migration4Sql from "../migrations/0004_waitlist.sql?raw";
 import migration5Sql from "../migrations/0005_support_dedupe.sql?raw";
 import migration6Sql from "../migrations/0006_dashboard_sessions.sql?raw";
+import migration7Sql from "../migrations/0007_tenant_contact.sql?raw";
+import migration8Sql from "../migrations/0008_watchtower.sql?raw";
 
 function statementsOf(sql: string): string[] {
   return sql
@@ -26,6 +28,8 @@ for (const statement of [
   ...statementsOf(migration4Sql),
   ...statementsOf(migration5Sql),
   ...statementsOf(migration6Sql),
+  ...statementsOf(migration7Sql),
+  ...statementsOf(migration8Sql),
 ]) {
   await env.DB.prepare(statement).run();
 }

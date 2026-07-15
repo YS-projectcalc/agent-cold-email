@@ -29,6 +29,27 @@ id = "e2d5939d1fdc498d85b59cfc6a3e0187"
 # alongside a custom-domain cutover at activation (ACTIVATION.md).
 [vars]
 PUBLIC_BASE_URL = "https://agent-cold-email-api.yaakovscher.workers.dev"
+# Ops email destination — founder alerts (watchtower) + the support@ inbound
+# forward target. NOT a secret: already public on the legal pages
+# (site/privacy.html §11, site/terms.html). A plain [vars] entry so the
+# watchtower/dunning/support code has a fixed recipient; the forward target
+# must also be VERIFIED in Email Routing before `message.forward` works
+# (ACTIVATION.md).
+OPS_ALERT_EMAIL = "jacob@epiphanymade.com"
+
+# Cloudflare Email Service (2025) outbound binding — the OpsMailer's channel
+# (src/ops-mail/). NO api keys: the binding IS the credential. Ships DARK: this
+# declaration is dry-run/deploy-safe on its own, but a `.send()` throws
+# `E_SENDER_NOT_VERIFIED` until the owner onboards the domain
+# (`wrangler email sending enable coldrig.dev`, ACTIVATION.md — needs an
+# email_sending-scoped token). RealOpsMailer catches that; callers log and
+# move on, so an un-onboarded domain never breaks a request or the sweep.
+# Deliberately UNRESTRICTED (no `destination_address`): the dunning path emails
+# arbitrary tenant contact addresses, which a single-destination restriction
+# would block — so sending requires full domain onboarding, not just one
+# verified destination. From-address is pinned in code to ops@coldrig.dev.
+[[send_email]]
+name = "OPS_EMAIL"
 
 # SPEC.md §19.1 (M1 serving spike, dashboard+inbox brief) — `/app/*` serves the
 # apps/dashboard SPA build (Vite `base: '/app/'` -> public/app/), everything
@@ -54,10 +75,19 @@ tag = "v2"
 new_classes = ["RateLimiterDO"]
 
 # D2 (ROADMAP.md) — the ops-sweep Cron Trigger, calling the `scheduled()`
-# export in src/index.ts (src/scheduled.ts: deliverability sweep -> dunning
-# sweep -> owner digest, for every tenant). Commented-out on purpose: ARMED
-# AT ACTIVATION (ACTIVATION.md), not deployed yet. `scheduled()` itself is
-# fully built and independently callable (`wrangler dev --test-scheduled`) —
-# uncommenting this block is the only step activation needs for the cron lane.
-# [triggers]
-# crons = ["0 13 * * *"] # once/day, 13:00 UTC — the owner's daily digest cadence
+# export in src/index.ts (src/scheduled.ts): deliverability sweep -> dunning
+# sweep (+ suspend notices) -> owner digest -> WATCHTOWER health probes +
+# founder-alert state machine, for every tenant.
+#
+# Cadence: every 5 minutes. Justification — the watchtower is the reason to arm
+# the cron now, and founder-alert latency on a real outage should be minutes,
+# not a day. Frequent probing is SAFE from email storms because the alert state
+# machine dedupes: a persistent outage emails at most once per 6h cooldown
+# regardless of probe cadence, and it emails only on state CHANGE. The
+# deliverability + dunning sweeps are idempotent (dunning is deduped per
+# (tenant, cycle); the loop acts only on threshold crossings), so running them
+# every 5 min is safe and improves remediation latency at test-mode scale. The
+# out-of-band 5-min external prober (ACTIVATION.md) covers the case where
+# Cloudflare itself is down and this in-CF cron cannot fire at all.
+[triggers]
+crons = ["*/5 * * * *"]

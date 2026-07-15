@@ -15,32 +15,46 @@ import { parseJsonBody } from "../validate.js";
 
 const WaitlistInput = z.object({ email: z.string().email() });
 
-// The live site's Pages origin (site/_headers CSP `connect-src`, server-card.json).
-const ALLOWED_ORIGIN = "https://agent-cold-email.pages.dev";
+// The site origins allowed to call this endpoint from a browser. `coldrig.dev`
+// is the live custom domain (the canonical host — all of site/'s self-refs
+// point there); the `pages.dev` origin is kept for the pre-cutover Pages URL /
+// preview deploys. Echo-validate: the request Origin is reflected back ONLY
+// when it's an exact allowlist member (never `*`, never an unvalidated echo),
+// so a browser on either host is allowed and every other origin gets no ACAO
+// header at all. (Before the coldrig.dev cutover this was a single hardcoded
+// pages.dev origin — a coldrig.dev browser was CORS-blocked on the form.)
+const ALLOWED_ORIGINS = new Set(["https://coldrig.dev", "https://agent-cold-email.pages.dev"]);
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_PER_WINDOW = 5;
 const RATE_LIMIT_KV_TTL_SECONDS = 120; // > the window, so a bucket always outlives its own window
 
-function corsHeaders(): Record<string, string> {
-  return {
-    "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
+function corsHeaders(requestOrigin: string | null | undefined): Record<string, string> {
+  const headers: Record<string, string> = {
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "content-type",
+    // The ACAO varies by request Origin (allowlist echo), so any cache MUST key
+    // on Origin or it could serve one origin's allow header to another.
+    Vary: "Origin",
   };
+  if (requestOrigin && ALLOWED_ORIGINS.has(requestOrigin)) {
+    headers["Access-Control-Allow-Origin"] = requestOrigin;
+  }
+  return headers;
 }
 
-function json(body: unknown, status: number): Response {
+function json(body: unknown, status: number, requestOrigin: string | null | undefined): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json", ...corsHeaders() },
+    headers: { "content-type": "application/json", ...corsHeaders(requestOrigin) },
   });
 }
 
 export const waitlistRoute = new Hono<{ Bindings: Env }>()
-  .options("/api/waitlist", () => new Response(null, { status: 204, headers: corsHeaders() }))
+  .options("/api/waitlist", (c) => new Response(null, { status: 204, headers: corsHeaders(c.req.header("Origin")) }))
   .post("/api/waitlist", async (c) => {
+    const origin = c.req.header("Origin");
     const parsed = await parseJsonBody(c, WaitlistInput);
-    if (!parsed.ok) return json(await parsed.response.json(), parsed.response.status);
+    if (!parsed.ok) return json(await parsed.response.json(), parsed.response.status, origin);
 
     const ip = c.req.header("CF-Connecting-IP") ?? c.req.header("x-forwarded-for") ?? "unknown";
     const windowBucket = Math.floor(new RealClock().now() / RATE_LIMIT_WINDOW_MS);
@@ -55,7 +69,7 @@ export const waitlistRoute = new Hono<{ Bindings: Env }>()
     const currentCountRaw = await c.env.WAITLIST.get(rateLimitKey);
     const currentCount = currentCountRaw ? Number.parseInt(currentCountRaw, 10) : 0;
     if (currentCount >= RATE_LIMIT_MAX_PER_WINDOW) {
-      return json({ error: "rate limited — try again shortly" }, 429);
+      return json({ error: "rate limited — try again shortly" }, 429, origin);
     }
     await c.env.WAITLIST.put(rateLimitKey, String(currentCount + 1), { expirationTtl: RATE_LIMIT_KV_TTL_SECONDS });
 
@@ -64,5 +78,5 @@ export const waitlistRoute = new Hono<{ Bindings: Env }>()
     // a repeat submission is a silent no-op, still `ok: true`.
     await insertWaitlistEmail(c.env, email, new RealClock().now());
 
-    return json({ ok: true }, 200);
+    return json({ ok: true }, 200, origin);
   });

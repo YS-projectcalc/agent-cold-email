@@ -1,0 +1,15 @@
+-- Dunning notices (D2 brief) — persist the tenant's contact email so the
+-- suspend path can actually email them. `SignupInput` (packages/shared) has
+-- ALWAYS required `contactEmail`, but the signup route validated it at the
+-- boundary and then DROPPED it — it was never stored anywhere, so there was no
+-- address to notify. This closes that capture gap.
+--
+-- Lives in the D1 control-plane index (alongside brand/plan/status), NOT a
+-- TenantDO: the dunning sweep is a cross-tenant D1-level loop, and contact
+-- email is account metadata, not per-tenant runtime email-sending state.
+--
+-- NULLABLE on purpose: tenants that signed up before this column existed (and
+-- the test-only `mintTenant` path, which bypasses /signup) have no contact
+-- email. The dunning path treats NULL as "no contact email on file" — it FLAGS
+-- the tenant (founder copy still sent) rather than inventing an address.
+ALTER TABLE tenants_index ADD COLUMN contact_email TEXT;

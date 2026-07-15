@@ -24,6 +24,18 @@ export interface RateLimitDecision {
 }
 
 export class RateLimiterDO extends DurableObject<Env> {
+  /**
+   * Watchtower DO-storage probe (src/admin/watchtower.ts). A trivial durable-
+   * storage read against a dedicated canary instance — proves the Durable
+   * Object subsystem + its storage are reachable, touching NO tenant data
+   * (RateLimiterDO holds only per-key rate counters). Returns true if the read
+   * completes; the probe caller treats a throw as an unhealthy DO subsystem.
+   */
+  async ping(): Promise<boolean> {
+    await this.ctx.storage.get("state");
+    return true;
+  }
+
   async hit(perMinuteCap: number, perDayCap: number): Promise<RateLimitDecision> {
     const now = Date.now();
     const minuteBucket = Math.floor(now / 60_000);

@@ -48,6 +48,9 @@ export const signupRoute = new Hono<{ Bindings: Env }>().post("/signup", async (
     brand: parsed.data.brand,
     plan: "demo",
     createdAt: new RealClock().now(),
+    // Captured (always required by SignupInput) and now persisted so the
+    // dunning-suspend path has an address to notify (migrations/0007).
+    contactEmail: parsed.data.contactEmail,
   });
 
   const stub = c.env.TENANT.get(c.env.TENANT.idFromName(tenantId));

@@ -12,7 +12,7 @@
 
 import { z } from "zod";
 import type { Env } from "../env.js";
-import { extractBearerToken } from "../auth.js";
+import { resolveRequestToken } from "../auth.js";
 import { resolveTenantFromToken } from "../require-auth.js";
 import { MCP_TOOLS } from "./tools.js";
 
@@ -47,7 +47,12 @@ function rpcError(id: string | number | null, code: number, message: string, sta
   return { status, body: { jsonrpc: "2.0", id, error: { code, message } } };
 }
 
-export async function handleMcpRequest(env: Env, authHeader: string | null, raw: unknown): Promise<McpResponse> {
+export async function handleMcpRequest(
+  env: Env,
+  authHeader: string | null,
+  raw: unknown,
+  apiKeyHeader: string | null = null,
+): Promise<McpResponse> {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return rpcError(null, -32600, "invalid request: expected a single JSON-RPC 2.0 request object", 400);
   }
@@ -96,7 +101,9 @@ export async function handleMcpRequest(env: Env, authHeader: string | null, raw:
     }
 
     case "tools/call": {
-      const token = extractBearerToken(authHeader);
+      // Accept the bearer token from Authorization OR X-API-Key (Smithery's
+      // gateway reserves Authorization) — same resolution as the HTTP surface.
+      const token = resolveRequestToken(authHeader, apiKeyHeader);
       const resolved = await resolveTenantFromToken(env, token);
       if (!resolved.ok) return rpcError(id, -32001, resolved.message, 401);
 
