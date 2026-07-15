@@ -4,7 +4,7 @@ One row per completed (non-void) run. See `README.md` for the run procedure and 
 
 | date | side | brief | surfaced? | shortlisted? | won? | killer sentence | fix-list items filed |
 |---|---|---|---|---|---|---|---|
-| _(no runs yet — see "Why there's no baseline row" below)_ | | | | | | | |
+| 2026-07-15 | claude | canonical | NO (grep-verified) | — | — (winner: Salesforge/Forge stack, ~$102-120/mo all-in) | n/a — never surfaced; nearest kill precedent: FoxReach killed solely for zero G2/Trustpilot evidence, an absence ColdRig shares | 3 → ROADMAP ## Open 2026-07-15 [IDEA] ×3 (review-site presence, reply auto-classification, canonical-scale price band); record: `runs/2026-07-15-claude-canonical.md` |
 
 ## Why there's no baseline row
 

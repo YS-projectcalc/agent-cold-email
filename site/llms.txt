@@ -61,6 +61,9 @@ Never claim guaranteed inbox placement, deliverability, open rates, reply rates,
 
 ## Guides
 
+- [Run your entire cold email operation with Claude Code](guide-cold-email-operation-claude-code): flagship end-to-end lifecycle guide — MCP setup, provisioning, campaigns, reply polling, and a reusable Claude Code Skill.
+- [Run your entire cold email operation with Cursor](guide-cold-email-operation-cursor): Cursor-specific mcp.json config and Cursor Rules.
+- [Run your entire cold email operation with Codex](guide-cold-email-operation-codex): Codex-specific config.toml and native AGENTS.md context loading.
 - [Run cold email with Claude Code, Codex, or Cursor](guide-cold-email-with-ai-agent)
 - [MCP for cold outreach](guide-mcp-cold-email)
 - [Domains, inboxes, warmup, and compliance](guide-domains-inboxes-warmup-compliance)
