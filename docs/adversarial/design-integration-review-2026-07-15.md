@@ -73,3 +73,15 @@ One BLOCKING finding survives self-refutation: a merge-introduced honesty page (
 ---
 
 **VERDICT: NO-SHIP** — blocked on F1 (`status.html:7` health-endpoint CTA 404s; fix `/health`→`/status`). All other checklist items HELD; re-review only the one-line link fix.
+
+---
+
+## Re-review addendum — 2026-07-15 (delta `a64f837`)
+
+Fresh re-attack of the fix delta (`git diff d68be4f..a64f837`): two files, minimal.
+
+- **F1 RESOLVED.** `site/status.html:7` CTA href changed `/health` → `/status`; live-verified `https://agent-cold-email-api.yaakovscher.workers.dev/status` → **HTTP 200 `{"status":"ok"}`**. The link text/phrasing is unchanged and remains accurate — `/status` *is* the purpose-built health/reachability probe (`routes/status.ts`). Regression ring: the diff touches only that one href; the rest of the page is byte-identical. Class sweep: **zero `workers.dev/health` URLs remain in `site/`**; the other `/health` hits in the tree are the engine daemon's real host-probe endpoint (`apps/engine/*`, port 8080 — a genuinely separate service) and internal-doc descriptions, none customer-facing.
+- **F2 (non-blocking) addressed.** `site/compare-vs-diy.html:118` now leads "Coldrig's retail pricing **starts at $99/month for five provisioned mailboxes, then $10/month per additional mailbox** (under the hood, a $49 platform fee plus $10 per mailbox)" — `$99`-first with the decomposition parenthetical, matching the founder directive; the now-stale word "provisional" is dropped (pricing founder-ratified in-session). Compliant.
+- No new findings; no collateral change beyond the two intended edits. Suites/typecheck/dashboard-bundle unaffected (no code touched).
+
+**FINAL VERDICT: SHIP.** The sole blocker is closed and live-verified; the non-blocking recommendation is applied. Clear to merge `a64f837` to main. (Deploy remains founder-gated; the UNVERIFIABLE waitlist-CORS origin note and the NEW out-of-scope `support-kb.ts` stale-tier note stand for founder follow-up, neither gating this merge.)
