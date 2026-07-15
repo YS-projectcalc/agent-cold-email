@@ -54,7 +54,12 @@ Never claim guaranteed inbox placement, deliverability, open rates, reply rates,
 - [Support](support): product, access, security, and abuse-reporting routes.
 - [Compare](compare): Coldrig versus assembling the vendor stack yourself.
 - [Smartlead and Instantly comparison](compare-vs-smartlead-instantly): sourced, non-disparaging comparison with established sending platforms.
+- [Smartlead comparison](compare-vs-smartlead): license-only software vs. mailboxes included — the "$X plan, 0 mailboxes included" pairing math against Smartlead's SmartSenders add-on marketplace.
 - [Salesforge / Forge Stack comparison](compare-vs-salesforge): the strongest current agent-operated alternative, including production status, webhook, multichannel, authentication, and price tradeoffs.
+- [AgentMail comparison](compare-vs-agentmail): cold-outreach platform vs. raw inbox API — honest different-category framing, where AgentMail genuinely wins (funding, MCP discovery hygiene).
+- [Skyp comparison](compare-vs-skyp): infrastructure-plus-campaigns vs. Skyp's full done-for-you GTM stack (email, LinkedIn, lead data, signals); cost-per-mailbox math.
+- [FoxReach comparison](compare-vs-foxreach): mailbox-unmetered vs. volume-metered pricing; resolved API-tier gating; shared independent-review-evidence gap disclosed.
+- [Maildoso comparison](compare-vs-maildoso): cheapest raw per-mailbox price in the category, honestly conceded, normalized against its 15-cold-email/day cap via a cost-per-100-sends/day table.
 - [Infrastructure versus sending platforms](guide-infrastructure-vs-sending-platform): why Coldrig combines infrastructure and execution for an agent.
 - [MCP surface comparison](guide-mcp-tool-count): maps the 17 intent-level tools to the published lifecycle and explains the context/control tradeoff.
 - [FAQ](faq): availability, isolation, compliance, pricing, and deliverability.

@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Coldrig vs AgentMail: Cold-Outreach Platform vs. Raw Inbox API (2026)</title>
+<meta name="description" content="An honest 2026 comparison of Coldrig and AgentMail: AgentMail is a funded, well-documented inbox API for AI agents, not a cold-outreach platform. Where each genuinely fits, sourced pricing, and why this isn't really a fair fight.">
+<link rel="canonical" href="https://coldrig.dev/compare-vs-agentmail">
+<meta property="og:title" content="Coldrig vs AgentMail: Cold-Outreach Platform vs. Raw Inbox API (2026)">
+<meta property="og:description" content="AgentMail gives an agent a raw, programmable inbox. Coldrig runs the full cold-outreach lifecycle. Here's the honest, sourced comparison — including where AgentMail genuinely wins.">
+<meta property="og:url" content="https://coldrig.dev/compare-vs-agentmail">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Coldrig">
+<meta property="og:image" content="https://coldrig.dev/assets/og-image.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://coldrig.dev/assets/og-image.png">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/brand.js" defer></script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "Coldrig vs AgentMail: cold-outreach platform vs. raw inbox API",
+  "description": "A sourced comparison of Coldrig and AgentMail: category fit, pricing, MCP discovery hygiene, and where each is the honest choice.",
+  "datePublished": "2026-07-15",
+  "dateModified": "2026-07-15",
+  "author": { "@id": "https://coldrig.dev/#organization", "@type": "Organization", "name": "EpiphanyMade" },
+  "publisher": { "@id": "https://coldrig.dev/#organization", "@type": "Organization", "name": "EpiphanyMade" }
+}
+</script>
+</head>
+<body>
+<nav class="site-nav">
+  <div class="wrap">
+    <a class="logo" href="/"><span data-brand></span><span class="tag">agent-controlled outreach</span></a>
+    <ul>
+      <li><a href="/">Home</a></li>
+      <li><a href="/docs">Docs</a></li>
+      <li><a href="/pricing">Pricing</a></li>
+      <li><a href="/compare" aria-current="page">Compare</a></li>
+      <li><a href="/for-agents">For agents</a></li>
+      <li><a href="/faq">FAQ</a></li>
+    </ul>
+  </div>
+</nav>
+
+<main class="wrap">
+  <span class="draft-stamp">First-party sources checked 2026-07-15</span>
+  <h1>Coldrig vs AgentMail: cold-outreach platform vs. raw inbox API</h1>
+  <p class="lede">This is not really a fair fight, and we'd rather say so than fake a rout. <strong>Use AgentMail</strong> when an agent needs its own raw, programmable inbox — send, receive, reply, search, threaded email over MCP — and you're prepared to build sequencing, warmup, and suppression yourself. <strong>Use Coldrig</strong> when you want the cold-outreach lifecycle — domains, mailboxes, warmup, campaigns, replies, suppression — as one managed layer your agent drives with a single token. AgentMail is the inbox-primitive layer; Coldrig is a full lifecycle built on top of that kind of primitive. Comparing sticker price alone would be slop.</p>
+
+  <div class="callout">
+    <strong>Why compare against a different category?</strong>
+    AgentMail is the best-funded, best-documented "MCP inbox for AI agents" result a discovery query returns, and it's frequently the first thing a research pass finds when searching for agent-operated email. A real buyer-agent research run we conducted independently evaluated AgentMail directly and rejected it for exactly this reason: <em>"It is explicitly not built or marketed for cold email / warmed mailbox fleets; it's an agent-native inbox API for transactional/conversational use — category mismatch."</em> (Our own internal buyer-agent research run, blind shopper, 2026-07 — not a marketing claim about AgentMail.)
+  </div>
+  <div class="callout">
+    <strong>No fabricated numbers</strong>
+    Every AgentMail figure below is sourced from agentmail.to's own pricing page and public site, fetched directly 2026-07-15. Coldrig figures come from the current <a href="/pricing">pricing page</a>. No deliverability, open-rate, or reply-rate comparison is made anywhere on this page.
+  </div>
+
+  <h2>Fast decision table</h2>
+  <table>
+    <thead><tr><th>Requirement</th><th>AgentMail</th><th>Coldrig</th></tr></thead>
+    <tbody>
+      <tr><td>Raw programmable inbox over MCP</td><td>Yes — this is the entire product</td><td>Yes, as one part of the lifecycle</td></tr>
+      <tr><td>Cold-outreach lifecycle (domains → mailboxes → warmup → campaigns → replies)</td><td><strong>No</strong> — confirmed no campaign, sequence, or cold-outreach layer anywhere in AgentMail's own marketing</td><td>Yes, one managed lifecycle behind <code>setup_infrastructure</code> and <code>launch_campaign</code></td></tr>
+      <tr><td>Warmup / deliverability tooling</td><td>None found beyond standard SPF/DKIM/DMARC auth</td><td>Built-in warmup state, tracked per mailbox</td></tr>
+      <tr><td>Suppression / unsubscribe compliance</td><td>None found — consistent with not being built for outbound marketing mail</td><td>Server-enforced suppression and unsubscribe by default</td></tr>
+      <tr><td>MCP discovery-file hygiene</td><td>Best of any cold-email-adjacent vendor researched — its own <code>/.well-known/mcp/server-card.json</code> resolves live</td><td>Also live — see <a href="/.well-known/mcp/server-card.json">our server card</a></td></tr>
+      <tr><td>Funding / credibility signal</td><td>$6M seed led by General Catalyst (announced March 2026), YC S25 — best-credentialed vendor in this comparison set</td><td>Early access, self-funded, no external round to disclose</td></tr>
+      <tr><td>Entry price at 10 inboxes/mailboxes</td><td>Developer tier: $20/mo, 10 inboxes, no cold-outreach tooling included</td><td>$149/mo, 10 provisioned mailboxes, full lifecycle included</td></tr>
+      <tr><td>Live production track record</td><td>Yes — a shipped, paying-customer product</td><td><strong>No</strong> — Coldrig is early access; the API, MCP endpoint, and sandbox are live, but real sending is not active yet (see <a href="/faq">FAQ</a>)</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Where AgentMail is honestly stronger</h2>
+  <ul>
+    <li><strong>Funding and credibility.</strong> A $6M seed led by General Catalyst and a YC S25 badge are real, verifiable signals Coldrig cannot currently match.</li>
+    <li><strong>Best-in-class MCP discovery hygiene.</strong> Its <code>server-card.json</code> resolves cleanly with OAuth2 details — the standards-based discovery surface an agent is specifically looking for, done properly.</li>
+    <li><strong>Genuinely cheaper if a raw inbox is all you need.</strong> $20/mo for 10 inboxes is less than $149/mo for 10 Coldrig mailboxes — but that price buys a different, smaller thing (see pricing section below).</li>
+    <li><strong>Simplicity.</strong> One inbox, one MCP connection, nothing else to configure — the right shape for a support-bot or personal-assistant use case, not a cold-outbound one.</li>
+  </ul>
+
+  <h2>Why this isn't the head-to-head it looks like</h2>
+  <p>AgentMail's own site describes exactly what it is: <em>"Email for AI Agents — give an agent its own inbox to send, receive, reply, search, and manage threaded email over MCP,"</em> explicitly distinguished from transactional ESPs like SendGrid. There's no mention anywhere in their marketing of campaign management, sequence automation, or cold outreach. If your agent needs to run actual cold outreach — multiple mailboxes working in concert, staged warmup ramps, per-mailbox send caps, unsubscribe/suppression enforcement, campaign-level reply handling — AgentMail gives you the inbox and leaves the rest to you. That's the same DIY cost calculus covered in <a href="/compare-vs-diy">our DIY comparison</a>, just starting one layer higher: the inbox is provisioned, but the sequencing, warmup, and compliance logic is still your job, and still has to be re-derived by your agent every session.</p>
+
+  <h2>Pricing: compare what you're actually buying</h2>
+  <table>
+    <thead><tr><th></th><th>AgentMail</th><th>Coldrig</th></tr></thead>
+    <tbody>
+      <tr><td>Free tier</td><td>$0/mo — 3 inboxes, 3,000 emails/mo, 100 emails/day cap, 3 GB storage</td><td>Free sandbox — full simulated pipeline, no real domains, mailboxes, or spend</td></tr>
+      <tr><td>Entry paid tier</td><td>Developer: $20/mo — 10 inboxes, 10,000 emails/mo (no daily cap), 10 custom domains, email support. No sequencing, no warmup, no unsubscribe handling at any tier.</td><td>$99/mo for 5 provisioned mailboxes, then $10/mo per additional mailbox (a $49 platform fee plus $10/mailbox, five-mailbox minimum): $149 for 10, $249 for 20, $649 for 60.</td></tr>
+      <tr><td>Send quota / billing meter</td><td>Free tier caps at 100 emails/day; Developer and Startup tiers publish a monthly email count (10,000 / 150,000) but these describe raw inbox API throughput, not a cold-campaign sending program.</td><td><strong>No send quota</strong> — sends are not the billing meter. Planning capacity ≈3,300/mo at 5 mailboxes (same physics on any platform; non-contractual planning guidance, not a purchased allowance — see <a href="/pricing#calculator-title">the calculator</a>).</td></tr>
+      <tr><td>Mid tier</td><td>Startup: $200/mo — 150 inboxes, 150,000 emails/mo, SOC 2, Slack support. No tier between $20 and $200 (no ~30-50 inbox option).</td><td>$249/mo at 20 mailboxes, $649/mo at 60 — a continuous curve, no pricing cliffs.</td></tr>
+    </tbody>
+  </table>
+  <p>AgentMail's Developer tier is real money saved if a bare inbox is genuinely the whole requirement. It stops being a fair price comparison the moment cold-outreach features enter the requirement, because AgentMail doesn't sell any — the entire sequencing, warmup, and compliance layer would need to be built and held in your agent's own state, which is exactly the friction <a href="/compare-vs-diy">the DIY comparison</a> quantifies.</p>
+
+  <h2>Bottom line</h2>
+  <p>If the requirement is "give my agent a raw, well-documented inbox and I'll build the rest," AgentMail is a strong, credible, better-funded choice, and its MCP discovery hygiene is worth learning from. If the requirement is "run cold outreach — sequences, warmup, replies, suppression — without re-deriving that state every session," Coldrig is built for exactly that and AgentMail isn't built for it at all. Re-run this comparison if AgentMail ships a cold-outreach layer; nothing in their public roadmap suggests that today.</p>
+
+  <h2>Related</h2>
+  <ul>
+    <li><a href="/compare-vs-diy">Agent-run platform vs. hand-assembling the vendors yourself</a> — what building AgentMail's missing layer actually costs.</li>
+    <li><a href="/compare-vs-skyp">Coldrig vs Skyp</a>.</li>
+    <li><a href="/compare-vs-foxreach">Coldrig vs FoxReach</a>.</li>
+    <li><a href="/compare-vs-maildoso">Coldrig vs Maildoso</a>.</li>
+    <li><a href="/compare-vs-smartlead">Coldrig vs Smartlead</a>.</li>
+    <li><a href="/compare-vs-salesforge">Coldrig vs Salesforge / Forge Stack</a> — the strongest current agent-operated alternative.</li>
+    <li><a href="/guide-mcp-tool-count">17 intent-level tools vs larger vendor MCP surfaces</a>.</li>
+  </ul>
+
+  <h2>Sources and verification</h2>
+  <ul>
+    <li><a href="https://www.agentmail.to/pricing">AgentMail: pricing tiers</a></li>
+    <li><a href="https://www.agentmail.to/">AgentMail: product positioning and inbox-API scope</a></li>
+    <li><a href="https://www.agentmail.to/.well-known/mcp/server-card.json">AgentMail: MCP server card</a> — fetched live 2026-07-15, resolves with OAuth2 details</li>
+    <li><a href="https://www.agentmail.to/llms.txt">AgentMail: llms.txt</a></li>
+    <li>Our own internal buyer-agent research run (blind shopper, 2026-07) — category-mismatch quote sourced here</li>
+    <li><a href="/pricing">Coldrig pricing</a></li>
+    <li><a href="/.well-known/mcp/server-card.json">Coldrig MCP server card</a></li>
+    <li><a href="/openapi.yaml">Coldrig OpenAPI</a></li>
+  </ul>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p><span data-brand></span> is operated by EpiphanyMade. Early access — no deliverability or inbox-placement guarantees.</p>
+    <ul>
+      <li><a href="/privacy">Privacy</a></li>
+      <li><a href="/terms">Terms</a></li>
+      <li><a href="/aup">Acceptable Use</a></li><li><a href="/dpa">DPA</a></li>
+      <li><a href="/docs">Docs</a></li>
+      <li><a href="/guide-cold-email-with-ai-agent">Guides</a></li>
+      <li><a href="/faq">FAQ</a></li>
+      <li><a href="openapi.yaml">OpenAPI</a></li>
+      <li><a href="llms.txt">llms.txt</a></li>
+      <li><a href="https://github.com/YS-projectcalc/agent-cold-email">GitHub</a></li>
+    </ul>
+  </div>
+</footer>
+</body>
+</html>

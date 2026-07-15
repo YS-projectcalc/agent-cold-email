@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Coldrig vs FoxReach: Mailbox-Metered vs. Volume-Metered Cold Email (2026)</title>
+<meta name="description" content="An honest 2026 comparison of Coldrig and FoxReach: FoxReach's free tier and agent-native content vs Coldrig's unmetered mailbox pricing. Sourced pricing, resolved API-gating claim, shared review-evidence gap disclosed.">
+<link rel="canonical" href="https://coldrig.dev/compare-vs-foxreach">
+<meta property="og:title" content="Coldrig vs FoxReach: Mailbox-Metered vs. Volume-Metered Cold Email (2026)">
+<meta property="og:description" content="FoxReach prices by contact/email volume with unlimited mailboxes; Coldrig prices by mailbox with no send quota. Here's the honest, sourced comparison — including where FoxReach wins.">
+<meta property="og:url" content="https://coldrig.dev/compare-vs-foxreach">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="Coldrig">
+<meta property="og:image" content="https://coldrig.dev/assets/og-image.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://coldrig.dev/assets/og-image.png">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/brand.js" defer></script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "Coldrig vs FoxReach: mailbox-metered vs. volume-metered cold email",
+  "description": "A sourced comparison of Coldrig and FoxReach: pricing structure, API/MCP access gating, compliance claims, and where each is the honest choice.",
+  "datePublished": "2026-07-15",
+  "dateModified": "2026-07-15",
+  "author": { "@id": "https://coldrig.dev/#organization", "@type": "Organization", "name": "EpiphanyMade" },
+  "publisher": { "@id": "https://coldrig.dev/#organization", "@type": "Organization", "name": "EpiphanyMade" }
+}
+</script>
+</head>
+<body>
+<nav class="site-nav">
+  <div class="wrap">
+    <a class="logo" href="/"><span data-brand></span><span class="tag">agent-controlled outreach</span></a>
+    <ul>
+      <li><a href="/">Home</a></li>
+      <li><a href="/docs">Docs</a></li>
+      <li><a href="/pricing">Pricing</a></li>
+      <li><a href="/compare" aria-current="page">Compare</a></li>
+      <li><a href="/for-agents">For agents</a></li>
+      <li><a href="/faq">FAQ</a></li>
+    </ul>
+  </div>
+</nav>
+
+<main class="wrap">
+  <span class="draft-stamp">First-party sources checked 2026-07-15</span>
+  <h1>Coldrig vs FoxReach: mailbox-metered vs. volume-metered cold email</h1>
+  <p class="lede">FoxReach is the closest thing to a direct agent-native competitor Coldrig has: built specifically for AI agent builders, with a free tier and dedicated Claude Code content. <strong>Choose FoxReach</strong> if you want to start at $0 and your volume fits its contact/email-count tiers, or if its automated warmup and unsubscribe-header claims match your needs today. <strong>Choose Coldrig</strong> if you want API and MCP access included at every tier with no separate paywall, and pricing that scales with mailbox count rather than a monthly contact/email ceiling. Neither of us has independent review evidence yet — we say so plainly below.</p>
+
+  <div class="callout">
+    <strong>Apples-to-oranges pricing axis — stated plainly</strong>
+    FoxReach does not charge per mailbox at all: "Unlimited email accounts" is included on every tier, including Free. Its pricing scales on contacts and monthly email volume instead. Coldrig prices by provisioned mailbox count and does not meter sends. These are genuinely different axes; a raw dollar-for-dollar comparison would be misleading without saying so.
+  </div>
+  <div class="callout">
+    <strong>No fabricated numbers</strong>
+    Every FoxReach figure below is sourced from foxreach.io's own pricing page, fetched directly 2026-07-15, including the tier-by-tier feature JSON-LD FoxReach itself publishes. Coldrig figures come from the current <a href="/pricing">pricing page</a>. No deliverability comparison is made.
+  </div>
+
+  <h2>Fast decision table</h2>
+  <table>
+    <thead><tr><th>Requirement</th><th>FoxReach</th><th>Coldrig</th></tr></thead>
+    <tbody>
+      <tr><td>Pricing axis</td><td>Contacts + emails/month; unlimited mailboxes on every tier</td><td>Provisioned mailbox count; no send quota</td></tr>
+      <tr><td>Free tier</td><td>$0 forever — 200 contacts, 500 emails/mo, unlimited email accounts, 25 AI credits</td><td>Free sandbox — full simulated pipeline, no real spend, no volume limit relevant (nothing sends for real)</td></tr>
+      <tr><td>REST API access</td><td>Confirmed gated to Growth tier ($89/mo) and above — not listed on Free or Starter tier descriptions</td><td>Included at every tier, no separate paywall</td></tr>
+      <tr><td>MCP access</td><td>Advertised as part of the platform's overall capability set; the pricing page does not break out MCP access by tier separately from the REST API, so we can't confirm whether it follows the same Growth+ gate — <strong>not asserted either way</strong></td><td>Included at every tier, no separate paywall</td></tr>
+      <tr><td>Automated inbox warmup</td><td>Continuous, active from signup, on every tier including Free (per FoxReach's own claim)</td><td>Built into provisioning, tracked per mailbox</td></tr>
+      <tr><td>One-click List-Unsubscribe / compliance claim</td><td>Explicitly claims one-click List-Unsubscribe header, DMARC-aware sending, and agent-proof suppression lists</td><td>Server-enforced suppression and unsubscribe; no explicit RFC-8058 claim published (see <a href="/faq">FAQ</a> for our current compliance disclosure)</td></tr>
+      <tr><td>Agent-native content / discoverability</td><td>llms.txt live; dedicated "Cold Email with Claude Code" academy content and framework-specific integration pages (LangGraph, OpenAI Agents SDK, Claude Agent SDK, CrewAI)</td><td>llms.txt live; flagship <a href="/guide-cold-email-operation-claude-code">Claude Code operation guide</a> and Cursor/Codex variants</td></tr>
+      <tr><td>Independent review evidence (G2/Trustpilot)</td><td>None found</td><td>None yet — see the disclosure below</td></tr>
+      <tr><td>Live production track record</td><td>Yes — a shipped, live-sending product</td><td><strong>No</strong> — Coldrig is early access; the API, MCP endpoint, and sandbox are live, but real sending is not active yet (see <a href="/faq">FAQ</a>)</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Where FoxReach is honestly stronger</h2>
+  <ul>
+    <li><strong>A genuine $0 tier.</strong> 200 contacts and 500 emails/month at zero cost, no credit card, lowers evaluation friction below anything Coldrig currently offers as a real (non-sandbox) tier.</li>
+    <li><strong>Agent-native content strategy.</strong> A dedicated Claude Code academy page and framework-specific integration guides for LangGraph, the OpenAI Agents SDK, the Claude Agent SDK, and CrewAI make FoxReach the strongest head-to-head content competitor of the vendors we've researched — it's already publishing the exact content shape that wins buyer-agent discovery.</li>
+    <li><strong>Broader automated-warmup and compliance claims.</strong> FoxReach explicitly claims a one-click List-Unsubscribe header and agent-proof suppression lists, plus a specific deliverability-lift claim ("primary inbox at rates 30-50% higher than raw SMTP through a generic ESP") — real, stated commitments, even though they're marketing-page claims we haven't independently verified.</li>
+    <li><strong>No mailbox ceiling at any price, including Free.</strong> If contact/email volume is genuinely the limiting factor rather than mailbox count, FoxReach's model can be cheaper at small scale.</li>
+  </ul>
+
+  <h2>Where Coldrig's design is different</h2>
+  <ul>
+    <li><strong>API and MCP included at every tier.</strong> FoxReach confirms REST API access starts at the $89/mo Growth tier; Coldrig includes the full HTTP API, MCP endpoint, and CLI at every mailbox tier with no separate feature-gate.</li>
+    <li><strong>No send quota, ever.</strong> FoxReach's tiers cap total monthly emails (500 → 10,000 → 100,000 → 500,000); Coldrig doesn't meter sends at all — capacity is bounded by warmup stage, mailbox health, and provider policy instead of a purchased allowance.</li>
+    <li><strong>Mailbox-based pricing scales predictably with infrastructure, not contact-list size.</strong> A large contact list you're not actively emailing costs nothing extra on Coldrig; on FoxReach it would need to fit inside a contact-count ceiling.</li>
+  </ul>
+
+  <div class="callout">
+    <strong>Honest disclosure: we share FoxReach's weakest row</strong>
+    A real buyer-agent research run we conducted found no independent review evidence (no Trustpilot presence, no G2 listing) for FoxReach and killed it from consideration specifically for that reason: <em>"too much unverified risk to run unsupervised."</em> Coldrig has the identical absence today. We're not claiming an advantage on this row — see <a href="/faq">FAQ</a> for our current early-access disclosure.
+  </div>
+
+  <h2>Pricing: what a mailbox costs, and what a send-quota model costs</h2>
+  <table>
+    <thead><tr><th>Plan</th><th>Price (monthly / annual)</th><th>Contacts</th><th>Emails/mo</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>Free</td><td>$0</td><td>200</td><td>500</td><td>Unlimited email accounts; 25 AI credits</td></tr>
+      <tr><td>Starter</td><td>$34 / $27 (annual)</td><td>5,000</td><td>10,000</td><td>2,500 AI credits; no REST API access</td></tr>
+      <tr><td>Growth</td><td>$89 / $71 (annual)</td><td>50,000</td><td>100,000</td><td>REST API access starts here; 3 workspaces</td></tr>
+      <tr><td>Agency</td><td>$169 / $135 (annual)</td><td>200,000</td><td>500,000</td><td>White-label, unlimited team</td></tr>
+    </tbody>
+  </table>
+  <p>Send quota / billing meter — <strong>Coldrig has no send quota</strong>. Sends are not the billing meter; the number that matters instead is mailbox count and how much conservative, warmup-gated volume it can carry: ≈3,300/mo planning capacity at 5 mailboxes (same physics on any platform — non-contractual planning guidance, not a purchased allowance; see <a href="/pricing#calculator-title">the calculator</a>). FoxReach's Growth plan advertises a hard 100,000-emails/month ceiling for $89/mo across unlimited mailboxes — genuinely more headline volume than Coldrig quotes, and a fair, real number worth stating rather than dodging. The tradeoff: FoxReach's number is a purchased monthly allowance you can exceed and get throttled on ("you won't be able to send more emails... until you upgrade"); Coldrig's number is a planning estimate with no contractual ceiling to hit at all.</p>
+
+  <h2>Bottom line</h2>
+  <p>FoxReach is the strongest agent-native content and free-tier competitor in this set, and its compliance claims deserve to be taken seriously rather than waved away. If contact/email volume is the real constraint and a fast, free start matters, FoxReach is a defensible pick today. If the requirement is unmetered mailbox-based sending with API/MCP access that isn't paywalled behind a mid-tier plan, Coldrig's structure fits better — with the caveat that both of us currently lack independent review evidence.</p>
+
+  <h2>Related</h2>
+  <ul>
+    <li><a href="/compare-vs-agentmail">Coldrig vs AgentMail</a>.</li>
+    <li><a href="/compare-vs-skyp">Coldrig vs Skyp</a>.</li>
+    <li><a href="/compare-vs-maildoso">Coldrig vs Maildoso</a>.</li>
+    <li><a href="/compare-vs-smartlead">Coldrig vs Smartlead</a>.</li>
+    <li><a href="/guide-cold-email-operation-claude-code">Run your entire cold email operation with Claude Code</a>.</li>
+  </ul>
+
+  <h2>Sources and verification</h2>
+  <ul>
+    <li><a href="https://www.foxreach.io/pricing">FoxReach: pricing tiers and per-tier feature JSON-LD</a> — fetched live 2026-07-15</li>
+    <li><a href="https://www.foxreach.io/solutions/for-ai-agents">FoxReach: positioning for AI agent builders</a></li>
+    <li><a href="https://www.foxreach.io/llms.txt">FoxReach: llms.txt</a></li>
+    <li><a href="https://www.foxreach.io/academy/claude-code-cold-email">FoxReach: "Cold Email with Claude Code" content</a></li>
+    <li>Our own internal buyer-agent research run (blind shopper, 2026-07) — review-evidence kill quote sourced here</li>
+    <li><a href="/pricing">Coldrig pricing</a></li>
+    <li><a href="/faq">Coldrig FAQ</a></li>
+  </ul>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <p><span data-brand></span> is operated by EpiphanyMade. Early access — no deliverability or inbox-placement guarantees.</p>
+    <ul>
+      <li><a href="/privacy">Privacy</a></li>
+      <li><a href="/terms">Terms</a></li>
+      <li><a href="/aup">Acceptable Use</a></li><li><a href="/dpa">DPA</a></li>
+      <li><a href="/docs">Docs</a></li>
+      <li><a href="/guide-cold-email-with-ai-agent">Guides</a></li>
+      <li><a href="/faq">FAQ</a></li>
+      <li><a href="openapi.yaml">OpenAPI</a></li>
+      <li><a href="llms.txt">llms.txt</a></li>
+      <li><a href="https://github.com/YS-projectcalc/agent-cold-email">GitHub</a></li>
+    </ul>
+  </div>
+</footer>
+</body>
+</html>
