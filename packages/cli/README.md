@@ -8,20 +8,30 @@ facade — no logic beyond argument parsing and printing; every one hits
 directly. The tenth, `mcp`, bridges MCP-over-stdio to the same hosted API's
 `/mcp` endpoint — see below.
 
-**Not yet published to npm** — this package ships in the repo ahead of the
-`npx agent-cold-email` distribution flip, which is an owner-hands activation
-step (`ACTIVATION.md`). Until then, run it from a local build (see below).
+> **Early access.** Published on npm as `agent-cold-email@0.2.0`. The API it
+> talks to runs in test mode today: sandbox vendor adapters, no real
+> domains, mailboxes, or sends yet — see [Pricing](#pricing) below and the
+> repo root `README.md` for full status.
 
-## Install (once published)
+## Install
 
 ```
 npx agent-cold-email demo
 ```
 
+## Pricing
+
+The `demo` command above is free, today — no signup, no card, no waitlist.
+Provisional early-access pricing for real sending once it activates: starts
+at **$99/month for 5 provisioned mailboxes**, then **$10/month per
+additional mailbox** (a $49 platform fee + $10/mailbox, 5-mailbox minimum).
+**No send quota** — sends are not the billing meter. Full ladder and
+calculator: [coldrig.dev/pricing](https://coldrig.dev/pricing).
+
 ## The demo (no signup required)
 
 ```
-node dist/index.js demo
+npx agent-cold-email demo
 ```
 
 Mints a disposable demo tenant, provisions sample branded domains and
@@ -29,7 +39,9 @@ mailboxes, and runs the accelerated sandbox pipeline end to end: warmup,
 sends respecting per-mailbox caps, replies, bounces, and a stop-on-reply
 proof — all against a fault-injecting simulator, never a real domain,
 mailbox, or inbox. Ends with an honest line: this ran in a sandbox, no real
-emails were sent, real sending is early-access.
+emails were sent, real sending is early-access. Building from source instead
+(e.g. to test an unreleased change)? Run `node dist/index.js demo` after
+the build steps in [How to run](#how-to-run) below.
 
 ## Commands
 

@@ -2,8 +2,8 @@
   "$schema": "https://modelcontextprotocol.io/schemas/server-card.json",
   "name": "agent-cold-email",
   "displayName": "Coldrig",
-  "version": "0.1.0",
-  "description": "Agent-controlled cold-outreach infrastructure. One bearer token and 17 focused tools replace multiple vendor accounts, preserve durable infrastructure state, provision isolated domains and mailboxes, run sequences, manage replies, and enforce guardrails server-side. The customer's own agent remains the strategy and content layer.",
+  "version": "0.2.0",
+  "description": "Agent-controlled cold-outreach infrastructure. One bearer token and 17 focused tools replace multiple vendor accounts, preserve durable infrastructure state, provision isolated domains and mailboxes, run sequences, manage replies, and enforce guardrails server-side. The customer's own agent remains the strategy and content layer. Free sandbox demo today, no card, no waitlist; provisional early-access pricing starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox, with no send quota (sends are not the billing meter).",
   "homepage": "https://coldrig.dev/",
   "documentation": "https://coldrig.dev/docs",
   "license": "MIT",
@@ -21,6 +21,11 @@
   },
   "status": "early-access",
   "statusNote": "Public early access: the hosted API, MCP endpoint, npm CLI, and isolated sandbox are live. Real sending is not active. Demo tenants are structurally unable to reach vendor adapters and incur no real spend.",
+  "pricing": {
+    "model": "Provisional early-access pricing: starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox (a $49 platform fee + $10/mailbox, 5-mailbox minimum; ladder runs 5-60 mailboxes). No send quota — sends are not the billing meter.",
+    "freeTier": "Free sandboxed demo, no signup, no card, no waitlist: POST /signup or `npx agent-cold-email demo`.",
+    "url": "https://coldrig.dev/pricing"
+  },
   "capabilities": {
     "tools": true,
     "resources": false,

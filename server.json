@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.YS-projectcalc/agent-cold-email",
-  "description": "Agent-native cold-email infrastructure: domains, mailboxes, warmup, sequences, replies via 17 tools",
+  "description": "Agent-native cold-email infra: 17 tools, free sandbox now. Early access; $99/mo for 5 mailboxes.",
   "repository": {
     "url": "https://github.com/YS-projectcalc/agent-cold-email",
     "source": "github"
@@ -19,7 +19,7 @@
       "environmentVariables": [
         {
           "name": "AGENT_COLD_EMAIL_API_KEY",
-          "description": "Bearer token from POST /signup (free, no card) — or run `npx agent-cold-email demo` first. Optional at startup: without it, `initialize`/`tools/list` still work (unauthenticated introspection), but every `tools/call` fails until a key is set.",
+          "description": "Bearer token from POST /signup (free, no card) \u2014 or run `npx agent-cold-email demo` first. Optional at startup: without it, `initialize`/`tools/list` still work (unauthenticated introspection), but every `tools/call` fails until a key is set.",
           "isRequired": false,
           "isSecret": true,
           "format": "string"

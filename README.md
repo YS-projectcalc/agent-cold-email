@@ -20,6 +20,10 @@ If you're a coding agent evaluating cold-email tooling for a task like "set up a
 
 Full design rationale: [`SPEC.md`](./SPEC.md).
 
+## Pricing
+
+**Provisional early-access pricing** — self-serve, no "contact sales": starts at **$99/month for 5 provisioned mailboxes**, then **$10/month per additional mailbox** (a $49 platform fee + $10/mailbox, 5-mailbox minimum; full ladder 5–60 mailboxes at [coldrig.dev/pricing](https://coldrig.dev/pricing)). **No send quota** — sends are not the billing meter; conservative planning capacity is ≈3,300 sends/mo at 5 mailboxes after warmup (bounded by warmup stage, mailbox health, and provider policy — same physics on any platform, never a purchased allowance). Checkout runs on Stripe test keys today (no real card charged); real sending isn't armed yet — see [Status & early access](#status--early-access) below.
+
 ## The 17 tools
 
 | Tool | What it does |
@@ -63,7 +67,7 @@ This is the full list — see [`SPEC.md` §6](./SPEC.md#6-agent-surface--the-too
 npx agent-cold-email demo
 ```
 
-The HTTP facade **and** the hosted MCP endpoint (`/mcp` above) are **live in test mode** at `https://agent-cold-email-api.yaakovscher.workers.dev` — the 17 intents are real, tested, reachable over HTTP or MCP (same tools, same tenant-scoped bearer-token auth), running against a fault-injecting **sandbox** vendor layer (no real domains/mailboxes/spend, not yet available for real sending). The CLI (`packages/cli`) is built and works today from a local build; `npx agent-cold-email` itself is published as of 2026-07-14 (`agent-cold-email@0.1.0`) (`ACTIVATION.md`) — the npm handle is live. This test-mode URL becomes the brand's custom domain at launch.
+The HTTP facade **and** the hosted MCP endpoint (`/mcp` above) are **live in test mode** at `https://agent-cold-email-api.yaakovscher.workers.dev` — the 17 intents are real, tested, reachable over HTTP or MCP (same tools, same tenant-scoped bearer-token auth), running against a fault-injecting **sandbox** vendor layer (no real domains/mailboxes/spend, not yet available for real sending). The CLI ships on npm as `agent-cold-email@0.2.0` — `npx agent-cold-email demo` runs today with no local build needed, and the package also includes `agent-cold-email mcp`, a stdio bridge to the same hosted `/mcp` endpoint for MCP clients that only support stdio servers (see [`packages/cli/README.md`](./packages/cli/README.md)). This test-mode URL becomes the brand's custom domain at launch.
 
 **What works today:** the 17 intents are real, tested HTTP endpoints behind a bearer token, live in test mode at `https://agent-cold-email-api.yaakovscher.workers.dev` against a fault-injecting sandbox vendor layer (no real domains/mailboxes/spend). Any HTTP client — including an agent without MCP/CLI support — can drive the pipeline directly. See [`site/openapi.yaml`](./site/openapi.yaml) for the full REST contract, or [`AGENTS.md`](./AGENTS.md) for the agent-facing walkthrough.
 
@@ -100,9 +104,16 @@ This project is under active build in **test mode only** — Stripe test keys, s
 
 Detailed build state, phase-by-phase status, and session history live in [`ROADMAP.md`](./ROADMAP.md) and [`HANDOFF.md`](./HANDOFF.md) — not in this README.
 
-**Where this stands today (2026-07-15):** the site is LIVE at [coldrig.dev](https://coldrig.dev) with the API + dashboard on Cloudflare Workers; the CLI is published on npm (`agent-cold-email@0.1.0`, with a 0.2.0 stdio MCP-bridge mode committed and pending publish) and the MCP server is listed in the official MCP Registry (`io.github.YS-projectcalc/agent-cold-email`). Still test-mode: **Stripe cannot take money** (live key unset — checkout is simulated). A human signup flow and dashboard Billing/Setup/Recovery pages now exist (external design integration, merged to main), but billing mutations (upgrade/downgrade/cancel/payment-method) are deliberately disabled pending a backend Stripe quantity-billing migration — a human still can't fully self-serve buy or manage a subscription today. The real send/receive engine, the per-tenant activation allowlist, and the CAN-SPAM one-click opt-out flow are all committed (shipped dark/flag-gated) after clean adversarial re-attacks, but not yet armed or deployed — arming and deploying are owner-hands steps in `ACTIVATION.md` (see `HANDOFF.md`).
+**Where this stands today (2026-07-15):** the site is LIVE at [coldrig.dev](https://coldrig.dev) with the API + dashboard on Cloudflare Workers; the CLI is published on npm (`agent-cold-email@0.2.0`, including the `agent-cold-email mcp` stdio-bridge mode) and the MCP server is listed in the official MCP Registry (`io.github.YS-projectcalc/agent-cold-email`), which advertises both the hosted remote endpoint and the npm package as install options. Still test-mode: **Stripe cannot take money** (live key unset — checkout is simulated). A human signup flow and dashboard Billing/Setup/Recovery pages now exist (external design integration, merged to main), but billing mutations (upgrade/downgrade/cancel/payment-method) are deliberately disabled pending a backend Stripe quantity-billing migration — a human still can't fully self-serve buy or manage a subscription today. The real send/receive engine, the per-tenant activation allowlist, and the CAN-SPAM one-click opt-out flow are all committed (shipped dark/flag-gated) after clean adversarial re-attacks, but not yet armed or deployed — arming and deploying are owner-hands steps in `ACTIVATION.md` (see `HANDOFF.md`).
 
-Want to be notified when real sending goes live? Join the waitlist at [coldrig.dev](https://coldrig.dev).
+**Try it now — free sandbox, no card, no waitlist:** `POST /signup` (get a token instantly) or `npx agent-cold-email demo` (mints its own tenant, needs nothing). Pricing for real sending once it activates: [coldrig.dev/pricing](https://coldrig.dev/pricing).
+
+## Learn more
+
+- [Compare](https://coldrig.dev/compare) — Coldrig vs a DIY stack, vs Smartlead, vs Salesforge, vs AgentMail, vs Skyp, vs FoxReach, vs Maildoso: sourced, numbers-first comparisons.
+- [Run your cold email operation with Claude Code](https://coldrig.dev/guide-cold-email-operation-claude-code) — the flagship agent-operation guide (Cursor and Codex variants are linked from it).
+- [Should your AI agent use Coldrig?](https://coldrig.dev/for-agents) — evidence, fit, and limits, written for an evaluating agent (machine-readable twin: [`agent-evaluation.md`](https://coldrig.dev/agent-evaluation.md)).
+- [Pricing](https://coldrig.dev/pricing) · [FAQ](https://coldrig.dev/faq) · [Docs](https://coldrig.dev/docs)
 
 ## License
 
