@@ -71,6 +71,24 @@ Only the stale waitlist framing was removed ("Want to be notified when real send
 ## UNVERIFIABLE
 - **Whether a specific directory (Glama/PulseMCP) renders server.json `description` in isolation vs the fuller ServerDetail** — depends on each directory's template; I confirmed the MCP-Registry ServerDetail carries more disclosure (env-var descriptions "free, no card") but could not drive each third-party listing's live rendering. This is the residual risk behind the #1 recommendation; resolving it = adopt the 96-char reword as cheap insurance.
 
+---
+
+## ADDENDUM (post-dispatch) — scope +1 file `glama.json` + mid-review commit
+
+**Baseline moved during review: `efc3d74` → `ebd1a12`** ("feat(shopfront): directory-source refresh…"). The 4 reviewed files + `glama.json` + `ROADMAP.md` + this verdict doc were committed mid-review (shared-worktree mutation class). Re-verified the committed bytes:
+- Committed content == the working-tree bytes I reviewed. `git diff --numstat efc3d74 ebd1a12` for README (14/3), cli/README (18/6), server-card (7/2), ROADMAP (2/2) are byte-identical to the working-tree diff I reviewed; server-card `statusNote` decoded-compares UNCHANGED; no unreviewed content slipped into any file.
+- **server.json (the one delta beyond my review):** description was replaced with my recommended NB reword — committed value `"Agent-native cold-email infra: 17 tools, free sandbox now. Early access; $99/mo for 5 mailboxes."` (96 chars, re-validated VALID against the live schema). Plus two no-ops: em-dash `—`→`—` (same char, JSON escape) in an env-var description, and a trailing newline added. **→ My single NON-BLOCKING finding (#1) is RESOLVED in the committed bytes.**
+
+### Attack #7 — repo-root `glama.json` (scope add) — VERIFIED / HELD
+On-disk + committed bytes (identical): `{"$schema":"https://glama.ai/mcp/schemas/server.json","maintainers":["YS-projectcalc"]}`.
+- **Schema fetched myself** (`https://glama.ai/mcp/schemas/server.json`, HTTP 200, draft-07): `type:object`, `required:["maintainers"]`, sole declared property `maintainers` = array of unique strings (GitHub usernames). Builder's claim confirmed exactly.
+- **`jsonschema` validation: VALID.** Zero undeclared data fields (only `maintainers` + the `$schema` meta-pointer). (`additionalProperties` is unset → defaults true, so even extras wouldn't fail; none present.)
+- **Maintainer handle matches repo owner:** `server.json` repository URL `github.com/YS-projectcalc/agent-cold-email` → owner `YS-projectcalc` == `maintainers[0]`. ✓
+- Location correct: repo root (`git rev-parse --show-toplevel` = the dir holding glama.json), which is where Glama reads it.
+
+### Updated verdict
+**SHIP — 0 blocking, 0 outstanding non-blocking** (the one NB was adopted into `ebd1a12`). glama.json is valid, minimal, and correctly attributed. Note per brief: a founder ruling on early-access framing is PENDING and may trigger a reframe round — this verdict judges the current committed bytes as-is.
+
 ## NEW (out-of-scope, no verdict weight)
 - `site/.well-known/mcp/server-card.json` `$schema` → `modelcontextprotocol.io/schemas/server-card.json` returns 404 (pre-existing; not touched by this diff).
 - `ROADMAP.md` residual (i): `SPEC.md:102` header still reads "~8–12 tools" — same staleness class the Glama shopper hit; already logged in ROADMAP as out of the builder's scope.
