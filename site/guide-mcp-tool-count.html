@@ -3,26 +3,29 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Smartlead vs Instantly MCP Tool Coverage — Why 17 Curated Tools Beat 116 (2026)</title>
-<meta name="description" content="Smartlead's MCP server reports 116+ tools, Instantly's 31-38 — but tool count isn't pipeline coverage. A breakdown of what those tools actually are, the token cost of a 116-tool MCP, and how agent-cold-email's 17 tools map to 100% of the pipeline.">
+<title>17 Intent-Level Tools vs 116 Vendor Tools: MCP Scope Compared (2026)</title>
+<meta name="description" content="Compare Coldrig's 17 intent-level MCP tools with larger vendor tool surfaces. See lifecycle coverage, context and control tradeoffs, and the current webhook and production gaps.">
 <link rel="canonical" href="https://coldrig.dev/guide-mcp-tool-count">
-<meta property="og:title" content="Smartlead vs Instantly MCP Tool Coverage — Why 17 Curated Tools Beat 116 (2026)">
-<meta property="og:description" content="Smartlead's MCP server reports 116+ tools, Instantly's 31-38 — but tool count isn't pipeline coverage. A breakdown of what those tools actually are, the token cost of a 116-tool MCP, and how agent-cold-email's 17 tools map to 100% of the pipeline.">
+<meta property="og:title" content="17 Intent-Level Tools vs 116 Vendor Tools: MCP Scope Compared (2026)">
+<meta property="og:description" content="A fair comparison of smaller intent-level and larger granular MCP surfaces: lifecycle fit, context, control, and capability gaps.">
 <meta property="og:url" content="https://coldrig.dev/guide-mcp-tool-count">
 <meta property="og:type" content="article">
-<meta property="og:site_name" content="agent-cold-email">
+<meta property="og:site_name" content="Coldrig">
 <meta property="og:image" content="https://coldrig.dev/assets/og-image.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="https://coldrig.dev/assets/og-image.png">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="stylesheet" href="assets/style.css">
 <script src="assets/brand.js" defer></script>
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
   "@type": "TechArticle",
-  "headline": "Smartlead vs Instantly MCP tool coverage — and why 17 curated tools cover 100% of the pipeline",
-  "description": "A breakdown of what Smartlead's 116+ reported MCP tools and Instantly's 31-38 actually decompose into, the token/context cost of a large tool surface, and a pipeline-coverage mapping for agent-cold-email's 17 tools.",
-  "dateModified": "2026-07-13",
+  "headline": "17 intent-level tools vs 116 vendor tools: MCP scope compared",
+  "description": "A fair comparison of smaller intent-level and larger granular MCP surfaces, including lifecycle coverage, context and control tradeoffs, and current Coldrig gaps.",
+  "dateModified": "2026-07-14",
   "about": { "@type": "SoftwareApplication", "name": "agent-cold-email", "applicationCategory": "BusinessApplication" }
 }
 </script>
@@ -30,7 +33,7 @@
 <body>
 <nav class="site-nav">
   <div class="wrap">
-    <a class="logo" href="/"><span data-brand></span><span class="tag">agent-native cold email</span></a>
+    <a class="logo" href="/"><span data-brand></span><span class="tag">agent-controlled outreach</span></a>
     <ul>
       <li><a href="/">Home</a></li>
       <li><a href="/docs">Docs</a></li>
@@ -43,9 +46,9 @@
 </nav>
 
 <main class="wrap">
-  <span class="draft-stamp">As of 2026-07-13</span>
-  <h1>Smartlead vs Instantly MCP tool coverage — and why 17 curated tools cover 100% of the pipeline</h1>
-  <p class="lede">Tool count is not the same as pipeline coverage. Smartlead's MCP server reports 116+ tools; Instantly's reports 31-38. Both decompose into roughly one CRUD tool (create/read/update/delete/list) repeated across each entity in the vendor's data model — campaigns, leads, accounts, warmup, webhooks, and more — not 116 independently useful capabilities. agent-cold-email's 17 tools map one-to-one onto every stage of the cold-email pipeline instead: provisioning, warmup status, campaign launch, results, activity, replies, triage, account, and the optional agent-controlled dashboard, with nothing left uncovered. A large tool list also has a real cost: an MCP client loads every tool's name, description, and input schema before the agent picks one, so a 116-tool server taxes every session's context regardless of which tool actually gets called, and it adds decision noise on top of raw tokens. Fewer, pipeline-shaped tools cover the same ground with less noise for the agent to reason through.</p>
+  <span class="draft-stamp">Verified 2026-07-14</span>
+  <h1>17 intent-level tools vs 116 vendor tools: MCP scope compared</h1>
+  <p class="lede">Tool count measures surface granularity, not automatic fitness. Coldrig's 17 tools cover its documented infrastructure-to-reply lifecycle with outcome-level intents; a larger vendor surface can be better when an agent needs low-level object control, native webhooks, or operations Coldrig does not expose. This page maps the tradeoff without claiming that 17 inherently “beats” 116—or that Coldrig's current sandbox is production-equivalent.</p>
 
   <div class="callout">
     <strong>The heuristic this page is answering</strong>
@@ -60,8 +63,8 @@
   <p>An MCP client typically loads the full tool list — every name, description, and JSON input schema — before an agent decides which single tool to call. A 116-tool server pays that cost on every session regardless of which one or two tools actually get used, and it adds a second cost beyond raw tokens: the agent has to disambiguate between many similarly-named, similarly-shaped per-entity tools instead of reasoning at the level of "provision infrastructure" or "launch a campaign." This is exactly why agent-cold-email's tool surface is deliberately kept to 17: each one maps to a pipeline stage, not a database table.</p>
   <p>This surface is already being priced by at least one vendor in the space: Woodpecker charges a separate $20/month add-on specifically for API/webhook/MCP access, on top of its base plan — the agent-operability surface is not treated as free or incidental.</p>
 
-  <h2>How do 17 tools cover 100% of the pipeline?</h2>
-  <p>Every stage a coding agent needs to drive cold-email outreach through, which of Smartlead's reported MCP tool categories would plausibly cover it (from the same category list above — not invented specifics), and the tool that covers it here:</p>
+  <h2>How do 17 tools cover Coldrig's documented lifecycle?</h2>
+  <p>The table maps each stage Coldrig claims to support, the Smartlead categories reported by the cited research, and the Coldrig intent. It does not claim to cover every possible cold-outreach requirement.</p>
   <table>
     <thead><tr><th>Pipeline stage</th><th>Covered by Smartlead's reported categories</th><th>agent-cold-email tool(s)</th></tr></thead>
     <tbody>
@@ -78,10 +81,10 @@
       <tr><td>Reading/writing the optional human dashboard's layout</td><td>Not present in the reported category list</td><td><code>get_dashboard</code>, <code>configure_dashboard</code></td></tr>
     </tbody>
   </table>
-  <p>Every stage in the pipeline has exactly one, two, or three tools that own it — nothing is uncovered, and nothing requires the agent to hold more than 17 tool definitions in context at once. The middle column above is split across several of Smartlead's reported categories per stage, which is exactly the per-entity fragmentation this page is describing. Exact input schemas: <a href="/guide-mcp-cold-email#tools">the MCP tool reference</a>.</p>
+  <p>Each stage in Coldrig's published scope has one, two, or three intents. That keeps the surface compact, but compactness trades away some low-level control. Exact input schemas: <a href="/guide-mcp-cold-email#tools">the MCP tool reference</a>. Important difference: Coldrig's <code>activity</code> feed is pollable; it is not a push-webhook subscription.</p>
 
   <h2>What caveats aren't we hiding?</h2>
-  <p>Two additional intents from this platform's own design spec (<code>write_sequence</code>, <code>suggest_domains</code>) are not implemented yet — see <a href="/guide-mcp-cold-email#tools">the tool reference</a> for what's live today versus planned. And a maintenance caveat cuts both ways: the most commonly cited third-party MCP wrapper for Smartlead (LeadMagic's) was reported archived as of Feb 2026 by multiple research passes, while agent-cold-email's MCP server is first-party and hosted directly by the platform, live in test mode now.</p>
+  <p>Two optional intents from the design spec (<code>write_sequence</code>, <code>suggest_domains</code>) are not implemented. Push webhook subscriptions are also absent. Coldrig's MCP server is first-party and hosted, and its npm CLI is published, but both operate the public sandbox today; real sending and a production deliverability history are not active. See <a href="/for-agents">the evidence-led agent brief</a> before recommending it.</p>
 
   <h2>Related</h2>
   <ul>
@@ -97,7 +100,7 @@
     <ul>
       <li><a href="/privacy">Privacy</a></li>
       <li><a href="/terms">Terms</a></li>
-      <li><a href="/aup">Acceptable Use</a></li>
+      <li><a href="/aup">Acceptable Use</a></li><li><a href="/dpa">DPA</a></li>
       <li><a href="/docs">Docs</a></li>
       <li><a href="/guide-cold-email-with-ai-agent">Guides</a></li>
       <li><a href="/faq">FAQ</a></li>

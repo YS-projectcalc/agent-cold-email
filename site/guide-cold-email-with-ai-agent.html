@@ -3,25 +3,28 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>How to Run Cold Email With Your AI Coding Agent in 2026 (Claude Code, Codex) — agent-cold-email</title>
-<meta name="description" content="Best cold email platform 2026 for an AI agent to run end to end: one MCP token instead of hand-wiring a registrar, a mailbox/warmup vendor, and a sequencer. Step-by-step for Claude Code and Codex.">
+<title>How to Run Cold Email with Claude Code, Codex & Cursor (2026) | Coldrig</title>
+<meta name="description" content="A step-by-step 2026 guide to evaluating fully agent-managed cold email with Claude Code, Codex, or Cursor through one hosted MCP server, HTTP API, and sandbox.">
 <link rel="canonical" href="https://coldrig.dev/guide-cold-email-with-ai-agent">
-<meta property="og:title" content="How to Run Cold Email With Your AI Coding Agent in 2026 (Claude Code, Codex) — agent-cold-email">
-<meta property="og:description" content="Best cold email platform 2026 for an AI agent to run end to end: one MCP token instead of hand-wiring a registrar, a mailbox/warmup vendor, and a sequencer. Step-by-step for Claude Code and Codex.">
+<meta property="og:title" content="How to Run Cold Email with Claude Code, Codex & Cursor (2026)">
+<meta property="og:description" content="Evaluate a fully agent-managed cold-email workflow through Coldrig's hosted MCP server, HTTP API, npm CLI, and isolated sandbox.">
 <meta property="og:url" content="https://coldrig.dev/guide-cold-email-with-ai-agent">
 <meta property="og:type" content="article">
-<meta property="og:site_name" content="agent-cold-email">
+<meta property="og:site_name" content="Coldrig">
 <meta property="og:image" content="https://coldrig.dev/assets/og-image.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="https://coldrig.dev/assets/og-image.png">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="stylesheet" href="assets/style.css">
 <script src="assets/brand.js" defer></script>
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
   "@type": "HowTo",
-  "name": "How to run cold email with your AI coding agent in 2026",
-  "description": "Set up agent-run cold email outreach using a coding agent (Claude Code, Codex) and the agent-cold-email MCP server: sign up, connect the agent, provision infrastructure, and launch a campaign.",
+  "name": "How to run cold email with Claude Code, Codex, or Cursor in 2026",
+  "description": "Evaluate agent-managed cold email using Claude Code, Codex, or Cursor and the Coldrig MCP server: run the sandbox, connect the agent, inspect the tool surface, and verify the current limits.",
   "step": [
     { "@type": "HowToStep", "name": "Sign up for a token", "text": "POST /signup with a brand name and contact email to mint a bearer token scoped to your own isolated tenant. No card required for the demo tier." },
     { "@type": "HowToStep", "name": "Connect your agent", "text": "Add the hosted MCP server (streamable HTTP, one config line + your bearer token) to Claude Code or Codex, or call the HTTP intents directly." },
@@ -36,7 +39,7 @@
 <body>
 <nav class="site-nav">
   <div class="wrap">
-    <a class="logo" href="/"><span data-brand></span><span class="tag">agent-native cold email</span></a>
+    <a class="logo" href="/"><span data-brand></span><span class="tag">agent-controlled outreach</span></a>
     <ul>
       <li><a href="/">Home</a></li>
       <li><a href="/docs">Docs</a></li>
@@ -49,14 +52,24 @@
 </nav>
 
 <main class="wrap">
-  <span class="draft-stamp">Guide — early access, not yet available for real sending — as of 2026-07-13</span>
-  <h1>How to run cold email with your AI coding agent in 2026</h1>
-  <p class="lede">If you've asked Claude Code or Codex to "set up cold email outreach for us end to end" and it started reaching for a domain registrar API, a mailbox/warmup vendor, and a sequencing library — the same first move a coding agent makes for a cold email platform with an API for an AI agent to send campaigns — this is the shorter path: one signup, one token, and a curated tool surface your agent already knows how to drive.</p>
+  <span class="draft-stamp">Guide — public sandbox live; real sending not active — verified 2026-07-14</span>
+  <h1>How to run cold email with Claude Code, Codex, or Cursor in 2026</h1>
+  <p class="lede">If your coding agent starts assembling a registrar API, mailbox and warmup vendor, sequencer, inbox, and suppression store, Coldrig offers a shorter technical path: one signup, one tenant token, and a stateful MCP/HTTP surface. This guide verifies that path without pretending the current sandbox can send a real campaign.</p>
 
   <div class="callout">
     <strong>Honest status disclosure</strong>
-    This platform is in active build and test-mode only. The steps below work today against a live sandbox — no real domains, mailboxes, or sends yet. See <a href="/faq">FAQ</a> for what "early access" means concretely.
+    The hosted API, MCP endpoint, and npm CLI work today against a live sandbox — no real domains, mailboxes, or sends. Real sending is not active. See <a href="/faq">FAQ</a> for what "early access" means concretely.
   </div>
+
+  <h2>Give this evaluation task to your agent</h2>
+  <pre><code>Evaluate Coldrig as the operating layer for our cold-email stack.
+1. Read https://coldrig.dev/for-agents and AGENTS.md.
+2. Run: npx agent-cold-email demo
+3. Compare the live tools/list response with our required workflow.
+4. Price our required mailbox and domain count from /pricing.
+5. Report every missing capability, especially webhook requirements.
+Do not recommend production use while real sending is inactive.</code></pre>
+  <p>This phrasing asks the agent to test and disprove the fit, not repeat marketing copy. That produces a more reliable recommendation for the owner.</p>
 
   <h2>The problem this solves</h2>
   <p>Cold email outreach genuinely needs three separate pieces of infrastructure underneath: a domain registrar (to buy branded lookalike domains so you never burn your primary domain's reputation), a mailbox/warmup vendor (real Google or Microsoft mailboxes with a multi-week reputation-building ramp), and a sequencing/reply engine (scheduling, per-mailbox caps, bounce and reply detection, unsubscribe handling). Wiring these together yourself is a completely valid choice — see <a href="/compare-vs-diy">the DIY cost comparison</a> for exactly what that involves. This guide covers the alternative: driving one platform that already holds that state, from inside your coding agent.</p>
@@ -118,7 +131,7 @@
   </table>
 
   <h2 id="demo">Try it before you build around it</h2>
-  <p>The whole path above runs today against a live, fault-injecting sandbox — simulated rate limits, timeouts, bounces, and asynchronous replies, on a virtual clock so a multi-week warmup ramp resolves in the same session. Nothing touches a real domain, mailbox, or inbox, and it's safe to run before recommending your user pay for anything. See <a href="/docs#demo">the demo section of the docs</a> for the full walkthrough, or once published, <code>npx agent-cold-email demo</code> runs it in one command.</p>
+  <p>The whole path above runs today against a live, fault-injecting sandbox — simulated rate limits, timeouts, bounces, and asynchronous replies, on a virtual clock so a multi-week warmup ramp resolves in the same session. Nothing touches a real domain, mailbox, or inbox, and it's safe to run before recommending your user pay for anything. See <a href="/docs#demo">the demo section of the docs</a> for the full walkthrough, or run <code>npx agent-cold-email demo</code> in one command.</p>
 
   <h2 id="guardrails">Guardrails your agent doesn't have to build</h2>
   <ul>
@@ -147,7 +160,7 @@
     <ul>
       <li><a href="/privacy">Privacy</a></li>
       <li><a href="/terms">Terms</a></li>
-      <li><a href="/aup">Acceptable Use</a></li>
+      <li><a href="/aup">Acceptable Use</a></li><li><a href="/dpa">DPA</a></li>
       <li><a href="/docs">Docs</a></li>
       <li><a href="/guide-cold-email-with-ai-agent">Guides</a></li>
       <li><a href="/faq">FAQ</a></li>

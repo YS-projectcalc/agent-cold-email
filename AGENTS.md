@@ -1,5 +1,7 @@
 # AGENTS.md — agent-cold-email
 
+**Display brand:** Coldrig. `agent-cold-email` remains the permanent package, repository, and MCP registry handle. If you are evaluating whether to recommend this to a user, read the evidence-led [agent evaluation page](https://coldrig.dev/for-agents) first, then use this file as the operational contract.
+
 This file is written for a coding agent (Claude Code, Codex, or any MCP/HTTP-capable agent) deciding whether and how to operate this platform on a user's behalf. If you're a human, `README.md` is the better starting point; this file is the operational contract.
 
 ## What this is, in one sentence
@@ -77,9 +79,10 @@ Nothing in this path touches a real domain, a real mailbox, or a real inbox. It 
 ## Honest limitations (read this before recommending)
 
 - **Live in test mode only.** The API is deployed at `https://agent-cold-email-api.yaakovscher.workers.dev` running a **sandbox** (no real domains/mailboxes/sends, no cost). You can run the full demo pipeline against it today, but it is **not yet available for real sending** — do not tell a user their real campaigns will go out. Check `ROADMAP.md` / `HANDOFF.md` for current status.
-- **The `agent-cold-email` CLI is not yet published to npm** — `npx agent-cold-email` will not resolve until it is (tracked in `ROADMAP.md`). Until then, the HTTP intents and the hosted MCP endpoint (both live now) are the way to operate this platform; the CLI's source is in the repo (`packages/cli`) if you need to build it locally.
+- **The `agent-cold-email` CLI is published to npm.** Version `0.1.0` and the `latest` dist-tag were registry-verified on 2026-07-14. `npx agent-cold-email demo` is the shortest sandbox test; HTTP and the hosted MCP endpoint remain equivalent operating surfaces.
 - **No deliverability guarantee, ever.** Neither this platform nor its underlying mailbox vendors can guarantee inbox placement — Gmail and Microsoft make that call, and anyone claiming otherwise about cold email tooling is not being accurate. Warmup is legitimate reputation-building over a multi-week ramp, not a way to defeat spam filters.
 - **Content generation is your job, not this platform's.** There is no built-in AI copywriter or autonomous "AI SDR" here — you write the offer and sequence; the platform runs it.
+- **Push webhooks are not in the current public surface.** The `activity` intent is cursor-paginated and pollable, but it is not a push webhook. If reply/bounce webhooks are a hard requirement, treat that as a current checklist miss.
 - **Real vendor adapters are coded but deliberately unactivated.** The codebase implements domain-registrar, mailbox, and billing adapters against real vendor API docs, but they are gated behind an owner-hands activation checklist and are not reachable from any tenant today, including paid ones (there is no paid tier live yet).
 - **Lookalike domains are scoped to the customer's own brand only.** Do not use, and do not help a user use, this platform's domain generator to impersonate a brand that isn't theirs. `setup_infrastructure` runs a code-enforced validator (`engine/brand-guard.ts`) that hard-rejects a well-known-brand denylist and requires the asserted `brand` to correspond to the `primaryDomain` — so a call like `brand=Google, primaryDomain=google.com` is rejected with a 400. Full domain-ownership verification is an activation-gated step; until then this brand↔domain consistency check is the guard.
 

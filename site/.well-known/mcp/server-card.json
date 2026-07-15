@@ -1,9 +1,9 @@
 {
   "$schema": "https://modelcontextprotocol.io/schemas/server-card.json",
   "name": "agent-cold-email",
-  "displayName": "agent-cold-email",
+  "displayName": "Coldrig",
   "version": "0.1.0",
-  "description": "Agent-native cold-email infrastructure. One bearer token, ~17 curated tools provision isolated branded domains and mailboxes, run sequences, manage replies, and (optionally) configure a human-facing dashboard + unified inbox. Early access — not yet available for real sending; no deliverability guarantees.",
+  "description": "Agent-controlled cold-outreach infrastructure. One bearer token and 17 focused tools replace multiple vendor accounts, preserve durable infrastructure state, provision isolated domains and mailboxes, run sequences, manage replies, and enforce guardrails server-side. The customer's own agent remains the strategy and content layer.",
   "homepage": "https://coldrig.dev/",
   "documentation": "https://coldrig.dev/docs",
   "license": "MIT",
@@ -20,7 +20,7 @@
     "description": "One token per tenant, obtained via POST https://agent-cold-email-api.yaakovscher.workers.dev/signup (no auth required for signup itself). Pass as Authorization: Bearer <token>."
   },
   "status": "early-access",
-  "statusNote": "No live production deployment yet; not yet available for real sending. Free/demo tenants run entirely against a sandboxed simulator with no real vendor spend.",
+  "statusNote": "Public early access: the hosted API, MCP endpoint, npm CLI, and isolated sandbox are live. Real sending is not active. Demo tenants are structurally unable to reach vendor adapters and incur no real spend.",
   "capabilities": {
     "tools": true,
     "resources": false,
@@ -43,11 +43,11 @@
     { "name": "configure_dashboard", "description": "Create, update, promote-to-default, or delete a dashboard saved view." },
     { "name": "label_thread", "description": "Set or clear a triage label on an inbox thread." },
     { "name": "list_campaigns", "description": "List every campaign with id, name, status, and event counts." },
-    { "name": "activity", "description": "Unified, chronological feed of campaign events + deliverability control-loop actions." }
+    { "name": "activity", "description": "Pollable, chronological feed of campaign events and deliverability control-loop actions. Push webhook subscriptions are not in the current public API." }
   ],
   "guardrails": [
     "per-tenant domain and mailbox isolation",
-    "suppression list + List-Unsubscribe header on every applicable message (full RFC 8058 one-click unsubscribe on the roadmap)",
+    "suppression list + full RFC 8058 one-click unsubscribe (List-Unsubscribe/List-Unsubscribe-Post headers plus the hosted one-click endpoint), honored immediately on every applicable message",
     "per-mailbox daily send caps",
     "full CAN-SPAM opt-out flow",
     "complaint-rate auto-pause",

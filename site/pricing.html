@@ -3,41 +3,46 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pricing — agent-cold-email</title>
-<meta name="description" content="agent-cold-email pricing: per-mailbox tiers from a free sandboxed demo through Launch, Growth, Scale, and Custom.">
+<title>Pricing — $99 for 5 Mailboxes, Then $10 Each | Coldrig</title>
+<meta name="description" content="Coldrig pricing starts at $99/month for 5 provisioned mailboxes, then adds $10/month per mailbox. Domains are included and sends are not separately metered.">
 <link rel="canonical" href="https://coldrig.dev/pricing">
-<meta property="og:title" content="Pricing — agent-cold-email">
-<meta property="og:description" content="agent-cold-email pricing: per-mailbox tiers from a free sandboxed demo through Launch, Growth, Scale, and Custom.">
+<meta property="og:title" content="Simple, mailbox-based pricing — Coldrig">
+<meta property="og:description" content="$99/month for 5 provisioned mailboxes, then $10 per additional mailbox. One deterministic formula for humans and agents.">
 <meta property="og:url" content="https://coldrig.dev/pricing">
 <meta property="og:type" content="website">
-<meta property="og:site_name" content="agent-cold-email">
+<meta property="og:site_name" content="Coldrig">
 <meta property="og:image" content="https://coldrig.dev/assets/og-image.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="https://coldrig.dev/assets/og-image.png">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="stylesheet" href="assets/style.css">
 <script src="assets/brand.js" defer></script>
+<script src="assets/pricing.js" defer></script>
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
-  "@type": "Product",
-  "name": "agent-cold-email",
-  "description": "agent-cold-email pricing: per-mailbox tiers from a free sandboxed demo through Launch, Growth, Scale, and Custom.",
+  "@type": "SoftwareApplication",
+  "@id": "https://coldrig.dev/#software",
+  "name": "Coldrig",
+  "alternateName": "agent-cold-email",
+  "description": "Agent-controlled cold-email infrastructure with deterministic mailbox-based pricing.",
   "url": "https://coldrig.dev/pricing",
-  "brand": { "@type": "Brand", "name": "agent-cold-email" },
+  "applicationCategory": "BusinessApplication",
+  "operatingSystem": "Web, MCP, CLI",
+  "brand": { "@type": "Brand", "name": "Coldrig" },
   "offers": [
-    { "@type": "Offer", "name": "Free / Demo", "price": "0", "priceCurrency": "USD", "description": "0 domains, 0 mailboxes (simulated), 0 real sends/mo." },
-    { "@type": "Offer", "name": "Launch", "price": "99", "priceCurrency": "USD", "description": "5 mailboxes, 2 domains, ~1,000 sends/mo." },
-    { "@type": "Offer", "name": "Growth", "price": "299", "priceCurrency": "USD", "description": "20 mailboxes, 6 domains, ~6,000 sends/mo." },
-    { "@type": "Offer", "name": "Scale", "price": "799", "priceCurrency": "USD", "description": "60 mailboxes, 18 domains, ~20,000 sends/mo." },
-    { "@type": "Offer", "name": "Custom", "priceSpecification": { "@type": "UnitPriceSpecification", "price": "13", "priceCurrency": "USD", "unitText": "per mailbox/mo, plus a $49 base fee" }, "description": "60+ mailboxes, metered, negotiated." }
+    { "@type": "Offer", "name": "Free sandbox", "price": "0", "priceCurrency": "USD", "description": "A complete simulated run with no real domains, mailboxes, sends, or vendor spend." },
+    { "@type": "AggregateOffer", "name": "Managed", "lowPrice": "99", "highPrice": "649", "priceCurrency": "USD", "offerCount": "56", "description": "Starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox (a $49 platform fee plus $10 per mailbox, five-mailbox minimum). Self-serve planning range: 5–60 mailboxes." }
   ]
 }
 </script>
 </head>
-<body>
+<body class="pricing-page">
 <nav class="site-nav">
   <div class="wrap">
-    <a class="logo" href="/"><span data-brand></span><span class="tag">agent-native cold email</span></a>
+    <a class="logo" href="/"><span data-brand></span><span class="tag">agent-controlled outreach</span></a>
     <ul>
       <li><a href="/">Home</a></li>
       <li><a href="/docs">Docs</a></li>
@@ -49,102 +54,156 @@
   </div>
 </nav>
 
-<main class="wrap">
-  <h1>Pricing</h1>
-  <p class="lede">Priced per mailbox/month plus a platform fee — the value metric tracks the underlying infrastructure cost. Domains are bundled with mailboxes since you need them anyway; sends are naturally bounded by per-mailbox deliverability caps (~40–50/mailbox/day), so there's no separate send meter for your agent to reason about.</p>
-
-  <div class="callout">
-    <strong>Test-mode pricing</strong>
-    These numbers are live in Stripe test mode and are still adjustable until activation. Card-on-file is required at signup for paid tiers, with auto-renewal disclosed per applicable state auto-renewal law; cancel anytime.
-  </div>
-
-  <div class="pricing-grid">
-    <div class="tier">
-      <h3>Free / Demo</h3>
-      <div class="price">$0</div>
-      <ul>
-        <li>0 domains, 0 mailboxes (simulated)</li>
-        <li>0 real sends/mo</li>
-        <li>The abuse-proof first use — <code>signup</code>, then exercise every tool against a fault-injecting simulator</li>
-      </ul>
+<main class="wrap pricing-main">
+  <header class="pricing-hero">
+    <span class="eyebrow"><i class="status-dot"></i> Provisional early-access pricing</span>
+    <h1>Simple enough for your agent to quote.</h1>
+    <p class="lede">One formula: <strong>starts at $99/month for 5 provisioned mailboxes, then $10/month for each additional mailbox</strong>. Under the hood that's a $49 platform fee plus $10 per mailbox with a five-mailbox minimum—not an arbitrary bundle, and never a separate send-credit meter.</p>
+    <div class="pricing-proof" aria-label="Pricing principles">
+      <span><strong>$99</strong> five-mailbox minimum</span>
+      <span><strong>+$10</strong> each additional mailbox</span>
+      <span><strong>$0</strong> per-send fees</span>
     </div>
-    <div class="tier">
-      <h3>Launch</h3>
-      <div class="price">$99<small>/mo</small></div>
-      <ul>
-        <li>5 mailboxes</li>
-        <li>2 domains</li>
-        <li>~1,000 sends/mo</li>
-      </ul>
-    </div>
-    <div class="tier featured">
-      <h3>Growth</h3>
-      <div class="price">$299<small>/mo</small></div>
-      <ul>
-        <li>20 mailboxes</li>
-        <li>6 domains</li>
-        <li>~6,000 sends/mo</li>
-      </ul>
-    </div>
-    <div class="tier">
-      <h3>Scale</h3>
-      <div class="price">$799<small>/mo</small></div>
-      <ul>
-        <li>60 mailboxes</li>
-        <li>18 domains</li>
-        <li>~20,000 sends/mo</li>
-      </ul>
-    </div>
-    <div class="tier">
-      <h3>Custom</h3>
-      <div class="price">$49<small>+ $13/mailbox/mo</small></div>
-      <ul>
-        <li>60+ mailboxes</li>
-        <li>~⅓ domains-to-mailboxes ratio</li>
-        <li>Metered, negotiated</li>
-      </ul>
-    </div>
-  </div>
+  </header>
 
-  <h2>Why per-mailbox</h2>
-  <p>Mailbox count is the resource that actually costs money underneath (mailbox rental, warmup, domain amortization, the 8–18%/month domain-burn-and-replace cycle that's a normal part of running cold email, not a failure mode). Pricing it directly means the number your agent sees maps to the number that determines your real send capacity — no separate "credits" abstraction to translate.</p>
+  <section class="price-calculator" aria-labelledby="calculator-title">
+    <div class="calculator-controls">
+      <span class="kicker">Quote before provisioning</span>
+      <h2 id="calculator-title">Choose your mailbox count</h2>
+      <p>Every addition follows the same curve, so an owner or agent can calculate the exact monthly price before Coldrig provisions anything.</p>
 
-  <h2>What's included at every paid tier</h2>
-  <ul>
-    <li>Per-tenant domain and mailbox isolation — never shared with other customers.</li>
-    <li>Warmup ramp on every new mailbox before it's used for real sends.</li>
-    <li>Suppression list and full CAN-SPAM opt-out handling on every applicable message — full RFC 8058 one-click unsubscribe (List-Unsubscribe/List-Unsubscribe-Post headers plus the hosted one-click endpoint), honored immediately.</li>
-    <li>Per-mailbox daily send caps and automatic complaint-rate throttling/pause.</li>
-    <li>The full ~17-tool agent surface (MCP + CLI + HTTP), including the optional agent-controlled dashboard.</li>
-  </ul>
-  <p>Not included, ever, at any tier: a deliverability or inbox-placement guarantee. See <a href="/compare">Compare</a> and <a href="/terms">Terms</a>.</p>
+      <div class="range-heading">
+        <label for="mailbox-count">Provisioned mailboxes</label>
+        <output for="mailbox-count" data-mailbox-output>5</output>
+      </div>
+      <input id="mailbox-count" class="price-range" type="range" min="5" max="60" step="1" value="5" aria-describedby="capacity-note">
+      <div class="range-scale" aria-hidden="true"><span>5</span><span>60</span></div>
+      <div class="quick-counts" aria-label="Example mailbox counts">
+        <button type="button" data-mailboxes="5" aria-pressed="true">5</button>
+        <button type="button" data-mailboxes="10" aria-pressed="false">10</button>
+        <button type="button" data-mailboxes="20" aria-pressed="false">20</button>
+        <button type="button" data-mailboxes="60" aria-pressed="false">60</button>
+      </div>
 
-  <h2>FAQ</h2>
-  <div class="faq">
-    <details>
-      <summary>Is there a contract or commitment?</summary>
-      <p>No — month-to-month, cancel anytime. Domains purchased on your behalf carry their own annual renewal economics regardless of your subscription status; see <a href="/terms">Terms</a>.</p>
-    </details>
-    <details>
-      <summary>What happens if I exceed my mailbox/domain allocation?</summary>
-      <p>Your agent will get a clear quota error from the relevant tool rather than a silent overage charge — usage-based billing beyond the packaged tiers is a Custom-tier conversation.</p>
-    </details>
-    <details>
-      <summary>Can I start on the free tier and upgrade later without losing setup?</summary>
-      <p>Yes — the demo tenant's configuration (persona, sequence content, etc.) carries forward conceptually; real infrastructure is only provisioned once you're on a paid tier with a real vendor adapter enabled.</p>
-    </details>
-  </div>
+      <div class="formula-line" aria-label="Pricing formula">
+        <span>$49 platform</span><i>+</i><span>$10 × <b data-formula-mailboxes>5</b> mailboxes</span>
+      </div>
+    </div>
+
+    <aside class="calculator-result" aria-live="polite">
+      <span class="result-label">Estimated monthly price</span>
+      <div class="result-price"><sup>$</sup><strong data-price-output>99</strong><small>/ month</small></div>
+      <div class="result-rule"></div>
+      <dl>
+        <div><dt>Provisioned mailboxes</dt><dd data-result-mailboxes>5</dd></div>
+        <div><dt>Operational domains</dt><dd>≈<span data-domain-output>2</span></dd></div>
+        <div><dt>Planning capacity after warmup</dt><dd>≈<span data-capacity-output>3,300</span> sends/mo</dd></div>
+      </dl>
+      <a class="btn inverse" href="/docs#quickstart">Run the free sandbox <span aria-hidden="true">→</span></a>
+      <p id="capacity-note">Capacity uses a conservative planning assumption of 30 campaign sends per mailbox on 22 sending days. It is not a purchased allowance or guarantee. Warmup, mailbox health, provider rules, and server-side guardrails determine actual safe volume.</p>
+    </aside>
+  </section>
+
+  <section class="pricing-examples" aria-labelledby="examples-title">
+    <div>
+      <span class="kicker">No pricing cliffs</span>
+      <h2 id="examples-title">The same curve at every size.</h2>
+      <p>Five is the minimum because a healthy cold-email setup needs enough mailboxes to distribute volume. From there, add only the capacity you need.</p>
+    </div>
+    <div class="price-example-grid">
+      <article><span>Start</span><strong>5</strong><small>mailboxes</small><b>$99/mo</b></article>
+      <article><span>Common</span><strong>10</strong><small>mailboxes</small><b>$149/mo</b></article>
+      <article><span>Growing</span><strong>20</strong><small>mailboxes</small><b>$249/mo</b></article>
+      <article><span>Scale</span><strong>60</strong><small>mailboxes</small><b>$649/mo</b></article>
+    </div>
+  </section>
+
+  <section class="pricing-definition" aria-labelledby="meter-title">
+    <div>
+      <span class="kicker">A meter agents can reason about</span>
+      <h2 id="meter-title">What counts as a mailbox?</h2>
+    </div>
+    <div class="definition-grid">
+      <article>
+        <span class="definition-number">01</span>
+        <h3>Provisioned capacity counts</h3>
+        <p>A mailbox counts while Coldrig has it configured and reserved for your account—including while it is warming, send-ready, or temporarily health-paused. That is the capacity Coldrig pays for underneath.</p>
+      </article>
+      <article>
+        <span class="definition-number">02</span>
+        <h3>Every change is quoted first</h3>
+        <p>Before adding mailboxes, the billing surface and agent response should show the new count and projected monthly price. No silent mailbox addition and no surprise send overage.</p>
+      </article>
+      <article>
+        <span class="definition-number">03</span>
+        <h3>Sends are not the billing meter</h3>
+        <p>Coldrig does not sell a bucket of email credits. Sending is bounded by warmup stage, mailbox health, provider policy, and conservative daily limits—not by an incentive to exhaust a quota.</p>
+      </article>
+    </div>
+  </section>
+
+  <section class="included-panel" aria-labelledby="included-title">
+    <div>
+      <span class="kicker light">Included in the formula</span>
+      <h2 id="included-title">One operating layer. Not another pile of seats.</h2>
+      <p>The platform fee pays for the durable control plane your agent would otherwise have to assemble and keep alive across multiple vendors and sessions.</p>
+    </div>
+    <ul>
+      <li>Isolated domains and mailboxes for each customer</li>
+      <li>Provisioning, DNS orchestration, and warmup state</li>
+      <li>Campaign sequencing, replies, and unified activity</li>
+      <li>Server-enforced suppression and health guardrails</li>
+      <li>One tenant token across MCP, HTTP, and CLI</li>
+      <li>A human control room for visibility and intervention</li>
+    </ul>
+  </section>
+
+  <section class="pricing-status" aria-labelledby="status-title">
+    <span class="kicker">Honest status</span>
+    <h2 id="status-title">Test the workflow before paying.</h2>
+    <p>The API, hosted MCP endpoint, npm CLI, and fault-injecting sandbox are live. Paid real-sending activation is not live yet, and these prices remain provisional until activation. The sandbox cannot reach a real vendor, spend money, or send an email.</p>
+    <div class="cta-row">
+      <a class="btn primary" href="/docs#quickstart">Run the free sandbox <span aria-hidden="true">→</span></a>
+      <a class="btn quiet" href="/#waitlist">Join the activation list</a>
+    </div>
+  </section>
+
+  <section class="pricing-faq" aria-labelledby="faq-title">
+    <h2 id="faq-title">Pricing questions</h2>
+    <div class="faq">
+      <details open>
+        <summary>Why is there a five-mailbox minimum?</summary>
+        <p>One mailbox is not a sensible foundation for sustained cold outreach. The minimum creates enough room to ramp conservatively and distribute volume while preserving a simple $99 entry price.</p>
+      </details>
+      <details>
+        <summary>Does a warming or temporarily paused mailbox count?</summary>
+        <p>Yes. “Provisioned mailbox” means capacity configured and retained for your account. Warming and temporarily health-paused mailboxes still occupy paid underlying capacity. A mailbox that has been fully deprovisioned no longer counts.</p>
+      </details>
+      <details>
+        <summary>Are domains included?</summary>
+        <p>Yes. Coldrig allocates the operational domains needed for the provisioned mailbox count, normally around one domain for every two to three mailboxes. Bring-your-own-domain support is planned with explicit risk consent when the domain is your primary brand domain.</p>
+      </details>
+      <details>
+        <summary>Is there a send limit or overage fee?</summary>
+        <p>There is no separate monthly send meter and no send overage fee. Per-mailbox daily caps still apply and can move downward based on warmup stage, mailbox health, bounce or complaint signals, and upstream provider rules.</p>
+      </details>
+      <details>
+        <summary>What happens above 60 mailboxes?</summary>
+        <p>That becomes a Custom conversation so Coldrig can verify infrastructure, risk, and support requirements. The published curve is the reference price; do not assume an additional volume discount.</p>
+      </details>
+    </div>
+  </section>
 </main>
 
 <footer class="site-footer">
   <div class="wrap">
-    <p><span data-brand></span> is operated by EpiphanyMade. Early access — no deliverability or inbox-placement guarantees.</p>
+    <p><span data-brand></span> is operated by EpiphanyMade. Early access—no deliverability or inbox-placement guarantees.</p>
     <ul>
       <li><a href="/privacy">Privacy</a></li>
       <li><a href="/terms">Terms</a></li>
-      <li><a href="/aup">Acceptable Use</a></li>
+      <li><a href="/aup">Acceptable Use</a></li><li><a href="/dpa">DPA</a></li>
       <li><a href="/docs">Docs</a></li>
-      <li><a href="/guide-cold-email-with-ai-agent">Guides</a></li>
+      <li><a href="/for-agents">For agents</a></li>
       <li><a href="/faq">FAQ</a></li>
     </ul>
   </div>

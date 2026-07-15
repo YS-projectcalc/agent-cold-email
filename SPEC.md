@@ -214,21 +214,26 @@ Can/should we pre-warm domain+mailbox stock ahead of signup so new tenants skip 
 
 ---
 
-## 18. Pricing (delegated design authority, 2026-07-09 — canonical; drives Stripe test-mode products + site pricing page; cost-basis columns CORRECTED 2026-07-12, see §12)
+## 18. Pricing (founder-ratified provisional curve, 2026-07-14 — canonical product intent; core billing migration pending)
 
-Value metric = **per-mailbox/mo** (tracks our cost) + a platform fee (control plane, agent surface, deliverability loop, AI support). Domains bundled (needed for the mailboxes anyway). Sends are naturally bounded by deliverability caps (~40–50/mbx/day) so no separate send meter — simpler for an agent to reason about. Packaged bundles (agents pick clean options):
+Value metric = **provisioned mailbox/month** (tracks reserved underlying capacity) + a **$49/month platform fee** (control plane, agent surface, deliverability loop, and support). The paid minimum is five provisioned mailboxes. Every additional mailbox is $10/month:
 
-⚠️ **Pricing-model revision pending founder ruling 2026-07-14** ($49 platform + $10/active mailbox, 5-mbx minimum — see ROADMAP.md `## Open` "PRICING RULING PENDING"). The tiers/prices below are the still-live ladder; NOT rewritten here — only the cost/margin columns are corrected.
+> **Monthly price = $49 + ($10 × provisioned mailboxes), minimum 5 mailboxes / $99.**
 
-| Tier | Price/mo | Mailboxes | Domains | ~Sends/mo | Fully-loaded cost (Mailforge path) | Gross margin |
-|---|---|---|---|---|---|---|
-| **Free / Demo** | $0 | 0 (sandbox dry-run, NO real sends) | — | 0 real | ~$0 | the abuse-proof first-use (`npx agent-cold-email demo`) |
-| **Launch** | $99 | 5 | 2 | ~1,000 | ~$24 | ~76% |
-| **Growth** ⭐ | $299 | 20 | 6 | ~6,000 | ~$95 | ~68% |
-| **Scale** | $799 | 60 | 18 | ~20,000 | ~$285 | ~64% |
-| **Custom** | platform $49 + $13/mbx/mo | 60+ | ⅓ of mbx | metered | — | negotiated (reseller wholesale improves it) |
+“Provisioned mailbox” is the billing meter. A mailbox counts while configured and retained for the tenant—including while warming, send-ready, or temporarily health-paused—because Coldrig still pays for that reserved capacity. A fully deprovisioned mailbox no longer counts. Before any mailbox addition, both the agent response and billing UI must return the proposed new count and projected monthly price; no silent capacity addition.
 
-Fully-loaded cost = mailboxes × **$4.75/mbx** (Mailforge-path midpoint of the corrected $4.50–5.00 range, §12); burn-replacement and Stripe fees layer on top per-transaction, same convention as before, not included in this column. **On the Inboxkit alternative path** (§12, ~$6.10/mbx) the same tiers cost ~$31/$122/$366 and clear ~69%/59%/54% — still comfortably above the margin floor, just thinner than Mailforge. All paid tiers clear a **2.5–3x+ per-mailbox target** ($13–15 retail vs $4.50–6/mbx wholesale, corrected — previously miscited here as "~$6" while the table math still ran on the stale $7 basis; both now consistent). **Free/Demo is structurally sandbox-only** (type-guarded, tested) — abuse-proof. Card-on-file at signup; auto-renew with ROSCA/state-ARL disclosure + easy-cancel. Numbers stay adjustable in Stripe test mode until activation.
+Domains are bundled and operationally allocated at roughly one domain per two to three mailboxes. Sends are **not** a billing meter. Warmup stage, mailbox health, upstream-provider rules, and server-enforced daily caps determine actual safe volume. For UI planning only, use a conservative post-warmup estimate of 30 campaign sends/mailbox on 22 sending days/month; label every capacity figure approximate, after-warmup, and non-contractual.
+
+| Reference size | Price/mo | Approx. domains | Planning capacity after warmup | Estimated mailbox COGS | Estimated gross margin |
+|---|---:|---:|---:|---:|---:|
+| **Free / Demo** | $0 | 0 real | 0 real sends | ~$0 | abuse-proof first use (`npx agent-cold-email demo`) |
+| **5 mailboxes (minimum)** | $99 | ~2 | ~3,300 sends/mo | ~$24–32 | ~68–76% |
+| **10 mailboxes** | $149 | ~4 | ~6,600 sends/mo | ~$48–63 | ~58–68% |
+| **20 mailboxes** | $249 | ~7 | ~13,200 sends/mo | ~$96–126 | ~49–61% |
+| **60 mailboxes** | $649 | ~20 | ~39,600 sends/mo | ~$288–378 | ~42–56% |
+| **Custom** | quote from the published curve | 61+ | health-limited | verified before quote | negotiated; no automatic volume discount |
+
+The continuous curve removes the old $99→$299 bundle cliff and lands the common 10-mailbox evaluation at $149. The $49 embedded platform fee supports strong entry economics; marginal margin compresses at larger counts, so do not stack an automatic volume discount on top. **Free/Demo remains structurally sandbox-only** (type-guarded, tested). Paid real-sending activation is not live. Card-on-file, quantity-based billing, quote-before-provision, auto-renew disclosure, easy cancellation, and owner spend ceilings must be implemented and verified before activation. The current code still models legacy `launch`/`growth`/`scale` fixed tiers; that implementation is stale relative to this product decision and must not be treated as the final billing contract.
 
 ---
 

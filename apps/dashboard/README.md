@@ -4,11 +4,11 @@ SPEC.md §19 — the optional human dashboard SPA (Vite + React + React Router
 + TanStack Query + Tailwind v4). Built with `base: '/app/'`; its production
 build lands in `apps/platform/public/app/` and is served same-origin by the
 platform Worker's `[assets]` binding (see `apps/platform/wrangler.toml` and
-`apps/platform/public/README.md`). M2 scope: the dashboard shell (token-gate
-auth, nav rail/bottom tabs) and the full widget-registry dashboard page +
-saved views + Settings. The unified Inbox (SPEC.md §19.6) is a placeholder
-page here — it ships in M3; the nav slot and `/inbox?thread=` deep-link
-already exist.
+`apps/platform/public/README.md`). The human surface now includes working
+sandbox signup, token login/recovery guidance, dashboard + saved views,
+unified inbox, agent setup, deterministic billing planning, and Settings.
+Production payment mutations remain disabled until core quantity billing is
+implemented; the interface says this rather than simulating success.
 
 ## What's here
 
@@ -20,8 +20,9 @@ already exist.
   comment on why they aren't imported directly).
 - `src/auth/` — `AuthProvider.tsx` (bootstraps auth by probing `/account`
   once, since the cookie is httpOnly/invisible to JS by design; subscribes to
-  the unauthorized bus) + `TokenGate.tsx` (paste-token login, with distinct
-  copy for a freshly-rejected token vs a session that just got dropped).
+  the unauthorized bus), `SignupPage.tsx` (real sandbox `POST /signup` with
+  one-time token handling), `TokenGate.tsx` (paste-token login), and
+  `RecoveryPage.tsx` (honest non-recoverability and rotation guidance).
 - `src/shell/` — `AppShell.tsx` + `NavRail.tsx` (desktop ≥1024px) +
   `BottomTabs.tsx` (mobile <768px).
 - `src/dashboard/` — `Grid.tsx` (12-col dense-packed desktop grid / single
@@ -38,6 +39,11 @@ already exist.
   mailto: link scheme allowlist), `format.ts`, `useMediaQuery.ts`, `ui.ts`
   (shared Tailwind class fragments), `brand.ts` (swappable brand constant,
   mirrors `site/assets/brand.js`), `icons.tsx`.
+- `src/pages/SetupPage.tsx` — owner readiness checklist and copyable current
+  MCP setup for Codex, Claude Code, Cursor, and Cline.
+- `src/pages/BillingPage.tsx` — provisioned-mailbox quote and owner ceiling
+  planner backed by `@coldstart/shared`; paid mutation controls are visibly
+  disabled until the backend meter is migrated.
 
 ## How to run
 
@@ -63,6 +69,14 @@ sign in through the live token-gate.
   callers use (parity law, §19.0).
 
 ## Known gaps (flagged for a follow-up, not worked around here)
+
+- Checkout, subscription quantity changes, payment methods, cancellation,
+  and a persisted owner spend ceiling still use or depend on the legacy
+  fixed-plan backend. The billing page is a deterministic planning surface,
+  not a functioning paid account-management surface.
+- The service stores token hashes, not recoverable plaintext. Automated
+  owner-verified rotation is not implemented; recovery guidance routes to a
+  fresh sandbox or support instead of pretending to email the old token.
 
 - `mailboxes.last_polled_at` (SPEC.md §19.2/[F7]) is written server-side
   (`tenant-do.ts`, `engine/reply-processor.ts`) but never surfaced through

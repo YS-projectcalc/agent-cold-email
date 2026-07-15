@@ -1,8 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { useAuth } from "./AuthProvider";
 import type { UnauthorizedReason } from "../api/unauthorizedBus";
-import { BRAND_NAME } from "../lib/brand";
-import { card, cardPad } from "../lib/ui";
+import { PublicAuthShell } from "./PublicAuthShell";
 
 // SPEC.md §19.1/§19.6 — token-gate screen: paste-token login, with distinct
 // error states for "that token was rejected just now" (this form's own
@@ -36,12 +35,11 @@ export function TokenGate() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-canvas px-4">
-      <div className={`${card} ${cardPad} w-full max-w-sm`}>
-        <p className="mb-1 font-mono text-sm font-bold text-ink">{BRAND_NAME}</p>
-        <h1 className="mb-1 text-xl font-semibold tracking-[-0.02em] text-ink">Sign in to your dashboard</h1>
-        <p className="mb-4 text-sm text-ink-muted">Paste the tenant token your agent used at signup.</p>
-
+    <PublicAuthShell
+      eyebrow="Human control room"
+      title="Sign in to your dashboard."
+      description="Use the tenant token created at signup. It connects this control room to the same isolated rig your agent operates."
+    >
         {reason && (
           <div role="alert" className="mb-4 rounded-[var(--radius-card)] border border-warn-border bg-warn-bg px-3 py-2 text-sm text-warn-text">
             <strong className="block">Your session ended.</strong>
@@ -61,7 +59,8 @@ export function TokenGate() {
             spellCheck={false}
             value={token}
             onChange={(e) => setToken(e.target.value)}
-            className="mb-3 w-full rounded-[var(--radius-card)] border border-line bg-canvas px-3 py-2 text-sm text-ink"
+            placeholder="cr_live_…"
+            className="mb-3 w-full rounded-[var(--radius-card)] border border-line bg-canvas px-3 py-2.5 font-mono text-sm text-ink placeholder:text-ink-muted/50"
             aria-invalid={formError ? true : undefined}
             aria-describedby={formError ? "token-error" : undefined}
           />
@@ -73,12 +72,15 @@ export function TokenGate() {
           <button
             type="submit"
             disabled={loginPending}
-            className="w-full rounded-[var(--radius-card)] border border-accent bg-accent px-4 py-2 text-sm font-semibold text-accent-contrast disabled:opacity-60"
+            className="w-full rounded-full border border-accent bg-accent px-4 py-2.5 text-sm font-semibold text-accent-contrast shadow-[0_9px_22px_rgba(46,92,255,.2)] transition hover:bg-[#1839af] disabled:opacity-60"
           >
             {loginPending ? "Signing in…" : "Sign in"}
           </button>
         </form>
-      </div>
-    </div>
+        <div className="mt-5 flex flex-wrap justify-between gap-3 border-t border-line pt-4 text-xs">
+          <a href="/app/signup" className="font-semibold text-accent">Create a free sandbox</a>
+          <a href="/app/recover" className="text-ink-muted underline underline-offset-4">Lost your token?</a>
+        </div>
+    </PublicAuthShell>
   );
 }

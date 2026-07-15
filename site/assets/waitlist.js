@@ -30,7 +30,7 @@ document.addEventListener("DOMContentLoaded", () => {
         body: JSON.stringify({ email: emailInput.value }),
       });
       if (res.ok) {
-        setStatus(status, "You're on the list — we'll email you when real sending goes live.", "ok");
+        setStatus(status, "You're on the activation list — we'll email you when real sending is available.", "ok");
         form.reset();
       } else {
         setStatus(status, "That didn't go through. Try again in a moment.", "err");

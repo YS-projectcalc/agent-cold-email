@@ -3,17 +3,20 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FAQ — agent-cold-email</title>
+<title>FAQ — Coldrig</title>
 <meta name="description" content="Frequently asked questions about agent-cold-email: availability, deliverability guarantees (none), pricing, isolation, how the demo works, and compliance.">
 <link rel="canonical" href="https://coldrig.dev/faq">
-<meta property="og:title" content="FAQ — agent-cold-email">
+<meta property="og:title" content="FAQ — Coldrig">
 <meta property="og:description" content="Frequently asked questions about agent-cold-email: availability, deliverability guarantees (none), pricing, isolation, how the demo works, and compliance.">
 <meta property="og:url" content="https://coldrig.dev/faq">
 <meta property="og:type" content="website">
-<meta property="og:site_name" content="agent-cold-email">
+<meta property="og:site_name" content="Coldrig">
 <meta property="og:image" content="https://coldrig.dev/assets/og-image.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="https://coldrig.dev/assets/og-image.png">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <link rel="stylesheet" href="assets/style.css">
 <script src="assets/brand.js" defer></script>
 <script type="application/ld+json">
@@ -24,7 +27,7 @@
     {
       "@type": "Question",
       "name": "Is agent-cold-email available today?",
-      "acceptedAnswer": { "@type": "Answer", "text": "It's early access. The control plane, sandbox engine, and agent-facing HTTP/MCP intents are built and live in test mode, but there is no live production deployment for real sending yet. You can run the full demo pipeline against the live sandbox today with no cost, but do not tell a user their real campaigns will go out." }
+      "acceptedAnswer": { "@type": "Answer", "text": "Public early access is live: the HTTP API, hosted MCP endpoint, npm CLI, and isolated sandbox are available today. Real sending is not active. You can run the full demo pipeline at no cost, but do not tell a user their real campaign will go out." }
     },
     {
       "@type": "Question",
@@ -49,12 +52,17 @@
     {
       "@type": "Question",
       "name": "What does agent-cold-email cost?",
-      "acceptedAnswer": { "@type": "Answer", "text": "Pricing is per-mailbox/month plus a platform fee, from a free sandboxed demo tier through Launch ($99/mo, 5 mailboxes), Growth ($299/mo, 20 mailboxes), Scale ($799/mo, 60 mailboxes), and a metered Custom tier. Numbers are live in Stripe test mode and adjustable until activation. Full tiers on the pricing page." }
+      "acceptedAnswer": { "@type": "Answer", "text": "Provisional paid pricing starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox (a $49 platform fee plus $10 per mailbox, five-mailbox minimum): 5 mailboxes cost $99/month, 10 cost $149, 20 cost $249, and 60 cost $649. Provisioned mailboxes count while warming, send-ready, or temporarily health-paused. Domains are included; sends are not separately metered. Paid real-sending activation is not live yet." }
     },
     {
       "@type": "Question",
-      "name": "Why is it called agent-cold-email instead of a brand name?",
-      "acceptedAnswer": { "@type": "Answer", "text": "agent-cold-email is the permanent keyword handle used for the repository, npm package, and MCP registry listings so none of them ever need renaming. A separate display brand will be chosen at activation and shown in one place across the site; the keyword handle does not change when that happens." }
+      "name": "Why is the npm package called agent-cold-email?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Coldrig is the display brand. agent-cold-email is the permanent keyword handle used for the repository, npm package, and MCP registry listings, so machine integrations do not need renaming." }
+    },
+    {
+      "@type": "Question",
+      "name": "Does Coldrig provide webhooks for replies and bounces?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Not in the current public API. Agents can poll the cursor-paginated activity intent for campaign, reply, bounce, and deliverability events. If push webhooks are a hard requirement, treat this as a current capability gap." }
     },
     {
       "@type": "Question",
@@ -73,7 +81,7 @@
 <body>
 <nav class="site-nav">
   <div class="wrap">
-    <a class="logo" href="/"><span data-brand></span><span class="tag">agent-native cold email</span></a>
+    <a class="logo" href="/"><span data-brand></span><span class="tag">agent-controlled outreach</span></a>
     <ul>
       <li><a href="/">Home</a></li>
       <li><a href="/docs">Docs</a></li>
@@ -93,7 +101,7 @@
   <div class="faq">
     <details open>
       <summary>Is agent-cold-email available today?</summary>
-      <p>It's early access. The control plane, sandbox engine, and agent-facing HTTP/MCP intents are built and live in test mode, but there is no live production deployment for real sending yet. You can run the full demo pipeline against the live sandbox today with no cost — see <a href="/guide-cold-email-with-ai-agent#demo">the demo walkthrough</a> — but do not tell a user their real campaigns will go out.</p>
+      <p>Public early access is live: the HTTP API, hosted MCP endpoint, npm CLI, and isolated sandbox are available today. Real sending is not active. You can run the full demo pipeline at no cost — see <a href="/guide-cold-email-with-ai-agent#demo">the demo walkthrough</a> — but do not tell a user their real campaign will go out.</p>
     </details>
     <details>
       <summary>What's the difference between the demo tier and a real account?</summary>
@@ -135,6 +143,10 @@
       <summary>How do I connect my coding agent?</summary>
       <p>Add the hosted MCP server (one config line, streamable HTTP, your bearer token) to Claude Code, Codex, or any MCP-capable agent, or call the HTTP intents directly. Full steps: <a href="/guide-cold-email-with-ai-agent">the setup guide</a>; exact tool schemas: <a href="/guide-mcp-cold-email">the MCP reference</a>.</p>
     </details>
+    <details>
+      <summary>Does Coldrig provide webhooks for replies and bounces?</summary>
+      <p>Not in the current public API. Agents can poll the cursor-paginated <code>activity</code> intent for campaign, reply, bounce, and deliverability events. If push webhooks are a hard requirement, treat this as a current capability gap rather than an equivalent feature.</p>
+    </details>
   </div>
 
   <h2 id="isolation">Isolation and safety</h2>
@@ -153,11 +165,11 @@
   <div class="faq">
     <details>
       <summary>What does agent-cold-email cost?</summary>
-      <p>Per-mailbox/month plus a platform fee: free sandboxed demo, Launch $99/mo (5 mailboxes, 2 domains), Growth $299/mo (20 mailboxes, 6 domains), Scale $799/mo (60 mailboxes, 18 domains), and a metered Custom tier. Full breakdown and what's included at every paid tier: <a href="/pricing">Pricing</a>.</p>
+      <p>Provisional paid pricing <strong>starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox</strong> (a $49 platform fee plus $10 per mailbox, five-mailbox minimum): 5 cost $99/month, 10 cost $149, 20 cost $249, and 60 cost $649. A provisioned mailbox counts while warming, send-ready, or temporarily health-paused because Coldrig is still reserving that capacity. Domains are included and sends are not separately metered. See the <a href="/pricing">interactive price calculator and exact meter definition</a>.</p>
     </details>
     <details>
       <summary>Is there a contract or commitment?</summary>
-      <p>No — month-to-month, cancel anytime. These numbers are live in Stripe test mode and still adjustable until activation.</p>
+      <p>No — the intended paid model is month-to-month and cancel-anytime. Paid real-sending activation is not live yet, and the published formula remains provisional until activation.</p>
     </details>
   </div>
 
@@ -176,8 +188,8 @@
   <h2 id="naming">Naming</h2>
   <div class="faq">
     <details>
-      <summary>Why is it called agent-cold-email instead of a brand name?</summary>
-      <p><code>agent-cold-email</code> is the permanent keyword handle for the repository, npm package, and MCP registry listings, so none of them ever need renaming. A separate display brand is chosen later, at activation, and shown in one place across this site — the keyword handle stays fixed either way.</p>
+      <summary>Why is the npm package called agent-cold-email?</summary>
+      <p><strong>Coldrig</strong> is the display brand. <code>agent-cold-email</code> is the permanent keyword handle for the repository, npm package, and MCP registry listings, so machine integrations do not need renaming.</p>
     </details>
   </div>
 
@@ -191,7 +203,7 @@
     <ul>
       <li><a href="/privacy">Privacy</a></li>
       <li><a href="/terms">Terms</a></li>
-      <li><a href="/aup">Acceptable Use</a></li>
+      <li><a href="/aup">Acceptable Use</a></li><li><a href="/dpa">DPA</a></li>
       <li><a href="/docs">Docs</a></li>
       <li><a href="/guide-cold-email-with-ai-agent">Guides</a></li>
       <li><a href="/faq">FAQ</a></li>

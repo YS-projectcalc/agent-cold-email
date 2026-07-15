@@ -13,6 +13,10 @@
   Access-Control-Allow-Origin: *
   Content-Type: text/plain; charset=utf-8
 
+/agent-evaluation.md
+  Access-Control-Allow-Origin: *
+  Content-Type: text/markdown; charset=utf-8
+
 /openapi.yaml
   Access-Control-Allow-Origin: *
   Content-Type: application/yaml; charset=utf-8

@@ -8,66 +8,37 @@
 @import "tailwindcss";
 
 :root {
-  --bg: #ffffff;
-  --bg-subtle: #f6f7f9;
-  --bg-inset: #eef0f3;
-  --text: #16181d;
-  --text-muted: #565d6b;
-  --border: #dfe3e8;
-  --accent: #1a5fb4;
+  color-scheme: light;
+  --bg: #f7f7f2;
+  --bg-subtle: #ffffff;
+  --bg-inset: #eeeee7;
+  --text: #12151a;
+  --text-muted: #62666e;
+  --border: #d9dad3;
+  --accent: #2e5cff;
   --accent-contrast: #ffffff;
-  --ok: #146c2e;
-  --warn-bg: #fff6e5;
-  --warn-border: #e8c468;
-  --warn-text: #6b4d00;
+  --ok: #14865b;
+  --warn-bg: #fff8dc;
+  --warn-border: #e3cc78;
+  --warn-text: #584713;
 
-  --chip-danger-bg: #fff1f2;
-  --chip-danger-text: #be123c;
+  --chip-danger-bg: #fff0ea;
+  --chip-danger-text: #b63d1d;
   --chip-success-bg: #ecfdf5;
   --chip-success-text: #047857;
   --chip-warning-bg: #fffbeb;
   --chip-warning-text: #b45309;
-  --chip-info-bg: #eff6ff;
-  --chip-info-text: #1d4ed8;
-  --chip-neutral-bg: #f1f5f9;
-  --chip-neutral-text: #475569;
+  --chip-info-bg: #e9edff;
+  --chip-info-text: #1839af;
+  --chip-neutral-bg: #eeeee7;
+  --chip-neutral-text: #62666e;
 
   /* M5 R2 item 4 — the "there's more below" scrim used by .scroll-fade-b. */
   --scroll-shadow: rgba(15, 17, 21, 0.12);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0f1115;
-    --bg-subtle: #161920;
-    --bg-inset: #1c2029;
-    --text: #e7e9ee;
-    --text-muted: #9aa2b1;
-    --border: #2a2f3a;
-    --accent: #6fa8ea;
-    --accent-contrast: #08131f;
-    --ok: #6fd08a;
-    --warn-bg: #2a230f;
-    --warn-border: #6b5316;
-    --warn-text: #e8c468;
-
-    --chip-danger-bg: #3a141d;
-    --chip-danger-text: #fca5b1;
-    --chip-success-bg: #0e2a1e;
-    --chip-success-text: #6fd08a;
-    --chip-warning-bg: #2a230f;
-    --chip-warning-text: #e8c468;
-    --chip-info-bg: #12233b;
-    --chip-info-text: #8ab8f2;
-    --chip-neutral-bg: #1c2029;
-    --chip-neutral-text: #9aa2b1;
-
-    --scroll-shadow: rgba(0, 0, 0, 0.45);
-  }
-}
-
 @theme {
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
   --color-canvas: var(--bg);
@@ -94,7 +65,7 @@
   --color-chip-neutral-bg: var(--chip-neutral-bg);
   --color-chip-neutral-text: var(--chip-neutral-text);
 
-  --radius-card: 8px;
+  --radius-card: 12px;
   /* KPI-hero + data-table type scale (premium-b2b archive): 11px uppercase
      tracked labels, 32px/600 KPI values — layered on top of Tailwind's
      default scale, not replacing it. */
@@ -120,6 +91,7 @@ body {
   background: var(--color-canvas);
   color: var(--color-ink);
   -webkit-text-size-adjust: 100%;
+  letter-spacing: -0.01em;
 }
 
 /* Visible focus ring everywhere (§19.6 a11y floor) — never rely on the
