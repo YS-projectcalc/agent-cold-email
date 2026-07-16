@@ -42,12 +42,68 @@ CREATE TABLE IF NOT EXISTS tenant_profile (
   clock_multiplier INTEGER NOT NULL DEFAULT 1
 );
 
+-- SPEC.md §20 — BYO domains & mailboxes. Every new column below defaults to
+-- the value an EXISTING provisioned (lookalike) domain already has, so every
+-- pre-existing row — and every existing test/tenant — is byte-identical
+-- (flag-dark: source='provisioned', is_primary=0, byo_status='active',
+-- reputation/breaker fields NULL/'standard'). Only a row explicitly inserted
+-- through the new BYO intake path (engine/byo-intake.ts) ever sets these to
+-- anything else.
 CREATE TABLE IF NOT EXISTS domains (
   id TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL,
   domain TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'active',
-  purchased_at INTEGER NOT NULL
+  purchased_at INTEGER NOT NULL,
+  -- 'provisioned' (the existing lookalike-domain flow, unchanged) | 'byo'
+  -- (SPEC.md §20 — the customer brought this domain).
+  source TEXT NOT NULL DEFAULT 'provisioned',
+  -- The tenant's declared primary/flagship business domain (SPEC.md §20.2/
+  -- §20.4/§20.5's primary-axis-first gate). At most one domain row per tenant
+  -- should have this set (enforced in engine/byo-intake.ts, not a DB
+  -- constraint — mirrors dashboard_views.is_default's own documented
+  -- app-level-only enforcement).
+  is_primary INTEGER NOT NULL DEFAULT 0,
+  -- 'we_manage_zone' | 'records_to_apply' | NULL (provisioned domains never
+  -- set this — the lookalike flow's setDns() is a different code path).
+  dns_mode TEXT,
+  -- BYO intake lifecycle: 'pending_scan' | 'pending_dns' | 'pending_consent'
+  -- | 'pending_kyc' | 'active' | 'rejected' | 'abandoned'. Provisioned
+  -- domains are always 'active' (there is no intake pipeline for them).
+  byo_status TEXT NOT NULL DEFAULT 'active',
+  -- SPEC.md §20.1's pre-flight live-infra scan result snapshot (JSON — see
+  -- byo-preflight.ts's PreflightScanFindings/PreflightInterpretation), frozen
+  -- at the moment it was taken so a later re-scan can't silently rewrite what
+  -- was actually disclosed to the customer (byo-consent.ts's ConsentRecord
+  -- also carries its OWN copy at ack time, for the same reason).
+  scan_json TEXT,
+  -- SPEC.md §20.3's abuse-gate verdict (JSON — byo-abuse-gate.ts's ByoAbuseAssessment).
+  abuse_gate_json TEXT,
+  -- SPEC.md §20.4's primary-domain consent record (JSON — byo-consent.ts's
+  -- ConsentRecord). NULL until a primary-domain intake has been acknowledged.
+  consent_json TEXT,
+  -- SPEC.md §20.5's reputation branch: 'primary_standard' | 'established_good'
+  -- | 'unknown_fresh' | 'blocklisted_reject' | NULL (provisioned domains have
+  -- no reputation-ladder branch at all — mailbox-state.ts's rampTierFor
+  -- treats NULL as 'standard', byte-identical to today).
+  reputation_branch TEXT,
+  -- SPEC.md §20.1's elevated-breaker note: a subdomain-of-primary domain is
+  -- NOT is_primary itself but still inherits §20.2's operationalized breaker
+  -- (deliverability.ts's evaluate() branches on this, not on is_primary,
+  -- when deciding which breaker a domain routes through). 'primary' |
+  -- 'elevated' | 'standard'.
+  breaker_tier TEXT NOT NULL DEFAULT 'standard',
+  -- Poll-verify bookkeeping for records-to-apply / we-manage-zone DNS
+  -- confirmation (SPEC.md §20.1's "no mode silently blocks forever" —
+  -- byo-intake.ts's pollByoDomainDns uses these for the 7-day idle timeout).
+  dns_check_count INTEGER NOT NULL DEFAULT 0,
+  dns_first_checked_at INTEGER,
+  -- SPEC.md §20.2's mandatory DMARC p=none observation window before first
+  -- send (14 days, or 7 if the pre-flight scan already found enforcement
+  -- mode). NULL = no gate (provisioned domains, and BYO domains before this is
+  -- computed) — tick.ts's capacity picker excludes a mailbox whose domain's
+  -- first_send_eligible_at is in the future; NULL never gates anything.
+  first_send_eligible_at INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS mailboxes (
@@ -96,7 +152,27 @@ CREATE TABLE IF NOT EXISTS mailboxes (
   -- inbound on every empty mailbox).
   poll_cursor INTEGER NOT NULL DEFAULT -1,
   warmup_started_at INTEGER NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  -- SPEC.md §20.6 — mailbox composition. 'provisioned' (the existing vendor-
+  -- provisioned flow, unchanged — includes a managed mailbox provisioned ON a
+  -- BYO domain, shape (a): we still own/manage the mailbox itself) | 'byo_connected'
+  -- (SPEC.md §20.6's Mordy-pilot seam — the customer's own existing OAuth/
+  -- SMTP+IMAP mailbox, bypassing provisioning entirely).
+  source TEXT NOT NULL DEFAULT 'provisioned',
+  -- Maps directly onto the engine's per-mailbox SEND transport discriminator
+  -- (apps/engine/src/config.ts's sendTransportSchema) — 'smtp' | 'gmail_api' |
+  -- 'ms_graph'. Every existing mailbox is 'smtp' by default, matching
+  -- config.ts's own documented default (an omitted 'send' field means smtp).
+  transport_kind TEXT NOT NULL DEFAULT 'smtp',
+  -- Connection metadata for a 'byo_connected' mailbox (JSON — kind-specific
+  -- fields mirroring config.ts's gmailTransportSchema/graphTransportSchema;
+  -- for 'smtp' this holds host/port/user, NEVER the raw password — see
+  -- engine/byo-intake.ts's connectByoMailbox doc comment on the secret-
+  -- handling posture, modeled on webhook_subscriptions.secret's "shown once,
+  -- never re-exposed on read" convention). NULL for 'provisioned' mailboxes
+  -- (their credentials are injected into the engine out-of-band, via the
+  -- existing droplet/env runbook -- unchanged by this lane).
+  transport_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS campaigns (
@@ -284,7 +360,13 @@ CREATE TABLE IF NOT EXISTS deliverability_actions (
   action TEXT NOT NULL,
   target TEXT NOT NULL,
   detail_json TEXT NOT NULL DEFAULT '{}',
-  ts INTEGER NOT NULL
+  ts INTEGER NOT NULL,
+  -- SPEC.md §20.2's dual-alert requirement for a HARD_PAUSE_PRIMARY_DOMAIN
+  -- action (customer dashboard banner + account-contact email, owner §D6
+  -- digest) — set the moment the best-effort notice is dispatched
+  -- (deliverability-actions.ts), so a re-sweep of an already-paused primary
+  -- domain never re-sends the same alert. NULL for every other action type.
+  alerted_at INTEGER
 );
 
 -- D5 chargeback / dispute lane (protects the master Stripe account). One row

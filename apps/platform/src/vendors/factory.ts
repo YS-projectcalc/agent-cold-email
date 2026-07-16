@@ -1,14 +1,18 @@
 import type { Clock, TenantPlan, VendorAdapters } from "@coldstart/shared";
 import { SandboxBillingPort } from "./sandbox/billing-port.js";
+import { SandboxDnsScanPort } from "./sandbox/dns-scan-port.js";
 import { SandboxDomainPort } from "./sandbox/domain-port.js";
 import { SandboxEmailPort } from "./sandbox/email-port.js";
 import { SandboxMailboxPort } from "./sandbox/mailbox-port.js";
 import { SandboxMetricsPort } from "./sandbox/metrics-port.js";
+import { SandboxDomainReputationPort } from "./sandbox/reputation-port.js";
 import { RealBillingPort } from "./real/billing-port.js";
+import { RealDnsScanPort } from "./real/dns-scan-port.js";
 import { RealDomainPort } from "./real/domain-port.js";
 import { RealEmailPort, type EngineClientConfig } from "./real/email-port.js";
 import { RealMailboxPort } from "./real/mailbox-port.js";
 import { RealMetricsPort } from "./real/metrics-port.js";
+import { RealDomainReputationPort } from "./real/reputation-port.js";
 
 export type VendorAdapterKind = "sandbox" | "real";
 
@@ -104,6 +108,8 @@ export function createVendorAdapters(
       email,
       billing: new SandboxBillingPort(clock),
       metrics: new SandboxMetricsPort(clock),
+      dnsScan: new SandboxDnsScanPort(),
+      reputation: new SandboxDomainReputationPort(),
     };
   }
 
@@ -114,5 +120,7 @@ export function createVendorAdapters(
     email,
     billing: new RealBillingPort(),
     metrics: new RealMetricsPort(),
+    dnsScan: new RealDnsScanPort(),
+    reputation: new RealDomainReputationPort(),
   };
 }

@@ -15,6 +15,17 @@ Implements the `VendorPort` interfaces from `@coldstart/shared` twice:
   — but it too stays dark (`NotActivatedError`) until `ENGINE_BASE_URL`/
   `ENGINE_AUTH_SECRET` are set AND the factory's ENGINE_TENANTS gate below
   admits the tenant.
+- `dns-scan-port.ts` / `reputation-port.ts` (both sandbox + real) — SPEC.md
+  §20.1/§20.5's `DnsScanPort`/`DomainReputationPort` — the BYO-domain
+  pre-flight scan + reputation-ladder signals. The `real/` adapters are
+  "coded-but-unactivated" like every other real port ABOVE (a DNS-over-HTTPS/
+  RDAP/DNSBL implementation is deferred), NOT because of vendor spend (a DNS
+  lookup is free) but because it's a new external network dependency scanning
+  a tenant-supplied hostname — deliberately activation-gated, not silently wired.
+  The sandbox adapters are fixture-map + magic-substring hostnames (e.g.
+  `liveinfra-`, `parked-`, `delegated-`, `established-`, `blocklisted-` — see
+  each file's own doc comment for the full list) so `byo-intake.ts`'s tests
+  can drive every intake branch deterministically.
 
 `factory.ts` is the single choke point that decides which bundle a tenant
 gets (`createVendorAdapters(plan, clock, realAdaptersActivated, engineConfig?,
