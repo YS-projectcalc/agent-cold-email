@@ -132,6 +132,87 @@ describe("registerByoDomain", () => {
   });
 });
 
+describe("registerByoDomain — single BYO-primary enforcement (schema.ts:62's documented, previously-unenforced invariant)", () => {
+  it("rejects a second BYO-primary registration while the tenant already has an active one", async () => {
+    const tenantId = await tenant("Second Primary Co", "secondprimary@example.com");
+    await withTenantContext(tenantId, (ctx) => registerByoDomain(ctx, { domain: "first-primary.com", domainRelationship: "is_primary" }));
+
+    await expect(
+      withTenantContext(tenantId, (ctx) => registerByoDomain(ctx, { domain: "second-primary.com", domainRelationship: "is_primary" })),
+    ).rejects.toThrow(ValidationError);
+  });
+
+  it("does NOT block a second primary registration once the first was REJECTED at intake (blocklisted)", async () => {
+    const tenantId = await tenant("Rejected Primary Co", "rejectedprimary@example.com");
+    const first = await withTenantContext(tenantId, (ctx) =>
+      registerByoDomain(ctx, { domain: "blocklisted-primary.com", domainRelationship: "is_primary" }),
+    );
+    expect(first.byoStatus).toBe("rejected");
+
+    const second = await withTenantContext(tenantId, (ctx) =>
+      registerByoDomain(ctx, { domain: "second-primary-after-reject.com", domainRelationship: "is_primary" }),
+    );
+    expect(second.isPrimary).toBe(true);
+  });
+
+  it("does NOT block a second primary registration once the first was ABANDONED (DNS idle timeout)", async () => {
+    const tenantId = await tenant("Abandoned Primary Co", "abandonedprimary@example.com");
+    const first = await withTenantContext(tenantId, (ctx) =>
+      registerByoDomain(ctx, { domain: "abandon-primary.com", domainRelationship: "is_primary" }),
+    );
+    await withTenantContext(tenantId, (ctx) => acknowledgePrimaryDomainConsent(ctx, first.domainId, { acknowledged: true }));
+    await withTenantContext(tenantId, (ctx) => pollByoDomainDns(ctx, first.domainId)); // first check, sets dns_first_checked_at
+    await tenantStub(tenantId).advanceClock(8 * ONE_DAY_MS);
+    const abandoned = await withTenantContext(tenantId, (ctx) => pollByoDomainDns(ctx, first.domainId));
+    expect(abandoned.byoStatus).toBe("abandoned");
+
+    const second = await withTenantContext(tenantId, (ctx) =>
+      registerByoDomain(ctx, { domain: "second-primary-after-abandon.com", domainRelationship: "is_primary" }),
+    );
+    expect(second.isPrimary).toBe(true);
+  });
+
+  it("does NOT block a second primary registration once the first is hard-paused (domains.status='paused_primary') — a retired primary never blocks a new one", async () => {
+    const tenantId = await tenant("Retired Primary Co", "retiredprimary@example.com");
+    const first = await withTenantContext(tenantId, (ctx) =>
+      registerByoDomain(ctx, { domain: "retired-primary.com", domainRelationship: "is_primary" }),
+    );
+    await withTenantContext(tenantId, (ctx) => {
+      ctx.sql.exec(`UPDATE domains SET status = 'paused_primary', byo_status = 'active' WHERE id = ?`, first.domainId);
+    });
+
+    const second = await withTenantContext(tenantId, (ctx) =>
+      registerByoDomain(ctx, { domain: "second-primary-after-retire.com", domainRelationship: "is_primary" }),
+    );
+    expect(second.isPrimary).toBe(true);
+  });
+
+  it("never blocks non-primary (fresh_standalone/subdomain) registrations, regardless of an existing active primary", async () => {
+    const tenantId = await tenant("Nonprimary Unblocked Co", "nonprimaryunblocked@example.com");
+    await withTenantContext(tenantId, (ctx) => registerByoDomain(ctx, { domain: "the-one-primary.com", domainRelationship: "is_primary" }));
+
+    const fresh = await withTenantContext(tenantId, (ctx) =>
+      registerByoDomain(ctx, { domain: "fresh-alongside-primary.com", domainRelationship: "fresh_standalone" }),
+    );
+    expect(fresh.isPrimary).toBe(false);
+    const sub = await withTenantContext(tenantId, (ctx) =>
+      registerByoDomain(ctx, { domain: "send.the-one-primary.com", domainRelationship: "subdomain_of_primary" }),
+    );
+    expect(sub.isPrimary).toBe(false);
+  });
+
+  it("is tenant-isolated: tenant A's active BYO-primary never blocks tenant B's primary registration", async () => {
+    const tenantA = await tenant("Primary Isolation A", "pia@example.com");
+    const tenantB = await tenant("Primary Isolation B", "pib@example.com");
+    await withTenantContext(tenantA, (ctx) => registerByoDomain(ctx, { domain: "isolation-primary-a.com", domainRelationship: "is_primary" }));
+
+    const recordB = await withTenantContext(tenantB, (ctx) =>
+      registerByoDomain(ctx, { domain: "isolation-primary-b.com", domainRelationship: "is_primary" }),
+    );
+    expect(recordB.isPrimary).toBe(true);
+  });
+});
+
 describe("pollByoDomainDns", () => {
   it("stays pending_dns and increments checksSoFar while unverified", async () => {
     const tenantId = await tenant("Poll Pending Co", "poll@example.com");

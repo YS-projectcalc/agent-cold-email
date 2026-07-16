@@ -69,6 +69,34 @@ export function requireByoDomainRow(ctx: TenantContext, domainId: string): Domai
   return row;
 }
 
+/**
+ * schema.ts:62's documented "at most one is_primary per tenant" invariant —
+ * actually enforced HERE, at the one boundary that creates a new BYO-primary
+ * row. A primary that is no longer a LIVE candidate never blocks a new one:
+ * rejected (blocklisted at intake) and abandoned (§20.1's 7-day DNS idle
+ * timeout) are terminal-failed byo_status values, and a hard-paused primary
+ * (domains.status='paused_primary', the §20.2 breaker's substitute remedy —
+ * see deliverability-actions.ts's applyHardPauseDomain) is retired from
+ * sending, not a second live primary to conflict with. Only a row still
+ * actively pursuing or already running as the primary (status='active' AND
+ * byo_status NOT IN rejected/abandoned) counts.
+ */
+function assertNoExistingActiveByoPrimary(ctx: TenantContext): void {
+  const existing = ctx.sql
+    .exec<{ n: number }>(
+      `SELECT COUNT(*) as n FROM domains
+       WHERE tenant_id = ? AND source = 'byo' AND is_primary = 1 AND status = 'active' AND byo_status NOT IN ('rejected', 'abandoned')`,
+      ctx.tenantId,
+    )
+    .one().n;
+  if (existing > 0) {
+    throw new ValidationError(
+      "tenant already has an active BYO primary-domain intake (SPEC.md §20 — at most one is_primary domain per tenant); " +
+        "a rejected, abandoned, or hard-paused primary does not block registering a new one",
+    );
+  }
+}
+
 function toRecord(row: DomainRow): ByoDomainRecord {
   return {
     domainId: row.id,
@@ -97,6 +125,7 @@ export async function registerByoDomain(ctx: TenantContext, input: RegisterByoDo
 
   const domain = input.domain.trim().toLowerCase();
   const isPrimary = input.domainRelationship === "is_primary";
+  if (isPrimary) assertNoExistingActiveByoPrimary(ctx);
   const now = ctx.clock.now();
 
   const scan = await ctx.adapters.dnsScan.scan(domain);

@@ -59,10 +59,13 @@ CREATE TABLE IF NOT EXISTS domains (
   -- (SPEC.md §20 — the customer brought this domain).
   source TEXT NOT NULL DEFAULT 'provisioned',
   -- The tenant's declared primary/flagship business domain (SPEC.md §20.2/
-  -- §20.4/§20.5's primary-axis-first gate). At most one domain row per tenant
-  -- should have this set (enforced in engine/byo-intake.ts, not a DB
-  -- constraint — mirrors dashboard_views.is_default's own documented
-  -- app-level-only enforcement).
+  -- §20.4/§20.5's primary-axis-first gate). At most one LIVE row per tenant
+  -- may have this set — enforced in engine/byo-intake.ts's
+  -- assertNoExistingActiveByoPrimary (registerByoDomain's boundary check), not
+  -- a DB constraint (mirrors dashboard_views.is_default's own documented
+  -- app-level-only enforcement). "Live" excludes a terminal-failed intake
+  -- (byo_status='rejected'/'abandoned') and a hard-paused primary
+  -- (status='paused_primary') — none of those block registering a new one.
   is_primary INTEGER NOT NULL DEFAULT 0,
   -- 'we_manage_zone' | 'records_to_apply' | NULL (provisioned domains never
   -- set this — the lookalike flow's setDns() is a different code path).
