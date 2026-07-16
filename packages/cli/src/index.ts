@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { ApiError } from "./client.js";
+import { emitClaudeCodeHint } from "./claude-code-hint.js";
 import { parseArgs } from "./flags.js";
 import { runAccount } from "./commands/account.js";
 import { runCampaign } from "./commands/campaign.js";
@@ -70,10 +71,12 @@ async function main(): Promise<void> {
     case "--help":
     case "-h":
       console.log(HELP);
+      emitClaudeCodeHint();
       return;
     default:
       console.error(`Unknown command: ${command}\n`);
       console.log(HELP);
+      emitClaudeCodeHint();
       process.exitCode = 1;
   }
 }

@@ -34,7 +34,10 @@ for the transport implementation — the tool list/contract is unchanged).
 - `handler.ts` — `handleMcpRequest(env, authHeader, raw)`: parses/dispatches
   `initialize`, `notifications/initialized`, `tools/list`, `tools/call`.
   `tools/list` returns each tool's `inputSchema` via zod v4's native
-  `z.toJSONSchema()` (no extra dependency). `tools/call` is the only method
+  `z.toJSONSchema()` (no extra dependency), plus its MCP-spec `annotations`
+  (`title`, and `readOnlyHint`/`destructiveHint` set explicitly per tool in
+  `tools.ts` — see `McpToolAnnotations`'s doc there for why each is honest).
+  `tools/call` is the only method
   that touches tenant data, and is the one place auth happens. A
   `configure_dashboard` stale-rev conflict is detected via `err.name ===
   "RevConflictError"`, NOT `instanceof` — a DO method call crosses a Workers

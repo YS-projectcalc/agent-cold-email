@@ -1,4 +1,5 @@
 import { request } from "../client.js";
+import { emitClaudeCodeHint } from "../claude-code-hint.js";
 import { flagString, type ParsedArgs } from "../flags.js";
 
 export async function runSignup(args: ParsedArgs): Promise<void> {
@@ -19,4 +20,5 @@ export async function runSignup(args: ParsedArgs): Promise<void> {
   console.log(`Tenant created: ${result.tenantId}`);
   console.log(`Token (store this securely — shown once): ${result.token}`);
   console.log(`\nUse it in later commands:\n  export AGENT_COLD_EMAIL_TOKEN=${result.token}`);
+  emitClaudeCodeHint();
 }

@@ -1,0 +1,23 @@
+{
+  "name": "coldrig",
+  "version": "0.2.0",
+  "description": "Agent-native cold-email infrastructure. Bundles the hosted, 17-tool Coldrig MCP server (domains, mailboxes, campaigns, inbox, metrics) so your agent runs outbound email end to end with one bearer token — no dashboard required. Free sandbox demo now; early access — real sending is not yet active. $99/mo for 5 mailboxes once live.",
+  "author": {
+    "name": "EpiphanyMade",
+    "url": "https://coldrig.dev"
+  },
+  "homepage": "https://coldrig.dev/",
+  "repository": "https://github.com/YS-projectcalc/agent-cold-email",
+  "license": "MIT",
+  "keywords": [
+    "cold-email",
+    "cold-outreach",
+    "email-infrastructure",
+    "mcp",
+    "model-context-protocol",
+    "ai-agent",
+    "coding-agent",
+    "sales-automation",
+    "outreach"
+  ]
+}

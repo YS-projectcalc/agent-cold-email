@@ -62,11 +62,15 @@ function slugify(name: string): string {
 }
 
 /**
- * Default-view lifecycle (§19.2/[F6]) — a fresh tenant always renders. Called
- * at the top of every view operation (not just the "first GET" the spec calls
- * out) so the "at least one default view exists" invariant holds regardless
- * of which endpoint an agent happens to call first. Idempotent: a no-op once
- * any row exists.
+ * Default-view lifecycle (§19.2/[F6]) — a fresh tenant always renders.
+ * Called at the top of every MUTATING view operation (create/update/promote/
+ * delete — never the read paths below, which return the default VIRTUALLY
+ * instead of persisting it; MCP `get_dashboard` is `readOnlyHint: true` and
+ * must not write, directory-readiness adversarial finding, docs/adversarial/
+ * directory-readiness-2026-07-16.md line 39) so the "at least one default
+ * view exists" invariant holds by the time any OTHER row could exist,
+ * regardless of which mutating endpoint an agent happens to call first.
+ * Idempotent: a no-op once any row exists.
  */
 export function ensureDefaultViewSeeded(ctx: TenantContext): void {
   const count = ctx.sql.exec<{ n: number }>(`SELECT COUNT(*) as n FROM dashboard_views`).one().n;
@@ -82,12 +86,41 @@ export function ensureDefaultViewSeeded(ctx: TenantContext): void {
   );
 }
 
+/**
+ * The default view's row shape for a tenant that has never written ANY
+ * dashboard_views row — computed in-memory, NOT persisted (read-only
+ * counterpart to ensureDefaultViewSeeded's INSERT, same shape as
+ * mailbox-state.ts's computeMailboxWarmupSnapshot for infrastructure_status).
+ * Every field is a fixed constant EXCEPT the timestamps, which anchor to the
+ * tenant's own `tenant_profile.created_at` (not `ctx.clock.now()`) so two
+ * reads before any write ever happens return byte-identical
+ * updatedAt/createdAt — required by test/dashboard-views.test.ts's "an
+ * already-seeded view is never re-seeded/replaced" assertion (now genuinely
+ * never-seeded-until-a-write).
+ */
+function virtualDefaultViewRow(ctx: TenantContext): ViewRow {
+  const tenantCreatedAt = ctx.sql
+    .exec<{ created_at: number }>(`SELECT created_at FROM tenant_profile WHERE id = ?`, ctx.tenantId)
+    .one().created_at;
+  const iso = new Date(tenantCreatedAt).toISOString();
+  return {
+    id: "default",
+    name: "Default",
+    is_default: 1,
+    rev: 1,
+    layout_json: JSON.stringify(starterDashboardLayout()),
+    layout_schema_version: 1,
+    edited_by: "system",
+    edited_by_note: null,
+    updated_at: iso,
+    created_at: iso,
+  };
+}
+
 export function listDashboardViews(ctx: TenantContext): DashboardViewSummary[] {
-  ensureDefaultViewSeeded(ctx);
-  return ctx.sql
-    .exec<ViewRow>(`SELECT * FROM dashboard_views ORDER BY is_default DESC, created_at ASC`)
-    .toArray()
-    .map(toSummary);
+  const rows = ctx.sql.exec<ViewRow>(`SELECT * FROM dashboard_views ORDER BY is_default DESC, created_at ASC`).toArray();
+  if (rows.length === 0) return [toSummary(virtualDefaultViewRow(ctx))];
+  return rows.map(toSummary);
 }
 
 function getRow(ctx: TenantContext, id: string): ViewRow {
@@ -97,8 +130,23 @@ function getRow(ctx: TenantContext, id: string): ViewRow {
 }
 
 export function getDashboardView(ctx: TenantContext, id: string): DashboardViewDetail {
-  ensureDefaultViewSeeded(ctx);
-  return toDetail(getRow(ctx, id));
+  const row = ctx.sql.exec<ViewRow>(`SELECT * FROM dashboard_views WHERE id = ?`, id).toArray()[0];
+  if (row) return toDetail(row);
+  // Virtual default ONLY for a genuinely virgin tenant — COUNT(*) === 0
+  // across the WHOLE table, matching listDashboardViews's own
+  // `rows.length === 0` gate above. NOT "is the id==='default' row missing":
+  // deleteDashboardView's guard below is `row.is_default === 1`, NOT
+  // `id === 'default'`, so the default-id row CAN be demoted
+  // (promoteDashboardViewDefault moves is_default to another view) and THEN
+  // legitimately deleted on a NON-virgin tenant. That must 404 like any
+  // other missing id — never synthesize a phantom "the default" that
+  // conflicts with the real surviving default (adversarial re-attack finding,
+  // docs/adversarial/directory-readiness-reattack-2026-07-16.md).
+  if (id === "default") {
+    const isVirgin = ctx.sql.exec<{ n: number }>(`SELECT COUNT(*) as n FROM dashboard_views`).one().n === 0;
+    if (isVirgin) return toDetail(virtualDefaultViewRow(ctx));
+  }
+  throw new NotFoundError(`dashboard view ${id} not found`);
 }
 
 export function createDashboardView(

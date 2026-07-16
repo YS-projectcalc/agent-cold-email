@@ -96,6 +96,9 @@ export async function handleMcpRequest(
         // those `required`, contradicting the permissive runtime parse + the
         // HTTP openapi shape (adversarial panel-03 finding #11).
         inputSchema: z.toJSONSchema(t.schema, { target: "draft-7", io: "input" }),
+        // MCP-spec ToolAnnotations (title/readOnlyHint/destructiveHint) —
+        // see tools.ts's McpToolAnnotations doc for why each is set.
+        annotations: t.annotations,
       }));
       return result(id, { tools });
     }

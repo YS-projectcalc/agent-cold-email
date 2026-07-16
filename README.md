@@ -61,6 +61,16 @@ This is the full list — see [`SPEC.md` §6](./SPEC.md#6-agent-surface--the-too
 }
 ```
 
+**Codex CLI** (`~/.codex/config.toml`, or a trusted project's `.codex/config.toml` — set `COLDRIG_TOKEN` first):
+
+```toml
+[mcp_servers.coldrig]
+url = "https://agent-cold-email-api.yaakovscher.workers.dev/mcp"
+bearer_token_env_var = "COLDRIG_TOKEN"
+```
+
+Same setup for every client (Claude Code, Cursor, Cline) at [coldrig.dev/connect](https://coldrig.dev/connect).
+
 **CLI twin:**
 
 ```bash

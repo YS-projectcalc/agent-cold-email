@@ -96,6 +96,19 @@ Without a key, `initialize`/`tools/list` still work (the hosted endpoint
 allows unauthenticated introspection) but `tools/call` fails with a
 JSON-RPC error until one is set — get one with `signup` or `demo` above.
 
+Prefer to skip the stdio bridge and point Codex straight at the hosted
+remote endpoint instead? Add this to `~/.codex/config.toml` (set
+`COLDRIG_TOKEN` to your bearer token first):
+
+```toml
+[mcp_servers.coldrig]
+url = "https://agent-cold-email-api.yaakovscher.workers.dev/mcp"
+bearer_token_env_var = "COLDRIG_TOKEN"
+```
+
+Same remote-endpoint setup for Claude Code, Cursor, and Cline at
+[coldrig.dev/connect](https://coldrig.dev/connect).
+
 ## Env vars
 
 - `AGENT_COLD_EMAIL_API` — API base URL for the REST commands. Default: `https://agent-cold-email-api.yaakovscher.workers.dev`.

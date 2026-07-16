@@ -5,7 +5,7 @@ import { reportUsageToStripeIfConfigured } from "./billing.js";
 import { assertNotLifecycleFrozen } from "./billing-state.js";
 import { assertBrandOwnership } from "./brand-guard.js";
 import { gatherMailboxHealth } from "./deliverability.js";
-import { refreshMailboxWarmupState } from "./mailbox-state.js";
+import { computeMailboxWarmupSnapshot } from "./mailbox-state.js";
 import { assertWithinProvisioningCap } from "./quota.js";
 import { computeWarmupDay, epochDay, warmupDailyCap, warmupStatus } from "./warmup.js";
 
@@ -184,7 +184,13 @@ export interface InfrastructureStatus {
 }
 
 export async function getInfrastructureStatus(ctx: TenantContext): Promise<InfrastructureStatus> {
-  refreshMailboxWarmupState(ctx);
+  // Read-only: computes the same live warmup dailyCap/sentToday the tick
+  // would persist, WITHOUT writing (MCP readOnlyHint: true — see
+  // mailbox-state.ts's computeMailboxWarmupSnapshot doc). `s.warmupStatus`
+  // below is already freshly computed by gatherMailboxHealth (never read
+  // from the possibly-stale DB `status` column), so only dailyCap/sentToday
+  // need overriding from the snapshot.
+  const warmupSnapshot = computeMailboxWarmupSnapshot(ctx);
   const domainCount = ctx.sql
     .exec<{ n: number }>(`SELECT COUNT(*) as n FROM domains WHERE tenant_id = ?`, ctx.tenantId)
     .one().n;
@@ -195,13 +201,14 @@ export async function getInfrastructureStatus(ctx: TenantContext): Promise<Infra
       // Vendor-reported reputation/placement (SPEC.md §10 raw signal, Inboxkit
       // in the real adapter). On-demand here, NOT on the hot tick path.
       const vendor = await ctx.adapters.mailbox.getHealth(s.email);
+      const snapshot = warmupSnapshot.get(s.mailboxId);
       return {
         email: s.email,
         domain: s.domain,
         status: s.warmupStatus,
         warmupDay: s.warmupDay,
-        dailyCap: s.dailyCap,
-        sentToday: s.sentToday,
+        dailyCap: snapshot?.dailyCap ?? s.dailyCap,
+        sentToday: snapshot?.sentToday ?? s.sentToday,
         sendReady: s.sendReady,
         delivStatus: s.delivStatus,
         sends: s.sends,

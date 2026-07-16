@@ -269,4 +269,44 @@ describe("POST /dashboard/views/:id/default — single-default invariant + delet
     const missing = await api(`/dashboard/views/${created.body.id}`, { token });
     expect(missing.status).toBe(404);
   });
+
+  // Adversarial re-attack (docs/adversarial/directory-readiness-reattack-2026-07-16.md
+  // finding #1): the DEMOTED id='default' row can be legitimately deleted
+  // (deleteDashboardView guards on `is_default === 1`, not `id === 'default'`),
+  // leaving a NON-virgin tenant with no 'default'-id row. GET must 404 like
+  // any other missing id — not fabricate a phantom starter view.
+  it("deleting a DEMOTED 'default'-id view does not resurrect a phantom default — GET 404s, LIST shows only the survivor", async () => {
+    const { token } = await signup("Masquerade Co", "masquerade@dashboard-test.example");
+
+    // create seeds the real 'default' row (write path) + inserts 'myview'.
+    const created = await api<ViewDetail>("/dashboard/views", {
+      method: "POST",
+      token,
+      body: JSON.stringify({ name: "My View", layout: MINIMAL_LAYOUT }),
+    });
+    expect(created.status).toBe(201);
+
+    // promote 'myview' -> default: demotes the id='default' row to is_default=0.
+    const promote = await api<ViewSummary[]>(`/dashboard/views/${created.body.id}/default`, { method: "POST", token });
+    expect(promote.status).toBe(200);
+    expect(promote.body.find((v) => v.id === "default")!.isDefault).toBe(false);
+    expect(promote.body.find((v) => v.id === created.body.id)!.isDefault).toBe(true);
+
+    // delete the now-demoted id='default' row — passes the is_default guard (it's 0 now).
+    const del = await api<{ deleted: true }>("/dashboard/views/default", { method: "DELETE", token });
+    expect(del.status).toBe(200);
+    expect(del.body.deleted).toBe(true);
+
+    // GET the now-missing 'default' id on a NON-virgin tenant — must 404,
+    // never fabricate a virgin starter view (there IS a real default, 'myview').
+    const phantom = await api("/dashboard/views/default", { token });
+    expect(phantom.status).toBe(404);
+
+    // LIST still returns only the surviving view — no phantom injected, no
+    // duplicate isDefault:true.
+    const list = await api<ViewSummary[]>("/dashboard/views", { token });
+    expect(list.body).toHaveLength(1);
+    expect(list.body[0]!.id).toBe(created.body.id);
+    expect(list.body[0]!.isDefault).toBe(true);
+  });
 });
