@@ -89,15 +89,24 @@ export interface MailboxHealthSignal {
 }
 
 // SPEC.md §20.1's breaker-tier axis (see schema.ts's domains.breaker_tier
-// comment). 'standard' is every EXISTING provisioned domain plus a
-// fresh-standalone BYO domain (§20.1: "the ONLY genuinely
-// lookalike-risk-equivalent case") — these keep the EXISTING burn-threshold/
-// REPLACE_DOMAIN path below, byte-identical to today. 'primary' and
-// 'elevated' (the tenant's actual primary domain, and a dedicated
-// subdomain-of-primary respectively) can never be burn-replaced (we don't own
-// a "buy a replacement" lever for a domain that IS the customer's business) —
-// both route through the windowed §20.2 breaker instead.
+// comment) — retained as descriptive metadata about WHY a BYO domain is
+// primary/elevated/standard-relationship, but it is NOT what the burn
+// decision below routes on (adversarial finding, docs/adversarial/
+// byo-intake-2026-07-17.md #1: a fresh-standalone BYO domain also gets
+// breaker_tier='standard', which is indistinguishable from a platform-bought
+// domain on this field alone — routing on breakerTier let a customer-owned
+// domain fall into the bare burn-threshold/REPLACE_DOMAIN path, which auto-
+// BUYS a lookalike replacement the platform has no right to substitute for a
+// domain it doesn't own). The routing key is `DomainStat.source`: ANY
+// `source === 'byo'` domain — 'primary', 'elevated', AND 'standard'-tier
+// fresh-standalone alike — goes through the windowed §20.2 breaker instead of
+// bare burn-threshold/REPLACE_DOMAIN, because we can never own-and-rebuy a
+// customer's domain regardless of its relationship to their primary. Only a
+// platform-bought domain (`source === 'provisioned'`, always breaker_tier
+// 'standard') keeps the EXISTING burn-threshold/REPLACE_DOMAIN path, byte-
+// identical to today.
 export type DomainBreakerTier = "standard" | "elevated" | "primary";
+export type DomainSource = "provisioned" | "byo";
 
 export interface DomainStat {
   domainId: string;
@@ -111,9 +120,11 @@ export interface DomainStat {
   complaintRate: number;
   isPrimary: boolean;
   breakerTier: DomainBreakerTier;
-  /** Trailing 7-day domain-aggregate send count — ONLY meaningful when breakerTier != 'standard' (0 otherwise, unused). */
+  /** 'provisioned' (platform-bought) | 'byo' (customer-owned) — THE burn-decision routing key, see DomainBreakerTier's doc comment. */
+  source: DomainSource;
+  /** Trailing 7-day domain-aggregate send count — ONLY meaningful for a BYO domain (source === 'byo'; 0 otherwise, unused). */
   windowSends: number;
-  /** Trailing 7-day domain-aggregate complaint count — ONLY meaningful when breakerTier != 'standard'. */
+  /** Trailing 7-day domain-aggregate complaint count — ONLY meaningful for a BYO domain (source === 'byo'). */
   windowComplaints: number;
 }
 
@@ -152,19 +163,21 @@ export function evaluate(
 ): DeliverabilityAction[] {
   const actions: DeliverabilityAction[] = [];
 
-  // 1. Domain burn -> retire + replace the whole domain (breakerTier
-  //    'standard' only — see DomainBreakerTier's doc comment). A
-  //    'primary'/'elevated' domain skips this ENTIRELY and routes through the
+  // 1. Domain burn -> retire + replace the whole domain (source==='provisioned'
+  //    ONLY — see DomainBreakerTier's doc comment). ANY BYO domain
+  //    (source==='byo' — 'primary', 'elevated', AND a 'standard'-tier
+  //    fresh-standalone alike) skips this ENTIRELY and routes through the
   //    §20.2 windowed breaker instead, since we cannot burn-replace a domain
-  //    that IS (or is dedicated infrastructure tied to) the customer's own
-  //    business identity. `domainsBeingReplaced` doubles as "taken fully
-  //    offline this sweep" for BOTH REPLACE_DOMAIN and HARD_PAUSE_DOMAIN, so
-  //    the per-mailbox loop below never double-pauses a mailbox on either.
+  //    the customer brought and the platform never owned — regardless of its
+  //    relationship to their declared primary. `domainsBeingReplaced` doubles
+  //    as "taken fully offline this sweep" for BOTH REPLACE_DOMAIN and
+  //    HARD_PAUSE_DOMAIN, so the per-mailbox loop below never double-pauses a
+  //    mailbox on either.
   const domainsBeingReplaced = new Set<string>();
   for (const d of domains) {
     if (d.status !== "active") continue; // already burning/retired/paused_primary — idempotent no-op
 
-    if (d.breakerTier !== "standard") {
+    if (d.source === "byo") {
       const verdict = evaluatePrimaryDomainBreaker({ windowSends: d.windowSends, windowComplaints: d.windowComplaints });
       if (verdict.type === "hard_pause") {
         domainsBeingReplaced.add(d.domain);
@@ -344,8 +357,8 @@ const PRIMARY_BREAKER_WINDOW_MS = 7 * ONE_DAY_MS;
 /**
  * Trailing-window domain-aggregate sends/complaints for the §20.2 breaker.
  * Queried DIRECTLY (not derived from the already-gathered all-time
- * `mailboxes` signals) — only called for a non-'standard' breakerTier domain,
- * so this adds ZERO extra query cost for every existing/provisioned tenant.
+ * `mailboxes` signals) — only called for a BYO (source==='byo') domain, so
+ * this adds ZERO extra query cost for every existing/platform-bought tenant.
  */
 function gatherWindowedDomainStats(
   ctx: TenantContext,
@@ -379,8 +392,8 @@ function gatherWindowedDomainStats(
 /** Aggregates per-mailbox signals up to per-domain stats (+ the domain's current status). */
 export function gatherDomainStats(ctx: TenantContext, mailboxes: MailboxHealthSignal[]): DomainStat[] {
   const domainRows = ctx.sql
-    .exec<{ id: string; domain: string; status: string; is_primary: number; breaker_tier: string }>(
-      `SELECT id, domain, status, is_primary, breaker_tier FROM domains WHERE tenant_id = ?`,
+    .exec<{ id: string; domain: string; status: string; is_primary: number; breaker_tier: string; source: string }>(
+      `SELECT id, domain, status, is_primary, breaker_tier, source FROM domains WHERE tenant_id = ?`,
       ctx.tenantId,
     )
     .toArray();
@@ -392,7 +405,10 @@ export function gatherDomainStats(ctx: TenantContext, mailboxes: MailboxHealthSi
     const bounces = boxes.reduce((s, m) => s + m.bounces, 0);
     const complaints = boxes.reduce((s, m) => s + m.complaints, 0);
     const breakerTier = (d.breaker_tier as DomainBreakerTier) || "standard";
-    const windowed = breakerTier === "standard" ? { windowSends: 0, windowComplaints: 0 } : gatherWindowedDomainStats(ctx, d.id, now);
+    const source = (d.source as DomainSource) || "provisioned";
+    // Windowed stats only ever matter for a BYO domain (see the burn-decision
+    // routing key above) — zero-cost for every platform-bought domain.
+    const windowed = source === "byo" ? gatherWindowedDomainStats(ctx, d.id, now) : { windowSends: 0, windowComplaints: 0 };
     return {
       domainId: d.id,
       domain: d.domain,
@@ -405,6 +421,7 @@ export function gatherDomainStats(ctx: TenantContext, mailboxes: MailboxHealthSi
       complaintRate: asRate(complaints, sends),
       isPrimary: d.is_primary === 1,
       breakerTier,
+      source,
       windowSends: windowed.windowSends,
       windowComplaints: windowed.windowComplaints,
     };

@@ -44,6 +44,7 @@ function dom(over: Partial<DomainStat> = {}): DomainStat {
     complaintRate: 0,
     isPrimary: true,
     breakerTier: "primary",
+    source: "byo",
     windowSends: 0,
     windowComplaints: 0,
     ...over,
@@ -102,15 +103,16 @@ describe("evaluate — primary/elevated domains never burn-replace", () => {
     expect(actions[0]).toMatchObject({ type: "HARD_PAUSE_DOMAIN" });
   });
 
-  it("leaves a 'standard'-tier domain (provisioned OR fresh-standalone BYO) on the EXISTING burn-threshold/REPLACE_DOMAIN path, unaffected by windowSends/windowComplaints", () => {
+  it("leaves a 'standard'-tier PLATFORM-BOUGHT domain (source='provisioned') on the EXISTING burn-threshold/REPLACE_DOMAIN path, unaffected by windowSends/windowComplaints", () => {
     const d = dom({
       isPrimary: false,
       breakerTier: "standard",
+      source: "provisioned",
       complaintRate: 0.01,
       complaints: 100,
       sends: 10_000,
       // Deliberately set windowed fields that WOULD trip the breaker if
-      // consulted -- must be ignored entirely for a 'standard' domain.
+      // consulted -- must be ignored entirely for a platform-bought domain.
       windowSends: 5000,
       windowComplaints: 10,
     });
@@ -118,5 +120,45 @@ describe("evaluate — primary/elevated domains never burn-replace", () => {
     const actions = evaluate([m], [d], DEFAULT_THRESHOLDS, NO_PENDING);
     expect(actions).toHaveLength(1);
     expect(actions[0]).toMatchObject({ type: "REPLACE_DOMAIN" });
+  });
+
+  // Adversarial finding (docs/adversarial/byo-intake-2026-07-17.md #1): a
+  // fresh-standalone BYO domain is assigned breaker_tier='standard'
+  // (byo-intake.ts:139) — identical to a platform-bought domain on that field
+  // alone. Routing the burn decision on breakerTier let a customer-owned
+  // domain fall into REPLACE_DOMAIN, which auto-BUYS a lookalike replacement
+  // of the tenant's OWN brand for a domain the platform never owned and
+  // cannot re-buy. The fix keys the routing decision on `source`, not
+  // breakerTier/is_primary/relationship — these tests prove ANY BYO domain,
+  // regardless of breaker_tier, is routed through the same windowed breaker a
+  // primary/elevated domain uses (HARD_PAUSE_DOMAIN/SOFT_FLAG_DOMAIN), never
+  // REPLACE_DOMAIN.
+  it("routes a 'standard'-tier BYO domain (fresh_standalone) through the SAME windowed breaker as primary/elevated once it trips hard-pause, never REPLACE_DOMAIN — even though the all-time burn threshold is ALSO crossed", () => {
+    const d = dom({
+      isPrimary: false,
+      breakerTier: "standard",
+      source: "byo",
+      // All-time complaintRate 1% >= burnComplaintRate (0.5%) over
+      // >=minSampleSends -- would ALSO trip the bare burn-threshold path if it
+      // were consulted. Proves that path is never even reached for a BYO
+      // domain, not merely that the windowed one wins a tie.
+      complaintRate: 0.01,
+      complaints: 100,
+      sends: 10_000,
+      windowSends: 5000,
+      windowComplaints: 10,
+    });
+    const m = mbx({ complaintRate: 0.01, complaints: 100, sends: 10_000 });
+    const actions = evaluate([m], [d], DEFAULT_THRESHOLDS, NO_PENDING);
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({ type: "HARD_PAUSE_DOMAIN", domainId: "d1" });
+    expect(actions.some((a) => a.type === "REPLACE_DOMAIN")).toBe(false);
+  });
+
+  it("SOFT_FLAGs a 'standard'-tier BYO domain below the volume floor with a single complaint, never REPLACE_DOMAIN/hard-pausing", () => {
+    const d = dom({ isPrimary: false, breakerTier: "standard", source: "byo", windowSends: 15, windowComplaints: 1 });
+    const actions = evaluate([mbx()], [d], DEFAULT_THRESHOLDS, NO_PENDING);
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({ type: "SOFT_FLAG_DOMAIN", domainId: "d1" });
   });
 });
