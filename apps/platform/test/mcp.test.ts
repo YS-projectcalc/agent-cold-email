@@ -48,6 +48,9 @@ const EXPECTED_TOOL_NAMES = [
   // ROADMAP.md WIN-THE-COMPARISON (d) — tools 18-19 (outbound webhooks).
   "get_webhooks",
   "configure_webhook",
+  // SPEC.md §20 — tools 20-21 (BYO domains & mailboxes).
+  "get_byo_domains",
+  "configure_byo_domain",
 ];
 
 describe("POST /mcp — hosted MCP JSON-RPC 2.0 endpoint", () => {
@@ -78,12 +81,12 @@ describe("POST /mcp — hosted MCP JSON-RPC 2.0 endpoint", () => {
     expect(res.body).toBeUndefined();
   });
 
-  it("tools/list returns exactly the 19 AGENTS.md tools with a JSON-Schema inputSchema each — no auth required", async () => {
+  it("tools/list returns exactly the 21 tools with a JSON-Schema inputSchema each — no auth required", async () => {
     const res = await api<JsonRpcSuccess<ToolListResult>>("/mcp", { method: "POST", body: rpc("tools/list") });
     expect(res.status).toBe(200);
     const names = res.body.result.tools.map((t) => t.name);
     expect(names).toEqual(EXPECTED_TOOL_NAMES);
-    expect(res.body.result.tools).toHaveLength(19);
+    expect(res.body.result.tools).toHaveLength(21);
     for (const t of res.body.result.tools) {
       expect(typeof t.description).toBe("string");
       expect(t.description.length).toBeGreaterThan(0);

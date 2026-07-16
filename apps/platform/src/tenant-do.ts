@@ -1,11 +1,15 @@
 import { DurableObject } from "cloudflare:workers";
 import type {
+  AcknowledgeByoConsentInput,
   ActivityQueryInput,
   CheckoutInput,
+  ConnectByoMailboxInput,
   DashboardLayout,
   InboxQueryInput,
   LaunchCampaignInput,
   Provenance,
+  RegisterByoDomainInput,
+  RequestManagedByoMailboxesInput,
   SetupInfrastructureInput,
   TenantPlan,
   WebhookCreateInput,
@@ -62,6 +66,22 @@ import {
 } from "./engine/webhooks.js";
 import { pumpWebhookDeliveries, type PumpSummary } from "./engine/webhook-delivery.js";
 import { realWebhookDeliverer } from "./engine/webhook-security.js";
+import {
+  acknowledgePrimaryDomainConsent,
+  getByoDomain,
+  listByoDomains,
+  pollByoDomainDns,
+  registerByoDomain,
+  type ByoDomainRecord,
+  type ByoDomainSummary,
+  type PollDnsResult,
+} from "./engine/byo-intake.js";
+import {
+  connectByoMailbox,
+  requestManagedByoMailboxes,
+  type ConnectByoMailboxResult,
+  type ManagedMailboxesResult,
+} from "./engine/byo-mailbox-composition.js";
 import { newId, TENANT_DO_SCHEMA } from "./schema.js";
 import type { TenantContext } from "./tenant-context.js";
 import { createVendorAdapters, type VendorAdapterBundle } from "./vendors/factory.js";
@@ -147,6 +167,25 @@ export class TenantDO extends DurableObject<Env> {
     // is a no-op then); see schema.ts's poll_cursor comment for the -1/0
     // distinction and the finding this closes.
     this.addColumnIfMissing("mailboxes", "poll_cursor", "INTEGER NOT NULL DEFAULT -1");
+    // SPEC.md §20 BYO domains & mailboxes — every default below reproduces an
+    // EXISTING provisioned domain/mailbox's implicit state exactly (flag-dark:
+    // see schema.ts's TENANT_DO_SCHEMA comment on these same columns).
+    this.addColumnIfMissing("domains", "source", "TEXT NOT NULL DEFAULT 'provisioned'");
+    this.addColumnIfMissing("domains", "is_primary", "INTEGER NOT NULL DEFAULT 0");
+    this.addColumnIfMissing("domains", "dns_mode", "TEXT");
+    this.addColumnIfMissing("domains", "byo_status", "TEXT NOT NULL DEFAULT 'active'");
+    this.addColumnIfMissing("domains", "scan_json", "TEXT");
+    this.addColumnIfMissing("domains", "abuse_gate_json", "TEXT");
+    this.addColumnIfMissing("domains", "consent_json", "TEXT");
+    this.addColumnIfMissing("domains", "reputation_branch", "TEXT");
+    this.addColumnIfMissing("domains", "breaker_tier", "TEXT NOT NULL DEFAULT 'standard'");
+    this.addColumnIfMissing("domains", "dns_check_count", "INTEGER NOT NULL DEFAULT 0");
+    this.addColumnIfMissing("domains", "dns_first_checked_at", "INTEGER");
+    this.addColumnIfMissing("domains", "first_send_eligible_at", "INTEGER");
+    this.addColumnIfMissing("mailboxes", "source", "TEXT NOT NULL DEFAULT 'provisioned'");
+    this.addColumnIfMissing("mailboxes", "transport_kind", "TEXT NOT NULL DEFAULT 'smtp'");
+    this.addColumnIfMissing("mailboxes", "transport_json", "TEXT");
+    this.addColumnIfMissing("deliverability_actions", "alerted_at", "INTEGER");
     // Created here, not in TENANT_DO_SCHEMA, so they run only after the columns
     // above are guaranteed to exist (safe for DOs that predate the column). Each
     // collapses any pre-existing rows that would violate the unique key BEFORE
@@ -400,6 +439,39 @@ export class TenantDO extends DurableObject<Env> {
   // controlled nowMs. Called per-tenant by the cron sweep (admin/ops-sweep.ts).
   async runWebhookDeliveries(nowMs: number = new RealClock().now()): Promise<PumpSummary> {
     return pumpWebhookDeliveries(this.requireContext(), realWebhookDeliverer, nowMs);
+  }
+
+  // --- SPEC.md §20 BYO domains & mailboxes. The SAME facade both the HTTP
+  // routes (routes/byo-domains.ts) and the MCP tools (get_byo_domains/
+  // configure_byo_domain) call — never a parallel implementation (CLAUDE.md
+  // rule c), exactly like the dashboard-views/webhooks facades above. ---
+
+  byoDomains(): ByoDomainSummary[] {
+    return listByoDomains(this.requireContext());
+  }
+
+  byoDomain(id: string): ByoDomainRecord {
+    return getByoDomain(this.requireContext(), id);
+  }
+
+  async registerByoDomain(input: RegisterByoDomainInput): Promise<ByoDomainRecord> {
+    return registerByoDomain(this.requireContext(), input);
+  }
+
+  async pollByoDomainDns(id: string): Promise<PollDnsResult> {
+    return pollByoDomainDns(this.requireContext(), id);
+  }
+
+  async acknowledgeByoConsent(id: string, input: AcknowledgeByoConsentInput): Promise<ByoDomainRecord> {
+    return acknowledgePrimaryDomainConsent(this.requireContext(), id, input);
+  }
+
+  async requestManagedByoMailboxes(id: string, input: RequestManagedByoMailboxesInput): Promise<ManagedMailboxesResult> {
+    return requestManagedByoMailboxes(this.requireContext(), id, input);
+  }
+
+  async connectByoMailbox(id: string, input: ConnectByoMailboxInput): Promise<ConnectByoMailboxResult> {
+    return connectByoMailbox(this.requireContext(), id, input);
   }
 
   async reply(threadId: string, body: string, idempotencyKey?: string) {
