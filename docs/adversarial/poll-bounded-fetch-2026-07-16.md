@@ -91,3 +91,16 @@ README now reads "initializes the cursor at the mailbox's CURRENT high-water (`u
 
 ## UNVERIFIABLE
 - Live greenmail e2e (`ENGINE_E2E=1`) — docker run denied. Finding-2 resolution rests on trace. Resolve with a manual run against fresh `greenmail/standalone:2.1.3` (expected: reply + DSN tests now PASS).
+
+---
+
+# ADDENDUM 2 — Re-ground after HEAD advanced (2026-07-16, same day)
+
+**HEAD moved `bf3a927` → `3d7d27d` mid-session (a sibling COMMITTED the fix).** Re-verified against the current tree per read-only-git discipline (a review of stale code is a false PASS).
+
+- **Fix is now COMMITTED and byte-identical to what ADDENDUM 1 reviewed.** `git diff bf3a927 -- <poll files>` shows the same `-1`-sentinel content (engine.ts `sinceCursor === -1` first-contact, imap.ts `fetchRange`, wire.ts `min(-1)`, provisioning.ts explicit `-1` INSERT, idempotency.test.ts `-1`/`9`/`[-1,9]`). Live `poll_cursor` DEFAULT is `-1` in `schema.ts:97` and `tenant-do.ts:149` — NOT clobbered by the uncommitted webhook edits.
+- **The ONLY remaining uncommitted changes to the in-scope files (`schema.ts`, `tenant-do.ts`) are the WEBHOOK lane** (webhook_subscriptions/deliveries tables + imports/methods) — out of scope, owned by a separate adversary, correctly ignored. The poll_cursor hunks are committed.
+- **`-1` never reaches `fetchRange` as a numeric bound (the raised edge) — PROVEN.** `engine.ts:145` returns `{events:[], cursor:highWater}` on `sinceCursor === -1` BEFORE the `fetchRange` call at `:154`; `fetchRange`'s `sinceUid` is therefore always `>= 0`, so its range is always `${sinceUid+1}:${throughUid}` >= `1:…` (never `0:…` or negative). Driver evidence: the `-1`-start scenario's only `fetchRange` call is `{sinceUid:0, throughUid:1}` (from the subsequent poll(0) tick), never `sinceUid:-1`.
+- **Re-verification on the current tree:** finding-1 driver re-run → ATTACK FAILS (first inbound FETCHED for both `-1`-start and `0`-start); engine typecheck 0, engine `68 passed | 3 skipped`; platform typecheck 0, platform `407 passed (62 files)`.
+
+## VERDICT (re-ground): SHIP — unchanged. Fix is committed, intact, and all attacks re-run and held.
