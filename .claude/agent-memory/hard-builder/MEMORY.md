@@ -11,3 +11,7 @@
 
 ## Test-env gotchas (ColdStart apps/platform vitest)
 - [coldstart-vitest-binding-and-d1-isolation-gotchas](coldstart-vitest-binding-and-d1-isolation-gotchas.md) — a wrangler.toml binding IS bound in the vitest env (not undefined; asserting `.toBeUndefined()` throws RPC inspect errors) → test factory branches with fake envs; direct `env.DB` writes are NOT rolled back per-test → `beforeEach` DELETE for state-machine tables; `test/setup.ts` needs each new migration added by explicit `?raw` import.
+
+## Build patterns / gotchas (ColdStart engine)
+- [coldstart-mailcomposer-single-builder-for-transports](coldstart-mailcomposer-single-builder-for-transports.md) — new send transports (Gmail/Graph API) must carry compliance headers byte-identically: reuse nodemailer's MailComposer as the ONE raw-message builder (deep import + @types both work); map all API failures to the SMTP path's UpstreamTransientError.
+- [coldstart-env-example-gitignored-and-header-folding](coldstart-env-example-gitignored-and-header-folding.md) — `.env.example` is gitignored by `.env.*` (durable docs → README); long MIME headers fold across lines (assert fold-tolerantly, not single-line).
