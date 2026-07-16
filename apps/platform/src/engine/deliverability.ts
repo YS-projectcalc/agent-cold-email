@@ -12,7 +12,8 @@
 // bounce/complaint stream, aggregated exactly as reporting.ts counts events).
 
 import type { TenantContext } from "../tenant-context.js";
-import { computeWarmupDay, isSendReady, warmupStatus } from "./warmup.js";
+import { evaluatePrimaryDomainBreaker } from "./byo-breaker.js";
+import { computeWarmupDay, isSendReady, ONE_DAY_MS, warmupStatus } from "./warmup.js";
 
 export type DeliverabilityMailboxStatus = "healthy" | "throttled" | "paused";
 
@@ -87,23 +88,47 @@ export interface MailboxHealthSignal {
   lastPolledAt: number | null;
 }
 
+// SPEC.md §20.1's breaker-tier axis (see schema.ts's domains.breaker_tier
+// comment). 'standard' is every EXISTING provisioned domain plus a
+// fresh-standalone BYO domain (§20.1: "the ONLY genuinely
+// lookalike-risk-equivalent case") — these keep the EXISTING burn-threshold/
+// REPLACE_DOMAIN path below, byte-identical to today. 'primary' and
+// 'elevated' (the tenant's actual primary domain, and a dedicated
+// subdomain-of-primary respectively) can never be burn-replaced (we don't own
+// a "buy a replacement" lever for a domain that IS the customer's business) —
+// both route through the windowed §20.2 breaker instead.
+export type DomainBreakerTier = "standard" | "elevated" | "primary";
+
 export interface DomainStat {
   domainId: string;
   domain: string;
-  status: string; // 'active' | 'burning' | 'retired'
+  status: string; // 'active' | 'burning' | 'retired' | 'paused_primary'
   mailboxCount: number;
   sends: number;
   bounces: number;
   complaints: number;
   bounceRate: number;
   complaintRate: number;
+  isPrimary: boolean;
+  breakerTier: DomainBreakerTier;
+  /** Trailing 7-day domain-aggregate send count — ONLY meaningful when breakerTier != 'standard' (0 otherwise, unused). */
+  windowSends: number;
+  /** Trailing 7-day domain-aggregate complaint count — ONLY meaningful when breakerTier != 'standard'. */
+  windowComplaints: number;
 }
 
 export type DeliverabilityAction =
   | { type: "THROTTLE"; mailboxId: string; email: string; newCap: number; reason: string }
   | { type: "PAUSE"; mailboxId: string; email: string; reason: string }
   | { type: "ROTATE"; pendingSends: number; healthyTargets: number; reason: string }
-  | { type: "REPLACE_DOMAIN"; domainId: string; domain: string; reason: string };
+  | { type: "REPLACE_DOMAIN"; domainId: string; domain: string; reason: string }
+  // SPEC.md §20.2's substitute remedy for a domain that CANNOT be
+  // burn-replaced (a primary domain, or a dedicated subdomain-of-primary) —
+  // hard-pause-all instead of retire+replace, never a REPLACE_DOMAIN.
+  | { type: "HARD_PAUSE_DOMAIN"; domainId: string; domain: string; reason: string }
+  // Below the §20.2 volume floor: any complaint is ambiguous, not an
+  // automatic-pause signal — halve the cap + flag for human review instead.
+  | { type: "SOFT_FLAG_DOMAIN"; domainId: string; domain: string; reason: string };
 
 export interface EvaluateContext {
   /** Tenant-wide count of still-pending scheduled sends (drives ROTATE). */
@@ -127,10 +152,29 @@ export function evaluate(
 ): DeliverabilityAction[] {
   const actions: DeliverabilityAction[] = [];
 
-  // 1. Domain burn -> retire + replace the whole domain.
+  // 1. Domain burn -> retire + replace the whole domain (breakerTier
+  //    'standard' only — see DomainBreakerTier's doc comment). A
+  //    'primary'/'elevated' domain skips this ENTIRELY and routes through the
+  //    §20.2 windowed breaker instead, since we cannot burn-replace a domain
+  //    that IS (or is dedicated infrastructure tied to) the customer's own
+  //    business identity. `domainsBeingReplaced` doubles as "taken fully
+  //    offline this sweep" for BOTH REPLACE_DOMAIN and HARD_PAUSE_DOMAIN, so
+  //    the per-mailbox loop below never double-pauses a mailbox on either.
   const domainsBeingReplaced = new Set<string>();
   for (const d of domains) {
-    if (d.status !== "active") continue; // already burning/retired — idempotent no-op
+    if (d.status !== "active") continue; // already burning/retired/paused_primary — idempotent no-op
+
+    if (d.breakerTier !== "standard") {
+      const verdict = evaluatePrimaryDomainBreaker({ windowSends: d.windowSends, windowComplaints: d.windowComplaints });
+      if (verdict.type === "hard_pause") {
+        domainsBeingReplaced.add(d.domain);
+        actions.push({ type: "HARD_PAUSE_DOMAIN", domainId: d.domainId, domain: d.domain, reason: verdict.reason });
+      } else if (verdict.type === "soft_response") {
+        actions.push({ type: "SOFT_FLAG_DOMAIN", domainId: d.domainId, domain: d.domain, reason: verdict.reason });
+      }
+      continue; // NEVER falls through to the bare burn-threshold check below
+    }
+
     if (d.sends < thresholds.minSampleSends) continue;
     if (d.complaintRate >= thresholds.burnComplaintRate || d.bounceRate >= thresholds.burnBounceRate) {
       domainsBeingReplaced.add(d.domain);
@@ -293,20 +337,62 @@ export function gatherMailboxHealth(ctx: TenantContext): MailboxHealthSignal[] {
   });
 }
 
+// SPEC.md §20.2's breaker window — trailing 7 days, never all-time (the
+// generic burn-threshold's own units).
+const PRIMARY_BREAKER_WINDOW_MS = 7 * ONE_DAY_MS;
+
+/**
+ * Trailing-window domain-aggregate sends/complaints for the §20.2 breaker.
+ * Queried DIRECTLY (not derived from the already-gathered all-time
+ * `mailboxes` signals) — only called for a non-'standard' breakerTier domain,
+ * so this adds ZERO extra query cost for every existing/provisioned tenant.
+ */
+function gatherWindowedDomainStats(
+  ctx: TenantContext,
+  domainId: string,
+  nowMs: number,
+): { windowSends: number; windowComplaints: number } {
+  const since = nowMs - PRIMARY_BREAKER_WINDOW_MS;
+  const windowSends = ctx.sql
+    .exec<{ n: number }>(
+      `SELECT COUNT(*) as n FROM scheduled_sends ss JOIN mailboxes m ON m.id = ss.mailbox_id
+       WHERE ss.tenant_id = ? AND m.domain_id = ? AND ss.status = 'sent' AND ss.sent_at >= ?`,
+      ctx.tenantId,
+      domainId,
+      since,
+    )
+    .one().n;
+  const windowComplaints = ctx.sql
+    .exec<{ n: number }>(
+      `SELECT COUNT(*) as n FROM events e
+       JOIN scheduled_sends ss ON ss.tenant_id = e.tenant_id AND ss.message_id = e.message_id
+       JOIN mailboxes m ON m.id = ss.mailbox_id
+       WHERE e.tenant_id = ? AND m.domain_id = ? AND e.type = 'complaint' AND e.ts >= ?`,
+      ctx.tenantId,
+      domainId,
+      since,
+    )
+    .one().n;
+  return { windowSends, windowComplaints };
+}
+
 /** Aggregates per-mailbox signals up to per-domain stats (+ the domain's current status). */
 export function gatherDomainStats(ctx: TenantContext, mailboxes: MailboxHealthSignal[]): DomainStat[] {
   const domainRows = ctx.sql
-    .exec<{ id: string; domain: string; status: string }>(
-      `SELECT id, domain, status FROM domains WHERE tenant_id = ?`,
+    .exec<{ id: string; domain: string; status: string; is_primary: number; breaker_tier: string }>(
+      `SELECT id, domain, status, is_primary, breaker_tier FROM domains WHERE tenant_id = ?`,
       ctx.tenantId,
     )
     .toArray();
+  const now = ctx.clock.now();
 
   return domainRows.map((d) => {
     const boxes = mailboxes.filter((m) => m.domain === d.domain);
     const sends = boxes.reduce((s, m) => s + m.sends, 0);
     const bounces = boxes.reduce((s, m) => s + m.bounces, 0);
     const complaints = boxes.reduce((s, m) => s + m.complaints, 0);
+    const breakerTier = (d.breaker_tier as DomainBreakerTier) || "standard";
+    const windowed = breakerTier === "standard" ? { windowSends: 0, windowComplaints: 0 } : gatherWindowedDomainStats(ctx, d.id, now);
     return {
       domainId: d.id,
       domain: d.domain,
@@ -317,6 +403,10 @@ export function gatherDomainStats(ctx: TenantContext, mailboxes: MailboxHealthSi
       complaints,
       bounceRate: asRate(bounces, sends),
       complaintRate: asRate(complaints, sends),
+      isPrimary: d.is_primary === 1,
+      breakerTier,
+      windowSends: windowed.windowSends,
+      windowComplaints: windowed.windowComplaints,
     };
   });
 }

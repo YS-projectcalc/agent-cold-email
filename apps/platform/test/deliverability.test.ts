@@ -44,6 +44,13 @@ function dom(over: Partial<DomainStat> = {}): DomainStat {
     complaints: 0,
     bounceRate: 0,
     complaintRate: 0,
+    // 'standard' -- byte-identical to pre-§20 behavior (the burn-threshold
+    // path below, never the windowed breaker). See byo-breaker.test.ts /
+    // deliverability-primary-breaker.test.ts for the non-'standard' cases.
+    isPrimary: false,
+    breakerTier: "standard",
+    windowSends: 0,
+    windowComplaints: 0,
     ...over,
   };
 }

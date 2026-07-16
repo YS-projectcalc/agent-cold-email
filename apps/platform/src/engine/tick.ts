@@ -253,11 +253,20 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
       continue;
     }
 
+    // SPEC.md §20.2's mandatory DMARC p=none observation window: a BYO
+    // domain's `first_send_eligible_at` (NULL for every provisioned/
+    // non-gated domain -- always eligible, byte-identical to today) excludes
+    // its mailboxes from the capacity picker until the window elapses. This
+    // is a hard "not yet" gate, distinct from `deliv_status='paused'` (a
+    // control-loop decision) -- neither state implies the other.
     const mailboxes = ctx.sql
       .exec<{ id: string; email: string; sentToday: number; dailyCap: number }>(
-        `SELECT id, email, sent_today as sentToday, daily_cap as dailyCap FROM mailboxes
-         WHERE tenant_id = ? AND deliv_status != 'paused'`,
+        `SELECT m.id as id, m.email as email, m.sent_today as sentToday, m.daily_cap as dailyCap
+         FROM mailboxes m JOIN domains d ON d.id = m.domain_id
+         WHERE m.tenant_id = ? AND m.deliv_status != 'paused'
+           AND (d.first_send_eligible_at IS NULL OR d.first_send_eligible_at <= ?)`,
         ctx.tenantId,
+        now,
       )
       .toArray();
     const picked = pickMailboxWithCapacity(mailboxes);

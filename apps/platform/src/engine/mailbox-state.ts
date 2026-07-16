@@ -1,5 +1,7 @@
 import type { TenantContext } from "../tenant-context.js";
-import { computeWarmupDay, epochDay, warmupDailyCap, warmupStatus } from "./warmup.js";
+import { effectiveDailyCap, rampTierFor, type RampTier } from "./byo-ramp.js";
+import type { ReputationBranch } from "./byo-reputation.js";
+import { computeWarmupDay, epochDay, warmupStatus } from "./warmup.js";
 
 export interface MailboxWarmupRow {
   warmup_started_at: number;
@@ -21,14 +23,20 @@ export interface MailboxWarmupState {
  * (reads it without persisting, for `infrastructure_status` — MCP
  * `readOnlyHint: true` must not write).
  *
- * The effective `dailyCap` is MIN(warmup ramp cap, cap_override): a
+ * `rampTier` defaults to 'standard' — every EXISTING call site that doesn't
+ * pass one gets byte-identical behavior to before SPEC.md §20 (this used to
+ * call `warmupDailyCap(day)` directly; `effectiveDailyCap(day, 'standard')`
+ * is defined to return the exact same value at every day — see byo-ramp.ts's
+ * own test coverage pinning this equivalence).
+ *
+ * The effective `dailyCap` is MIN(ramp-tier cap, cap_override): a
  * deliverability throttle (engine/deliverability-actions.ts sets cap_override)
  * survives this recompute instead of being wiped back up to the ramp cap.
  */
-export function computeMailboxWarmupState(row: MailboxWarmupRow, nowMs: number): MailboxWarmupState {
+export function computeMailboxWarmupState(row: MailboxWarmupRow, nowMs: number, rampTier: RampTier = "standard"): MailboxWarmupState {
   const today = epochDay(nowMs);
   const day = computeWarmupDay(row.warmup_started_at, nowMs);
-  const rampCap = warmupDailyCap(day);
+  const rampCap = effectiveDailyCap(day, rampTier);
   const dailyCap = row.cap_override === null ? rampCap : Math.min(rampCap, row.cap_override);
   return {
     dailyCap,
@@ -47,6 +55,32 @@ export function computeMailboxWarmupState(row: MailboxWarmupRow, nowMs: number):
  * `deliv_status` (healthy/throttled/paused) is owned by the loop and is
  * deliberately left untouched here.
  */
+/**
+ * Every mailbox row's domain-tier ramp inputs, joined once per call site
+ * (INNER JOIN is safe: provisioning.ts is the only mailbox inserter and it
+ * always inserts the owning domains row first — no mailbox can exist without
+ * a matching domain). A provisioned (non-BYO) domain has is_primary=0 and
+ * reputation_branch=NULL, which `rampTierFor` always resolves to 'standard'.
+ */
+function rampTierByMailboxId(ctx: TenantContext): Map<string, RampTier> {
+  const rows = ctx.sql
+    .exec<{ id: string; is_primary: number; reputation_branch: string | null }>(
+      `SELECT m.id as id, d.is_primary as is_primary, d.reputation_branch as reputation_branch
+       FROM mailboxes m JOIN domains d ON d.id = m.domain_id
+       WHERE m.tenant_id = ?`,
+      ctx.tenantId,
+    )
+    .toArray();
+  const map = new Map<string, RampTier>();
+  for (const row of rows) {
+    map.set(
+      row.id,
+      rampTierFor({ isPrimary: row.is_primary === 1, reputationBranch: row.reputation_branch as ReputationBranch | null }),
+    );
+  }
+  return map;
+}
+
 export function refreshMailboxWarmupState(ctx: TenantContext): void {
   const now = ctx.clock.now();
   const today = epochDay(now);
@@ -57,9 +91,10 @@ export function refreshMailboxWarmupState(ctx: TenantContext): void {
       ctx.tenantId,
     )
     .toArray();
+  const rampTiers = rampTierByMailboxId(ctx);
 
   for (const row of rows) {
-    const state = computeMailboxWarmupState(row, now);
+    const state = computeMailboxWarmupState(row, now, rampTiers.get(row.id));
 
     if (state.rolledOver) {
       ctx.sql.exec(
@@ -98,10 +133,11 @@ export function computeMailboxWarmupSnapshot(ctx: TenantContext): Map<string, Ma
       ctx.tenantId,
     )
     .toArray();
+  const rampTiers = rampTierByMailboxId(ctx);
 
   const snapshot = new Map<string, MailboxWarmupSnapshot>();
   for (const row of rows) {
-    const state = computeMailboxWarmupState(row, now);
+    const state = computeMailboxWarmupState(row, now, rampTiers.get(row.id));
     snapshot.set(row.id, { dailyCap: state.dailyCap, status: state.status, sentToday: state.rolledOver ? 0 : row.sent_today });
   }
   return snapshot;

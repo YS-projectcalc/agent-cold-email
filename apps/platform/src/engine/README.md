@@ -16,6 +16,10 @@ into a god file:
   brand↔primaryDomain ownership-consistency check (SPEC.md §8, panel-02).
 - `provisioning.ts` — `setup_infrastructure` (validates brand ownership, then
   buys domains, DNS, provisions mailboxes, starts warmup) + `infrastructure_status`.
+  `provisionMailboxesForDomain` (the per-mailbox vendor-call/warmup/metering
+  loop) is factored out and reused by `byo-mailbox-composition.ts`'s
+  `requestManagedByoMailboxes` (SPEC.md §20.6 shape (a) — a BYO domain we
+  don't own/buy, but still provision platform-owned mailboxes on).
 - `campaigns.ts` — `launch_campaign` (schedules every sequence step for
   every non-suppressed lead up front; `is_demo` marks demo-run campaigns) +
   `pause`/`pause_all` + `listCampaigns` (SPEC.md §19.4 `GET /campaigns`: id/
@@ -102,6 +106,46 @@ into a god file:
   create AND re-applied per delivery), HMAC-SHA256 body signing, and
   `realWebhookDeliverer` (strict timeout, no redirect following, truncated
   response snippet). See SPEC.md §21 for the DNS-resolution platform caveat.
+- `byo-preflight.ts` — SPEC.md §20.1's pure pre-flight live-infra scan
+  interpretation (`interpretPreflightScan`) + DNS-mode recommendation
+  (`recommendDnsMode`: we_manage_zone vs records_to_apply, primary/DNSSEC/
+  live-infra hard-refuse rules) + poll-verify criterion (`isDnsVerified`).
+- `byo-abuse-gate.ts` — SPEC.md §20.3's BYO abuse gate: extends
+  `brand-guard.ts`'s SAME denylist (exported from there) to the BYO domain
+  itself + a bounded-Levenshtein/homoglyph lookalike check (the `paypa1.com`
+  class). Never a hard reject — routes to `kyc_required`, never auto-admit.
+- `byo-reputation.ts` — SPEC.md §20.5's non-primary reputation ladder
+  (`computeReputationBranch`: established_good/unknown_fresh/blocklisted_reject),
+  primary-axis-first (a primary domain never branches on reputation).
+- `byo-ramp.ts` — SPEC.md §20.2/§20.5's domain-tier warmup/cap ramp
+  (`rampTierFor`/`effectiveDailyCap`): a primary domain clamps to <=20/mbx/day
+  at the standard ramp's own pacing (never compressed); a non-primary
+  established-good domain gets a genuinely shortened (7-10 day) ramp. Composes
+  `warmup.ts`'s existing pure math rather than duplicating it.
+- `byo-breaker.ts` — SPEC.md §20.2's primary-domain complaint-rate circuit
+  breaker (`evaluatePrimaryDomainBreaker`): a trailing-7-day windowed 3-condition
+  AND (volume floor + absolute-complaint floor + rate), never a bare rate —
+  the exact formula the adversarial review fought over 3 rounds (a griefing/
+  false-pause vector at low volume otherwise).
+- `byo-consent.ts` — SPEC.md §20.4's primary-domain consent mechanics:
+  `buildConsentRecord` (domain + timestamp + scan snapshot) +
+  `validateConsentAcknowledgment` (rejects anything short of an explicit `true`).
+- `byo-intake.ts` — SPEC.md §20.1-§20.5's intake ORCHESTRATION (mirrors
+  `provisioning.ts`'s role, but this domain is never bought):
+  `registerByoDomain` (scan + abuse gate + reputation ladder -> starting
+  byo_status), `pollByoDomainDns` (poll-verify + 7-day idle timeout ->
+  abandoned), `acknowledgePrimaryDomainConsent`, `listByoDomains`/`getByoDomain`
+  (read-only facade surface). Exports `requireByoDomainRow` for
+  `byo-mailbox-composition.ts` to reuse.
+- `byo-mailbox-composition.ts` — SPEC.md §20.6's mailbox COMPOSITION on an
+  already-active BYO domain: `requestManagedByoMailboxes` (shape (a), the
+  founder-ruled PRIMARY build target — platform-provisioned mailboxes, reuses
+  `provisioning.ts`'s `provisionMailboxesForDomain`) + `connectByoMailbox`
+  (the Mordy-pilot BYO-mailbox seam — OAuth/SMTP+IMAP connect, maps onto
+  `apps/engine/src/config.ts`'s transport discriminator; SECURITY POSTURE
+  documented in its own doc comment — the connection secret is stored
+  verbatim, tenant-isolated + encrypted-at-rest but not application-layer
+  vaulted, and no read path ever selects it back).
 
 Every function here takes a `TenantContext` (`../tenant-context.ts`): the
 DO's own `SqlStorage` handle, tenant id, injected `Clock`, and the tenant's
