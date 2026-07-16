@@ -5,3 +5,4 @@ export * from "./vendor-ports.js";
 export * from "./intents.js";
 export * from "./pricing.js";
 export * from "./dashboard.js";
+export * from "./webhooks.js";

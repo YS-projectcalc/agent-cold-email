@@ -366,6 +366,97 @@ CREATE TABLE IF NOT EXISTS thread_labels (
   source TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+-- Per-tenant OUTBOUND webhook subscriptions (ROADMAP.md WIN-THE-COMPARISON (d)
+-- / forensics §5 (c) — buyer checklists hard-gate on reply/bounce PUSH). One
+-- row per registered endpoint, scoped inside the tenant's own DO exactly like
+-- every other table here (one tenant per DO instance — a subscription can
+-- physically reference no other tenant's events). 'secret' is the HMAC-SHA256
+-- signing key (server-minted if the caller omits one); NEVER logged. The
+-- delivery pump (engine/webhook-delivery.ts) auto-disables a subscription after
+-- WEBHOOK_DISABLE_THRESHOLD consecutive TERMINAL delivery failures — 'status'
+-- flips to 'disabled' with a tenant-visible 'disabled_reason', and 'active'
+-- reflects both the caller's pause flag AND that auto-disable (a re-enable via
+-- updateWebhook resets consecutive_failures + status). 'event_types_json' is a
+-- JSON array of the WEBHOOK_EVENT_TYPES this endpoint wants.
+CREATE TABLE IF NOT EXISTS webhook_subscriptions (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  url TEXT NOT NULL,
+  secret TEXT NOT NULL,
+  event_types_json TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT 'active',
+  disabled_reason TEXT,
+  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- The at-least-once delivery queue. One row per (event, subscription) the
+-- enqueue path fans out (engine/webhooks.ts, called from the SAME once-per-new-
+-- event choke point that records the event — engine/reply-processor.ts's
+-- recordEventIfNew — so a re-polled duplicate event enqueues nothing twice).
+-- 'payload_json' is the exact raw body signed + POSTed, frozen at enqueue so a
+-- retry re-sends identical bytes with a stable signature. 'event_id' is the
+-- source events.id, surfaced in the payload as the CONSUMER dedup key; the
+-- UNIQUE(subscription_id, event_id) index (created in ensureColumnMigrations)
+-- makes enqueue idempotent. 'next_attempt_at' is REAL wall-clock ms (webhook
+-- retries are real-time infra, NOT the tenant's accelerated VirtualClock): the
+-- pump processes rows due at/<= its injected nowMs, and on a retryable failure
+-- reschedules next_attempt_at = nowMs + exponential backoff until MAX_ATTEMPTS.
+-- Terminal states: 'delivered' | 'failed' (retries exhausted) | 'canceled'
+-- (subscription deleted/inactive before delivery). Bounded by retention pruning
+-- of terminal rows.
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  subscription_id TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at INTEGER NOT NULL,
+  last_status_code INTEGER,
+  last_error TEXT,
+  created_at INTEGER NOT NULL,
+  last_attempt_at INTEGER,
+  delivered_at INTEGER
+);
+
+-- Per-attempt delivery log (the "delivery-attempt log queryable per
+-- subscription" the brief requires). One row per HTTP attempt: outcome, the
+-- endpoint's status code, a bounded error tag, and a TRUNCATED response snippet
+-- (WEBHOOK_SNIPPET_MAX chars — a consumer response body is never stored in
+-- full). Pruned alongside its terminal delivery.
+CREATE TABLE IF NOT EXISTS webhook_delivery_attempts (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  subscription_id TEXT NOT NULL,
+  delivery_id TEXT NOT NULL,
+  attempt_no INTEGER NOT NULL,
+  ok INTEGER NOT NULL,
+  status_code INTEGER,
+  error TEXT,
+  snippet TEXT,
+  ts INTEGER NOT NULL
+);
+
+-- Enqueue idempotency: a given source event is delivered at most once per
+-- subscription (enqueue uses INSERT OR IGNORE against this key). These tables
+-- are always new (no DO predates them), so the unique/lookup indexes live
+-- inline here rather than in the collapse-then-index migration path.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_webhook_deliveries_dedupe
+  ON webhook_deliveries(subscription_id, event_id);
+-- The pump's hot query: due pending rows, oldest first.
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_due
+  ON webhook_deliveries(status, next_attempt_at);
+-- Per-subscription delivery + attempt log reads.
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_sub
+  ON webhook_deliveries(subscription_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_webhook_delivery_attempts_delivery
+  ON webhook_delivery_attempts(delivery_id, attempt_no);
 `;
 
 export function newId(prefix: string): string {

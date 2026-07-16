@@ -82,6 +82,26 @@ into a god file:
   windowed deliverability-action counts. Dispatched via
   `TenantDO.opsSummary()`, called ONLY from `../admin/*` (never a tenant
   facade route) — see `../admin/README.md`.
+- `webhooks.ts` — per-tenant OUTBOUND webhook subscription CRUD (SPEC.md §21 /
+  ROADMAP.md WIN-THE-COMPARISON (d)). Backs both
+  `routes/webhook-subscriptions.ts` and the MCP
+  `get_webhooks`/`configure_webhook` tools (parity law). The signing secret is
+  returned once at create/rotate; reads never re-expose it.
+- `webhook-enqueue.ts` — `enqueueEventWebhooks`: the event -> delivery-queue
+  fan-out. `recordEventIfNew` (reply-processor.ts) — the one once-per-new-event
+  choke point — calls it, so a re-polled duplicate never enqueues twice.
+- `webhook-delivery.ts` — the at-least-once delivery pump: retry with
+  exponential backoff, per-attempt logging, auto-disable after N consecutive
+  terminal failures, retention pruning. `pumpWebhookDeliveries(store, deliver,
+  nowMs)` is time- + transport-injected (REAL wall-clock + real fetch in prod;
+  test-controlled `nowMs` + a fake deliverer in specs), so the DO's
+  `runWebhookDeliveries` (driven per-tenant by the cron sweep,
+  `../admin/ops-sweep.ts`) and the tests exercise ONE code path.
+- `webhook-security.ts` — the delivery security boundary: `assertSafeWebhookUrl`
+  (https-only + SSRF private/link-local/metadata IP rejection, applied at
+  create AND re-applied per delivery), HMAC-SHA256 body signing, and
+  `realWebhookDeliverer` (strict timeout, no redirect following, truncated
+  response snippet). See SPEC.md §21 for the DNS-resolution platform caveat.
 
 Every function here takes a `TenantContext` (`../tenant-context.ts`): the
 DO's own `SqlStorage` handle, tenant id, injected `Clock`, and the tenant's

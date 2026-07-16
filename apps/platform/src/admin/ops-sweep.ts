@@ -151,6 +151,34 @@ export async function runDeliverabilitySweepAllTenants(env: Env): Promise<Delive
   return { tenantsSwept: tenantIds.length, errors };
 }
 
+export interface WebhookDeliverySweepSummary {
+  tenantsSwept: number;
+  errors: number;
+}
+
+/**
+ * Drives the outbound webhook delivery pump for EVERY tenant — the cron wake
+ * for the retry/backoff queue (ROADMAP.md WIN-THE-COMPARISON (d)). Each
+ * tenant's own DO owns its queue; runWebhookDeliveries attempts every due
+ * pending delivery on REAL wall-clock and reschedules failures per the backoff
+ * ladder, so this cron cadence is the delivery clock. Idempotent (only due rows
+ * fire); one tenant's failure never aborts the sweep for the rest.
+ */
+export async function runWebhookDeliveriesAllTenants(env: Env): Promise<WebhookDeliverySweepSummary> {
+  const tenantIds = await listAllTenantIds(env);
+  let errors = 0;
+  for (const tenantId of tenantIds) {
+    try {
+      const stub = env.TENANT.get(env.TENANT.idFromName(tenantId));
+      await stub.runWebhookDeliveries();
+    } catch (err) {
+      errors++;
+      console.error(`webhook delivery sweep failed for tenant ${tenantId}`, err);
+    }
+  }
+  return { tenantsSwept: tenantIds.length, errors };
+}
+
 export interface OpsDigest {
   windowHours: number;
   tenants: { total: number; activeByPlan: Record<string, number> };

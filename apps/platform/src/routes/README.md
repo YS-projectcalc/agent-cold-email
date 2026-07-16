@@ -25,6 +25,13 @@ through the DO.
   saved-view CRUD lifecycle (§19.2/§19.4). Authed (bearer OR cookie).
 - `activity.ts` — `GET /activity` (§19.4): the merged events +
   deliverability_actions feed.
+- `webhook-subscriptions.ts` — `GET|POST /webhook-subscriptions`,
+  `GET|PUT|DELETE /webhook-subscriptions/:id` (SPEC.md §21): per-tenant
+  OUTBOUND webhook subscription CRUD. Authed (bearer OR cookie). Named
+  distinctly from `webhooks.ts` on purpose — a `/webhooks/*` auth pattern
+  would have swept the unauthenticated inbound `POST /webhooks/stripe` into
+  `requireAuth`. Boundary URL security (https-only, SSRF) lives in the DO
+  facade (`assertSafeWebhookUrl`), surfaced here as the usual 400.
 - `checkout.ts` — `POST /checkout` (B1, authed): demo/free -> paid upgrade.
   Real Stripe TEST-mode Checkout Session if `env.STRIPE_SECRET_KEY` is set,
   else a simulated session. `GET /checkout/simulate` (UNAUTHENTICATED — the

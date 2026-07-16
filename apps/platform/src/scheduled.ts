@@ -14,7 +14,7 @@
 // unsendable alert can never take down the sweep.
 import { RealClock } from "./clock.js";
 import type { Env } from "./env.js";
-import { buildOpsDigest, runDeliverabilitySweepAllTenants, runDunningSweep } from "./admin/ops-sweep.js";
+import { buildOpsDigest, runDeliverabilitySweepAllTenants, runDunningSweep, runWebhookDeliveriesAllTenants } from "./admin/ops-sweep.js";
 import { runWatchtower } from "./admin/watchtower.js";
 import { createOpsMailer } from "./ops-mail/ops-mailer.js";
 
@@ -26,6 +26,10 @@ export async function runScheduledOpsSweep(env: Env): Promise<void> {
   const dunning = await runDunningSweep(env, now, mailer);
   const digest = await buildOpsDigest(env, now, 24);
   const watchtower = await runWatchtower(env, mailer, now);
+  // Outbound webhook delivery pump — the cron is the retry-queue wake
+  // (ROADMAP.md WIN-THE-COMPARISON (d)). Last so a webhook fan-out failure
+  // can't delay the health/dunning/watchtower legs above.
+  const webhooks = await runWebhookDeliveriesAllTenants(env);
 
-  console.log("scheduled ops sweep", JSON.stringify({ deliverability, dunning, digest, watchtower }));
+  console.log("scheduled ops sweep", JSON.stringify({ deliverability, dunning, digest, watchtower, webhooks }));
 }

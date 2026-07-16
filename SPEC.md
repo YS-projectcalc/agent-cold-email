@@ -493,6 +493,24 @@ Domain source × mailbox source is a 2×2; not all four combinations are in scop
 
 ---
 
+## 21. Outbound webhooks — per-tenant reply/bounce/complaint push (ROADMAP.md WIN-THE-COMPARISON (d) / forensics §5 (c))
+
+Buyer checklists hard-gate on reply/bounce **push**; `activity()`-polling was the interim positioning. A tenant registers HTTPS endpoints that receive event POSTs, so the customer's agent reacts to a reply without polling.
+
+**Subscription model** (per-tenant, in the tenant's own `TenantDO` SQLite — a subscription can reference no other tenant's events). `webhook_subscriptions`: `url`, server-minted-or-supplied `secret`, an `event_types` filter (subset of `reply | bounce | soft_bounce | complaint`), an `active` flag, plus `status` (`active | disabled`) + `consecutive_failures` for auto-disable. CRUD via BOTH transports off one facade (parity law): HTTP `/webhook-subscriptions` (+ `/:id`) and the MCP `get_webhooks` (read) / `configure_webhook` (create/update/delete) tools. The signing secret is returned **once** at create/rotate; reads never re-expose it. Deleting cascades its deliveries + attempt log.
+
+**Enqueue.** The single once-per-new-event choke point (`recordEventIfNew`, `engine/reply-processor.ts`) fans each new event out to every active subscription whose filter matches — one `webhook_deliveries` row each, with the raw signed body frozen at enqueue. `UNIQUE(subscription_id, event_id)` makes it idempotent, so an at-least-once IMAP re-poll never double-delivers.
+
+**Delivery** (`engine/webhook-delivery.ts`) is at-least-once with bounded retries + exponential backoff (1m/5m/30m/2h/6h, ≤6 attempts), then a terminal `failed`. Timing is **real wall-clock** (a webhook retry is real seconds, NOT the tenant's accelerated VirtualClock): `next_attempt_at` is real ms, and `pumpWebhookDeliveries(store, deliver, nowMs)` processes due rows at an injected `nowMs`. The DO's `runWebhookDeliveries` (real clock + real fetch) is driven per-tenant by the cron sweep; tests drive the same pump with a controlled `nowMs` + a fake deliverer — one code path, so cron and tests can't diverge. **Alarm note:** the DO uses zero alarms today by explicit design (real DO alarms are B2, `engine/README.md`); this rides the existing cron scheduler and the pump is alarm-ready (a pure `nowMs` function) if a dedicated per-DO alarm is later wanted for sub-cron retry latency. Each delivery carries `X-Coldrig-Event`, `-Event-Id` (consumer dedup key = source `events.id`), `-Delivery`, `-Timestamp`, and `-Signature`. A subscription auto-disables after 5 consecutive terminal failures (tenant-visible `disabled_reason`); a single success resets the counter; a re-enable (`update active:true`) clears it. Terminal deliveries + attempts are pruned past a 7-day retention window. Every attempt is logged (`webhook_delivery_attempts`) and queryable per subscription via `GET /webhook-subscriptions/:id`.
+
+**Signature verification recipe (for consumers).** Compute `HMAC-SHA256(subscription_secret, raw_request_body)`, hex-encode, and constant-time compare against the hex after `sha256=` in the `X-Coldrig-Signature` header. Sign/verify over the **raw bytes**, not a re-serialized JSON.
+
+**Security (SSRF boundary).** URLs are validated at registration AND re-validated at every delivery (DNS-rebinding posture): **https only**, no embedded credentials, default port only, and every private/loopback/link-local/CGNAT/metadata IP literal is rejected — in any encoding the WHATWG URL parser normalizes (hex/decimal/octal IPv4, IPv4-mapped IPv6). No redirects are followed (a 3xx is a failed delivery); fetches carry a strict timeout; response bodies are stored only as a truncated snippet; secrets are never logged. **Platform caveat:** a Cloudflare Worker has no DNS-resolver API, so a *hostname* cannot be resolve-then-checked in-process — the literal-IP rejection above is exhaustive, and the residual DNS-rebinding vector is additionally contained by the runtime's public egress being unable to route to RFC1918/link-local space.
+
+**Out of scope here:** the marketing capability-matrix copy still lists webhooks as absent / polling-equivalent — a site-copy change flagged for the orchestrator, not made in this lane.
+
+---
+
 ## Appendix — verified facts & sources
 
 - Cold email is BANNED on shared-pool ESPs (SES/SendGrid/Mailgun/Postmark) → must use own SMTP or Google/MS mailboxes.

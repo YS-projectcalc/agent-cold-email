@@ -8,6 +8,8 @@ import type {
   Provenance,
   SetupInfrastructureInput,
   TenantPlan,
+  WebhookCreateInput,
+  WebhookUpdateInput,
 } from "@coldstart/shared";
 // Not type-only: demoRun()'s default parameter value needs the runtime
 // schema (`DemoRunInput.parse({})`), not just the inferred type.
@@ -49,6 +51,17 @@ import {
 } from "./engine/dashboard-views.js";
 import { getAccount, getCampaignResults, getMetrics } from "./engine/reporting.js";
 import { getOpsSummary, suspendTenant, type TenantOpsSummary } from "./engine/ops-summary.js";
+import {
+  createWebhook,
+  deleteWebhook,
+  getWebhook,
+  listWebhooks,
+  updateWebhook,
+  type WebhookDetail,
+  type WebhookSummary,
+} from "./engine/webhooks.js";
+import { pumpWebhookDeliveries, type PumpSummary } from "./engine/webhook-delivery.js";
+import { realWebhookDeliverer } from "./engine/webhook-security.js";
 import { newId, TENANT_DO_SCHEMA } from "./schema.js";
 import type { TenantContext } from "./tenant-context.js";
 import { createVendorAdapters, type VendorAdapterBundle } from "./vendors/factory.js";
@@ -352,6 +365,41 @@ export class TenantDO extends DurableObject<Env> {
 
   deleteDashboardView(id: string): { deleted: true } {
     return deleteDashboardView(this.requireContext(), id);
+  }
+
+  // --- Outbound webhook subscriptions (ROADMAP.md WIN-THE-COMPARISON (d) /
+  // forensics §5 (c)). The SAME facade both the HTTP routes
+  // (routes/webhook-subscriptions.ts) and the MCP tools
+  // (get_webhooks/configure_webhook) call — never a parallel implementation
+  // (CLAUDE.md rule c). Tenant-isolated: a subscription lives in this DO's own
+  // SQLite and can reference no other tenant's events (rule h). ---
+
+  webhooks(): WebhookSummary[] {
+    return listWebhooks(this.requireContext());
+  }
+
+  webhook(id: string): WebhookDetail {
+    return getWebhook(this.requireContext(), id);
+  }
+
+  createWebhook(input: WebhookCreateInput): WebhookSummary & { secret: string } {
+    return createWebhook(this.requireContext(), input, new RealClock().now());
+  }
+
+  updateWebhook(id: string, input: WebhookUpdateInput): WebhookSummary & { secret?: string } {
+    return updateWebhook(this.requireContext(), id, input, new RealClock().now());
+  }
+
+  deleteWebhook(id: string): { deleted: true } {
+    return deleteWebhook(this.requireContext(), id);
+  }
+
+  // Cron/test-driven delivery pump — NOT a tenant HTTP intent (like tick()/
+  // pollInbox()): production uses REAL wall-clock + the real fetch deliverer;
+  // tests drive pumpWebhookDeliveries directly with a fake deliverer + a
+  // controlled nowMs. Called per-tenant by the cron sweep (admin/ops-sweep.ts).
+  async runWebhookDeliveries(nowMs: number = new RealClock().now()): Promise<PumpSummary> {
+    return pumpWebhookDeliveries(this.requireContext(), realWebhookDeliverer, nowMs);
   }
 
   async reply(threadId: string, body: string, idempotencyKey?: string) {

@@ -1,8 +1,10 @@
 import type { PolledEvent } from "@coldstart/shared";
+import { RealClock } from "../clock.js";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
 import { cancelPendingSteps, suppress, unsubscribeEmail } from "./suppression.js";
 import { lookupThreadRef, type ThreadRef } from "./threads.js";
+import { enqueueEventWebhooks } from "./webhook-enqueue.js";
 
 // A2 (CLASS A) — a soft (transient 4.x.x) bounce is tallied, not permanently
 // suppressed; only after this many soft bounces for one address — with NO reply
@@ -80,10 +82,11 @@ function recordEventIfNew(
   ctx: TenantContext,
   ev: { campaignId: string; leadId: string; type: string; step: number; messageId: string; threadId: string; ts: number; metadata: Record<string, unknown> },
 ): boolean {
+  const eventId = newId("evt");
   const res = ctx.sql.exec(
     `INSERT OR IGNORE INTO events (id, tenant_id, campaign_id, lead_id, type, step, message_id, thread_id, ts, metadata_json)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    newId("evt"),
+    eventId,
     ctx.tenantId,
     ev.campaignId,
     ev.leadId,
@@ -94,7 +97,33 @@ function recordEventIfNew(
     ev.ts,
     JSON.stringify(ev.metadata),
   );
-  return res.rowsWritten > 0;
+  if (res.rowsWritten === 0) return false;
+
+  // This is the single once-per-new-event choke point, so it is also where a
+  // new event fans out to any active outbound webhook subscriptions — a
+  // re-polled duplicate returned above without re-enqueuing. Best-effort: a
+  // webhook-layer failure must NEVER break inbound event recording (the event
+  // is already durably committed). `next_attempt_at` uses REAL wall-clock —
+  // webhook retry timing is real-time, not the tenant's accelerated VirtualClock.
+  try {
+    enqueueEventWebhooks(
+      ctx,
+      {
+        id: eventId,
+        type: ev.type,
+        ts: ev.ts,
+        campaignId: ev.campaignId,
+        leadId: ev.leadId,
+        threadId: ev.threadId,
+        messageId: ev.messageId,
+        metadata: ev.metadata,
+      },
+      new RealClock().now(),
+    );
+  } catch (err) {
+    console.error("webhook enqueue failed (event already recorded)", err);
+  }
+  return true;
 }
 
 function processReply(ctx: TenantContext, ev: Extract<PolledEvent, { kind: "reply" }>, ref: ThreadRef): boolean {

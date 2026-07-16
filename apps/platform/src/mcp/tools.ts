@@ -1,5 +1,6 @@
-// The 17 MCP tools (AGENTS.md tool list — names match exactly; tools 13-15
-// added by SPEC.md §19.5, tools 16-17 by the §19.0 parity-gap follow-up).
+// The 19 MCP tools (AGENTS.md tool list — names match exactly; tools 13-15
+// added by SPEC.md §19.5, tools 16-17 by the §19.0 parity-gap follow-up, tools
+// 18-19 by the ROADMAP.md WIN-THE-COMPARISON (d) webhooks lane).
 // Each tool dispatches to the SAME TenantDO method the equivalent HTTP route
 // calls (src/routes/*.ts) — the MCP surface is a second transport onto the
 // exact same facade, never a parallel implementation (CLAUDE.md rule c).
@@ -10,8 +11,10 @@ import type { TenantDO } from "../tenant-do.js";
 import {
   CampaignIdInput,
   ConfigureDashboardInput,
+  ConfigureWebhookInput,
   EmptyInput,
   GetDashboardInput,
+  GetWebhooksInput,
   LabelThreadInput,
   LaunchCampaignToolInput,
   SetupInfrastructureToolInput,
@@ -214,5 +217,33 @@ export const MCP_TOOLS: McpTool<any>[] = [
     ActivityQueryInput,
     { title: "Activity Feed", readOnlyHint: true },
     (stub, args) => stub.activity(args),
+  ),
+  // --- Outbound webhooks (ROADMAP.md WIN-THE-COMPARISON (d)) — tools 18-19.
+  // Push reply/bounce/complaint events to your own HTTPS endpoint instead of
+  // polling activity(). Mirrors get_dashboard/configure_dashboard. ---
+  tool(
+    "get_webhooks",
+    "List your outbound webhook subscriptions, or (with id) one subscription plus its recent delivery + attempt log. No id → [{ id, url, eventTypes, active, status, disabledReason, consecutiveFailures }]. With id → { subscription, recentDeliveries[], recentAttempts[] }. Secrets are never returned on reads — they are shown once at create/rotate.",
+    GetWebhooksInput,
+    { title: "Get Webhooks", readOnlyHint: true },
+    (stub, args) => (args.id ? stub.webhook(args.id) : stub.webhooks()),
+  ),
+  tool(
+    "configure_webhook",
+    "Manage an outbound webhook subscription. action = create (needs url + eventTypes: reply|bounce|soft_bounce|complaint; optional secret/active) | update (needs id + one changed field; active:true re-enables an auto-disabled one, active:false pauses; secret rotates) | delete (needs id). create/rotate return the HMAC signing secret ONCE. URLs must be https to a public host (private/metadata IPs rejected). Deliveries are signed X-Coldrig-Signature: sha256=HMAC-SHA256(secret, raw body).",
+    ConfigureWebhookInput,
+    // action=delete permanently removes a subscription — the tool is honestly
+    // flagged for its worst-case action (mirrors configure_dashboard).
+    { title: "Configure Webhook", destructiveHint: true },
+    (stub, args) => {
+      switch (args.action) {
+        case "create":
+          return stub.createWebhook({ url: args.url!, eventTypes: args.eventTypes!, secret: args.secret, active: args.active ?? true });
+        case "update":
+          return stub.updateWebhook(args.id!, { url: args.url, eventTypes: args.eventTypes, secret: args.secret, active: args.active });
+        case "delete":
+          return stub.deleteWebhook(args.id!);
+      }
+    },
   ),
 ];

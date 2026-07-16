@@ -30,13 +30,14 @@ const READ_ONLY_TOOLS = new Set([
   "get_dashboard",
   "list_campaigns",
   "activity",
+  "get_webhooks",
 ]);
 
 // Tools whose worst-case action is genuinely destructive/irreversible via
 // this API surface: real sends (launch_campaign, reply), a hard delete
 // (configure_dashboard action=delete), or an unrecoverable suspend (pause,
 // pause_all — AGENTS.md/tools.ts: "there is no resume tool").
-const DESTRUCTIVE_TOOLS = new Set(["launch_campaign", "reply", "pause", "pause_all", "configure_dashboard"]);
+const DESTRUCTIVE_TOOLS = new Set(["launch_campaign", "reply", "pause", "pause_all", "configure_dashboard", "configure_webhook"]);
 
 // Tools that mutate but only additively/reversibly: setup_infrastructure
 // (creates new resources, never deletes/overwrites existing ones), mark and
@@ -53,9 +54,9 @@ async function listTools(): Promise<ToolListResult["tools"]> {
 }
 
 describe("tools/list — MCP tool annotations (Anthropic Connectors Directory requirement)", () => {
-  it("every one of the 17 tools carries a non-empty annotations.title", async () => {
+  it("every one of the 19 tools carries a non-empty annotations.title", async () => {
     const tools = await listTools();
-    expect(tools).toHaveLength(17);
+    expect(tools).toHaveLength(19);
     for (const t of tools) {
       expect(t.annotations, `${t.name} is missing annotations`).toBeDefined();
       expect(typeof t.annotations!.title, `${t.name}.annotations.title`).toBe("string");
@@ -100,10 +101,10 @@ describe("tools/list — MCP tool annotations (Anthropic Connectors Directory re
     }
   });
 
-  it("classification covers exactly the 17 tools with no overlap between sets", async () => {
+  it("classification covers exactly the 19 tools with no overlap between sets", async () => {
     const tools = await listTools();
     const classified = new Set([...READ_ONLY_TOOLS, ...DESTRUCTIVE_TOOLS, ...ADDITIVE_NONDESTRUCTIVE_TOOLS]);
-    expect(classified.size).toBe(17);
+    expect(classified.size).toBe(19);
     expect(tools.map((t) => t.name).sort()).toEqual([...classified].sort());
   });
 });
@@ -142,6 +143,9 @@ describe("write-detecting spy — every readOnlyHint:true tool performs ZERO wri
     get_dashboard: (i) => i.dashboardViews(),
     list_campaigns: (i) => i.campaigns(),
     activity: (i) => i.activity(ActivityQueryInput.parse({})),
+    // get_webhooks with no id lists subscriptions — a pure read (must issue
+    // ZERO writes, same ground-truth oracle the others face).
+    get_webhooks: (i) => i.webhooks(),
   };
 
   let fixture: ReadOnlyFixture;
