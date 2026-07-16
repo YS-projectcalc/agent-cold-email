@@ -38,6 +38,20 @@ events — persists the returned `cursor`. So a lost `/v1/poll` response leaves 
 consumer's cursor un-advanced and the next poll redelivers the same events
 (deduped on Message-ID) instead of dropping them forever.
 
+**First contact never fetches history.** `sinceCursor: -1` is the sentinel for
+"never polled this mailbox before" (real IMAP UIDs start at 1, so -1 is
+distinct from every legitimate cursor value, INCLUDING 0 — a genuinely empty
+mailbox's high-water is 0, and 0 is an ordinary INCREMENTAL cursor, not a
+sentinel). On first contact the engine initializes the cursor at the
+mailbox's CURRENT high-water (`uidNext - 1`, one cheap `STATUS` call) and
+returns `{ events: [], cursor }` — it never pulls a real, pre-existing
+mailbox's history. Poll's semantics are "events since we started watching,"
+never "mirror the inbox." Every subsequent poll, including `sinceCursor: 0`,
+is incremental and capped to `POLL_BATCH_CAP` (300) UIDs per call (`src/
+engine.ts`), so a backlog larger than one cap pages across polls instead of
+buffering an unbounded number of full RFC5322 sources in memory (the defect
+found live by the Gate-1 smoke on a real >147k-UID mailbox).
+
 **Error grading** (the Worker re-derives a `VendorError.retryable` from the
 status, so `engine/tick.ts` retries transient failures under its cap and fails
 fast on permanent ones):

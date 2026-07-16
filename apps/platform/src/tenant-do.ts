@@ -126,9 +126,14 @@ export class TenantDO extends DurableObject<Env> {
     // Settings→Mailboxes "last polled" UI claim (§19.6).
     this.addColumnIfMissing("mailboxes", "last_polled_at", "INTEGER");
     // Consumer-owned IMAP poll cursor (persist-after-confirm class fix; see
-    // schema.ts + engine/reply-processor.ts). DEFAULT 0 so a DO that predates
-    // the column starts from the beginning of the mailbox.
-    this.addColumnIfMissing("mailboxes", "poll_cursor", "INTEGER NOT NULL DEFAULT 0");
+    // schema.ts + engine/reply-processor.ts). DEFAULT -1 (never-polled
+    // sentinel) so a DO that predates the column treats its existing
+    // mailboxes as never-polled -- initializing at their current high-water
+    // on the next poll rather than re-pulling their full history. Existing
+    // DOs where this column already exists are unaffected (addColumnIfMissing
+    // is a no-op then); see schema.ts's poll_cursor comment for the -1/0
+    // distinction and the finding this closes.
+    this.addColumnIfMissing("mailboxes", "poll_cursor", "INTEGER NOT NULL DEFAULT -1");
     // Created here, not in TENANT_DO_SCHEMA, so they run only after the columns
     // above are guaranteed to exist (safe for DOs that predate the column). Each
     // collapses any pre-existing rows that would violate the unique key BEFORE

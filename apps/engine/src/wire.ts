@@ -26,8 +26,15 @@ export const sendRequestSchema = z.object({
 export const pollRequestSchema = z.object({
   mailboxEmail: z.string().email(),
   // The consumer's stored per-mailbox IMAP UID high-water. The engine fetches
-  // strictly above it and holds no cursor of its own (see engine.ts). >= 0.
-  sinceCursor: z.number().int().min(0),
+  // strictly above it and holds no cursor of its own (see engine.ts).
+  // -1 is the "never polled this mailbox before" sentinel (real IMAP UIDs
+  // start at 1, so -1 is distinct from every legitimate cursor value,
+  // INCLUDING 0 -- a genuinely empty mailbox's high-water is 0, which must be
+  // treated as an ordinary incremental cursor on the next poll, not
+  // re-interpreted as "never polled" (adversary poll-bounded-fetch-2026-07-16
+  // finding 1: overloading 0 as both meanings permanently lost the first
+  // inbound on every empty mailbox).
+  sinceCursor: z.number().int().min(-1),
 });
 
 export type SendRequest = z.infer<typeof sendRequestSchema>;

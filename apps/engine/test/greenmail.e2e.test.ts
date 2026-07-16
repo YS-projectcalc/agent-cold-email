@@ -55,9 +55,20 @@ describe.skipIf(!RUN)("GreenMail end-to-end (real SMTP+IMAP)", () => {
   let originalMessageId: string;
   let senderCursor = 0; // consumer-owned poll cursor, advanced between polls
 
-  beforeAll(() => {
+  beforeAll(async () => {
     dir = mkdtempSync(join(tmpdir(), "engine-e2e-"));
     engine = new EmailEngine({ credentials: creds, store: new EngineStore(dir), smtp: nodemailerSender, imap: imapflowFetcher });
+    // Prime the poll cursor BEFORE any sends/replies happen -- mirrors the real
+    // platform's ordering (mailbox connects, first poll initializes the cursor
+    // at the mailbox's current high-water, THEN campaigns start sending).
+    // sinceCursor=-1 is the first-contact sentinel (engine.ts); 0 is an
+    // ordinary incremental cursor, NOT a sentinel (adversary poll-bounded-
+    // fetch-2026-07-16 finding 1/2) -- without this priming poll, the FIRST
+    // poll call below would use 0 directly, which is a real incremental fetch
+    // from UID 1 rather than a no-op initialization, and would not establish
+    // the "events since we started watching" baseline this suite relies on.
+    const primed = await engine.poll(SENDER, -1);
+    senderCursor = primed.cursor;
   });
   afterAll(() => {
     rawTransport.close();

@@ -410,13 +410,19 @@ describe("poll cursor is owned + persisted by the consumer DO", () => {
       const cursorOf = () =>
         state.storage.sql.exec<{ poll_cursor: number }>(`SELECT poll_cursor FROM mailboxes LIMIT 1`).one().poll_cursor;
 
-      expect(cursorOf()).toBe(0); // fresh mailbox
+      // Fresh mailbox: poll_cursor starts at -1 (the never-polled sentinel,
+      // engine.ts's first-contact branch) -- provisioning.ts sets it
+      // explicitly on insert (round-2 fix, adversary
+      // poll-bounded-fetch-2026-07-16 finding 1: a bare 0 default collided
+      // with a legitimate empty-mailbox cursor and permanently lost the
+      // first inbound on every fresh mailbox).
+      expect(cursorOf()).toBe(-1);
       await instance.pollInbox();
-      expect(cursorOf()).toBe(10); // persisted the returned cursor
+      expect(cursorOf()).toBe(9); // persisted the returned cursor (-1 + 10)
       await instance.pollInbox();
-      expect(cursorOf()).toBe(20);
-      // The DO passed its STORED cursor each time (0 then 10), never a fixed 0.
-      expect(seen).toEqual([0, 10]);
+      expect(cursorOf()).toBe(19); // 9 + 10
+      // The DO passed its STORED cursor each time (-1 then 9), never a fixed 0.
+      expect(seen).toEqual([-1, 9]);
     });
   });
 });

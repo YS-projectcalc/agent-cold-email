@@ -58,11 +58,25 @@ class StallableSmtp implements SmtpSender {
 }
 
 class FakeImap implements ImapFetcher {
-  constructor(private readonly byMailbox: Record<string, RawMessage[]>) {}
-  fetched: { sinceUid: number }[] = [];
-  async fetchSince(credsArg: { user: string }, sinceUid: number): Promise<RawMessage[]> {
-    this.fetched.push({ sinceUid });
-    return (this.byMailbox[credsArg.user] ?? []).filter((m) => m.uid > sinceUid);
+  constructor(
+    private readonly byMailbox: Record<string, RawMessage[]>,
+    // Explicit per-mailbox UIDNEXT override. Defaults to (max fixture UID + 1)
+    // -- a realistic mailbox where UIDNEXT is one past the last existing
+    // message -- so most tests don't need to compute it by hand.
+    private readonly uidNextByMailbox: Record<string, number> = {},
+  ) {}
+  fetched: { sinceUid: number; throughUid: number }[] = [];
+
+  async currentUidNext(credsArg: { user: string }): Promise<number> {
+    const override = this.uidNextByMailbox[credsArg.user];
+    if (override !== undefined) return override;
+    const maxUid = (this.byMailbox[credsArg.user] ?? []).reduce((m, msg) => Math.max(m, msg.uid), 0);
+    return maxUid + 1;
+  }
+
+  async fetchRange(credsArg: { user: string }, sinceUid: number, throughUid: number): Promise<RawMessage[]> {
+    this.fetched.push({ sinceUid, throughUid });
+    return (this.byMailbox[credsArg.user] ?? []).filter((m) => m.uid > sinceUid && m.uid <= throughUid);
   }
 }
 
@@ -227,25 +241,140 @@ function replyFrom(messageId: string): string {
 }
 
 describe("EmailEngine.poll", () => {
-  it("is cursor-stateless: classifies messages above sinceCursor and returns the new cursor (consumer advances)", async () => {
+  it("does NOT fetch mailbox history on first contact (sinceCursor=-1), even on a mailbox with a large pre-existing UID space — the unbounded-first-fetch defect — and initializes the cursor at the mailbox's current high-water", async () => {
+    const store = new EngineStore(dir);
+    const smtp = new FakeSmtp();
+    // A real pre-existing mailbox (the Gate-1 smoke found one with UID >147k):
+    // hundreds of historical messages already sitting in INBOX before the
+    // platform ever polls it.
+    const historical: RawMessage[] = [];
+    for (let uid = 1; uid <= 500; uid++) {
+      historical.push({ uid, source: `From: x@y.test\r\nMessage-ID: <h${uid}@x.test>\r\nContent-Type: text/plain\r\n\r\nbody` });
+    }
+    const imap = new FakeImap({ [SENDER]: historical });
+    const engine = new EmailEngine({ credentials: creds, store, smtp, imap });
+
+    const { events, cursor } = await engine.poll(SENDER, -1);
+    expect(imap.fetched).toHaveLength(0); // no IMAP fetch at all on first contact
+    expect(events).toHaveLength(0);
+    // Cursor lands exactly at the mailbox's current high-water (the fixture's
+    // max UID), not at 0 and not at some partial/capped value — the very next
+    // poll starts strictly above all 500 historical messages.
+    expect(cursor).toBe(500);
+  });
+
+  it("ROUND-2 REGRESSION (adversary poll-bounded-fetch-2026-07-16 finding 1): an empty mailbox's first-ever inbound is NOT silently lost -- sinceCursor -1 (never polled) is distinct from a legitimate 0 (incremental from UID 1)", async () => {
+    const store = new EngineStore(dir);
+    const smtp = new FakeSmtp();
+    const engine0 = new EmailEngine({ credentials: creds, store, smtp, imap: new FakeImap({}) });
+    const sent = await engine0.send(baseInput({ threadId: "thr_empty" }), "seed-empty");
+
+    // Tick 1: the mailbox is genuinely empty when first polled. sinceCursor=-1
+    // is the "never polled" sentinel -- initializes at the current (empty)
+    // high-water, which is legitimately 0 for an empty mailbox.
+    const emptyImap = new FakeImap({}, { [SENDER]: 1 }); // UIDNEXT=1 -- nothing exists yet
+    const primingEngine = new EmailEngine({ credentials: creds, store, smtp, imap: emptyImap });
+    const primed = await primingEngine.poll(SENDER, -1);
+    expect(emptyImap.fetched).toHaveLength(0);
+    expect(primed.cursor).toBe(0);
+
+    // A real reply now arrives at UID 1 -- the mailbox's very first message
+    // ever.
+    const imap = new FakeImap({ [SENDER]: [{ uid: 1, source: replyFrom(sent.messageId) }] }, { [SENDER]: 2 });
+    const engine = new EmailEngine({ credentials: creds, store, smtp, imap });
+
+    // Tick 2: the consumer polls again with the PERSISTED cursor (0). Under the
+    // old (round-1) sentinel where 0 meant "never polled", this would re-enter
+    // first-contact and skip UID 1 forever -- the exact defect the adversary
+    // demonstrated live. 0 must now be an ordinary incremental cursor.
+    const { events, cursor } = await engine.poll(SENDER, primed.cursor);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: "reply", threadId: "thr_empty" });
+    expect(cursor).toBe(1);
+  });
+
+  it("classifies messages on a normal incremental poll (after first contact already initialized the cursor) and returns the new cursor", async () => {
     const store = new EngineStore(dir);
     const smtp = new FakeSmtp();
     const engine0 = new EmailEngine({ credentials: creds, store, smtp, imap: new FakeImap({}) });
     const sent = await engine0.send(baseInput({ threadId: "thr_9" }), "seed");
 
-    const imap = new FakeImap({ [SENDER]: [{ uid: 7, source: replyFrom(sent.messageId) }] });
+    // Realistic ordering: the mailbox already has some history (uid 1-5) the
+    // FIRST time the platform connects and polls it. First contact initializes
+    // the cursor at that high-water without fetching anything.
+    const preExisting: RawMessage[] = [1, 2, 3, 4, 5].map((uid) => ({
+      uid,
+      source: `Message-ID: <old-${uid}@x.test>\r\n\r\nold`,
+    }));
+    const primingImap = new FakeImap({ [SENDER]: preExisting });
+    const primingEngine = new EmailEngine({ credentials: creds, store, smtp, imap: primingImap });
+    const primed = await primingEngine.poll(SENDER, -1);
+    expect(primingImap.fetched).toHaveLength(0);
+    expect(primed.cursor).toBe(5);
+
+    // A genuine reply now lands at uid 7, after the primed high-water. A
+    // normal incremental poll from the primed cursor must classify it.
+    const imap = new FakeImap({ [SENDER]: [...preExisting, { uid: 7, source: replyFrom(sent.messageId) }] });
     const engine = new EmailEngine({ credentials: creds, store, smtp, imap });
 
-    const { events, cursor } = await engine.poll(SENDER, 0);
+    const { events, cursor } = await engine.poll(SENDER, primed.cursor);
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ kind: "reply", threadId: "thr_9", messageId: "<reply-1@example.com>" });
     expect(cursor).toBe(7);
+    expect(imap.fetched).toEqual([{ sinceUid: 5, throughUid: 7 }]);
 
-    // The consumer persists cursor=7 and polls again with it — fetches only
-    // above 7, nothing new. Engine stored no cursor of its own.
+    // The consumer persists cursor=7 and polls again with it — fully caught up,
+    // so no fetch call happens at all this time.
     const next = await engine.poll(SENDER, cursor);
     expect(next.events).toHaveLength(0);
-    expect(imap.fetched.at(-1)?.sinceUid).toBe(7);
+    expect(imap.fetched).toHaveLength(1); // still just the one fetch from above
+  });
+
+  it("caps a single incremental poll's fetch range to POLL_BATCH_CAP UIDs and pages across polls (batch-cap defense-in-depth)", async () => {
+    const store = new EngineStore(dir);
+    const smtp = new FakeSmtp();
+    // 800 messages beyond an already-initialized cursor -- a backlog bigger
+    // than one poll's cap (300).
+    const historical: RawMessage[] = [];
+    for (let uid = 1; uid <= 800; uid++) {
+      historical.push({ uid, source: `Message-ID: <h${uid}@x.test>\r\n\r\nbody` });
+    }
+    const imap = new FakeImap({ [SENDER]: historical }, { [SENDER]: 801 });
+    const engine = new EmailEngine({ credentials: creds, store, smtp, imap });
+
+    // sinceCursor=1 (already initialized, non-zero) exercises the incremental
+    // path, not first contact.
+    const page1 = await engine.poll(SENDER, 1);
+    expect(page1.cursor).toBe(301); // capped short of the true high-water (800)
+    expect(imap.fetched).toEqual([{ sinceUid: 1, throughUid: 301 }]);
+
+    const page2 = await engine.poll(SENDER, page1.cursor);
+    expect(page2.cursor).toBe(601);
+
+    const page3 = await engine.poll(SENDER, page2.cursor);
+    expect(page3.cursor).toBe(800); // now caught up to the mailbox's true high-water
+
+    const page4 = await engine.poll(SENDER, page3.cursor);
+    expect(page4.cursor).toBe(800); // fully caught up -- no further fetch calls
+    expect(imap.fetched).toHaveLength(3);
+  });
+
+  it("advances the cursor to the FULL scanned range even when the top-of-range UID doesn't exist (expunged/deleted) -- the anti-stall property", async () => {
+    const store = new EngineStore(dir);
+    const smtp = new FakeSmtp();
+    // Messages exist through uid 305, but nothing at 306-310 (expunged/gap).
+    // From cursor 10, the batch-cap range is (10, 310] -- the last message
+    // ACTUALLY present in that range is 305, not 310.
+    const historical: RawMessage[] = [];
+    for (let uid = 11; uid <= 305; uid++) historical.push({ uid, source: `Message-ID: <h${uid}@x.test>\r\n\r\nbody` });
+    const imap = new FakeImap({ [SENDER]: historical }, { [SENDER]: 500 }); // highWater=499, well above 310
+    const engine = new EmailEngine({ credentials: creds, store, smtp, imap });
+
+    const { cursor } = await engine.poll(SENDER, 10);
+    // If cursor tracked the max RETURNED uid instead of the full scanned range,
+    // this would be 305 and the next poll would re-scan the dead 306-310 gap
+    // forever. It must be 310 -- proving the anti-stall design is real.
+    expect(cursor).toBe(310);
   });
 
   it("REDELIVERS the same events on a lost response (consumer did not advance) — the cursor-loss fix", async () => {
@@ -257,12 +386,15 @@ describe("EmailEngine.poll", () => {
     const imap = new FakeImap({ [SENDER]: [{ uid: 7, source: replyFrom(sent.messageId) }] });
     const engine = new EmailEngine({ credentials: creds, store, smtp, imap });
 
-    // First poll returns the event + cursor=7 — but the response is "lost": the
-    // consumer never persists cursor, so it retries from the SAME sinceCursor.
-    const first = await engine.poll(SENDER, 0);
+    // Start from an already-initialized cursor (5) below the reply at uid 7 --
+    // first contact already happened on a prior poll; this exercises a normal
+    // incremental poll, not the first-contact path.
+    const first = await engine.poll(SENDER, 5);
     expect(first.events).toHaveLength(1);
 
-    const retry = await engine.poll(SENDER, 0);
+    // Response "lost": the consumer never persisted the advanced cursor, so it
+    // retries from the SAME sinceCursor.
+    const retry = await engine.poll(SENDER, 5);
     // Same event redelivered (no engine-side cursor advanced past it). Its
     // Message-ID is stable, so the Worker's events unique index dedupes it.
     expect(retry.events).toHaveLength(1);

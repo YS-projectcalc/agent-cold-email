@@ -59,9 +59,14 @@ export async function provisionDomainWithMailboxes(
 
     const day = computeWarmupDay(warmup.startedAt, now);
     ctx.sql.exec(
+      // poll_cursor starts at -1 (never-polled sentinel, engine.ts's
+      // first-contact branch) so runPollInbox's first poll for a brand-new
+      // mailbox initializes the cursor at the mailbox's current high-water
+      // WITHOUT fetching history, instead of the column's own DEFAULT 0 (an
+      // ordinary incremental cursor since the round-2 fix, not a sentinel).
       `INSERT INTO mailboxes
-         (id, tenant_id, domain_id, domain, email, daily_cap, sent_today, sent_today_epoch_day, status, warmup_started_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+         (id, tenant_id, domain_id, domain, email, daily_cap, sent_today, sent_today_epoch_day, status, warmup_started_at, created_at, poll_cursor)
+       VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, -1)`,
       newId("mbx"),
       ctx.tenantId,
       domainId,

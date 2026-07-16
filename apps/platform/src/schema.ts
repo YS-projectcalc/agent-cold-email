@@ -82,7 +82,19 @@ CREATE TABLE IF NOT EXISTS mailboxes (
   -- AFTER transactionally processing the returned events, advances it to the
   -- returned cursor. A lost poll response leaves this un-advanced so the next
   -- poll redelivers (deduped on events.message_id) — no silent event loss.
-  poll_cursor INTEGER NOT NULL DEFAULT 0,
+  -- -1 is the "never polled this mailbox" sentinel (engine.ts's first-contact
+  -- branch: initialize at the mailbox's current high-water WITHOUT fetching
+  -- history). 0 is NOT a sentinel -- it is a legitimate ordinary incremental
+  -- cursor (a genuinely empty mailbox's high-water is 0). This DEFAULT is a
+  -- brand-new-tenant-DO bootstrap fallback only; provisioning.ts sets
+  -- poll_cursor=-1 explicitly on every new mailbox row it inserts. EXISTING
+  -- rows (from before this fix) keep whatever value they already had,
+  -- INCLUDING any already at 0 -- under the current engine semantics that is
+  -- safely treated as an ordinary incremental start (bounded, capped), not
+  -- re-primed as first-contact (adversary poll-bounded-fetch-2026-07-16
+  -- finding 1: overloading 0 as both meanings permanently lost the first
+  -- inbound on every empty mailbox).
+  poll_cursor INTEGER NOT NULL DEFAULT -1,
   warmup_started_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL
 );

@@ -9,6 +9,18 @@ import { mintMessageId } from "./message-id.js";
 import type { SmtpSender } from "./smtp.js";
 import type { EngineStore } from "./store.js";
 
+/**
+ * Hard cap on how many UIDs a single incremental poll scans. Bounds the
+ * per-call fetch to a small, tunable, KNOWN quantity of full RFC5322 sources
+ * regardless of mailbox backlog size — the batch is capped by an explicit
+ * numeric IMAP UID range (imap.ts fetchRange), not by truncating an
+ * already-unbounded result client-side. A mailbox with a larger backlog than
+ * one cap simply pages: the cursor advances by at most this much per poll and
+ * the next scheduled tick (runPollInbox, apps/platform/src/engine/
+ * reply-processor.ts) continues from where this one left off.
+ */
+const POLL_BATCH_CAP = 300;
+
 export interface EngineDeps {
   credentials: CredentialsMap;
   store: EngineStore;
@@ -92,19 +104,55 @@ export class EmailEngine {
   }
 
   /**
-   * Cursor-stateless poll: fetch INBOX messages with UID > `sinceCursor`
-   * (the consumer's stored high-water), classify them, and return the events
-   * plus the new `cursor` (the max UID seen). The engine persists NOTHING about
-   * the cursor — the consumer advances its own high-water only after
-   * transactionally processing these events, so a lost response redelivers the
-   * exact same batch on the next poll (the Worker dedupes on Message-ID).
+   * Cursor-stateless poll: fetch INBOX messages with UID in (`sinceCursor`,
+   * `throughUid`], classify them, and return the events plus the new `cursor`.
+   * The engine persists NOTHING about the cursor — the consumer advances its
+   * own high-water only after transactionally processing these events, so a
+   * lost response redelivers the exact same batch on the next poll (the
+   * Worker dedupes on Message-ID).
+   *
+   * Two bounds close the unbounded-first-fetch defect (Gate-1 smoke, a real
+   * pre-existing mailbox with UID >147k):
+   *
+   *   1. First contact (`sinceCursor === -1` — real IMAP UIDs start at 1, so
+   *      -1 is a sentinel distinct from EVERY legitimate cursor value,
+   *      including 0): initialize the cursor at the mailbox's CURRENT
+   *      high-water (`uidNext - 1`, which is legitimately 0 for a genuinely
+   *      empty mailbox) and fetch NOTHING. Poll's semantics are "events since
+   *      we started watching," never "mirror the inbox" — every BYO mailbox
+   *      arrives with existing history that must never be pulled in one
+   *      shot. The consumer persists this cursor even though the poll
+   *      returned zero events (reply-processor.ts stamps `poll_cursor`
+   *      unconditionally), so the very next poll is a normal bounded
+   *      incremental fetch. NOTE: 0 is NOT a first-contact sentinel — it is
+   *      an ordinary incremental starting point (fetch strictly above UID 0,
+   *      i.e. from UID 1). Overloading 0 as both meanings was a real,
+   *      demonstrated defect: a genuinely empty mailbox's high-water is 0,
+   *      so re-treating a persisted 0 as "never polled" on the NEXT tick
+   *      permanently skipped that mailbox's first-ever inbound message
+   *      (adversary poll-bounded-fetch-2026-07-16 finding 1).
+   *   2. Every subsequent poll (including `sinceCursor === 0`) is capped to
+   *      at most `POLL_BATCH_CAP` UIDs — the cursor advances to the full
+   *      scanned range (`throughUid`), not just the max UID among messages
+   *      actually returned, so a gap of deleted/expunged UIDs can never
+   *      stall forward progress.
    */
   async poll(mailboxEmail: string, sinceCursor: number): Promise<PollResult> {
     const creds = this.resolve(mailboxEmail);
-    const messages = await this.imap.fetchSince(creds.imap, sinceCursor);
+    const uidNext = await this.imap.currentUidNext(creds.imap);
+    const mailboxHighWaterUid = Math.max(0, uidNext - 1);
 
+    if (sinceCursor === -1) {
+      return { events: [], cursor: mailboxHighWaterUid };
+    }
+
+    const throughUid = Math.min(mailboxHighWaterUid, sinceCursor + POLL_BATCH_CAP);
+    if (throughUid <= sinceCursor) {
+      return { events: [], cursor: sinceCursor }; // fully caught up, nothing new
+    }
+
+    const messages = await this.imap.fetchRange(creds.imap, sinceCursor, throughUid);
     const events: PollResult["events"] = [];
-    let cursor = sinceCursor;
     for (const msg of messages) {
       const event = await classifyMessage(
         msg.source,
@@ -113,9 +161,8 @@ export class EmailEngine {
         this.now(),
       );
       if (event) events.push(event);
-      if (msg.uid > cursor) cursor = msg.uid;
     }
-    return { events, cursor };
+    return { events, cursor: throughUid };
   }
 
   /**

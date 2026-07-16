@@ -19,7 +19,14 @@ const creds: CredentialsMap = {
 };
 
 const noopSmtp: SmtpSender = { async send() {} };
-const emptyImap: ImapFetcher = { async fetchSince() { return []; } };
+const emptyImap: ImapFetcher = {
+  async currentUidNext() {
+    return 1; // an empty mailbox: no messages exist yet
+  },
+  async fetchRange() {
+    return [];
+  },
+};
 
 function req(over: Partial<EngineRequest>): EngineRequest {
   return { method: "GET", path: "/health", authHeader: undefined, rawBody: "", ...over };
@@ -81,15 +88,28 @@ describe("route", () => {
     expect(res.status).toBe(422);
   });
 
-  it("200s an authed poll and returns { events, cursor }", async () => {
+  it("200s an authed poll (ordinary incremental, sinceCursor=0) and returns { events, cursor }", async () => {
     const body = JSON.stringify({ mailboxEmail: SENDER, sinceCursor: 0 });
     const res = await route(engine, SECRET, req({ method: "POST", path: "/v1/poll", authHeader: auth, rawBody: body }));
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ events: [], cursor: 0 });
   });
 
+  it("200s an authed poll with sinceCursor=-1 (first-contact sentinel) through the full wire boundary", async () => {
+    const body = JSON.stringify({ mailboxEmail: SENDER, sinceCursor: -1 });
+    const res = await route(engine, SECRET, req({ method: "POST", path: "/v1/poll", authHeader: auth, rawBody: body }));
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ events: [], cursor: 0 }); // emptyImap: uidNext=1 -> high-water 0
+  });
+
   it("400s a poll missing sinceCursor (schema validation)", async () => {
     const body = JSON.stringify({ mailboxEmail: SENDER });
+    const res = await route(engine, SECRET, req({ method: "POST", path: "/v1/poll", authHeader: auth, rawBody: body }));
+    expect(res.status).toBe(400);
+  });
+
+  it("400s a poll with sinceCursor below the -1 floor (schema validation)", async () => {
+    const body = JSON.stringify({ mailboxEmail: SENDER, sinceCursor: -2 });
     const res = await route(engine, SECRET, req({ method: "POST", path: "/v1/poll", authHeader: auth, rawBody: body }));
     expect(res.status).toBe(400);
   });
