@@ -122,3 +122,77 @@ export const TerminateInput = z.object({
   evidence: z.record(z.string(), z.unknown()).default({}),
 });
 export type TerminateInput = z.infer<typeof TerminateInput>;
+
+// SPEC.md §20 — BYO domains & mailboxes. The three §20.1 domain-relationship
+// shapes the delegation-risk ladder distinguishes (engine/byo-preflight.ts's
+// DomainRelationship, re-exported here as the zod boundary validator).
+export const DomainRelationshipInput = z.enum(["fresh_standalone", "subdomain_of_primary", "is_primary"]);
+export type DomainRelationshipInput = z.infer<typeof DomainRelationshipInput>;
+
+export const RegisterByoDomainInput = z.object({
+  domain: z.string().min(3).max(253),
+  domainRelationship: DomainRelationshipInput,
+});
+export type RegisterByoDomainInput = z.infer<typeof RegisterByoDomainInput>;
+
+// §20.4 — primary-domain consent must be an EXPLICIT `true`, never a default
+// or an implied acknowledgment (z.literal rejects anything else at the
+// boundary, before engine/byo-consent.ts's own runtime check even runs).
+export const AcknowledgeByoConsentInput = z.object({
+  acknowledged: z.literal(true),
+});
+export type AcknowledgeByoConsentInput = z.infer<typeof AcknowledgeByoConsentInput>;
+
+// §20.6 shape (a) — the founder-ruled PRIMARY build target: platform-
+// provisioned mailboxes on an already-active BYO domain (reuses the existing
+// vendor-provisioning path, engine/provisioning.ts's provisionMailboxesForDomain).
+export const RequestManagedByoMailboxesInput = z.object({
+  count: z.number().int().min(1).max(10),
+  personaSlug: z.string().min(1).max(50).optional(),
+});
+export type RequestManagedByoMailboxesInput = z.infer<typeof RequestManagedByoMailboxesInput>;
+
+// §20.6 — BYO-mailbox connect (the Mordy-pilot seam): maps DIRECTLY onto
+// apps/engine/src/config.ts's per-mailbox send-transport discriminated union
+// (mailboxCredentialsSchema's `send` field), so the intake data model is
+// ready for the engine to consume without translation. This is a "declare an
+// existing connection" endpoint (the caller already has the OAuth refresh
+// token / SMTP+IMAP app password in hand) -- a real interactive OAuth
+// consent-screen redirect flow is dashboard/follow-on work, not this intent.
+export const ConnectByoMailboxSmtpInput = z.object({
+  kind: z.literal("smtp"),
+  host: z.string().min(1),
+  port: z.number().int().positive(),
+  secure: z.boolean(),
+  user: z.string().min(1),
+  pass: z.string().min(1),
+});
+export const ConnectByoMailboxGmailInput = z.object({
+  kind: z.literal("gmail_api"),
+  clientId: z.string().min(1),
+  clientSecret: z.string().min(1),
+  refreshToken: z.string().min(1),
+});
+export const ConnectByoMailboxGraphInput = z.object({
+  kind: z.literal("ms_graph"),
+  mode: z.enum(["delegated", "app_only"]),
+  tenantId: z.string().min(1),
+  clientId: z.string().min(1),
+  clientSecret: z.string().min(1),
+  refreshToken: z.string().min(1).optional(),
+});
+// Named separately so the MCP flat-object tool schema (mcp/schemas.ts's
+// ConfigureByoDomainInput) can reuse the SAME transport union as an OPTIONAL
+// field, matching this required field's validation exactly (CLAUDE.md rule c).
+export const ConnectByoMailboxTransportInput = z.discriminatedUnion("kind", [
+  ConnectByoMailboxSmtpInput,
+  ConnectByoMailboxGmailInput,
+  ConnectByoMailboxGraphInput,
+]);
+export type ConnectByoMailboxTransportInput = z.infer<typeof ConnectByoMailboxTransportInput>;
+
+export const ConnectByoMailboxInput = z.object({
+  email: z.string().email(),
+  transport: ConnectByoMailboxTransportInput,
+});
+export type ConnectByoMailboxInput = z.infer<typeof ConnectByoMailboxInput>;
