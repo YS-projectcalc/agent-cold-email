@@ -1,7 +1,9 @@
 import type { PollResult, SendEmailInput, SendEmailResult } from "@coldstart/shared";
 import { classifyMessage } from "./classify.js";
-import type { CredentialsMap } from "./config.js";
+import type { CredentialsMap, MailboxCredentials } from "./config.js";
 import { SendInProgressError, UnknownMailboxError } from "./errors.js";
+import type { GmailSender } from "./gmail.js";
+import type { GraphSender } from "./graph.js";
 import type { ImapFetcher } from "./imap.js";
 import { mintMessageId } from "./message-id.js";
 import type { SmtpSender } from "./smtp.js";
@@ -12,6 +14,15 @@ export interface EngineDeps {
   store: EngineStore;
   smtp: SmtpSender;
   imap: ImapFetcher;
+  /**
+   * HTTPS/443 send transports. Optional so a test that only exercises SMTP need
+   * not wire them; the real daemon (index.ts) always provides both, so a mailbox
+   * configured for gmail_api/ms_graph resolves its sender. A mailbox needing an
+   * un-wired transport fails as an internal (transient) error, never a silent
+   * wrong-wire send.
+   */
+  gmail?: GmailSender;
+  graph?: GraphSender;
   /** Injected for tests; defaults to wall-clock (the engine is real infra). */
   now?: () => number;
 }
@@ -29,6 +40,8 @@ export class EmailEngine {
   private readonly store: EngineStore;
   private readonly smtp: SmtpSender;
   private readonly imap: ImapFetcher;
+  private readonly gmail?: GmailSender;
+  private readonly graph?: GraphSender;
   private readonly now: () => number;
 
   constructor(deps: EngineDeps) {
@@ -36,6 +49,8 @@ export class EmailEngine {
     this.store = deps.store;
     this.smtp = deps.smtp;
     this.imap = deps.imap;
+    this.gmail = deps.gmail;
+    this.graph = deps.graph;
     this.now = deps.now ?? Date.now;
   }
 
@@ -61,7 +76,7 @@ export class EmailEngine {
     try {
       const creds = this.resolve(input.fromEmail);
       const messageId = mintMessageId(input.fromEmail, creds.messageIdDomain);
-      await this.smtp.send(creds.smtp, input, messageId);
+      await this.dispatchSend(creds, input, messageId);
       const sentAt = this.now();
       // Record AFTER a successful send: a failed send throws before this, so its
       // key is never cached and a retry genuinely re-sends. The messageId→threadId
@@ -101,6 +116,28 @@ export class EmailEngine {
       if (msg.uid > cursor) cursor = msg.uid;
     }
     return { events, cursor };
+  }
+
+  /**
+   * Route the send to the mailbox's configured transport. The compliance-bearing
+   * raw message is built by the SAME message.ts builder for every wire, so which
+   * branch runs changes only the transport, never the bytes. An OMITTED `send`
+   * means SMTP (backward-compatible). An API transport whose sender wasn't wired
+   * is an internal misconfiguration surfaced as a transient error (the real
+   * daemon always wires both), never a silent wrong-transport send.
+   */
+  private async dispatchSend(creds: MailboxCredentials, input: SendEmailInput, messageId: string): Promise<void> {
+    const send = creds.send;
+    if (!send || send.kind === "smtp") {
+      if (!creds.smtp) throw new Error(`internal: mailbox ${input.fromEmail} selected smtp transport but has no smtp endpoint`);
+      return this.smtp.send(creds.smtp, input, messageId);
+    }
+    if (send.kind === "gmail_api") {
+      if (!this.gmail) throw new Error(`internal: mailbox ${input.fromEmail} needs the gmail_api transport but it is not wired`);
+      return this.gmail.send(send, input, messageId);
+    }
+    if (!this.graph) throw new Error(`internal: mailbox ${input.fromEmail} needs the ms_graph transport but it is not wired`);
+    return this.graph.send(send, input, messageId);
   }
 
   private resolve(email: string) {

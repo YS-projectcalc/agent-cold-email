@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { CredentialsMap } from "../src/config.js";
 import { EmailEngine } from "../src/engine.js";
 import { SendInProgressError, UnknownMailboxError } from "../src/errors.js";
+import type { GmailSender } from "../src/gmail.js";
+import type { GraphSender } from "../src/graph.js";
 import type { ImapFetcher, RawMessage } from "../src/imap.js";
 import type { SmtpSender } from "../src/smtp.js";
 import { EngineStore } from "../src/store.js";
@@ -140,6 +142,74 @@ describe("EmailEngine.send", () => {
     await expect(engine.send(baseInput({ fromEmail: "nobody@x.test" }), "k")).rejects.toBeInstanceOf(
       UnknownMailboxError,
     );
+  });
+});
+
+class FakeApiSender<T> {
+  calls: { transport: T; input: SendEmailInput; messageId: string }[] = [];
+  async send(transport: T, input: SendEmailInput, messageId: string): Promise<void> {
+    this.calls.push({ transport, input, messageId });
+  }
+}
+
+const GMAIL_BOX = "gmail@coldstart.test";
+const GRAPH_BOX = "graph@coldstart.test";
+const apiCreds: CredentialsMap = {
+  [GMAIL_BOX]: {
+    imap: { host: "imap", port: 993, secure: true, user: GMAIL_BOX, pass: "p" },
+    send: { kind: "gmail_api", clientId: "c", clientSecret: "s", refreshToken: "rt" },
+  },
+  [GRAPH_BOX]: {
+    imap: { host: "imap", port: 993, secure: true, user: GRAPH_BOX, pass: "p" },
+    send: { kind: "ms_graph", mode: "delegated", tenantId: "t", clientId: "c", clientSecret: "s", refreshToken: "rt" },
+  },
+};
+
+describe("EmailEngine.send — transport routing", () => {
+  it("routes a gmail_api mailbox to the Gmail sender, not SMTP", async () => {
+    const smtp = new FakeSmtp();
+    const gmail = new FakeApiSender();
+    const engine = new EmailEngine({
+      credentials: apiCreds,
+      store: new EngineStore(dir),
+      smtp,
+      imap: new FakeImap({}),
+      gmail: gmail as unknown as GmailSender,
+      graph: new FakeApiSender() as unknown as GraphSender,
+    });
+
+    const res = await engine.send(baseInput({ fromEmail: GMAIL_BOX }), "k-gmail");
+    expect(gmail.calls).toHaveLength(1);
+    expect(smtp.calls).toHaveLength(0);
+    expect(gmail.calls[0]!.messageId).toBe(res.messageId);
+  });
+
+  it("routes an ms_graph mailbox to the Graph sender, not SMTP", async () => {
+    const smtp = new FakeSmtp();
+    const graph = new FakeApiSender();
+    const engine = new EmailEngine({
+      credentials: apiCreds,
+      store: new EngineStore(dir),
+      smtp,
+      imap: new FakeImap({}),
+      gmail: new FakeApiSender() as unknown as GmailSender,
+      graph: graph as unknown as GraphSender,
+    });
+
+    await engine.send(baseInput({ fromEmail: GRAPH_BOX }), "k-graph");
+    expect(graph.calls).toHaveLength(1);
+    expect(smtp.calls).toHaveLength(0);
+  });
+
+  it("fails (never silently wrong-wire sends) when the needed API transport is not wired", async () => {
+    const engine = new EmailEngine({
+      credentials: apiCreds,
+      store: new EngineStore(dir),
+      smtp: new FakeSmtp(),
+      imap: new FakeImap({}),
+      // gmail/graph intentionally omitted
+    });
+    await expect(engine.send(baseInput({ fromEmail: GMAIL_BOX }), "k")).rejects.toThrow(/not wired/);
   });
 });
 

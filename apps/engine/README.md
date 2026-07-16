@@ -63,12 +63,118 @@ thread via `In-Reply-To` / `References` / returned `rfc822-headers` → the stor
 sandbox hands out for free (memory: the four sandbox conveniences a real server
 withholds).
 
+## Send transports (HTTPS/443 — the SMTP-egress-wall path)
+
+Sending has three interchangeable transports, chosen **per mailbox** by the
+`send.kind` discriminator in that mailbox's credentials. All three build the
+outbound message with the SAME builder (`src/message.ts`), so the compliance
+surface — RFC 8058 `List-Unsubscribe` / `List-Unsubscribe-Post`, the in-body
+opt-out link + CAN-SPAM footer (carried verbatim in the body), the real
+`Message-ID`, sequence `In-Reply-To`/`References` — is **byte-identical no matter
+which wire the send takes**. Reply reading is ALWAYS IMAP (993) regardless of
+send transport, so every mailbox still needs an `imap` endpoint. (API-based reply
+reading is possible future work; not built.)
+
+| `send.kind`  | Wire | Auth | Why |
+|--------------|------|------|-----|
+| `smtp` (default, or `send` omitted) | SMTP 465/587 | app password | the original path; unchanged |
+| `gmail_api`  | HTTPS 443 → `gmail.googleapis.com` | OAuth2 refresh token | survives a host that blocks outbound SMTP |
+| `ms_graph`   | HTTPS 443 → `graph.microsoft.com` | OAuth2 (delegated refresh token **or** app-only client credentials) | same, for Microsoft 365 |
+
+The API transports exist because a host can block outbound SMTP egress (465/587)
+account-wide while leaving 443 and IMAP 993 open — the exact condition on the
+current DO droplet. `gmail_api` POSTs the raw base64url RFC822 to Gmail's
+`messages.send`; `ms_graph` POSTs the raw MIME (base64, `text/plain` body) to
+Graph's `sendMail`, which preserves every header. Both use the built-in `fetch`
+(no vendor SDK), cache the access token, refresh once on a 401, and back off on
+429/5xx — then map any unrecovered failure to the SAME transient error the SMTP
+path throws, so the Worker's retry/bounce accounting is unchanged.
+
+> **Gmail endpoint note.** We use the standard `messages.send`
+> (`https://gmail.googleapis.com/gmail/v1/users/me/messages/send`) with a
+> base64url `{ raw }` JSON body — the documented path for messages ≤5 MB, which
+> every cold email is. The resumable `/upload/gmail/v1/...` endpoint is for large
+> media and takes raw `message/rfc822` bytes (not base64url), so it is not used
+> here.
+
 ## Config surface (all env-driven — no secret in code)
 
 See `.env.example`. `ENGINE_AUTH_SECRET` (required, ≥16 chars), `ENGINE_PORT`
 (default 8080), `ENGINE_STATE_DIR` (default `./state`), and
 `MAILBOX_CREDENTIALS` (inline JSON) **or** `MAILBOX_CREDENTIALS_FILE` (path) — a
-`{ email → { smtp, imap, messageIdDomain? } }` map.
+`{ email → MailboxCredentials }` map. Each `MailboxCredentials`:
+
+```jsonc
+{
+  "imap": { "host": "…", "port": 993, "secure": true, "user": "…", "pass": "…" }, // always required (reply reading)
+  "messageIdDomain": "…",   // optional; defaults to the sending address's domain
+
+  // Send transport — OMIT for the default SMTP path (backward compatible):
+  "smtp": { "host": "…", "port": 465, "secure": true, "user": "…", "pass": "…" }, // required iff SMTP
+
+  // …OR pick an HTTPS/443 transport instead of `smtp`:
+  "send": { "kind": "gmail_api", "clientId": "…", "clientSecret": "…", "refreshToken": "…" }
+  // "send": { "kind": "ms_graph", "mode": "delegated", "tenantId": "…", "clientId": "…", "clientSecret": "…", "refreshToken": "…" }
+  // "send": { "kind": "ms_graph", "mode": "app_only",  "tenantId": "…", "clientId": "…", "clientSecret": "…", "user": "box@domain" }
+}
+```
+
+Validation is fail-fast at boot: an `smtp`-transport mailbox must carry an `smtp`
+endpoint; `ms_graph` `delegated` requires `refreshToken`; `ms_graph` `app_only`
+requires `user` (Graph app-only has no `me`). A legacy `{ smtp, imap }` entry
+(no `send`) is unchanged — it is the `smtp` transport.
+
+## Minting BYO send credentials (founder runbook)
+
+The API transports need per-mailbox OAuth credentials. These are minted ONCE by
+the mailbox owner and dropped into `MAILBOX_CREDENTIALS_FILE` — never committed
+(CLAUDE.md rule g). Send-only scopes throughout (least privilege).
+
+### Gmail (`gmail_api`)
+
+1. **Google Cloud Console** → a project → *APIs & Services* → **enable the Gmail
+   API**.
+2. *OAuth consent screen*: External, add the mailbox as a **test user** (no app
+   verification needed while in Testing for your own mailbox).
+3. *Credentials* → **Create OAuth client ID** → application type **Desktop app**.
+   Note the `client_id` + `client_secret`.
+4. Mint the refresh token with the loopback helper (opens a consent URL, catches
+   the redirect on `http://127.0.0.1`, exchanges the code):
+   ```bash
+   node apps/engine/scripts/mint-gmail-token.mjs <client_id> <client_secret>
+   ```
+   Consent as the mailbox; the script prints the `refresh_token`. Scope minted:
+   `https://www.googleapis.com/auth/gmail.send`.
+5. Put `{ "kind": "gmail_api", "clientId", "clientSecret", "refreshToken" }` under
+   that mailbox's `send`, keeping its `imap` endpoint (app password) for replies.
+
+### Microsoft 365 — delegated (`ms_graph`, `mode:"delegated"`)
+
+1. **Entra ID** → *App registrations* → **New registration**. Note the
+   *Application (client) ID* and *Directory (tenant) ID*.
+2. *Authentication* → add a **Mobile & desktop** platform with redirect URI
+   `http://localhost` (loopback), and enable **Allow public client flows**.
+3. *API permissions* → **Microsoft Graph → Delegated → `Mail.Send`** (add
+   `offline_access` for the refresh token). Grant consent.
+4. *Certificates & secrets* → **New client secret**; note the value.
+5. Mint a refresh token via any standard v2.0 auth-code + loopback flow for scope
+   `https://graph.microsoft.com/Mail.Send offline_access` (the Gmail helper's
+   flow is the same shape against `login.microsoftonline.com/<tenant>/oauth2/
+   v2.0/{authorize,token}`; a dedicated Graph helper is future work).
+6. Put `{ "kind":"ms_graph", "mode":"delegated", "tenantId", "clientId",
+   "clientSecret", "refreshToken" }` under `send`.
+
+### Microsoft 365 — app-only (`ms_graph`, `mode:"app_only"`)
+
+1. Same app registration; instead of delegated, add **Graph → Application →
+   `Mail.Send`** and click **Grant admin consent**.
+2. **Scope the blast radius.** Application `Mail.Send` grants send-as-ANY mailbox
+   in the tenant by default. Restrict it to only the sending mailboxes with an
+   Exchange **Application Access Policy** (`New-ApplicationAccessPolicy … 
+   -AccessRight RestrictAccess`) before using it in production.
+3. No refresh token — the client-credentials grant mints app tokens directly. Put
+   `{ "kind":"ms_graph", "mode":"app_only", "tenantId", "clientId",
+   "clientSecret", "user":"<the-sending-mailbox>" }` under `send`.
 
 ## Run / test locally
 

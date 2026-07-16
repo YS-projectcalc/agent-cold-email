@@ -2,6 +2,7 @@ import nodemailer from "nodemailer";
 import type { SendEmailInput } from "@coldstart/shared";
 import type { Endpoint } from "./config.js";
 import { UpstreamTransientError } from "./errors.js";
+import { buildMailOptions } from "./message.js";
 
 export interface SmtpSender {
   send(creds: Endpoint, input: SendEmailInput, messageId: string): Promise<void>;
@@ -41,20 +42,8 @@ export const nodemailerSender: SmtpSender = {
       greetingTimeout: GREETING_TIMEOUT_MS,
       socketTimeout: SOCKET_TIMEOUT_MS,
     });
-    const headers: Record<string, string> = {};
-    if (input.listUnsubscribe) headers["List-Unsubscribe"] = input.listUnsubscribe;
-    if (input.listUnsubscribePost) headers["List-Unsubscribe-Post"] = input.listUnsubscribePost;
     try {
-      await transport.sendMail({
-        from: input.fromEmail,
-        to: input.toEmail,
-        subject: input.subject,
-        text: input.body,
-        messageId,
-        inReplyTo: input.inReplyToMessageId ?? undefined,
-        references: input.inReplyToMessageId ?? undefined,
-        headers,
-      });
+      await transport.sendMail(buildMailOptions(input, messageId));
     } catch (err) {
       throw new UpstreamTransientError(`SMTP send failed for ${input.fromEmail}: ${(err as Error).message}`, {
         cause: err,

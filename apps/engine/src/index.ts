@@ -1,6 +1,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { loadConfig } from "./config.js";
 import { EmailEngine } from "./engine.js";
+import { createGmailSender } from "./gmail.js";
+import { createGraphSender } from "./graph.js";
 import { imapflowFetcher } from "./imap.js";
 import { route, type EngineRequest } from "./router.js";
 import { nodemailerSender } from "./smtp.js";
@@ -38,6 +40,8 @@ function main(): void {
     store,
     smtp: nodemailerSender,
     imap: imapflowFetcher,
+    gmail: createGmailSender(),
+    graph: createGraphSender(),
   });
 
   const server = createServer((reqMessage: IncomingMessage, res: ServerResponse) => {
