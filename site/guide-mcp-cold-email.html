@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>What Is a Cold Email MCP Server? Coldrig for Coding Agents (2026)</title>
-<meta name="description" content="What is a cold email MCP server: the agent-cold-email MCP server in 2026 — 19 curated tools over streamable HTTP for cold-email infrastructure, exact input schemas, how to connect it to Claude Code or Codex, and the no-signup CLI demo.">
+<meta name="description" content="What is a cold email MCP server: the agent-cold-email MCP server in 2026 — 21 curated tools over streamable HTTP for cold-email infrastructure, exact input schemas, how to connect it to Claude Code or Codex, and the no-signup CLI demo.">
 <link rel="canonical" href="https://coldrig.dev/guide-mcp-cold-email">
 <meta property="og:title" content="What Is a Cold Email MCP Server? Coldrig for Coding Agents (2026)">
-<meta property="og:description" content="What is a cold email MCP server: the agent-cold-email MCP server in 2026 — 19 curated tools over streamable HTTP for cold-email infrastructure, exact input schemas, how to connect it to Claude Code or Codex, and the no-signup CLI demo.">
+<meta property="og:description" content="What is a cold email MCP server: the agent-cold-email MCP server in 2026 — 21 curated tools over streamable HTTP for cold-email infrastructure, exact input schemas, how to connect it to Claude Code or Codex, and the no-signup CLI demo.">
 <meta property="og:url" content="https://coldrig.dev/guide-mcp-cold-email">
 <meta property="og:type" content="article">
 <meta property="og:site_name" content="Coldrig">
@@ -24,7 +24,7 @@
   "@context": "https://schema.org",
   "@type": "TechArticle",
   "headline": "What is a cold email MCP server? The cold-email MCP server for coding agents",
-  "description": "What the agent-cold-email MCP server does, its 19 tools with exact input schemas, how to add it to a coding agent, and the no-signup CLI demo.",
+  "description": "What the agent-cold-email MCP server does, its 21 tools with exact input schemas, how to add it to a coding agent, and the no-signup CLI demo.",
   "dateModified": "2026-07-13",
   "about": { "@type": "SoftwareApplication", "name": "agent-cold-email", "applicationCategory": "BusinessApplication" }
 }
@@ -48,7 +48,7 @@
 <main class="wrap">
   <span class="draft-stamp">As of 2026-07-13</span>
   <h1>What is a cold email MCP server? The cold-email MCP server for coding agents</h1>
-  <p class="lede">A hosted, streamable-HTTP MCP server exposing 19 intent-level cold-email infrastructure tools, scoped by per-tenant bearer token and live in production. This page documents the exact tool surface — verified against the live <code>tools/list</code> response, not aspirational.</p>
+  <p class="lede">A hosted, streamable-HTTP MCP server exposing 21 intent-level cold-email infrastructure tools, scoped by per-tenant bearer token and live in production. This page documents the exact tool surface — verified against the live <code>tools/list</code> response, not aspirational.</p>
 
   <div class="callout">
     <strong>Live in production</strong>
@@ -56,7 +56,7 @@
   </div>
 
   <h2 id="what">What this MCP server does</h2>
-  <p>Most cold-email MCP servers in the wild re-export a vendor's full API surface — a well-known example ships 100+ tools. This one is a curated, high-level facade: 19 intents that hide domain-registrar, mailbox-vendor, and sequencing-engine plumbing behind calls an agent can reason about in one context window. Content generation — the offer, the subject lines, the sequence body — stays your agent's job; this server owns infrastructure provisioning, sequencing, isolation, and compliance guardrails. Five of the 19 (<code>get_dashboard</code>, <code>configure_dashboard</code>, <code>label_thread</code>, <code>list_campaigns</code>, <code>activity</code>) are the same facade the optional human dashboard at <code>/app</code> uses — parity by design, never dashboard-only state. For how that tool count compares to larger vendor-wrapper MCP servers, see <a href="/guide-mcp-tool-count">Smartlead vs Instantly MCP tool coverage</a>.</p>
+  <p>Most cold-email MCP servers in the wild re-export a vendor's full API surface — a well-known example ships 100+ tools. This one is a curated, high-level facade: 21 intents that hide domain-registrar, mailbox-vendor, and sequencing-engine plumbing behind calls an agent can reason about in one context window. Content generation — the offer, the subject lines, the sequence body — stays your agent's job; this server owns infrastructure provisioning, sequencing, isolation, and compliance guardrails. Five of the 21 (<code>get_dashboard</code>, <code>configure_dashboard</code>, <code>label_thread</code>, <code>list_campaigns</code>, <code>activity</code>) are the same facade the optional human dashboard at <code>/app</code> uses — parity by design, never dashboard-only state. For how that tool count compares to larger vendor-wrapper MCP servers, see <a href="/guide-mcp-tool-count">Smartlead vs Instantly MCP tool coverage</a>.</p>
 
   <h2 id="connect">How to add it</h2>
   <p>Streamable HTTP, JSON-RPC 2.0 (<code>initialize</code>, <code>tools/list</code>, <code>tools/call</code>), one config line, no OAuth dance. Get a token first via <code>POST /signup</code> (see <a href="/guide-cold-email-with-ai-agent#setup">the setup guide</a>), then add:</p>
@@ -72,7 +72,7 @@
 }</code></pre>
   <p>The endpoint resolves your token fresh on every call — there is no session or cache that could leak another tenant's data. The same tool names and same per-tenant auth are also reachable as plain REST (see <a href="openapi.yaml">openapi.yaml</a>) if your agent talks HTTP directly instead of MCP.</p>
 
-  <h2 id="tools">The 19 tools — exact schemas</h2>
+  <h2 id="tools">The 21 tools — exact schemas</h2>
   <p>Verified directly against the live <code>tools/list</code> response and <a href="openapi.yaml">openapi.yaml</a>. Two additional helpers described in the design spec (<code>write_sequence</code>, <code>suggest_domains</code>) are <strong>not implemented</strong> — don't assume they exist.</p>
 
   <h3><code>setup_infrastructure</code></h3>
@@ -166,8 +166,45 @@
   note?: string (0-2000 chars)
 }</code></pre>
 
+  <h3><code>get_webhooks</code></h3>
+  <p>List every outbound webhook subscription, or, with <code>id</code>, fetch one subscription plus its recent delivery and attempt log. Secrets are never returned on reads — shown once at create/rotate.</p>
+  <pre><code>{ id?: string (1-200 chars) }   // omit to list every subscription</code></pre>
+
+  <h3><code>configure_webhook</code></h3>
+  <p>Create, update, or delete an outbound webhook subscription — push <code>reply</code>, <code>bounce</code>, <code>soft_bounce</code>, and <code>complaint</code> events (HMAC-SHA256 signed, header <code>X-Coldrig-Signature</code>) to your own HTTPS endpoint. URLs must be https and resolve to a public host.</p>
+  <pre><code>{
+  action: "create" | "update" | "delete",
+  id?: string,                    // required for update/delete
+  url?: string,                   // required for create; optional on update
+  eventTypes?: ("reply" | "bounce" | "soft_bounce" | "complaint")[],  // required for create; 1-4 items
+  secret?: string (16-200 chars), // omit on create to auto-generate; set to rotate
+  active?: boolean                // default true
+}</code></pre>
+
+  <h3><code>get_byo_domains</code></h3>
+  <p>List your bring-your-own domains, or, with <code>id</code>, fetch one domain's full intake detail (pre-flight scan, abuse verdict, consent status). <code>byoStatus</code> progresses <code>pending_kyc</code>|<code>pending_consent</code>|<code>pending_dns</code> → <code>active</code> (or <code>rejected</code>/<code>abandoned</code>).</p>
+  <pre><code>{ id?: string (1-200 chars) }   // omit to list every domain</code></pre>
+
+  <h3><code>configure_byo_domain</code></h3>
+  <p>Register or advance a BYO domain intake (SPEC.md §20). Registration, the pre-flight scan, and consent tracking are live today; real DNS delegation, live reputation checks, and platform-provisioned mailboxes on your own domain activate via the same concierge step as real sending generally.</p>
+  <pre><code>{
+  action: "register" | "poll_dns" | "acknowledge_consent" | "request_managed_mailboxes" | "connect_mailbox",
+  domain?: string (3-253 chars),               // required for register
+  domainRelationship?: "fresh_standalone" | "subdomain_of_primary" | "is_primary",  // required for register
+  id?: string,                                 // required for poll_dns/acknowledge_consent/request_managed_mailboxes/connect_mailbox
+  acknowledged?: true,                         // required (must be true) for acknowledge_consent
+  count?: integer (1-10),                      // required for request_managed_mailboxes
+  personaSlug?: string (1-50 chars),           // optional for request_managed_mailboxes
+  email?: string,                              // required for connect_mailbox
+  transport?: { kind: "smtp", host, port, secure, user, pass }
+            | { kind: "gmail_api", clientId, clientSecret, refreshToken }
+            | { kind: "ms_graph", mode: "delegated" | "app_only", tenantId, clientId, clientSecret, refreshToken? }
+            // required for connect_mailbox — declares a mailbox connection YOU already hold; not this platform's own send transport
+}</code></pre>
+  <p>No pricing is published yet for BYO-connected mailboxes specifically, and a burned BYO domain hard-pauses rather than auto-replacing (unlike a burned lookalike domain) — see <a href="/byo-domain">the BYO domain page</a> for the full risk model.</p>
+
   <h2 id="demo">The no-signup CLI demo</h2>
-  <p><code>npx agent-cold-email demo</code> mints a demo tenant, provisions sample infrastructure, and runs the accelerated sandbox pipeline end to end (warmup, sends, replies, bounces, stop-on-reply) in one command — no signup or token-wrangling required. The npm CLI is live at v0.2.0 (registry-verified 2026-07-15). The same 19 tools are available over the hosted MCP endpoint or directly over HTTP (<a href="/docs#quickstart">quickstart</a>). The demo path stays sandboxed; real sending is live in production for activated accounts, via a short concierge activation step.</p>
+  <p><code>npx agent-cold-email demo</code> mints a demo tenant, provisions sample infrastructure, and runs the accelerated sandbox pipeline end to end (warmup, sends, replies, bounces, stop-on-reply) in one command — no signup or token-wrangling required. The npm CLI is live at v0.2.0 (registry-verified 2026-07-15). The same 21 tools are available over the hosted MCP endpoint or directly over HTTP (<a href="/docs#quickstart">quickstart</a>). The demo path stays sandboxed; real sending is live in production for activated accounts, via a short concierge activation step.</p>
 
   <h2 id="auth">Auth model</h2>
   <p>One bearer token per tenant, minted by the unauthenticated <code>POST /signup</code> bootstrap call. Every other tool call requires <code>Authorization: Bearer &lt;token&gt;</code> and resolves server-side to exactly one tenant's isolated state — there is no cross-tenant data access at any layer.</p>
@@ -178,10 +215,10 @@
     <li><a href="/guide-cold-email-operation-cursor">Run your entire cold email operation with Cursor</a> — exact mcp.json config and Cursor Rules.</li>
     <li><a href="/guide-cold-email-operation-codex">Run your entire cold email operation with Codex</a> — exact config.toml and native AGENTS.md context.</li>
     <li><a href="/guide-cold-email-with-ai-agent">How to run cold email with your AI coding agent</a> — the full step-by-step walkthrough.</li>
-    <li><a href="/guide-mcp-tool-count">19 intent-level tools vs larger vendor MCP surfaces</a> — lifecycle coverage and control tradeoffs.</li>
+    <li><a href="/guide-mcp-tool-count">21 intent-level tools vs larger vendor MCP surfaces</a> — lifecycle coverage and control tradeoffs.</li>
     <li><a href="/compare-vs-smartlead-instantly">Smartlead vs Instantly vs agent-cold-email</a>.</li>
     <li><a href="/docs">Docs</a> — quickstart, CLI usage, auth model.</li>
-    <li><a href="openapi.yaml">openapi.yaml</a> — the same 19 intents as REST.</li>
+    <li><a href="openapi.yaml">openapi.yaml</a> — the same 21 intents as REST.</li>
     <li><a href=".well-known/mcp/server-card.json">MCP server card</a> — machine-readable transport + tool list for registry scans.</li>
   </ul>
 </main>

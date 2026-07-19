@@ -3,7 +3,7 @@ info:
   title: agent-cold-email API
   version: "0.1.0"
   description: >
-    Agent-native cold-email infrastructure, live in production. 19 curated
+    Agent-native cold-email infrastructure, live in production. 21 curated
     intents behind one bearer token per tenant (a subset — the /dashboard/*
     session + views endpoints — also accept an httpOnly session cookie minted
     by POST /dashboard/session, for the optional human dashboard SPA; see
@@ -34,6 +34,7 @@ tags:
   - name: account
   - name: dashboard
   - name: webhooks
+  - name: byo-domains
   - name: compliance
 
 paths:
@@ -759,6 +760,200 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /byo-domains:
+    get:
+      operationId: get_byo_domains
+      tags: [byo-domains]
+      summary: List every bring-your-own domain for the tenant.
+      description: >
+        SPEC.md §20. Summary rows only — use GET /byo-domains/{id} for the
+        full intake detail (pre-flight scan, abuse verdict, consent status).
+      responses:
+        '200':
+          description: BYO domain summaries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ByoDomainSummary' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      operationId: register_byo_domain
+      tags: [byo-domains]
+      summary: Register a bring-your-own domain and run the pre-flight intake scan.
+      description: >
+        Runs the live-infra scan (SPEC.md §20.1), the abuse gate (§20.3),
+        and the reputation ladder (§20.5), returning the starting
+        byoStatus. A live-infra hit hard-refuses NS delegation and falls
+        back to records_to_apply; a primary domain is always
+        records_to_apply, never we_manage_zone. Real DNS delegation and
+        live reputation checks activate per-tenant the same way real
+        sending does — this endpoint is reachable today, but registering a
+        domain does not itself provision anything real until the tenant is
+        activated.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterByoDomainInput'
+      responses:
+        '201':
+          description: Domain registered — intake started.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ByoDomainRecord'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /byo-domains/{id}:
+    get:
+      operationId: get_byo_domain
+      tags: [byo-domains]
+      summary: One BYO domain's full intake detail.
+      parameters:
+        - $ref: '#/components/parameters/ByoDomainId'
+      responses:
+        '200':
+          description: BYO domain detail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ByoDomainRecord'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /byo-domains/{id}/poll-dns:
+    post:
+      operationId: poll_byo_domain_dns
+      tags: [byo-domains]
+      summary: Re-check DNS delegation/records for a domain in pending_dns.
+      description: >
+        SPEC.md §20.1's poll-verify: advances pending_dns → active on
+        success, or → abandoned after a 7-day idle timeout with no
+        verification. A no-op (returns current state) once past
+        pending_dns.
+      parameters:
+        - $ref: '#/components/parameters/ByoDomainId'
+      responses:
+        '200':
+          description: Poll result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PollDnsResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /byo-domains/{id}/consent:
+    post:
+      operationId: acknowledge_byo_consent
+      tags: [byo-domains]
+      summary: Acknowledge the primary-domain risk disclosure (SPEC.md §20.4).
+      description: >
+        Required before a primary-domain intake can proceed past
+        pending_consent. acknowledged must be the literal true — there is
+        no default or implied acknowledgment. Idempotent past
+        pending_consent. The acknowledgment documents informed consent; it
+        does not itself remove the business's exposure or substitute for
+        the technical safeguards in §20.1/§20.2.
+      parameters:
+        - $ref: '#/components/parameters/ByoDomainId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcknowledgeByoConsentInput'
+      responses:
+        '200':
+          description: Consent recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ByoDomainRecord'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /byo-domains/{id}/managed-mailboxes:
+    post:
+      operationId: request_managed_byo_mailboxes
+      tags: [byo-domains]
+      summary: Request platform-provisioned mailboxes on an already-active BYO domain.
+      description: >
+        SPEC.md §20.6 shape (a) — the primary build target: the vendor
+        provisions new mailboxes under the customer's own domain, reusing
+        the same provisioning path as the lookalike-domain flow. Requires
+        the domain to already be active (past DNS verification). No
+        pricing is published for BYO-connected mailboxes specifically.
+      parameters:
+        - $ref: '#/components/parameters/ByoDomainId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RequestManagedByoMailboxesInput'
+      responses:
+        '201':
+          description: Mailboxes provisioned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManagedMailboxesResult'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /byo-domains/{id}/connect-mailbox:
+    post:
+      operationId: connect_byo_mailbox
+      tags: [byo-domains]
+      summary: Declare an existing mailbox connection on a BYO domain.
+      description: >
+        SPEC.md §20.6 — bypasses vendor provisioning entirely: the caller
+        already holds the OAuth refresh token or SMTP+IMAP app password for
+        a mailbox that already exists. This declares the mailbox the
+        caller is connecting — it is not a claim about this platform's own
+        outbound send transport, which is Gmail API over HTTPS/443 in
+        production today.
+      parameters:
+        - $ref: '#/components/parameters/ByoDomainId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectByoMailboxInput'
+      responses:
+        '201':
+          description: Mailbox connection recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectByoMailboxResult'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /unsubscribe:
     get:
       operationId: unsubscribe_confirm_page
@@ -863,6 +1058,15 @@ components:
         The MCP tools `get_webhooks` and `configure_webhook` take this same
         identifier as an `id` argument (there is no URL path in MCP tool
         calls).
+      schema: { type: string }
+    ByoDomainId:
+      name: id
+      in: path
+      required: true
+      description: >
+        The MCP tools `get_byo_domains` and `configure_byo_domain` take
+        this same identifier as an `id` argument (there is no URL path in
+        MCP tool calls).
       schema: { type: string }
     UnsubscribeTenant:
       name: tenant
@@ -1254,3 +1458,140 @@ components:
         recentAttempts:
           type: array
           items: { $ref: '#/components/schemas/WebhookAttemptView' }
+
+    DomainRelationshipInput:
+      type: string
+      enum: [fresh_standalone, subdomain_of_primary, is_primary]
+      description: >
+        fresh_standalone = brand-new domain, no history; subdomain_of_primary
+        = a subdomain of the tenant's existing primary domain;
+        is_primary = the tenant's own flagship business domain.
+
+    RegisterByoDomainInput:
+      type: object
+      required: [domain, domainRelationship]
+      properties:
+        domain: { type: string, minLength: 3, maxLength: 253 }
+        domainRelationship: { $ref: '#/components/schemas/DomainRelationshipInput' }
+
+    AcknowledgeByoConsentInput:
+      type: object
+      required: [acknowledged]
+      properties:
+        acknowledged:
+          type: boolean
+          enum: [true]
+          description: >
+            Must be the literal true — SPEC.md §20.4's separate, unbundled
+            risk acknowledgment.
+
+    RequestManagedByoMailboxesInput:
+      type: object
+      required: [count]
+      properties:
+        count: { type: integer, minimum: 1, maximum: 10 }
+        personaSlug: { type: string, minLength: 1, maxLength: 50, description: "Optional; defaults to a slug of the domain." }
+
+    ConnectByoMailboxSmtpInput:
+      type: object
+      required: [kind, host, port, secure, user, pass]
+      properties:
+        kind: { type: string, enum: [smtp] }
+        host: { type: string }
+        port: { type: integer }
+        secure: { type: boolean }
+        user: { type: string }
+        pass: { type: string }
+
+    ConnectByoMailboxGmailInput:
+      type: object
+      required: [kind, clientId, clientSecret, refreshToken]
+      properties:
+        kind: { type: string, enum: [gmail_api] }
+        clientId: { type: string }
+        clientSecret: { type: string }
+        refreshToken: { type: string }
+
+    ConnectByoMailboxGraphInput:
+      type: object
+      required: [kind, mode, tenantId, clientId, clientSecret]
+      properties:
+        kind: { type: string, enum: [ms_graph] }
+        mode: { type: string, enum: [delegated, app_only] }
+        tenantId: { type: string }
+        clientId: { type: string }
+        clientSecret: { type: string }
+        refreshToken: { type: string, description: "Optional for app_only mode." }
+
+    ConnectByoMailboxInput:
+      type: object
+      required: [email, transport]
+      properties:
+        email: { type: string, format: email }
+        transport:
+          description: >
+            The mailbox connection the caller already holds — declares an
+            EXISTING credential the caller supplies, not an OAuth flow this
+            API initiates. This describes the mailbox being connected; it
+            is not a claim about this platform's own outbound send
+            transport, which is Gmail API over HTTPS/443 in production
+            today.
+          oneOf:
+            - $ref: '#/components/schemas/ConnectByoMailboxSmtpInput'
+            - $ref: '#/components/schemas/ConnectByoMailboxGmailInput'
+            - $ref: '#/components/schemas/ConnectByoMailboxGraphInput'
+          discriminator:
+            propertyName: kind
+
+    ByoDomainSummary:
+      type: object
+      required: [domainId, domain, isPrimary, dnsMode, byoStatus, breakerTier, reputationBranch, mailboxCount]
+      properties:
+        domainId: { type: string }
+        domain: { type: string }
+        isPrimary: { type: boolean }
+        dnsMode: { type: string, enum: [we_manage_zone, records_to_apply] }
+        byoStatus: { type: string, enum: [pending_kyc, pending_consent, pending_dns, active, rejected, abandoned] }
+        breakerTier: { type: string, enum: [standard, elevated, primary] }
+        reputationBranch: { type: string, nullable: true }
+        mailboxCount: { type: integer }
+
+    ByoDomainRecord:
+      type: object
+      required: [domainId, domain, isPrimary, dnsMode, byoStatus, breakerTier, reputationBranch, scan, abuseVerdict, consentAcknowledged]
+      properties:
+        domainId: { type: string }
+        domain: { type: string }
+        isPrimary: { type: boolean }
+        dnsMode: { type: string, enum: [we_manage_zone, records_to_apply] }
+        byoStatus: { type: string, enum: [pending_kyc, pending_consent, pending_dns, active, rejected, abandoned] }
+        breakerTier: { type: string, enum: [standard, elevated, primary] }
+        reputationBranch: { type: string, nullable: true }
+        scan: { type: object, additionalProperties: true, description: "Pre-flight live-infra scan result (SPEC.md §20.1)." }
+        abuseVerdict: { type: string, description: "SPEC.md §20.3 abuse-gate verdict." }
+        consentAcknowledged: { type: boolean }
+
+    PollDnsResult:
+      type: object
+      required: [domainId, byoStatus, verified, checksSoFar]
+      properties:
+        domainId: { type: string }
+        byoStatus: { type: string, enum: [pending_kyc, pending_consent, pending_dns, active, rejected, abandoned] }
+        verified: { type: boolean }
+        checksSoFar: { type: integer }
+
+    ManagedMailboxesResult:
+      type: object
+      required: [mailboxEmails]
+      properties:
+        mailboxEmails:
+          type: array
+          items: { type: string }
+
+    ConnectByoMailboxResult:
+      type: object
+      required: [mailboxId, email, transportKind]
+      properties:
+        mailboxId: { type: string }
+        email: { type: string }
+        transportKind: { type: string }

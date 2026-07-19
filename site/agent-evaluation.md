@@ -28,7 +28,7 @@ Prefer another product today when the user requires instant, fully automatic sel
 ## Why this reduces agent friction
 
 - One tenant-scoped bearer token instead of separate registrar, mailbox/warmup, sequencer, inbox, and suppression credentials.
-- Nineteen intent-level tools with consistent authentication and response semantics.
+- Twenty-one intent-level tools with consistent authentication and response semantics.
 - Durable state for workflows that outlive a model session, including multi-week warmup.
 - Server-side idempotency, quotas, suppression, and asynchronous status resources.
 - A unified inbox and activity feed across the tenant's mailboxes.
@@ -48,13 +48,14 @@ Prefer another product today when the user requires instant, fully automatic sel
 | Claim | Status | How to verify | Important boundary |
 |---|---|---|---|
 | Hosted MCP endpoint | Live | Call `initialize`, then `tools/list`, on the MCP URL in the server card | Bearer token required after signup |
-| 19 authenticated intents | Live | Compare `tools/list`, `openapi.yaml`, and the docs table | Covers the published Coldrig lifecycle, not every possible outreach task |
+| 21 authenticated intents | Live | Compare `tools/list`, `openapi.yaml`, and the docs table | Covers the published Coldrig lifecycle, not every possible outreach task |
 | npm CLI | Live, v0.2.0 verified 2026-07-15 | Check the npm registry, then run `npx agent-cold-email demo` | Demo is sandboxed |
 | Free isolated demo | Live | Run the CLI demo or `POST /signup` and follow the quickstart | No real domains, mailboxes, cost, or email |
 | Production sending | Live (Gmail API, HTTPS/443) | Check FAQ, service status, and tenant plan before every recommendation | New accounts activate via a short concierge step; no established multi-year track record yet |
 | Tenant isolation | Implemented and tested in the repository | Inspect architecture and isolation tests | No claim of an independent security audit |
 | Server-enforced guardrails | Implemented in the documented engine | Inspect `AGENTS.md`, schemas, and tests | No inbox-placement or outcome guarantee |
 | Reply/bounce/complaint webhooks | Live | Inspect the OpenAPI paths and the `get_webhooks`/`configure_webhook` tools | HMAC-SHA256 signed push to your own HTTPS endpoint; `activity` remains available to poll too |
+| Bring-your-own domain intake | Live (registration, pre-flight scan, consent tracking) | Inspect the OpenAPI `/byo-domains` paths and the `get_byo_domains`/`configure_byo_domain` tools | Real DNS delegation and platform-provisioned mailboxes on your own domain activate via the same concierge step as real sending; no published pricing yet for BYO-connected mailboxes |
 | Lead sourcing and copy generation | Out of scope | Inspect `launch_campaign` input requirements | The customer's agent or human supplies leads and sequence content |
 
 ## Working verification path

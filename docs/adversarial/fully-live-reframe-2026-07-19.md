@@ -90,3 +90,33 @@ The reframe is well-executed on posture: no caveat is deleted (every surface kee
 
 ### Residual non-blocking (does not gate)
 - `status.html` service board still shows a "Early access" pill on the **Dashboard** row — defensible component sub-status (dashboard paid mutations remain gated), consistent with the sibling "Rolling out" / "Concierge step" pills. Optional to reword.
+
+---
+
+# ADDENDUM — Round 3 re-attack (2026-07-19, HEAD 8175623, two lanes)
+
+## ROUND-3 VERDICT: SHIP-AFTER-FIXES — 2 trivial spelled-out count stragglers + the standing deploy-ordering gate. Lane 2 (fee deletion) is a clean SHIP. Everything else verified.
+
+Grounded at HEAD `8175623` (byo-intake merged; both lanes uncommitted on top). Live Worker now serves **19** tools and `/webhook-subscriptions` → 401 (webhooks deployed since round 2); `/byo-domains` → 404 (BYO not yet deployed — gate standing).
+
+### LANE 1 — F-wave copy (19→21 + BYO + AGENTS.md)
+**BLOCKING (2 trivial spelled-out stragglers)** — the numeric 19→21 sweep was complete (tree-wide numeric-19-as-count = clean; `llms.txt` correctly says "Twenty-one") but two spelled-out cardinals were missed:
+- `site/index.html:177` — "**Nineteen** carefully scoped tools keep context small…" → should be "Twenty-one" (homepage; contradicts the "21" hero-proof stat on the same page).
+- `site/agent-evaluation.md:31` — "**Nineteen** intent-level tools with consistent authentication…" → should be "Twenty-one" (machine-read brief; page's own claim table says 21). Both are cross-checkable-false against live `tools/list` (21 after deploy). Same class/severity as the round-2 `llms.txt` v0.1.0 straggler.
+
+**Verified clean:**
+- **openapi BYO fidelity** — validates (29 paths / 40 schemas). 6 paths / 7 ops match `apps/platform/src/routes/byo-domains.ts` exactly: `GET/POST /byo-domains`, `GET /byo-domains/{id}`, `POST …/{id}/poll-dns|consent|managed-mailboxes|connect-mailbox`; status 201 on register/managed-mailboxes/connect-mailbox, 200 elsewhere (matches the route's `.json(…, 201)`). `byoStatus` enum `[pending_kyc, pending_consent, pending_dns, active, rejected, abandoned]` byte-matches `byo-intake.ts:28`; poll-dns "→active on success / →abandoned after 7-day idle" matches `byo-intake.ts:223`.
+- **BYO copy honesty (vs SPEC §20 + stubs)** — `registerByoDomain` genuinely runs the dnsScan pre-flight, abuse gate, and reputation ladder at registration and writes a real status row (sandbox adapters; real ones coded-but-unactivated) → "register/scan/consent live today" TRUE. `requestManagedByoMailboxes`/`connectByoMailbox` both throw `ValidationError` unless `byo_status === "active"`, and register provisions nothing real → "registering does not provision anything real until activated" TRUE. `byo-breaker.ts` hard-pauses with no replace action → "burned BYO domain hard-pauses, never auto-replaced" TRUE. No BYO-connected pricing anywhere — every surface (byo-domain.html, agent-evaluation.md, guide-mcp, AGENTS.md) explicitly declines to quote one (ruling-D compliant). Consistent across all four surfaces; no page still says BYO "not yet exposed."
+- **ms_graph scoping** — both mentions (`guide-mcp-cold-email.html:201`, `openapi.yaml:1519`) are the customer connect-mailbox transport config, never claimed as Coldrig's own platform send transport. No B1 regression.
+- **AGENTS.md** CLI `0.2.0` registry-verified 2026-07-15. **og-image** SVG now "21 focused tools", PNG re-rendered (mtime 22:03, bytes changed) — visual render taken on orchestrator's headless check; SVG source + PNG-byte change confirmed, not independently OCR'd.
+
+### LANE 2 — 2¢ send-fee deletion (`apps/platform`) — CLEAN SHIP, no findings
+- **(a) Public claims:** `pricing.html:65` "**$0** per-send fees" and the tree-wide "sends are not separately metered" are now true **by construction** — the deletion closes a latent gap (a 2¢ per-send usage ledger entry + Stripe report existed before). No public claim is invalidated.
+- **(b) tick.ts is fee-only:** removed = `SEND_USAGE_FEE_CENTS`, the `billing.recordUsage` A4 try/catch, the `ledger_entries` usage insert, and `reportUsageToStripeIfConfigured`. The **send-path** A4 grading (`email.send` throw → transient-to-pending / permanent-or-at-cap-to-failed), the orphan-`sending` reclaim, `MAX_SEND_ATTEMPTS`, suppression skip, and the `sent`+cap+event commit are all **preserved** (only comments reworded). `reportUsageToStripeIfConfigured` is NOT orphaned (still called by `provisioning.ts:96` for the mailbox fee); `MAILBOX_MONTHLY_FEE_CENTS=600` billing preserved.
+- **(c) Test coverage:** exactly **3** tests removed (tick-correctness −1 "sent-but-unbilled" billing test; tick-vendor-error −2 billing-A4 tests) — all fee-specific. The 4 send-path/orphan-reclaim tests in tick-vendor-error and the mailbox-fee metering test are **preserved**. **Ran** the 5 fee-affected files → **17 passed / 0 failed** against the modified tick.ts (the RateLimitError/TenantIsolationError console lines are asserted negative paths).
+
+### STANDING GATE (operational)
+Live Worker = 19 tools, `/byo-domains` → 404. The 21-tool / BYO / openapi-BYO-path claims are correct-against-source but verify-false until the platform Worker (`8175623`+, incl. the fee deletion) deploys BEFORE the site. Deploy Worker → re-curl `tools/list` = 21 AND `GET /byo-domains` ≠ 404 → THEN push site.
+
+### Not independently verified
+Full-suite (534) pass + full typecheck-0 (builder's claim) — I ran only the 5 fee-affected files (green) and the targeted BYO/webhook source reads; the affected path compiles+runs. og-image PNG visual "21" taken on the orchestrator's headless-render statement.

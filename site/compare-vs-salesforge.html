@@ -63,12 +63,12 @@
     <tbody>
       <tr><td>Real cold-email sending now</td><td>Yes; production product and trial</td><td>Yes; live in production (Gmail API, HTTPS/443) — new accounts activate via a short concierge step</td></tr>
       <tr><td>MCP for coding agents</td><td>Hosted endpoint for Claude Code, Cursor, and other MCP clients</td><td>Hosted streamable-HTTP endpoint plus REST and npm CLI</td></tr>
-      <tr><td>Authentication shape</td><td>One endpoint; separate product headers/keys for each Forge product used</td><td>One tenant bearer token for all 19 intents</td></tr>
+      <tr><td>Authentication shape</td><td>One endpoint; separate product headers/keys for each Forge product used</td><td>One tenant bearer token for all 21 intents</td></tr>
       <tr><td>Infrastructure</td><td>Mailforge, Infraforge, or Primeforge; Warmforge for warmup</td><td>One intended managed lifecycle behind <code>setup_infrastructure</code></td></tr>
       <tr><td>Lead sourcing</td><td>Available through Leadsforge</td><td>Not included</td></tr>
       <tr><td>Email + LinkedIn</td><td>Supported</td><td>Email only</td></tr>
       <tr><td>Webhooks</td><td>Salesforge's official MCP help lists webhooks in the supported surface</td><td>Yes — <code>get_webhooks</code>/<code>configure_webhook</code> push reply, bounce, soft_bounce, and complaint events (HMAC-signed); <code>activity</code> remains pollable too</td></tr>
-      <tr><td>Agent surface philosophy</td><td>Broad, product-specific controls across the Forge products configured</td><td>19 outcome-level intents across Coldrig's documented lifecycle</td></tr>
+      <tr><td>Agent surface philosophy</td><td>Broad, product-specific controls across the Forge products configured</td><td>21 outcome-level intents across Coldrig's documented lifecycle</td></tr>
       <tr><td>Production track record</td><td>Established product with public customers and reviews</td><td>Real sending live in production as of today; no established multi-year track record yet</td></tr>
     </tbody>
   </table>

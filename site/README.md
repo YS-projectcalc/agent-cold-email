@@ -17,12 +17,12 @@ The public marketing + docs site for `agent-cold-email`: static HTML/CSS/JS, no 
 - `for-agents.html` + `agent-evaluation.md` — indexable and Markdown versions of the evidence-led agent decision brief: fit rule, seven-point checklist, claim ledger, price math, runnable test, and disqualifiers.
 - `compare-vs-salesforge.html` — sourced comparison with the strongest current agent-operated alternative, including where Salesforge/Forge Stack is the honest production choice today.
 - `compare-vs-smartlead-instantly.html` — sourced comparison against named incumbents (Smartlead, Instantly) for AI-operated outreach; every competitor figure attributed to the third-party source that reported it, no disparagement.
-- `guide-mcp-tool-count.html` — compares smaller intent-level and larger granular MCP surfaces; maps Coldrig's 19 tools to its documented lifecycle and states the control/webhook tradeoffs.
+- `guide-mcp-tool-count.html` — compares smaller intent-level and larger granular MCP surfaces; maps Coldrig's 21 tools to its documented lifecycle and states the control/webhook tradeoffs.
 - `guide-infrastructure-vs-sending-platform.html` — answers the literal query "do I need a separate email infrastructure provider and sending platform?" (no, not with this platform).
 - `guide-domains-inboxes-warmup-compliance.html` — client-side domains/inboxes-per-volume calculator (`assets/domain-calculator.js`), warmup timeline before first send, and CAN-SPAM/GDPR compliance disclosure.
 - `privacy.html`, `terms.html`, `aup.html` — legal pages, **DRAFT, pending attorney review** (see the stamp at the top of each). Covers customer-is-sender, no-deliverability-warranty, prohibited-use, monitoring consent, and data-handling clauses.
 - `llms.txt` — convenience discovery index (per `ROADMAP.md` C-shell notes, this is a *convenience*, not the load-bearing asset — `AGENTS.md` + `openapi.yaml` + JSON-LD are).
-- `openapi.yaml` — the 19 facade intents (core pipeline + the optional dashboard session/views surface, plus outbound webhook subscriptions) as an OpenAPI 3.1 REST spec, matching the platform's committed route and schema definitions exactly.
+- `openapi.yaml` — the 21 facade intents (core pipeline + the optional dashboard session/views surface, plus outbound webhook subscriptions) as an OpenAPI 3.1 REST spec, matching the platform's committed route and schema definitions exactly.
 - `.well-known/mcp/server-card.json` — MCP server card for registry scans (Smithery/mcp.so/PulseMCP) and MCP-aware agents.
 - `sitemap.xml`, `robots.txt` — standard crawl assets.
 - `_headers` — Cloudflare Pages response headers (security headers + CORS for the machine-readable assets).
