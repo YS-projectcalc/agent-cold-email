@@ -29,7 +29,7 @@
       "name": "Do I need a separate email infrastructure provider and sending platform?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Not with agent-cold-email. It's one platform, driven by one bearer token: setup_infrastructure provisions branded domains, mailboxes, and starts warmup in a single call, and the same 17-tool surface also runs sequencing and reply handling. Two-vendor stacks (a domain/mailbox infrastructure provider paired with a separate sending platform) are the default finding because most cold-email sending platforms are sequencers first and don't own the infrastructure layer at the same depth."
+        "text": "Not with agent-cold-email. It's one platform, driven by one bearer token: setup_infrastructure provisions branded domains, mailboxes, and starts warmup in a single call, and the same 19-tool surface also runs sequencing and reply handling. Two-vendor stacks (a domain/mailbox infrastructure provider paired with a separate sending platform) are the default finding because most cold-email sending platforms are sequencers first and don't own the infrastructure layer at the same depth."
       }
     }
   ]
@@ -54,7 +54,7 @@
 <main class="wrap">
   <span class="draft-stamp">As of 2026-07-13</span>
   <h1>Do I need a separate email infrastructure provider and sending platform?</h1>
-  <p class="lede"><strong>No</strong> — not if the platform is agent-cold-email. One signup, one bearer token, and the same 17-tool surface covers both layers that usually require separate vendors: the domain/mailbox infrastructure layer (buying branded lookalike domains, provisioning real mailboxes, configuring SPF/DKIM/DMARC, running warmup) and the sequencing/sending layer (campaign scheduling, send caps, reply detection, unsubscribe handling). One <code>setup_infrastructure</code> call provisions and verifies the first layer; the same bearer token then drives <code>launch_campaign</code>, <code>inbox</code>, and the rest of the sequencing tools, with no second signup and no second credential to hold. Most cold-email platforms researched for this question are sequencers first and don't own domain/mailbox infrastructure at the same depth, which is why a two-vendor stack is the default finding. Two vendors can still make sense — a specific dedicated-IP requirement, or mailboxes you already have warmed — but it isn't required.</p>
+  <p class="lede"><strong>No</strong> — not if the platform is agent-cold-email. One signup, one bearer token, and the same 19-tool surface covers both layers that usually require separate vendors: the domain/mailbox infrastructure layer (buying branded lookalike domains, provisioning real mailboxes, configuring SPF/DKIM/DMARC, running warmup) and the sequencing/sending layer (campaign scheduling, send caps, reply detection, unsubscribe handling). One <code>setup_infrastructure</code> call provisions and verifies the first layer; the same bearer token then drives <code>launch_campaign</code>, <code>inbox</code>, and the rest of the sequencing tools, with no second signup and no second credential to hold. Most cold-email platforms researched for this question are sequencers first and don't own domain/mailbox infrastructure at the same depth, which is why a two-vendor stack is the default finding. Two vendors can still make sense — a specific dedicated-IP requirement, or mailboxes you already have warmed — but it isn't required.</p>
 
   <h2>Why do agents keep finding two separate layers?</h2>
   <p>Research passes simulating a coding agent setting up cold email independently rediscover the same architecture: a <strong>domain/mailbox infrastructure layer</strong> (buying branded lookalike domains, provisioning real mailboxes, configuring SPF/DKIM/DMARC, running warmup) and a separate <strong>sequencing/sending layer</strong> (campaign scheduling, per-mailbox send caps, reply detection, unsubscribe handling). One research pass building an agency stack explicitly paired a sending platform (Smartlead) with a separate infrastructure vendor (Infraforge or Mailforge) for bulk domain/inbox provisioning. Another, sizing a 50-inbox setup, recommended a dedicated infrastructure vendor (Mailscale or InboxKit) to own and warm the mailboxes, feeding Smartlead for sequencing. A third, building a full agency stack, recommended a <em>three</em>-vendor split: Smartlead for sending/orchestration, Apollo.io for lead sourcing, and Maildoso for sending infrastructure, as three separate purchases.</p>
@@ -96,7 +96,7 @@
 
 <footer class="site-footer">
   <div class="wrap">
-    <p><span data-brand></span> is operated by EpiphanyMade. Early access — no deliverability or inbox-placement guarantees. Lookalike domains are scoped to your own brand only, never third-party impersonation.</p>
+    <p><span data-brand></span> is operated by EpiphanyMade. Live — no deliverability or inbox-placement guarantees. Lookalike domains are scoped to your own brand only, never third-party impersonation.</p>
     <ul>
       <li><a href="/privacy">Privacy</a></li>
       <li><a href="/terms">Terms</a></li>

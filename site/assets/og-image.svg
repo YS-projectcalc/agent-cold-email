@@ -7,7 +7,7 @@
   <text x="152" y="112" fill="#12151A" font-family="DejaVu Sans" font-size="38" font-weight="700" letter-spacing="-1.5">Coldrig</text>
   <text x="70" y="277" fill="#12151A" font-family="DejaVu Sans" font-size="72" font-weight="700" letter-spacing="-4">Your agent runs outreach.</text>
   <text x="70" y="360" fill="#2E5CFF" font-family="DejaVu Serif" font-size="78" font-style="italic" letter-spacing="-4">We run the rig.</text>
-  <text x="74" y="435" fill="#62666E" font-family="DejaVu Sans" font-size="25">One token · 17 focused tools · server-side guardrails</text>
+  <text x="74" y="435" fill="#62666E" font-family="DejaVu Sans" font-size="25">One token · 19 focused tools · server-side guardrails</text>
   <g transform="translate(905 135) rotate(3)"><rect width="220" height="310" rx="22" fill="#fff" stroke="#C6C8C0"/><rect x="22" y="25" width="176" height="14" rx="7" fill="#EEEEEE"/><rect x="22" y="65" width="110" height="24" rx="6" fill="#E9EDFF"/><rect x="22" y="110" width="176" height="48" rx="10" fill="#F3F0E9"/><rect x="22" y="174" width="176" height="38" rx="9" fill="#E8F7F0"/><rect x="22" y="224" width="176" height="38" rx="9" fill="#E9EDFF"/><circle cx="180" cy="29" r="5" fill="#14865B"/></g>
   <circle cx="1110" cy="505" r="13" fill="#FF6B35"/>
 </svg>

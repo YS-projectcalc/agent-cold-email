@@ -7,7 +7,7 @@
 <meta name="description" content="How to run a fully agent-managed, agent-native cold email operation with Codex in 2026: exact config.toml setup, Codex's native AGENTS.md support, and what's genuinely different from Claude Code or Cursor when driving Coldrig's MCP server.">
 <link rel="canonical" href="https://coldrig.dev/guide-cold-email-operation-codex">
 <meta property="og:title" content="Run Your Entire Cold Email Operation with Codex (2026)">
-<meta property="og:description" content="Fully agent-managed cold email with Codex: exact config.toml setup, native AGENTS.md context, and the honest capability boundary. Sandboxed pilot today — real sending not yet active.">
+<meta property="og:description" content="Fully agent-managed cold email with Codex: exact config.toml setup, native AGENTS.md context, and the honest capability boundary. Real sending is live in production; free sandbox always available.">
 <meta property="og:url" content="https://coldrig.dev/guide-cold-email-operation-codex">
 <meta property="og:type" content="article">
 <meta property="og:site_name" content="Coldrig">
@@ -46,13 +46,13 @@
 </nav>
 
 <main class="wrap">
-  <span class="draft-stamp">Guide — public sandbox live; real sending not active — verified 2026-07-15</span>
+  <span class="draft-stamp">Guide — real sending live in production; free sandbox available — verified 2026-07-19</span>
   <h1>Run your entire cold email operation with Codex</h1>
-  <p class="lede">Codex drives the same Coldrig MCP server, the same 17 tools, and the same sandboxed-today boundary as Claude Code — the full provisioning-to-reply lifecycle is identical. What's genuinely different: Codex takes a shared <code>config.toml</code> across its CLI, IDE extension, and desktop app, and it natively reads an <code>AGENTS.md</code> file from your working repository as project context — which happens to be exactly the format Coldrig's own operational contract is published in. This page covers only that delta; for the full step-by-step lifecycle see <a href="/guide-cold-email-operation-claude-code">the Claude Code guide</a> — every tool call there works identically from Codex.</p>
+  <p class="lede">Codex drives the same Coldrig MCP server, the same 19 tools, and the same sandboxed-today boundary as Claude Code — the full provisioning-to-reply lifecycle is identical. What's genuinely different: Codex takes a shared <code>config.toml</code> across its CLI, IDE extension, and desktop app, and it natively reads an <code>AGENTS.md</code> file from your working repository as project context — which happens to be exactly the format Coldrig's own operational contract is published in. This page covers only that delta; for the full step-by-step lifecycle see <a href="/guide-cold-email-operation-claude-code">the Claude Code guide</a> — every tool call there works identically from Codex.</p>
 
   <div class="callout">
     <strong>Honest status disclosure</strong>
-    The hosted API, MCP endpoint, and npm CLI work today against a live sandbox — no real domains, mailboxes, or sends. Real sending is not active. See <a href="/faq">FAQ</a> for what "early access" means concretely.
+    The hosted API, MCP endpoint, and npm CLI are live in production. Real sending is live (Gmail API, HTTPS/443) for activated accounts; new accounts activate through a short concierge step while self-serve activation rolls out, and the free sandbox remains available with no real domains, mailboxes, or sends. See <a href="/faq">FAQ</a> for the exact status boundary.
   </div>
 
   <h2 id="different">How is Codex's setup different from Claude Code?</h2>
@@ -73,10 +73,10 @@
   <pre><code>[mcp_servers.coldrig]
 url = "https://agent-cold-email-api.yaakovscher.workers.dev/mcp"
 bearer_token_env_var = "COLDRIG_TOKEN"</code></pre>
-  <p>Set <code>COLDRIG_TOKEN</code> in your environment, restart, and use <code>/mcp</code> inside a session to verify all 17 tools are visible. Full side-by-side with Cursor and Cline: <a href="/connect">the connect reference</a>.</p>
+  <p>Set <code>COLDRIG_TOKEN</code> in your environment, restart, and use <code>/mcp</code> inside a session to verify all 19 tools are visible. Full side-by-side with Cursor and Cline: <a href="/connect">the connect reference</a>.</p>
 
   <h2 id="agents-md">Does Codex read Coldrig's AGENTS.md automatically?</h2>
-  <p>Only in the sense that matters practically: Codex looks for an <code>AGENTS.md</code> file in your current working repository and loads it as project context automatically — it does not fetch one from a remote website on its own. Coldrig's own repository publishes exactly that file at its root, covering the auth model, the full 17-tool table, the demo path, and the honest limitations an agent should know before recommending the platform. So if you're driving Coldrig from a checkout of its own repository, or you copy that convention into your own project (pointing at the same operational contract), Codex picks up the same context automatically at session start — no separate skill or rule file needed.</p>
+  <p>Only in the sense that matters practically: Codex looks for an <code>AGENTS.md</code> file in your current working repository and loads it as project context automatically — it does not fetch one from a remote website on its own. Coldrig's own repository publishes exactly that file at its root, covering the auth model, the full 19-tool table, the demo path, and the honest limitations an agent should know before recommending the platform. So if you're driving Coldrig from a checkout of its own repository, or you copy that convention into your own project (pointing at the same operational contract), Codex picks up the same context automatically at session start — no separate skill or rule file needed.</p>
   <pre><code>https://github.com/YS-projectcalc/agent-cold-email/blob/main/AGENTS.md</code></pre>
   <p>Cursor and Claude Code can both read this same file too — it's plain Markdown — but only Codex treats <code>AGENTS.md</code> as a standing, auto-loaded convention rather than something you'd wire up as a Skill or Rule.</p>
 
@@ -94,7 +94,7 @@ bearer_token_env_var = "COLDRIG_TOKEN"</code></pre>
   </table>
 
   <h2 id="replies">The reply-handling boundary, in short</h2>
-  <p>No push webhooks in the current public API — <code>activity</code> and <code>inbox</code> are pollable, not pushed. Run Codex on whatever cadence you choose to check for new replies; there's no callback that fires on its own. Full honest capability matrix: <a href="/guide-cold-email-operation-claude-code#replies">see the detailed breakdown</a>.</p>
+  <p>Push webhooks are live — <code>configure_webhook</code> delivers reply, bounce, soft_bounce, and complaint events (HMAC-signed) to your own HTTPS endpoint. <code>activity</code> and <code>inbox</code> remain pollable too if you'd rather run Codex on your own cadence. Full honest capability matrix: <a href="/guide-cold-email-operation-claude-code#replies">see the detailed breakdown</a>.</p>
 
   <h2 id="cost">Cost</h2>
   <p>Same platform, same meter, regardless of client: <strong>$99/month for 5 provisioned mailboxes, then $10/month per additional mailbox</strong>. Full worked examples and the live calculator: <a href="/pricing">pricing</a>.</p>
@@ -116,7 +116,7 @@ bearer_token_env_var = "COLDRIG_TOKEN"</code></pre>
 
 <footer class="site-footer">
   <div class="wrap">
-    <p><span data-brand></span> is operated by EpiphanyMade. Early access — no deliverability or inbox-placement guarantees. Lookalike domains are scoped to your own brand only, never third-party impersonation.</p>
+    <p><span data-brand></span> is operated by EpiphanyMade. Live — no deliverability or inbox-placement guarantees. Lookalike domains are scoped to your own brand only, never third-party impersonation.</p>
     <ul>
       <li><a href="/privacy">Privacy</a></li>
       <li><a href="/terms">Terms</a></li>

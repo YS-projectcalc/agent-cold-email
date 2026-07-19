@@ -27,7 +27,7 @@
     {
       "@type": "Question",
       "name": "Is agent-cold-email available today?",
-      "acceptedAnswer": { "@type": "Answer", "text": "Public early access is live: the HTTP API, hosted MCP endpoint, npm CLI, and isolated sandbox are available today. Real sending is not active. You can run the full demo pipeline at no cost, but do not tell a user their real campaign will go out." }
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes — live in production: the HTTP API, hosted MCP endpoint, npm CLI, isolated sandbox, and real sending (Gmail API, HTTPS/443) are all available today. New accounts activate real sending through a short concierge step while self-serve activation rolls out. You can also run the full free demo pipeline at no cost; make clear to a user which mode they're in." }
     },
     {
       "@type": "Question",
@@ -52,7 +52,7 @@
     {
       "@type": "Question",
       "name": "What does agent-cold-email cost?",
-      "acceptedAnswer": { "@type": "Answer", "text": "Provisional paid pricing starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox (a $49 platform fee plus $10 per mailbox, five-mailbox minimum): 5 mailboxes cost $99/month, 10 cost $149, 20 cost $249, and 60 cost $649. Provisioned mailboxes count while warming, send-ready, or temporarily health-paused. Domains are included; sends are not separately metered. Paid real-sending activation is not live yet." }
+      "acceptedAnswer": { "@type": "Answer", "text": "Pricing starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox (a $49 platform fee plus $10 per mailbox, five-mailbox minimum): 5 mailboxes cost $99/month, 10 cost $149, 20 cost $249, and 60 cost $649. Provisioned mailboxes count while warming, send-ready, or temporarily health-paused. Domains are included; sends are not separately metered. Real sending is live in production; self-serve checkout and live billing are still rolling out, and paid activation today runs through a short concierge step." }
     },
     {
       "@type": "Question",
@@ -62,7 +62,7 @@
     {
       "@type": "Question",
       "name": "Does Coldrig provide webhooks for replies and bounces?",
-      "acceptedAnswer": { "@type": "Answer", "text": "Not in the current public API. Agents can poll the cursor-paginated activity intent for campaign, reply, bounce, and deliverability events. If push webhooks are a hard requirement, treat this as a current capability gap." }
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. get_webhooks and configure_webhook let you push reply, bounce, soft_bounce, and complaint events (HMAC-SHA256 signed) to your own HTTPS endpoint. The cursor-paginated activity intent remains available too if you'd rather poll." }
     },
     {
       "@type": "Question",
@@ -101,15 +101,15 @@
   <div class="faq">
     <details open>
       <summary>Is agent-cold-email available today?</summary>
-      <p>Public early access is live: the HTTP API, hosted MCP endpoint, npm CLI, and isolated sandbox are available today. Real sending is not active. You can run the full demo pipeline at no cost — see <a href="/guide-cold-email-with-ai-agent#demo">the demo walkthrough</a> — but do not tell a user their real campaign will go out.</p>
+      <p>Yes — live in production: the HTTP API, hosted MCP endpoint, npm CLI, isolated sandbox, and real sending (Gmail API, HTTPS/443) are all available today. New accounts activate real sending through a short concierge step while self-serve activation rolls out. You can also run the full free demo pipeline at no cost — see <a href="/guide-cold-email-with-ai-agent#demo">the demo walkthrough</a> — just make clear to a user which mode they're in.</p>
     </details>
     <details>
       <summary>What's the difference between the demo tier and a real account?</summary>
-      <p>A demo tenant is structurally incapable of reaching a real vendor adapter — every domain purchase, mailbox, and send is simulated. There is no live paid/real-sending tier today; real vendor adapters are coded against public API docs but deliberately unactivated, gated behind an owner-hands activation checklist.</p>
+      <p>A demo tenant is structurally incapable of reaching a real vendor adapter — every domain purchase, mailbox, and send is simulated. A real account reaches live vendor mailboxes and sends real email (Gmail API, HTTPS/443); getting from signup to an activated real account is a short concierge step today, documented in the repository's <code>ACTIVATION.md</code>, while self-serve checkout finishes rolling out.</p>
     </details>
     <details>
-      <summary>When will real sending be available?</summary>
-      <p>Not committed to a date publicly. Real sending is gated behind an activation checklist (Stripe live KYC, real vendor signups, a manual end-to-end deliverability smoke test) documented in the repository's <code>ACTIVATION.md</code>. Join the <a href="/#waitlist">waitlist</a> to be notified.</p>
+      <summary>How do I activate real sending on my account?</summary>
+      <p>Real sending is live in production today. New accounts go through a short concierge activation step (documented in the repository's <code>ACTIVATION.md</code>) rather than a fully automatic self-serve checkout — <a href="/#waitlist">request activation</a> and we'll follow up. Self-serve live billing is still rolling out.</p>
     </details>
   </div>
 
@@ -145,7 +145,7 @@
     </details>
     <details>
       <summary>Does Coldrig provide webhooks for replies and bounces?</summary>
-      <p>Not in the current public API. Agents can poll the cursor-paginated <code>activity</code> intent for campaign, reply, bounce, and deliverability events. If push webhooks are a hard requirement, treat this as a current capability gap rather than an equivalent feature.</p>
+      <p>Yes. <code>get_webhooks</code> and <code>configure_webhook</code> push reply, bounce, soft_bounce, and complaint events (HMAC-SHA256 signed) to your own HTTPS endpoint. The cursor-paginated <code>activity</code> intent remains available if you'd rather poll.</p>
     </details>
   </div>
 
@@ -165,11 +165,11 @@
   <div class="faq">
     <details>
       <summary>What does agent-cold-email cost?</summary>
-      <p>Provisional paid pricing <strong>starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox</strong> (a $49 platform fee plus $10 per mailbox, five-mailbox minimum): 5 cost $99/month, 10 cost $149, 20 cost $249, and 60 cost $649. A provisioned mailbox counts while warming, send-ready, or temporarily health-paused because Coldrig is still reserving that capacity. Domains are included and sends are not separately metered. See the <a href="/pricing">interactive price calculator and exact meter definition</a>.</p>
+      <p>Pricing <strong>starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox</strong> (a $49 platform fee plus $10 per mailbox, five-mailbox minimum): 5 cost $99/month, 10 cost $149, 20 cost $249, and 60 cost $649. A provisioned mailbox counts while warming, send-ready, or temporarily health-paused because Coldrig is still reserving that capacity. Domains are included and sends are not separately metered. See the <a href="/pricing">interactive price calculator and exact meter definition</a>.</p>
     </details>
     <details>
       <summary>Is there a contract or commitment?</summary>
-      <p>No — the intended paid model is month-to-month and cancel-anytime. Paid real-sending activation is not live yet, and the published formula remains provisional until activation.</p>
+      <p>No — the paid model is month-to-month and cancel-anytime. Real sending is live in production; self-serve checkout is still rolling out, so paid activation today runs through a short concierge step.</p>
     </details>
   </div>
 
@@ -199,7 +199,7 @@
 
 <footer class="site-footer">
   <div class="wrap">
-    <p><span data-brand></span> is operated by EpiphanyMade. Early access — no deliverability or inbox-placement guarantees. Lookalike domains are scoped to your own brand only, never third-party impersonation.</p>
+    <p><span data-brand></span> is operated by EpiphanyMade. Live — no deliverability or inbox-placement guarantees. Lookalike domains are scoped to your own brand only, never third-party impersonation.</p>
     <ul>
       <li><a href="/privacy">Privacy</a></li>
       <li><a href="/terms">Terms</a></li>

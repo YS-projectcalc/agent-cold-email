@@ -3,15 +3,17 @@ info:
   title: agent-cold-email API
   version: "0.1.0"
   description: >
-    Agent-native cold-email infrastructure. ~17 curated intents behind one
-    bearer token per tenant (a subset — the /dashboard/* session + views
-    endpoints — also accept an httpOnly session cookie minted by
-    POST /dashboard/session, for the optional human dashboard SPA; see
+    Agent-native cold-email infrastructure, live in production. 19 curated
+    intents behind one bearer token per tenant (a subset — the /dashboard/*
+    session + views endpoints — also accept an httpOnly session cookie minted
+    by POST /dashboard/session, for the optional human dashboard SPA; see
     SPEC.md §19). Content generation is the caller's job; this API owns
     infrastructure provisioning, sequencing, isolation, and compliance
-    guardrails. Early access — this spec documents the intended contract;
-    see the repository ROADMAP.md for what is live vs. in build. No
-    deliverability or inbox-placement guarantees are made by this API.
+    guardrails. Real sending runs live in production (Gmail API, HTTPS/443);
+    new accounts activate real sending through a short
+    concierge step while self-serve activation rolls out — see the
+    repository ROADMAP.md for exact current state. No deliverability or
+    inbox-placement guarantees are made by this API.
   contact:
     name: EpiphanyMade
     email: support@epiphanymade.com
@@ -31,6 +33,7 @@ tags:
   - name: inbox
   - name: account
   - name: dashboard
+  - name: webhooks
   - name: compliance
 
 paths:
@@ -645,6 +648,117 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /webhook-subscriptions:
+    get:
+      operationId: get_webhooks
+      tags: [webhooks]
+      summary: List every outbound webhook subscription for the tenant.
+      description: >
+        Secrets are never returned on reads — they are shown once at
+        create/rotate. Use GET /webhook-subscriptions/{id} for one
+        subscription plus its recent delivery and attempt log.
+      responses:
+        '200':
+          description: Webhook subscription summaries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/WebhookSummary' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      operationId: configure_webhook_create
+      tags: [webhooks]
+      summary: Create an outbound webhook subscription.
+      description: >
+        Push reply, bounce, soft_bounce, and complaint events to your own
+        HTTPS endpoint instead of polling GET /activity. Deliveries are
+        signed `X-Coldrig-Signature: sha256=HMAC-SHA256(secret, raw body)`.
+        URLs must be https and resolve to a public host — private/link-
+        local/metadata IPs are rejected, re-validated on every delivery.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookCreateInput'
+      responses:
+        '201':
+          description: Subscription created — the response carries the signing secret once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookCreateResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /webhook-subscriptions/{id}:
+    parameters:
+      - $ref: '#/components/parameters/WebhookSubscriptionId'
+    get:
+      operationId: get_webhook
+      tags: [webhooks]
+      summary: One webhook subscription plus its recent delivery and attempt log.
+      responses:
+        '200':
+          description: Subscription detail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      operationId: configure_webhook_update
+      tags: [webhooks]
+      summary: Update a webhook subscription — url, event filter, active flag, or rotate the secret.
+      description: >
+        At least one of url, eventTypes, secret, or active must be present.
+        active:true re-enables a subscription the delivery pump
+        auto-disabled after 5 consecutive terminal failures; active:false
+        pauses delivery without deleting. Rotating the secret returns it
+        once in the response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookUpdateInput'
+      responses:
+        '200':
+          description: Subscription updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookUpdateResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      operationId: configure_webhook_delete
+      tags: [webhooks]
+      summary: Delete a webhook subscription.
+      responses:
+        '200':
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { deleted: { type: boolean } }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /unsubscribe:
     get:
       operationId: unsubscribe_confirm_page
@@ -740,6 +854,15 @@ components:
       name: id
       in: path
       required: true
+      schema: { type: string }
+    WebhookSubscriptionId:
+      name: id
+      in: path
+      required: true
+      description: >
+        The MCP tools `get_webhooks` and `configure_webhook` take this same
+        identifier as an `id` argument (there is no URL path in MCP tool
+        calls).
       schema: { type: string }
     UnsubscribeTenant:
       name: tenant
@@ -1008,3 +1131,126 @@ components:
         layout: { $ref: '#/components/schemas/DashboardLayout' }
         name: { type: string, minLength: 1, maxLength: 200, description: "Optional rename; omit to leave unchanged." }
         note: { type: string, maxLength: 2000 }
+
+    WebhookEventType:
+      type: string
+      enum: [reply, bounce, soft_bounce, complaint]
+      description: "reply = genuine reply; bounce = HARD (permanent) bounce; soft_bounce = transient bounce; complaint = spam complaint."
+
+    WebhookCreateInput:
+      type: object
+      required: [url, eventTypes]
+      properties:
+        url:
+          type: string
+          minLength: 1
+          maxLength: 2048
+          description: >
+            HTTPS endpoint that receives event POSTs. Must be https and
+            resolve to a public host — private/link-local/metadata IPs
+            are rejected.
+        eventTypes:
+          type: array
+          minItems: 1
+          maxItems: 4
+          items: { $ref: '#/components/schemas/WebhookEventType' }
+          description: "Which event types to receive. At least one."
+        secret:
+          type: string
+          minLength: 16
+          maxLength: 200
+          description: >
+            Optional HMAC signing secret (>=16 chars). Omit to have the
+            server generate one, returned once on create.
+        active: { type: boolean, default: true, description: "Whether the subscription delivers immediately. Defaults to true." }
+
+    WebhookUpdateInput:
+      type: object
+      description: "Every field optional; at least one of url, eventTypes, secret, or active must be present."
+      properties:
+        url: { type: string, minLength: 1, maxLength: 2048 }
+        eventTypes:
+          type: array
+          minItems: 1
+          maxItems: 4
+          items: { $ref: '#/components/schemas/WebhookEventType' }
+        secret:
+          type: string
+          minLength: 16
+          maxLength: 200
+          description: "Rotates the signing secret; the new value is returned once in the response."
+        active:
+          type: boolean
+          description: >
+            Set false to pause delivery without deleting; set true to
+            resume (also re-enables an auto-disabled subscription).
+
+    WebhookSummary:
+      type: object
+      required: [id, url, eventTypes, active, status, disabledReason, consecutiveFailures, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        url: { type: string }
+        eventTypes:
+          type: array
+          items: { $ref: '#/components/schemas/WebhookEventType' }
+        active: { type: boolean }
+        status: { type: string, enum: [active, disabled] }
+        disabledReason: { type: string, nullable: true }
+        consecutiveFailures: { type: integer }
+        createdAt: { type: integer }
+        updatedAt: { type: integer }
+
+    WebhookCreateResponse:
+      allOf:
+        - $ref: '#/components/schemas/WebhookSummary'
+        - type: object
+          required: [secret]
+          properties:
+            secret: { type: string, description: "HMAC signing secret — shown once on create, never returned on reads." }
+
+    WebhookUpdateResponse:
+      allOf:
+        - $ref: '#/components/schemas/WebhookSummary'
+        - type: object
+          properties:
+            secret: { type: string, description: "Present only when this update rotated the secret; shown once." }
+
+    WebhookDeliveryView:
+      type: object
+      required: [id, eventId, eventType, status, attempts, lastStatusCode, lastError, nextAttemptAt, createdAt, lastAttemptAt, deliveredAt]
+      properties:
+        id: { type: string }
+        eventId: { type: string }
+        eventType: { type: string }
+        status: { type: string }
+        attempts: { type: integer }
+        lastStatusCode: { type: integer, nullable: true }
+        lastError: { type: string, nullable: true }
+        nextAttemptAt: { type: integer }
+        createdAt: { type: integer }
+        lastAttemptAt: { type: integer, nullable: true }
+        deliveredAt: { type: integer, nullable: true }
+
+    WebhookAttemptView:
+      type: object
+      required: [deliveryId, attemptNo, ok, statusCode, error, ts]
+      properties:
+        deliveryId: { type: string }
+        attemptNo: { type: integer }
+        ok: { type: boolean }
+        statusCode: { type: integer, nullable: true }
+        error: { type: string, nullable: true }
+        ts: { type: integer }
+
+    WebhookDetail:
+      type: object
+      required: [subscription, recentDeliveries, recentAttempts]
+      properties:
+        subscription: { $ref: '#/components/schemas/WebhookSummary' }
+        recentDeliveries:
+          type: array
+          items: { $ref: '#/components/schemas/WebhookDeliveryView' }
+        recentAttempts:
+          type: array
+          items: { $ref: '#/components/schemas/WebhookAttemptView' }

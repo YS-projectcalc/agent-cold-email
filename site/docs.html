@@ -25,7 +25,7 @@
   "@type": "TechArticle",
   "headline": "Docs — Coldrig",
   "description": "Quickstart, MCP setup, CLI usage, and the full tool reference for agent-cold-email, agent-native cold-email infrastructure.",
-  "dateModified": "2026-07-14",
+  "dateModified": "2026-07-19",
   "about": { "@type": "SoftwareApplication", "name": "agent-cold-email", "applicationCategory": "BusinessApplication" }
 }
 </script>
@@ -50,8 +50,8 @@
   <p class="lede">Quickstart, MCP setup, CLI usage, and the full tool reference — written for both a human setting this up and an agent operating it.</p>
 
   <div class="callout">
-    <strong>Early access</strong>
-    The hosted MCP endpoint, HTTP API, npm CLI, and fault-injecting sandbox are live. Real sending is not active: every public signup creates an isolated demo tenant that cannot reach vendor adapters.
+    <strong>Live in production</strong>
+    The hosted MCP endpoint, HTTP API, npm CLI, fault-injecting sandbox, and real sending (Gmail API, HTTPS/443) are all live. A public signup by default creates an isolated demo tenant that cannot reach vendor adapters; activating real sending on your own account runs through a short concierge step while self-serve activation rolls out.
   </div>
 
   <div class="doc-toc">
@@ -90,7 +90,7 @@
     }
   }
 }</code></pre>
-  <p>The hosted MCP server is streamable-HTTP and per-token scoped — one config line, no OAuth dance. It is live against sandbox vendors; see the status banner above.</p>
+  <p>The hosted MCP server is streamable-HTTP and per-token scoped — one config line, no OAuth dance. It is live in production; demo tenants run against sandbox vendors, and activated tenants reach real ones — see the status banner above.</p>
 
   <h2 id="cli">CLI usage</h2>
   <pre><code>npx agent-cold-email demo                 # run the full pipeline against the live sandbox, no signup
@@ -98,13 +98,13 @@ npx agent-cold-email signup --brand Acme --email you@acme.com
 npx agent-cold-email setup --brand Acme --primary-domain acme.com --domains 2 --inboxes-each 3
 npx agent-cold-email status
 npx agent-cold-email campaign launch --file campaign.json</code></pre>
-  <p>The CLI is published on npm (v0.1.0 registry-verified 2026-07-14) and is a thin twin over the same HTTP facade documented below. Every subcommand maps to a tool in the <a href="#tools">tool reference</a>; the package remains the permanent machine handle for Coldrig.</p>
+  <p>The CLI is published on npm (v0.2.0 registry-verified 2026-07-15) and is a thin twin over the same HTTP facade documented below. Every subcommand maps to a tool in the <a href="#tools">tool reference</a>; the package remains the permanent machine handle for Coldrig.</p>
 
   <h2 id="demo">The free demo</h2>
   <p><code>POST /signup</code> mints a <code>demo</code>-plan tenant that is structurally incapable of reaching a real vendor adapter — enforced at the type level and covered by a test that fails if the guard is ever bypassed, not just documented policy. Every domain purchase, mailbox provisioning step, warmup tick, and send in demo mode runs against a fault-injecting sandbox: simulated rate limits, timeouts, bounces, and asynchronous replies, on a virtual clock so a multi-week warmup ramp resolves in the same session instead of in real time. This is the safe way to see the whole pipeline — provision, warm, send, reply, report — before anyone pays for anything.</p>
 
   <h2 id="tools">Tool reference</h2>
-  <p>All 17 authed intents, plus the one unauthenticated bootstrap call. Full JSON Schemas: <a href="openapi.yaml">openapi.yaml</a>.</p>
+  <p>All 19 authed intents, plus the one unauthenticated bootstrap call. Full JSON Schemas: <a href="openapi.yaml">openapi.yaml</a>.</p>
   <table>
     <thead><tr><th>Tool</th><th>HTTP</th><th>Body / params</th></tr></thead>
     <tbody>
@@ -126,10 +126,12 @@ npx agent-cold-email campaign launch --file campaign.json</code></pre>
       <tr><td><code>account</code></td><td><code>GET /account</code></td><td>—</td></tr>
       <tr><td><code>get_dashboard</code></td><td><code>GET /dashboard/views</code>, <code>GET /dashboard/views/{id}</code></td><td>—</td></tr>
       <tr><td><code>configure_dashboard</code></td><td><code>POST/PUT/DELETE /dashboard/views[/{id}]</code>, <code>POST /dashboard/views/{id}/default</code></td><td><code>{ name, layout, note }</code> (per action)</td></tr>
+      <tr><td><code>get_webhooks</code></td><td><code>GET /webhook-subscriptions</code>, <code>GET /webhook-subscriptions/{id}</code></td><td>—</td></tr>
+      <tr><td><code>configure_webhook</code></td><td><code>POST /webhook-subscriptions</code>, <code>PUT/DELETE /webhook-subscriptions/{id}</code></td><td><code>{ action, url, eventTypes, secret, active }</code> (per action)</td></tr>
     </tbody>
   </table>
   <p>Two optional helpers (<code>write_sequence</code>, <code>suggest_domains</code>) are designed but not yet built — do not assume they exist today.</p>
-  <p><strong>Webhook boundary:</strong> <code>activity</code> can be polled for campaign, reply, bounce, and deliverability events. The current public API does not expose push webhook subscriptions; treat webhooks as unavailable if they are a hard integration requirement.</p>
+  <p><strong>Webhook boundary:</strong> real push webhooks are live. <code>get_webhooks</code>/<code>configure_webhook</code> deliver reply, bounce, soft_bounce, and complaint events (HMAC-SHA256 signed, header <code>X-Coldrig-Signature</code>) to your own HTTPS endpoint; URLs must be a public HTTPS host. <code>activity</code> remains available as a pollable alternative for the same event classes.</p>
 
   <h2 id="auth">Auth model</h2>
   <p>One bearer token per tenant, minted at signup. Every authed call:</p>
@@ -139,7 +141,7 @@ npx agent-cold-email campaign launch --file campaign.json</code></pre>
 
 <footer class="site-footer">
   <div class="wrap">
-    <p><span data-brand></span> is operated by EpiphanyMade. Early access — no deliverability or inbox-placement guarantees.</p>
+    <p><span data-brand></span> is operated by EpiphanyMade. Live — no deliverability or inbox-placement guarantees.</p>
     <ul>
       <li><a href="/privacy">Privacy</a></li>
       <li><a href="/terms">Terms</a></li>

@@ -3,7 +3,7 @@
   "name": "agent-cold-email",
   "displayName": "Coldrig",
   "version": "0.2.0",
-  "description": "Agent-controlled cold-outreach infrastructure. One bearer token and 17 focused tools replace multiple vendor accounts, preserve durable infrastructure state, provision isolated domains and mailboxes, run sequences, manage replies, and enforce guardrails server-side. The customer's own agent remains the strategy and content layer. Free sandbox demo today, no card, no waitlist; provisional early-access pricing starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox, with no send quota (sends are not the billing meter).",
+  "description": "Agent-controlled cold-outreach infrastructure, live in production. One bearer token and 19 focused tools replace multiple vendor accounts, preserve durable infrastructure state, provision isolated domains and mailboxes, run sequences, manage replies and push webhooks, and enforce guardrails server-side. The customer's own agent remains the strategy and content layer. Free sandbox demo today, no card, no waitlist; real sending runs in production (Gmail API, HTTPS/443), with new accounts activating via a short concierge step while self-serve activation rolls out. Pricing starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox, with no send quota (sends are not the billing meter).",
   "homepage": "https://coldrig.dev/",
   "documentation": "https://coldrig.dev/docs",
   "license": "MIT",
@@ -19,10 +19,10 @@
     "type": "bearer",
     "description": "One token per tenant, obtained via POST https://agent-cold-email-api.yaakovscher.workers.dev/signup (no auth required for signup itself). Pass as Authorization: Bearer <token>."
   },
-  "status": "early-access",
-  "statusNote": "Public early access: the hosted API, MCP endpoint, npm CLI, and isolated sandbox are live. Real sending is not active. Demo tenants are structurally unable to reach vendor adapters and incur no real spend.",
+  "status": "live",
+  "statusNote": "Live in production: the hosted API, MCP endpoint, npm CLI, isolated sandbox, and real sending (Gmail API, HTTPS/443) are all live. New accounts activate real sending through a short concierge step while self-serve activation and live billing finish rolling out. Demo/sandbox tenants remain structurally unable to reach vendor adapters and incur no real spend.",
   "pricing": {
-    "model": "Provisional early-access pricing: starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox (a $49 platform fee + $10/mailbox, 5-mailbox minimum; ladder runs 5-60 mailboxes). No send quota — sends are not the billing meter.",
+    "model": "Starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox (a $49 platform fee + $10/mailbox, 5-mailbox minimum; ladder runs 5-60 mailboxes). No send quota — sends are not the billing meter. Self-serve live billing is rolling out; paid activation today runs through a short concierge step.",
     "freeTier": "Free sandboxed demo, no signup, no card, no waitlist: POST /signup or `npx agent-cold-email demo`.",
     "url": "https://coldrig.dev/pricing"
   },
@@ -48,7 +48,9 @@
     { "name": "configure_dashboard", "description": "Create, update, promote-to-default, or delete a dashboard saved view." },
     { "name": "label_thread", "description": "Set or clear a triage label on an inbox thread." },
     { "name": "list_campaigns", "description": "List every campaign with id, name, status, and event counts." },
-    { "name": "activity", "description": "Pollable, chronological feed of campaign events and deliverability control-loop actions. Push webhook subscriptions are not in the current public API." }
+    { "name": "activity", "description": "Pollable, chronological feed of campaign events and deliverability control-loop actions." },
+    { "name": "get_webhooks", "description": "List outbound webhook subscriptions, or fetch one subscription plus its recent delivery and attempt log." },
+    { "name": "configure_webhook", "description": "Create, update, or delete an outbound webhook subscription. Push reply, bounce, soft_bounce, and complaint events to your own HTTPS endpoint, HMAC-SHA256 signed, as an alternative to polling activity." }
   ],
   "guardrails": [
     "per-tenant domain and mailbox isolation",

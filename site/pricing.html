@@ -56,7 +56,7 @@
 
 <main class="wrap pricing-main">
   <header class="pricing-hero">
-    <span class="eyebrow"><i class="status-dot"></i> Provisional early-access pricing</span>
+    <span class="eyebrow"><i class="status-dot"></i> Live pricing — real sending is live in production</span>
     <h1>Simple enough for your agent to quote.</h1>
     <p class="lede">One formula: <strong>starts at $99/month for 5 provisioned mailboxes, then $10/month for each additional mailbox</strong>. Under the hood that's a $49 platform fee plus $10 per mailbox with a five-mailbox minimum—not an arbitrary bundle, and never a separate send-credit meter.</p>
     <div class="pricing-proof" aria-label="Pricing principles">
@@ -161,10 +161,10 @@
   <section class="pricing-status" aria-labelledby="status-title">
     <span class="kicker">Honest status</span>
     <h2 id="status-title">Test the workflow before paying.</h2>
-    <p>The API, hosted MCP endpoint, npm CLI, and fault-injecting sandbox are live. Paid real-sending activation is not live yet, and these prices remain provisional until activation. The sandbox cannot reach a real vendor, spend money, or send an email.</p>
+    <p>The API, hosted MCP endpoint, npm CLI, sandbox, and real sending (Gmail API, HTTPS/443) are all live in production. New accounts activate real sending through a short concierge step while self-serve checkout and live billing finish rolling out — Stripe still runs on test keys today. The free sandbox cannot reach a real vendor, spend money, or send an email.</p>
     <div class="cta-row">
       <a class="btn primary" href="/docs#quickstart">Run the free sandbox <span aria-hidden="true">→</span></a>
-      <a class="btn quiet" href="/#waitlist">Join the activation list</a>
+      <a class="btn quiet" href="/#waitlist">Request activation</a>
     </div>
   </section>
 
@@ -197,7 +197,7 @@
 
 <footer class="site-footer">
   <div class="wrap">
-    <p><span data-brand></span> is operated by EpiphanyMade. Early access—no deliverability or inbox-placement guarantees.</p>
+    <p><span data-brand></span> is operated by EpiphanyMade. Live — no deliverability or inbox-placement guarantees.</p>
     <ul>
       <li><a href="/privacy">Privacy</a></li>
       <li><a href="/terms">Terms</a></li>

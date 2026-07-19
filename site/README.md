@@ -12,17 +12,17 @@ The public marketing + docs site for `agent-cold-email`: static HTML/CSS/JS, no 
 - `unsubscribe.html`, `why-email.html` — noindex recipient-experience previews. They deliberately do not claim a real suppression record while production sending is inactive.
 - `404.html` — branded not-found route with recovery paths.
 - `docs.html` — quickstart, MCP setup, CLI usage, full tool reference, the free demo, auth model.
-- `pricing.html` — provisional quantity-price calculator: $49 platform + $10/provisioned mailbox, five-mailbox/$99 minimum (mirrors current `SPEC.md` §18 copy; backend quantity billing is still activation-gated).
+- `pricing.html` — quantity-price calculator: $49 platform + $10/provisioned mailbox, five-mailbox/$99 minimum (backend quantity billing is still activation-gated).
 - `compare.html` — honest DIY-vs-Coldrig comparison with explicit sandbox/production boundary.
 - `for-agents.html` + `agent-evaluation.md` — indexable and Markdown versions of the evidence-led agent decision brief: fit rule, seven-point checklist, claim ledger, price math, runnable test, and disqualifiers.
 - `compare-vs-salesforge.html` — sourced comparison with the strongest current agent-operated alternative, including where Salesforge/Forge Stack is the honest production choice today.
 - `compare-vs-smartlead-instantly.html` — sourced comparison against named incumbents (Smartlead, Instantly) for AI-operated outreach; every competitor figure attributed to the third-party source that reported it, no disparagement.
-- `guide-mcp-tool-count.html` — compares smaller intent-level and larger granular MCP surfaces; maps Coldrig's 17 tools to its documented lifecycle and states the control/webhook tradeoffs.
+- `guide-mcp-tool-count.html` — compares smaller intent-level and larger granular MCP surfaces; maps Coldrig's 19 tools to its documented lifecycle and states the control/webhook tradeoffs.
 - `guide-infrastructure-vs-sending-platform.html` — answers the literal query "do I need a separate email infrastructure provider and sending platform?" (no, not with this platform).
 - `guide-domains-inboxes-warmup-compliance.html` — client-side domains/inboxes-per-volume calculator (`assets/domain-calculator.js`), warmup timeline before first send, and CAN-SPAM/GDPR compliance disclosure.
 - `privacy.html`, `terms.html`, `aup.html` — legal pages, **DRAFT, pending attorney review** (see the stamp at the top of each). Covers customer-is-sender, no-deliverability-warranty, prohibited-use, monitoring consent, and data-handling clauses.
 - `llms.txt` — convenience discovery index (per `ROADMAP.md` C-shell notes, this is a *convenience*, not the load-bearing asset — `AGENTS.md` + `openapi.yaml` + JSON-LD are).
-- `openapi.yaml` — the ~17 facade intents (core pipeline + the optional dashboard session/views surface) as an OpenAPI 3.1 REST spec, matching `apps/platform/src/routes/*` and `packages/shared/src/intents.ts`/`dashboard.ts` exactly.
+- `openapi.yaml` — the 19 facade intents (core pipeline + the optional dashboard session/views surface, plus outbound webhook subscriptions) as an OpenAPI 3.1 REST spec, matching the platform's committed route and schema definitions exactly.
 - `.well-known/mcp/server-card.json` — MCP server card for registry scans (Smithery/mcp.so/PulseMCP) and MCP-aware agents.
 - `sitemap.xml`, `robots.txt` — standard crawl assets.
 - `_headers` — Cloudflare Pages response headers (security headers + CORS for the machine-readable assets).
@@ -57,4 +57,4 @@ npx serve site
 
 ## Depends on
 
-Nothing outside this directory at runtime (self-contained CSS/JS, no external requests except the waitlist POST and deliberate links to the same-origin Worker dashboard/health endpoint). Content here should stay in sync with `packages/shared/src/intents.ts` and `apps/platform/src/routes/*` (the tool reference and OpenAPI spec), `packages/shared/src/pricing.ts`, and `SPEC.md` §18 — if any changes, update this directory in the same change.
+Nothing outside this directory at runtime (self-contained CSS/JS, no external requests except the activation-request POST and deliberate links to the same-origin Worker dashboard/health endpoint). Content here should stay in sync with the platform's committed route and schema definitions (the tool reference and OpenAPI spec) and the platform pricing config — if any changes, update this directory in the same change.

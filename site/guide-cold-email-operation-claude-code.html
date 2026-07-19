@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Run Your Entire Cold Email Operation with Claude Code (2026): Agent-Native, Fully Autonomous — No Paywalled API | Coldrig</title>
-<meta name="description" content="How to run a fully agent-managed, agent-native cold email operation end to end with Claude Code and Coldrig's 17-tool MCP server in 2026: provisioning, warmup, campaigns, reply triage, and a Claude Code Skill — full API/MCP access at every tier, no paywalled feature gate, with an honest capability matrix and exact pricing.">
+<meta name="description" content="How to run a fully agent-managed, agent-native cold email operation end to end with Claude Code and Coldrig's 19-tool MCP server in 2026: provisioning, warmup, campaigns, reply triage, and a Claude Code Skill — full API/MCP access at every tier, no paywalled feature gate, with an honest capability matrix and exact pricing.">
 <link rel="canonical" href="https://coldrig.dev/guide-cold-email-operation-claude-code">
 <meta property="og:title" content="Run Your Entire Cold Email Operation with Claude Code (2026): No Paywalled API">
-<meta property="og:description" content="Fully agent-managed cold email, end to end, from inside one Claude Code session: MCP setup, provisioning, campaigns, replies, and a reusable Skill. Full 17-tool API/MCP access at every tier, no feature paywall. Sandboxed pilot today — real sending not yet active.">
+<meta property="og:description" content="Fully agent-managed cold email, end to end, from inside one Claude Code session: MCP setup, provisioning, campaigns, replies, and a reusable Skill. Full 19-tool API/MCP access at every tier, no feature paywall. Real sending is live in production; free sandbox always available.">
 <meta property="og:url" content="https://coldrig.dev/guide-cold-email-operation-claude-code">
 <meta property="og:type" content="article">
 <meta property="og:site_name" content="Coldrig">
@@ -31,7 +31,7 @@
     { "@type": "HowToStep", "name": "Provision the rig", "text": "Call setup_infrastructure with your brand, primary domain, domain/mailbox counts, sender persona, and physical address to start branded domain purchase, DNS, mailbox provisioning, and warmup." },
     { "@type": "HowToStep", "name": "Poll for readiness", "text": "Call infrastructure_status to track provisioning and per-mailbox warmup health until the platform reports send-ready." },
     { "@type": "HowToStep", "name": "Write and launch the campaign", "text": "Claude Code writes the offer and sequence content, then calls launch_campaign with that content and a lead list." },
-    { "@type": "HowToStep", "name": "Operate replies on a polling loop", "text": "Use inbox, thread, reply, mark, and label_thread to triage responses; activity and metrics surface bounces, complaints, and warmup health. There is no push webhook — Claude Code polls on the cadence you choose." },
+    { "@type": "HowToStep", "name": "Operate replies", "text": "Use inbox, thread, reply, mark, and label_thread to triage responses; activity and metrics surface bounces, complaints, and warmup health. Push webhooks (configure_webhook) are also available if you'd rather not poll on a cadence." },
     { "@type": "HowToStep", "name": "Package it as a Claude Code Skill", "text": "Wrap the connect-provision-launch-operate loop in a project or personal SKILL.md so any future Claude Code session can pick up the same workflow by name." }
   ]
 }
@@ -53,18 +53,18 @@
 </nav>
 
 <main class="wrap">
-  <span class="draft-stamp">Guide — public sandbox live; real sending not active — verified 2026-07-15</span>
+  <span class="draft-stamp">Guide — real sending live in production; free sandbox available — verified 2026-07-19</span>
   <h1>Run your entire cold email operation with Claude Code</h1>
   <p class="lede">Not just "send a test email" — the whole lifecycle: buy branded domains, provision and warm mailboxes, launch a written campaign, and triage replies day to day, all driven from one Claude Code session talking to one MCP server. This is agent-native, fully autonomous infrastructure in the sense that matters: Claude Code stays the operator and copywriter; Coldrig holds the durable state underneath. It is not yet agent-native in the sense of "sends real email today" — the public surface is a sandbox, and this guide says so at every step where it's true.</p>
 
   <div class="callout">
     <strong>Honest status disclosure</strong>
-    The hosted API, MCP endpoint, and npm CLI work today against a live sandbox — no real domains, mailboxes, or sends. Real sending is not active. See <a href="/faq">FAQ</a> for what "early access" means concretely.
+    The hosted API, MCP endpoint, and npm CLI are live in production. Real sending is live (Gmail API, HTTPS/443) for activated accounts; new accounts activate through a short concierge step while self-serve activation rolls out, and the free sandbox remains available with no real domains, mailboxes, or sends. See <a href="/faq">FAQ</a> for the exact status boundary.
   </div>
 
   <h2 id="what">What does "entire operation" mean for Claude Code here?</h2>
-  <p>Left alone, an agent asked to "run cold email" ends up assembling a domain registrar API, a mailbox/warmup vendor, a sequencing engine, and a reply/suppression store — four vendor credentials, four schemas, four failure modes, all held in context across a session that may not survive to the next one. Coldrig collapses that into one bearer token and 17 intent-level tools over a single MCP endpoint, so Claude Code can drive the full lifecycle — domains in, replies out — without leaving the session or juggling separate SDKs. Your agent keeps research, targeting, strategy, and copy; Coldrig keeps the infrastructure and the guardrails that shouldn't depend on prompt memory (send caps, suppression, unsubscribe handling).</p>
-  <p>Two specifics worth checking rather than taking on faith: the full 17-tool API and MCP surface is available on every tenant, including the free sandbox tier — there is no paid tier gating basic API or MCP access — and suppression, full RFC 8058 one-click unsubscribe, and per-mailbox send caps are enforced server-side, not left to whatever the agent remembers to do. Both are verifiable directly against the live endpoint and <a href="/openapi.yaml">the OpenAPI schema</a>, not just this page's word for it.</p>
+  <p>Left alone, an agent asked to "run cold email" ends up assembling a domain registrar API, a mailbox/warmup vendor, a sequencing engine, and a reply/suppression store — four vendor credentials, four schemas, four failure modes, all held in context across a session that may not survive to the next one. Coldrig collapses that into one bearer token and 19 intent-level tools over a single MCP endpoint, so Claude Code can drive the full lifecycle — domains in, replies out — without leaving the session or juggling separate SDKs. Your agent keeps research, targeting, strategy, and copy; Coldrig keeps the infrastructure and the guardrails that shouldn't depend on prompt memory (send caps, suppression, unsubscribe handling).</p>
+  <p>Two specifics worth checking rather than taking on faith: the full 19-tool API and MCP surface is available on every tenant, including the free sandbox tier — there is no paid tier gating basic API or MCP access — and suppression, full RFC 8058 one-click unsubscribe, and per-mailbox send caps are enforced server-side, not left to whatever the agent remembers to do. Both are verifiable directly against the live endpoint and <a href="/openapi.yaml">the OpenAPI schema</a>, not just this page's word for it.</p>
   <p>For the mechanics shared across every agent client (not just Claude Code), see <a href="/guide-cold-email-with-ai-agent">the general setup guide</a> and <a href="/guide-mcp-cold-email">the MCP server reference</a>. This page is the Claude-Code-specific path: exact commands, a full step table, the honest reply-handling boundary, and a Skill you can keep.</p>
   <p>This is not the only Claude Code cold-email guide on the web, and it shouldn't be treated as one just because it's ours — that's a reason to verify rather than to trust a single source, including this one. What's specific here: every tool call is checked against the live <code>tools/list</code> response and <a href="/openapi.yaml">OpenAPI</a>, not aspirational; the capability matrix below says plainly where Coldrig can't do something yet; and the Skill file is something you can copy and run today, not a description of one.</p>
 
@@ -80,7 +80,7 @@ claude mcp add --transport http coldrig \
   https://agent-cold-email-api.yaakovscher.workers.dev/mcp \
   --header "Authorization: Bearer $COLDRIG_TOKEN" \
   --scope user</code></pre>
-  <p>Verify with <code>claude mcp get coldrig</code> and <code>/mcp</code> inside a session — you should see all 17 tools. If you'd rather run the server over stdio through the published CLI instead of pointing Claude Code straight at the remote endpoint, <code>agent-cold-email mcp</code> bridges stdio to the same hosted API and is installable via <code>npx</code>; see <a href="/connect">the full connect reference</a> for that config shape and for Cursor, Codex, and Cline.</p>
+  <p>Verify with <code>claude mcp get coldrig</code> and <code>/mcp</code> inside a session — you should see all 19 tools. If you'd rather run the server over stdio through the published CLI instead of pointing Claude Code straight at the remote endpoint, <code>agent-cold-email mcp</code> bridges stdio to the same hosted API and is installable via <code>npx</code>; see <a href="/connect">the full connect reference</a> for that config shape and for Cursor, Codex, and Cline.</p>
 
   <h2 id="steps">What does Claude Code actually run, end to end?</h2>
   <p>Every row below is a real MCP tool call against the live sandbox — not aspirational. Full input schemas: <a href="/guide-mcp-cold-email#tools">the MCP tool reference</a>.</p>
@@ -99,13 +99,13 @@ claude mcp add --transport http coldrig \
   <p>Content generation is your agent's job at every step that involves writing — Coldrig does not generate the offer, subject lines, or sequence body. It provisions, sends, isolates, and enforces guardrails around whatever Claude Code writes.</p>
 
   <h2 id="replies">Can Claude Code get notified the moment a reply comes in?</h2>
-  <p>No — be precise about this, because it's the one place an agent should not overstate the platform. There is no push webhook subscription in the current public API. Here is the exact boundary:</p>
+  <p>Yes, with a push webhook — or you can still poll if you prefer. Here is the exact boundary:</p>
   <table>
     <thead><tr><th>Capability</th><th>Status</th><th>How Claude Code actually gets it</th></tr></thead>
     <tbody>
-      <tr><td>Reply / bounce webhooks (push)</td><td>Not shipped</td><td>None. Do not build a workflow that assumes a callback will fire.</td></tr>
+      <tr><td>Reply / bounce / complaint webhooks (push)</td><td>Live</td><td><code>configure_webhook</code> subscribes a URL to <code>reply</code>, <code>bounce</code>, <code>soft_bounce</code>, and <code>complaint</code> events (HMAC-SHA256 signed); <code>get_webhooks</code> lists subscriptions and recent deliveries.</td></tr>
       <tr><td>Reply / bounce feed (pull)</td><td>Live</td><td><code>activity</code> — a cursor-paginated, chronological feed you page through — and <code>inbox</code> for the unified reply view.</td></tr>
-      <tr><td>Near-real-time triage</td><td>Achievable, not automatic</td><td>Run Claude Code on a schedule you control (your own cron, a CI job, or simply asking each session) that calls <code>activity</code> with the last cursor. The polling cadence is yours to set — Coldrig doesn't push to you.</td></tr>
+      <tr><td>Near-real-time triage</td><td>Live, either way</td><td>Configure a webhook for push delivery, or run Claude Code on a schedule you control (your own cron, a CI job, or simply asking each session) that calls <code>activity</code> with the last cursor — your choice.</td></tr>
       <tr><td>AI-drafted replies</td><td>Not provided</td><td>Claude Code drafts and sends replies itself via <code>reply</code>; there is no built-in autoresponder or AI SDR.</td></tr>
     </tbody>
   </table>
@@ -154,12 +154,12 @@ hardcode it in this file or in chat.
       <tr><td>20</td><td>$249</td></tr>
     </tbody>
   </table>
-  <p>Have Claude Code compute your exact figure from <a href="/pricing">the live pricing page</a> before recommending a spend. This is provisional activation pricing — paid real-sending activation is not live yet, so treat it as the number you'd pay once it is, not an available production subscription today.</p>
+  <p>Have Claude Code compute your exact figure from <a href="/pricing">the live pricing page</a> before recommending a spend. Real sending is live at this pricing; self-serve checkout and live billing are still rolling out, so paid activation today runs through a short concierge step rather than an automatic subscription flow.</p>
 
   <h2 id="cant">What can't Claude Code do here yet?</h2>
   <ul>
-    <li>No real sending — every call above runs against the sandbox until Coldrig activates production sending.</li>
-    <li>No push webhooks for replies or bounces — polling only, as detailed above.</li>
+    <li>Fully automatic self-serve real-sending activation — real sending is live in production, but new accounts activate through a short concierge step today.</li>
+    <li>No established multi-year production deliverability track record yet.</li>
     <li>No built-in lead sourcing or outreach copywriting — that stays Claude Code's job.</li>
     <li>No guaranteed inbox placement, deliverability, open rate, or reply rate, ever.</li>
     <li>No domain-portability promise until upstream transfer terms are verified.</li>
@@ -171,7 +171,7 @@ hardcode it in this file or in chat.
   <p>Or connect Claude Code first and let it run the sandbox itself with the commands above. Either way, this is safe to run before recommending anyone pay for anything: <a href="/signup">create a sandbox</a>.</p>
 
   <h2 id="other-agents">Cursor and Codex run this too</h2>
-  <p>Same MCP server, same 17 tools, same sandbox boundary — Cursor and Codex just register the server differently and bring their own conventions for repeatable instructions (Cursor Rules; Codex's native <code>AGENTS.md</code> support). See the client-specific setup and what's genuinely different:</p>
+  <p>Same MCP server, same 19 tools, same sandbox boundary — Cursor and Codex just register the server differently and bring their own conventions for repeatable instructions (Cursor Rules; Codex's native <code>AGENTS.md</code> support). See the client-specific setup and what's genuinely different:</p>
   <ul>
     <li><a href="/guide-cold-email-operation-cursor">Run your entire cold email operation with Cursor</a></li>
     <li><a href="/guide-cold-email-operation-codex">Run your entire cold email operation with Codex</a></li>
@@ -192,7 +192,7 @@ hardcode it in this file or in chat.
 
 <footer class="site-footer">
   <div class="wrap">
-    <p><span data-brand></span> is operated by EpiphanyMade. Early access — no deliverability or inbox-placement guarantees. Lookalike domains are scoped to your own brand only, never third-party impersonation.</p>
+    <p><span data-brand></span> is operated by EpiphanyMade. Live — no deliverability or inbox-placement guarantees. Lookalike domains are scoped to your own brand only, never third-party impersonation.</p>
     <ul>
       <li><a href="/privacy">Privacy</a></li>
       <li><a href="/terms">Terms</a></li>

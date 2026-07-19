@@ -30,7 +30,7 @@ document.addEventListener("DOMContentLoaded", () => {
         body: JSON.stringify({ email: emailInput.value }),
       });
       if (res.ok) {
-        setStatus(status, "You're on the activation list — we'll email you when real sending is available.", "ok");
+        setStatus(status, "Request received — we'll follow up to activate real sending on your account.", "ok");
         form.reset();
       } else {
         setStatus(status, "That didn't go through. Try again in a moment.", "err");
@@ -38,7 +38,7 @@ document.addEventListener("DOMContentLoaded", () => {
     } catch {
       setStatus(
         status,
-        "Waitlist isn't connected yet in this preview — check back once the platform is deployed.",
+        "That request couldn't reach the server just now — try again in a moment.",
         "err",
       );
     } finally {
