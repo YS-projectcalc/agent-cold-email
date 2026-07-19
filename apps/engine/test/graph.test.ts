@@ -68,7 +68,11 @@ describe("createGraphSender", () => {
     const { fn, calls } = mockFetch([new Response("", { status: 202 })]);
     const sender = createGraphSender(fn, noSleep);
 
-    await sender.send(delegated, input(), "<m1@coldstart.test>");
+    // Graph's sendMail returns 202 with no id, so the transport reports NO wire id
+    // (undefined): the reply loop rests on Graph honoring the submitted MIME
+    // Message-ID (= the internetMessageId) — asserted present in the payload below.
+    const returned = await sender.send(delegated, input(), "<m1@coldstart.test>");
+    expect(returned).toBeUndefined();
 
     const tokenInit = calls.find((c) => c.url === TOKEN_URL)!.init!;
     const form = new URLSearchParams(tokenInit.body as string);
@@ -82,6 +86,8 @@ describe("createGraphSender", () => {
     expect(headers["content-type"]).toBe("text/plain");
     const mime = Buffer.from(sendCall.init!.body as string, "base64").toString("utf8");
     expect(mime).toContain("List-Unsubscribe: <https://coldstart.test/u/abc>");
+    // The minted Message-ID IS the internetMessageId set explicitly on the outbound
+    // message — the id Graph is expected to keep on the wire (Gate-2 verifies live).
     expect(mime).toContain("Message-ID: <m1@coldstart.test>");
   });
 

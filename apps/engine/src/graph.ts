@@ -12,6 +12,19 @@ import { TokenCache } from "./oauth.js";
 // modes: `delegated` (user refresh-token grant, endpoint /me/sendMail) and
 // `app_only` (client-credentials grant, endpoint /users/{user}/sendMail — Graph
 // app-only has no `me`). Success is 202 Accepted. No @azure SDK — built-in fetch.
+//
+// WIRE Message-ID: Graph assigns its own `internetMessageId` UNLESS the submitted
+// message sets one explicitly. The shared builder ALREADY sets it — the raw MIME
+// carries the minted `Message-ID` header (buildRawMessage → MailComposer), which
+// IS the internetMessageId when sending MIME — so a Graph that honors the
+// submitted header delivers with the minted id and the reply loop matches on it,
+// exactly like SMTP. Unlike Gmail, Graph's sendMail returns 202 with NO id, so we
+// cannot read the wire id back to confirm; if a given tenant rewrites it anyway,
+// the store's dual-record net can't recover it (we never learn the real wire id).
+// The reply loop's correctness for THIS transport therefore rests on Graph
+// honoring the submitted Message-ID — an ACTIVATION Gate-2 per-transport live
+// smoke MUST confirm it (send → IMAP-fetch the delivered message → assert its
+// Message-ID equals the minted one) before ms_graph is armed for real traffic.
 
 const GRAPH_SEND_BASE = "https://graph.microsoft.com/v1.0";
 const GRAPH_ACCEPTED = 202;

@@ -124,3 +124,67 @@ describe("createGmailSender", () => {
     expect(calls.filter((c) => c.url === SEND_URL)).toHaveLength(1);
   });
 });
+
+// Gmail rewrites the Message-ID on send, so after a successful send the adapter
+// reads the delivered message's header back (messages.get?format=metadata) and
+// returns that WIRE id — the id a reply will carry. These cover that read-back,
+// its best-effort failure handling, and the no-id case.
+const MESSAGES_BASE = "https://gmail.googleapis.com/gmail/v1/users/me/messages";
+
+/** Routes token / send-POST / metadata-GET distinctly (send URL is checked first). */
+function mockSendThenGet(sendResponse: Response, getResponse?: Response) {
+  const calls: { url: string; method: string | undefined }[] = [];
+  let tokenN = 1;
+  const fn = vi.fn(async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const u = String(url);
+    calls.push({ url: u, method: init?.method });
+    if (u === TOKEN_URL) {
+      return new Response(JSON.stringify({ access_token: `tok${tokenN++}`, expires_in: 3600 }), { status: 200 });
+    }
+    if (u === SEND_URL) return sendResponse;
+    if (u.startsWith(`${MESSAGES_BASE}/`)) {
+      if (!getResponse) throw new Error(`unexpected read-back GET to ${u}`);
+      return getResponse;
+    }
+    throw new Error(`unexpected call to ${u}`);
+  });
+  return { fn: fn as unknown as typeof fetch, calls };
+}
+
+describe("createGmailSender — wire Message-ID read-back", () => {
+  it("reads the rewritten wire Message-ID back after a successful send and returns it", async () => {
+    const wireId = "<CAMc35PQ9axcPb86Sr9hnWHhJDUTEa7CdKiAuqffNeZ06=vc3fw@mail.gmail.com>";
+    const { fn, calls } = mockSendThenGet(
+      new Response(JSON.stringify({ id: "gm123", threadId: "t" }), { status: 200 }),
+      new Response(JSON.stringify({ payload: { headers: [{ name: "Message-ID", value: wireId }] } }), { status: 200 }),
+    );
+    const sender = createGmailSender(fn, noSleep);
+
+    const returned = await sender.send(transport, input(), "<minted@coldstart.test>");
+    expect(returned).toBe(wireId);
+
+    // The read-back GETs the created message id, asking ONLY for the Message-ID header.
+    const get = calls.find((c) => c.method === "GET");
+    expect(get).toBeDefined();
+    expect(get!.url).toBe(`${MESSAGES_BASE}/gm123?format=metadata&metadataHeaders=Message-ID`);
+  });
+
+  it("returns undefined WITHOUT failing the send when the read-back is 403 (e.g. token missing gmail.metadata)", async () => {
+    const { fn } = mockSendThenGet(
+      new Response(JSON.stringify({ id: "gm123" }), { status: 200 }),
+      new Response("insufficient scope", { status: 403 }),
+    );
+    const sender = createGmailSender(fn, noSleep);
+
+    // The message went out — the read-back failure must NOT throw.
+    await expect(sender.send(transport, input(), "<minted@coldstart.test>")).resolves.toBeUndefined();
+  });
+
+  it("makes no read-back and returns undefined when the send response carries no message id", async () => {
+    const { fn, calls } = mockSendThenGet(new Response("{}", { status: 200 }));
+    const sender = createGmailSender(fn, noSleep);
+
+    await expect(sender.send(transport, input(), "<minted@coldstart.test>")).resolves.toBeUndefined();
+    expect(calls.some((c) => c.method === "GET")).toBe(false);
+  });
+});

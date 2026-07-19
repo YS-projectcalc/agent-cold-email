@@ -77,6 +77,18 @@ thread via `In-Reply-To` / `References` / returned `rfc822-headers` → the stor
 sandbox hands out for free (memory: the four sandbox conveniences a real server
 withholds).
 
+> **Wire Message-ID (API transports).** The engine mints the `Message-ID`, but
+> some send APIs **rewrite** it on the wire: Gmail's `messages.send` replaces our
+> minted id with its own (`<…@mail.gmail.com>`), so a reply carries THAT id, not
+> the one we put in the MIME. For `gmail_api` the engine reads the delivered
+> message's header back (`messages.get?format=metadata`) and records the wire id
+> as the send's canonical `Message-ID` (returned from `/v1/send`); if the read-back
+> fails, the send still succeeds and the minted id is kept. As a safety net the
+> store maps BOTH the minted and the wire id to the thread, so a reply matches on
+> whichever the delivered message carried. `smtp` preserves the header (wire ==
+> minted); `ms_graph` is expected to honor the submitted MIME `Message-ID`, pending
+> the Gate-2 live smoke (below).
+
 ## Send transports (HTTPS/443 — the SMTP-egress-wall path)
 
 Sending has three interchangeable transports, chosen **per mailbox** by the
@@ -109,7 +121,10 @@ path throws, so the Worker's retry/bounce accounting is unchanged.
 > base64url `{ raw }` JSON body — the documented path for messages ≤5 MB, which
 > every cold email is. The resumable `/upload/gmail/v1/...` endpoint is for large
 > media and takes raw `message/rfc822` bytes (not base64url), so it is not used
-> here.
+> here. After a successful send the adapter calls `messages.get?format=metadata`
+> on the returned message `id` to read the WIRE `Message-ID` back (Gmail rewrites
+> it — see Wire Message-ID above); this needs the `gmail.metadata` scope in
+> addition to `gmail.send` (the mint helper requests both).
 
 ## Config surface (all env-driven — no secret in code)
 
@@ -142,14 +157,18 @@ requires `user` (Graph app-only has no `me`). A legacy `{ smtp, imap }` entry
 
 The API transports need per-mailbox OAuth credentials. These are minted ONCE by
 the mailbox owner and dropped into `MAILBOX_CREDENTIALS_FILE` — never committed
-(CLAUDE.md rule g). Send-only scopes throughout (least privilege).
+(CLAUDE.md rule g). Least privilege: send scope everywhere, plus Gmail's
+metadata-read scope (needed to read the rewritten wire `Message-ID` back — see
+Wire Message-ID above), never message-body or mailbox-management scopes.
 
 ### Gmail (`gmail_api`)
 
 1. **Google Cloud Console** → a project → *APIs & Services* → **enable the Gmail
    API**.
 2. *OAuth consent screen*: External, add the mailbox as a **test user** (no app
-   verification needed while in Testing for your own mailbox).
+   verification needed while in Testing for your own mailbox — this also lets the
+   mailbox consent to the restricted `gmail.metadata` scope past the "unverified
+   app" screen).
 3. *Credentials* → **Create OAuth client ID** → application type **Desktop app**.
    Note the `client_id` + `client_secret`.
 4. Mint the refresh token with the loopback helper (opens a consent URL, catches
@@ -157,8 +176,11 @@ the mailbox owner and dropped into `MAILBOX_CREDENTIALS_FILE` — never committe
    ```bash
    node apps/engine/scripts/mint-gmail-token.mjs <client_id> <client_secret>
    ```
-   Consent as the mailbox; the script prints the `refresh_token`. Scope minted:
-   `https://www.googleapis.com/auth/gmail.send`.
+   Consent as the mailbox; the script prints the `refresh_token`. Scopes minted:
+   `gmail.send` **and** `gmail.metadata` (the latter lets the engine read the wire
+   `Message-ID` back so replies thread correctly). A token minted with `gmail.send`
+   ALONE will still send but silently drop reply/bounce threading — **re-mint any
+   send-only token** before arming `gmail_api`.
 5. Put `{ "kind": "gmail_api", "clientId", "clientSecret", "refreshToken" }` under
    that mailbox's `send`, keeping its `imap` endpoint (app password) for replies.
 

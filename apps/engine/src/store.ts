@@ -9,7 +9,14 @@ interface SendRecord {
 interface StoreState {
   /** idempotencyKey -> the SendEmailResult that key already produced. */
   sends: Record<string, SendRecord>;
-  /** outbound Message-ID -> the threadId supplied at send time (reverse lookup). */
+  /**
+   * outbound Message-ID -> the threadId supplied at send time (reverse lookup).
+   * A single send can register MORE THAN ONE id here: for an API transport whose
+   * wire Message-ID differs from the one we minted (Gmail rewrites it), BOTH the
+   * minted and the wire id map to the same threadId, so an inbound reply's
+   * In-Reply-To/References matches whichever id ended up on the delivered message.
+   * For SMTP (header preserved) the two ids are equal and this is a single entry.
+   */
   threads: Record<string, string>;
 }
 
@@ -78,10 +85,24 @@ export class EngineStore {
     this.inFlight.delete(idempotencyKey);
   }
 
-  /** Records a completed send and its Message-ID→threadId mapping atomically. */
-  async recordSend(idempotencyKey: string, messageId: string, threadId: string, sentAt: number): Promise<void> {
+  /**
+   * Records a completed send and its Message-ID→threadId mapping(s) atomically.
+   * `messageId` is the CANONICAL id returned to the caller (the wire id when the
+   * transport learned one, else the minted id). `aliasMessageIds` are any OTHER
+   * ids for the same message that a reply might carry — for a wire-rewriting
+   * transport this is the minted id, mapped alongside the canonical so the reply
+   * loop matches on either. Empty for SMTP (wire == minted, one entry).
+   */
+  async recordSend(
+    idempotencyKey: string,
+    messageId: string,
+    threadId: string,
+    sentAt: number,
+    aliasMessageIds: string[] = [],
+  ): Promise<void> {
     this.state.sends[idempotencyKey] = { messageId, sentAt };
     this.state.threads[messageId] = threadId;
+    for (const alias of aliasMessageIds) this.state.threads[alias] = threadId;
     await this.flush();
   }
 
