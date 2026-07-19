@@ -511,6 +511,30 @@ Buyer checklists hard-gate on reply/bounce **push**; `activity()`-polling was th
 
 ---
 
+## 22. Warm-lead thin layer (ratified design, build-gated) — ratified 2026-07-16, BUILD GATED on founder go + Q1-Q6 below (ROADMAP.md deep-dive order, adversary verdict SHIP `docs/adversarial/warm-lead-thin-layer-design-2026-07-16.md`)
+
+Design principle: the platform is the system of record for lead state (identity, disposition, notes, suppression, follow-up timers); the agent is the cognition layer — it reacts to a webhook push, reads/writes state via tools, and keeps nothing of its own between invocations. Full agent-journey audit, premise-by-premise verification, and the ranked build list live in the frozen dive: `docs/research/warm-lead-thin-layer-dive-2026-07-16.md`.
+
+**Data-model deltas.** `lead_dispositions` (new), keyed `(tenant_id, email)` — decoupled from the campaign-scoped `leads` table (one row per campaign per email, `schema.ts:115-124`) because disposition belongs to the contact, not the campaign-lead: `interest_status` (server-enforced enum, see Q2), `notes`, `tags_json`, `source`, `updated_at`. `followups` (new) for one-off scheduled sends: `id, tenant_id, thread_id, lead_id, campaign_id, run_at, body, status (pending|sent|skipped|canceled), idempotency_key, created_at`. **Rejected: reusing `scheduled_sends`** — those rows carry sequence semantics (a `step` index rendered from `campaigns.sequence_json` at tick time, `schema.ts:126-151`) and have no body column; a one-off with a custom body would force a synthetic step + a body side-channel + a tick render-path branch (patch-on-patch, CLAUDE.md rule f). A dedicated table drained by the same tick alarm is cleaner and reuses more.
+
+**Four new tools (20-23).** `suppress_lead` (mutating, `destructiveHint:true`) `{email, reason?='manual', note?}` — writes the `suppressions` row tenant-wide by parametrizing `unsubscribeEmail`'s hardcoded `"unsubscribe"` reason (`suppression.ts:71`); the tick already honors the row (`tick.ts:228-244`). `update_lead` (mutating, `destructiveHint:false`) `{email, interestStatus?, notes?, tags?}` — upserts `lead_dispositions` (`source='mcp'`, provenance pattern matches `thread_labels.source`). `list_leads` (read-only) `{campaign?, interestStatus?, suppressed?, replied?, cursor, limit}` — JOINs `leads`↔`lead_dispositions`↔`suppressions`↔last-event, reusing the CTE pattern at `inbox.ts:108-143`; doubles as the export surface (paginated JSON — no separate CSV endpoint unless a customer asks). `schedule_followup` (mutating, `destructiveHint:true`) `{threadId, runAt, body, idempotencyKey?}` — inserts a `followups` row; **send mechanism is PENDING, see amendment below and Q3.**
+
+**Webhook vs poll.** Already push: `reply|bounce|soft_bounce|complaint` (`webhooks.ts:16`). Gap: `unsubscribe` is poll-only, and closing it needs BOTH changes together or the fix is inert — add it to `WEBHOOK_EVENT_TYPES` AND route the direct `INSERT` at `suppression.ts:95-105` through the `recordEventIfNew` choke point (`reply-processor.ts:81-127`); the enqueue fan-out fires only inside that choke, so the enum addition alone changes nothing. Stays pull: `list_leads`, disposition, reporting rollups — on-demand queries, not events.
+
+**Adversary amendments (residuals R1-R3, `docs/adversarial/warm-lead-thin-layer-design-2026-07-16.md`) — binding on this section:**
+- **Send mechanism PENDING founder Q3.** The dive's line that `schedule_followup` sends "via the existing manual-reply path (`replyToThread`)" is NOT ratified — `replyToThread` (`threads.ts:111-179`) sends without the daily-cap check, warmup-ramp check, `pickMailboxWithCapacity`, or the `deliv_status='paused'` exclusion the tick applies inline (`tick.ts:256-267`). Q3's capacity-picker recommendation implies a **new shared guarded single-send primitive** (daily caps + warmup ramp + deliverability-pause + suppression re-check) that neither `replyToThread` nor `runTick`'s inline loop exposes as a callable unit today. Build increment #4 must name that guarded primitive as its reuse target, not `replyToThread` — reusing `replyToThread` as-is would let a scheduled follow-up send from a throttled/paused/still-warming mailbox (a deliverability hazard, not a compliance hole — the suppression re-check holds either way).
+- **`suppress_lead` reason is last-write-wins**, matching existing `unsubscribeEmail` behavior (`suppression.ts:71-72`, unconditional `suppress()` call). Un-suppress stays OUT of scope for this design; if it is ever added, gate it on `reason='manual'` only, so a `manual` suppress can never downgrade or clear a `complaint`/`unsubscribe` row.
+
+**Build gate — founder questions Q1-Q6 (condensed, answer-by-ID; full framing in the frozen dive §4):**
+- **Q1** Lead identity scope — tenant-wide `(tenant,email)` disposition + tenant-wide suppress (recommended) vs per-campaign-lead?
+- **Q2** `interest_status` — server-enforced enum + free-form `tags` hybrid (recommended) vs fully free-form?
+- **Q3** `schedule_followup` send mechanism — same-thread reply (recommended) vs new thread; and confirm it must route through the mailbox daily-cap/warmup-ramp capacity picker rather than bypass it (recommended — see amendment above).
+- **Q4** Auto-classification pre-fill — build now (build-list #5) or defer until a real cheap/no-agent customer demands it (recommended: defer)?
+- **Q5** Retention TTL on reply bodies — launch gate for the Mordy pilot, or defer (compliance call, not UX)?
+- **Q6** Export format — `list_leads` JSON-only (recommended) or a literal CSV/CRM-sync endpoint?
+
+---
+
 ## Appendix — verified facts & sources
 
 - Cold email is BANNED on shared-pool ESPs (SES/SendGrid/Mailgun/Postmark) → must use own SMTP or Google/MS mailboxes.

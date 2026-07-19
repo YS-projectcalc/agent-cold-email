@@ -24,8 +24,8 @@
 - [ ] **Registrar account + card** — Namecheap (confirmed buy-domain API) or Porkbun (confirm purchase endpoint w/ support); real `DomainPort` adapter coded, unactivated.
 - [ ] **Go-engine host — CLEARED TO PROVISION** (re-attack #3 = SHIP, 2026-07-14, `docs/adversarial/engine-host-review-2026-07-14.md`; double-send race fixed + revert-fail-proven). ⚠️ **Two adversary-ruled residuals to carry into arming:** (1) MUST-before-arm: crash-after-SMTP-accept-before-record ⇒ redelivery double-send (narrow window; needs a durable pre-send intent log OR explicit founder acceptance of the residual at arm time — do not silently arm past this line); (2) known-minor: a pathologically slow SMTP server can exceed the 180s fetch abort and end mis-graded terminal `'failed'` after max attempts (delivered-but-marked-failed, unbilled; exactly-once still holds); (3) `ENGINE_TENANTS` allowlist semantics (adversary-reviewed SHIP, `docs/adversarial/engine-tenants-allowlist-review-2026-07-14.md`): adapters are cached per-DO, so REMOVING a tenant from `ENGINE_TENANTS` needs a DO restart/eviction to take effect — plan revocation accordingly; and post-arm, a paid tenant NOT on the allowlist gets a sandbox email port (the allowlist strictly narrows — intended comped-pilot semantics). Also run the Docker-gated GreenMail e2e (`ENGINE_E2E=1`) once at host stand-up — never run in CI sandbox. **Go-engine host** — stand up the email engine (24/7 SMTP/IMAP daemon) and wire the Worker↔engine boundary. This is the real `EmailPort`. **BUILT + verified 2026-07-14** (`apps/engine/`, Node service reusing the A5-validated nodemailer/imapflow/mailparser stack; Worker client `apps/platform/src/vendors/real/email-port.ts`). Ships dark: `RealEmailPort` throws `NotActivatedError` until BOTH env vars below are set. Runbook (owner-hands, ~20 min):
 
-  1. **Build the image (host):** `npm run build -w @coldstart/engine && docker build -t coldstart-engine apps/engine`
-  2. **Generate the shared secret (once):** `SECRET=$(openssl rand -hex 24)` — the SAME value goes to both the droplet and the Worker.
+  1. **Build the image (host):** `npm run build -w @coldstart/engine && docker build --provenance=false --sbom=false -t coldstart-engine apps/engine` — the plain flags skip an attestation-index manifest, for maximum `docker load` compatibility on the droplet. The Dockerfile now does `npm pkg delete devDependencies` before `npm install --omit=dev` (real fix for a workspace-devDep 404 on `@coldstart/shared`, `apps/engine/Dockerfile` — closes the 2026-07-15 `ROADMAP.md ## Open` Dockerfile npm-defect item; round-trip proven 2026-07-17: build→load→run→`/health` ok→unauth `/v1/send` 401'd→torn down). **A pre-built, pre-verified tarball is staged for this exact step** (from HEAD `c30cd68`, linux/amd64, 61,051,904 bytes): `/private/tmp/claude-503/-Users-yaakovscher/2d80a426-039c-47e2-8ff4-c6ebcf240703/scratchpad/deploy-stage/coldstart-engine.tar` + a companion `DEPLOY-RUNBOOK.md` — ⚠️ SESSION-MORTAL (lives in a scratchpad, gone if that staging session died); if stale (HEAD has moved with further `apps/engine/` changes) or missing, this step's build command reproduces it cheaply.
+  2. **Shared secret.** ⚠️ **Verified 2026-07-17, corrects an earlier staged-runbook assumption:** the droplet's running container already bearer-gates `/v1/send` (confirmed live — unauth POST 401s), so a secret exists THERE, but `npx wrangler secret list` (run from `apps/platform`) shows the Worker has **never had `ENGINE_AUTH_SECRET` or `ENGINE_BASE_URL` set** (only `ADMIN_TOKEN`/`TOKEN_HASH_PEPPER` exist) — nothing live depends on the droplet's current value, so there's no continuity to preserve. Simplest correct path: `SECRET=$(openssl rand -hex 24)` and set it fresh on BOTH the new container (step 5) and the Worker (step 6) together at deploy time.
   3. **Provision the droplet (doctl — account authed):**
      ```
      doctl compute droplet create coldstart-engine --region nyc1 --size s-1vcpu-1gb \
@@ -34,12 +34,23 @@
      ```
      *Size:* `s-1vcpu-1gb` (~$6/mo). Node 24 baseline (~60–90 MB) + a handful of concurrent imapflow IMAP connections fit 1 GB with headroom; the 512 MB/$4 tier risks OOM under concurrent polls. 1 vCPU is ample for one pilot tenant's few mailboxes. (Cloudflare Containers is the alternative but is a worse fit for a single always-on long-lived-connection daemon — revisit only if multi-region/autoscale is needed.)
   4. **Lock inbound (DO Cloud Firewall):** allow SSH (22) + the engine port (8080) only. Tighten 8080 to your IP for the smoke test if possible.
-  5. **Write the mailbox creds file** on the droplet (`/root/mailboxes.json`) — the `{ email → { smtp, imap } }` map from `apps/engine/.env.example` (BYO Google Workspace = app password + `smtp.gmail.com:465` / `imap.gmail.com:993`). Ship the image + run:
+  5. **Write the mailbox creds file** on the droplet (`/root/mailboxes.json`, existing file — do not wipe other mailbox entries if any) — the `{ email → { imap, send } }` map from `apps/engine/.env.example`. Two `send` shapes: plain SMTP (`{ kind: "smtp", host, port, secure, user, pass }`, e.g. app-password + `smtp.gmail.com:465`) OR the block-immune 443/HTTPS transport:
+     ```json
+     {
+       "<MAILBOX_EMAIL>": {
+         "imap": { "host": "imap.gmail.com", "port": 993, "secure": true, "user": "<MAILBOX_EMAIL>", "pass": "<EXISTING_IMAP_APP_PASSWORD>" },
+         "send": { "kind": "gmail_api", "clientId": "<GOOGLE_OAUTH_CLIENT_ID>", "clientSecret": "<GOOGLE_OAUTH_CLIENT_SECRET>", "refreshToken": "<GMAIL_REFRESH_TOKEN>" }
+       }
+     }
      ```
-     docker save coldstart-engine | ssh root@$IP docker load
-     ssh root@$IP docker run -d --name engine --restart unless-stopped -p 8080:8080 \
-       -e ENGINE_AUTH_SECRET="$SECRET" -e MAILBOX_CREDENTIALS_FILE=/run/mailboxes.json \
-       -v /root/mailboxes.json:/run/mailboxes.json:ro -v engine-state:/app/state coldstart-engine
+     (`ms_graph` is the analogous MS365 shape — see `apps/engine/README.md`.) `clientId`/`clientSecret`/`refreshToken` mint via `apps/engine/scripts/mint-gmail-token.mjs`. Ship the image (the staged tarball from step 1, or `docker save coldstart-engine | ssh root@$IP docker load`), then **swap** the already-running container — the droplet already has one `Up` from provisioning, so a bare `docker run` collides on the name:
+     ```
+     ssh root@$IP '
+       docker stop engine 2>/dev/null; docker rm engine 2>/dev/null
+       docker run -d --name engine --restart unless-stopped -p 8080:8080 \
+         -e ENGINE_AUTH_SECRET="$SECRET" -e MAILBOX_CREDENTIALS_FILE=/run/mailboxes.json \
+         -v /root/mailboxes.json:/run/mailboxes.json:ro -v engine-state:/app/state coldstart-engine
+     '
      ```
   6. **Set the Worker secrets** (in `apps/platform`): `# ⚠️ NEVER a plain http:// URL — the client rejects it as a PERMANENT error and every due send goes terminal 'failed' with no requeue path. Use an https tunnel (Cloudflare Tunnel) or localhost ONLY.
    echo "https://<tunnel-host>" | wrangler secret put ENGINE_BASE_URL` and `echo "$SECRET" | wrangler secret put ENGINE_AUTH_SECRET`.
