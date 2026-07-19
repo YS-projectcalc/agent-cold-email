@@ -1,6 +1,7 @@
-// The 19 MCP tools (AGENTS.md tool list — names match exactly; tools 13-15
-// added by SPEC.md §19.5, tools 16-17 by the §19.0 parity-gap follow-up, tools
-// 18-19 by the ROADMAP.md WIN-THE-COMPARISON (d) webhooks lane).
+// The 21 MCP tools (tools 13-15 added by SPEC.md §19.5, tools 16-17 by the
+// §19.0 parity-gap follow-up, tools 18-19 by the ROADMAP.md WIN-THE-COMPARISON
+// (d) webhooks lane, tools 20-21 by SPEC.md §20's BYO domain intake — AGENTS.md's
+// public tool table is a canonical doc folded by the orchestrator, not updated here).
 // Each tool dispatches to the SAME TenantDO method the equivalent HTTP route
 // calls (src/routes/*.ts) — the MCP surface is a second transport onto the
 // exact same facade, never a parallel implementation (CLAUDE.md rule c).
@@ -10,9 +11,11 @@ import { ActivityQueryInput, InboxQueryInput } from "@coldstart/shared";
 import type { TenantDO } from "../tenant-do.js";
 import {
   CampaignIdInput,
+  ConfigureByoDomainInput,
   ConfigureDashboardInput,
   ConfigureWebhookInput,
   EmptyInput,
+  GetByoDomainsInput,
   GetDashboardInput,
   GetWebhooksInput,
   LabelThreadInput,
@@ -243,6 +246,39 @@ export const MCP_TOOLS: McpTool<any>[] = [
           return stub.updateWebhook(args.id!, { url: args.url, eventTypes: args.eventTypes, secret: args.secret, active: args.active });
         case "delete":
           return stub.deleteWebhook(args.id!);
+      }
+    },
+  ),
+  // --- SPEC.md §20 — BYO domains & mailboxes. Tools 20-21, mirroring
+  // get_dashboard/configure_dashboard + get_webhooks/configure_webhook exactly. ---
+  tool(
+    "get_byo_domains",
+    "List your BYO (bring-your-own) domains, or (with id) one domain's full intake detail. No id → [{ domainId, domain, isPrimary, dnsMode, byoStatus, breakerTier, reputationBranch, mailboxCount }]. With id → adds the pre-flight scan result, abuse-gate verdict, and consent-acknowledgment status. byoStatus progresses pending_kyc|pending_consent|pending_dns → active (or rejected/abandoned). Use configure_byo_domain to register a new one or advance it.",
+    GetByoDomainsInput,
+    { title: "Get BYO Domains", readOnlyHint: true },
+    (stub, args) => (args.id ? stub.byoDomain(args.id) : stub.byoDomains()),
+  ),
+  tool(
+    "configure_byo_domain",
+    "Register or advance a BYO domain/mailbox intake (SPEC.md §20). action = register (needs domain + domainRelationship: fresh_standalone|subdomain_of_primary|is_primary — runs the pre-flight live-infra scan + abuse gate + reputation ladder, returns the starting byoStatus) | poll_dns (needs id — re-checks DNS delegation/records, advances pending_dns → active, or → abandoned after 7 idle days) | acknowledge_consent (needs id + acknowledged:true — REQUIRED before a primary domain can proceed past pending_consent; this does not remove your business's exposure, it documents informed consent) | request_managed_mailboxes (needs id + count — platform-provisioned mailboxes on an ALREADY-ACTIVE domain, the primary shape) | connect_mailbox (needs id + email + transport — declares an EXISTING OAuth/SMTP+IMAP connection you already have, bypassing provisioning; transport is { kind:'smtp', host, port, secure, user, pass } | { kind:'gmail_api', clientId, clientSecret, refreshToken } | { kind:'ms_graph', mode, tenantId, clientId, clientSecret, refreshToken? }).",
+    ConfigureByoDomainInput,
+    // request_managed_mailboxes provisions real (sandbox-mode) infra + accrues
+    // metering on paid tiers; connect_mailbox stores a connection secret.
+    // Neither destroys an existing resource, but both have real side effects
+    // — flagged honestly rather than claiming destructiveHint:false.
+    { title: "Configure BYO Domain", destructiveHint: true },
+    (stub, args) => {
+      switch (args.action) {
+        case "register":
+          return stub.registerByoDomain({ domain: args.domain!, domainRelationship: args.domainRelationship! });
+        case "poll_dns":
+          return stub.pollByoDomainDns(args.id!);
+        case "acknowledge_consent":
+          return stub.acknowledgeByoConsent(args.id!, { acknowledged: true });
+        case "request_managed_mailboxes":
+          return stub.requestManagedByoMailboxes(args.id!, { count: args.count!, personaSlug: args.personaSlug });
+        case "connect_mailbox":
+          return stub.connectByoMailbox(args.id!, { email: args.email!, transport: args.transport! });
       }
     },
   ),

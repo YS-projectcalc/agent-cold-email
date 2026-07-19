@@ -20,7 +20,10 @@ import { ValidationError } from "@coldstart/shared";
 // reject). Matched as whole slug tokens, never substrings, to avoid false
 // positives (e.g. "metadata" != "meta"). Not exhaustive by design — the
 // consistency gate below catches impersonation of brands not on this list.
-const DENYLISTED_BRANDS = new Set<string>([
+// Exported: SPEC.md §20.3's BYO abuse gate (engine/byo-abuse-gate.ts) extends
+// this SAME denylist to a BYO domain itself, rather than duplicating it
+// (CLAUDE.md rule c).
+export const DENYLISTED_BRANDS = new Set<string>([
   "google", "gmail", "youtube", "android",
   "microsoft", "outlook", "office", "azure", "windows", "xbox", "linkedin", "github",
   "apple", "icloud", "itunes",

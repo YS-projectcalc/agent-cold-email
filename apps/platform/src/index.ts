@@ -22,6 +22,7 @@ import { dashboardSessionRoute } from "./routes/dashboard-session.js";
 import { dashboardRoute } from "./routes/dashboard.js";
 import { activityRoute } from "./routes/activity.js";
 import { webhookSubscriptionsRoute } from "./routes/webhook-subscriptions.js";
+import { byoDomainsRoute } from "./routes/byo-domains.js";
 import { runScheduledOpsSweep } from "./scheduled.js";
 import { handleInboundSupportEmail } from "./admin/support-inbound.js";
 
@@ -97,6 +98,8 @@ const AUTHED_PATH_PATTERNS = [
   "/activity",
   "/webhook-subscriptions",
   "/webhook-subscriptions/*",
+  "/byo-domains",
+  "/byo-domains/*",
 ];
 
 const authed = new Hono<{ Bindings: Env; Variables: AuthedVariables }>();
@@ -115,6 +118,7 @@ authed.route("/", demoRoute);
 authed.route("/", dashboardRoute);
 authed.route("/", activityRoute);
 authed.route("/", webhookSubscriptionsRoute);
+authed.route("/", byoDomainsRoute);
 app.route("/", authed);
 
 // SPEC.md §19.1 (M1 serving spike) — Hono's default 404 is `text/plain`

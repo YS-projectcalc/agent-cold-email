@@ -5,7 +5,17 @@
 // (MCP tools have no URL, so the id becomes an argument field instead).
 
 import { z } from "zod";
-import { DashboardLayoutSchema, LaunchCampaignInput, MarkInput, ReplyInput, SetupInfrastructureInput, ThreadLabelInput, WEBHOOK_EVENT_TYPES } from "@coldstart/shared";
+import {
+  ConnectByoMailboxTransportInput,
+  DashboardLayoutSchema,
+  DomainRelationshipInput,
+  LaunchCampaignInput,
+  MarkInput,
+  ReplyInput,
+  SetupInfrastructureInput,
+  ThreadLabelInput,
+  WEBHOOK_EVENT_TYPES,
+} from "@coldstart/shared";
 
 export const EmptyInput = z.object({});
 
@@ -118,4 +128,46 @@ export const ConfigureWebhookInput = z
       return typeof v.id === "string"; // delete
     },
     { message: "missing required fields for the given action (create needs url+eventTypes; update needs id + one changed field; delete needs id)" },
+  );
+
+// SPEC.md §20 — BYO domains & mailboxes. get_byo_domains / configure_byo_domain,
+// mirroring the get_dashboard/configure_dashboard + get_webhooks/configure_webhook
+// pattern exactly (CLAUDE.md rule c: one CRUD-over-one-tool shape per feature
+// area, not five separate single-purpose tools).
+
+export const GetByoDomainsInput = z.object({
+  id: z.string().min(1).max(200).optional().describe("Omit to list every BYO domain; pass an id for that domain's full intake detail (scan result, abuse verdict, consent status)."),
+});
+
+// A single flat object (NOT z.discriminatedUnion at the TOP level) for the
+// same tools/list JSON-Schema reason as ConfigureDashboardInput/
+// ConfigureWebhookInput above — `transport` itself is a discriminated union,
+// but nested inside a property, not the schema root, so it does not trip the
+// "every tool resolves to a top-level {type:object}" invariant (test/mcp.test.ts).
+export const ConfigureByoDomainInput = z
+  .object({
+    action: z.enum(["register", "poll_dns", "acknowledge_consent", "request_managed_mailboxes", "connect_mailbox"]),
+    id: z.string().min(1).max(200).optional().describe("Required for poll_dns/acknowledge_consent/request_managed_mailboxes/connect_mailbox — the domainId from register."),
+    domain: z.string().min(3).max(253).optional().describe("Required for register."),
+    domainRelationship: DomainRelationshipInput.optional().describe("Required for register: fresh_standalone | subdomain_of_primary | is_primary."),
+    acknowledged: z.literal(true).optional().describe("Required (must be true) for acknowledge_consent — SPEC.md §20.4's separate, unbundled risk acknowledgment."),
+    count: z.number().int().min(1).max(10).optional().describe("Required for request_managed_mailboxes — how many platform-provisioned mailboxes to attach."),
+    personaSlug: z.string().min(1).max(50).optional().describe("Optional for request_managed_mailboxes — defaults to a slug of the domain."),
+    email: z.string().email().optional().describe("Required for connect_mailbox — the existing mailbox address."),
+    transport: ConnectByoMailboxTransportInput.optional().describe(
+      "Required for connect_mailbox — { kind: 'smtp', host, port, secure, user, pass } | { kind: 'gmail_api', clientId, clientSecret, refreshToken } | { kind: 'ms_graph', mode: 'delegated'|'app_only', tenantId, clientId, clientSecret, refreshToken? }.",
+    ),
+  })
+  .refine(
+    (v) => {
+      if (v.action === "register") return typeof v.domain === "string" && typeof v.domainRelationship === "string";
+      if (v.action === "poll_dns") return typeof v.id === "string";
+      if (v.action === "acknowledge_consent") return typeof v.id === "string" && v.acknowledged === true;
+      if (v.action === "request_managed_mailboxes") return typeof v.id === "string" && typeof v.count === "number";
+      return typeof v.id === "string" && typeof v.email === "string" && v.transport !== undefined; // connect_mailbox
+    },
+    {
+      message:
+        "missing required fields for the given action (register needs domain+domainRelationship; poll_dns needs id; acknowledge_consent needs id+acknowledged:true; request_managed_mailboxes needs id+count; connect_mailbox needs id+email+transport)",
+    },
   );

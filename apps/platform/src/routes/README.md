@@ -32,6 +32,12 @@ through the DO.
   would have swept the unauthenticated inbound `POST /webhooks/stripe` into
   `requireAuth`. Boundary URL security (https-only, SSRF) lives in the DO
   facade (`assertSafeWebhookUrl`), surfaced here as the usual 400.
+- `byo-domains.ts` — `GET /byo-domains`, `GET /byo-domains/:id`,
+  `POST /byo-domains` (register), `POST /byo-domains/:id/poll-dns`,
+  `POST /byo-domains/:id/consent`, `POST /byo-domains/:id/managed-mailboxes`,
+  `POST /byo-domains/:id/connect-mailbox` (SPEC.md §20). Authed (bearer OR
+  cookie). Every mutating body validates at the boundary against a
+  `@coldstart/shared` zod schema before it reaches the DO.
 - `checkout.ts` — `POST /checkout` (B1, authed): demo/free -> paid upgrade.
   Real Stripe TEST-mode Checkout Session if `env.STRIPE_SECRET_KEY` is set,
   else a simulated session. `GET /checkout/simulate` (UNAUTHENTICATED — the

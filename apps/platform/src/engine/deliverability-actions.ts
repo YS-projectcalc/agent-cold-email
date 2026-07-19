@@ -3,6 +3,9 @@
 // the pure `evaluate` produced; `runDeliverabilitySweep` is the one entry point
 // the tick calls each cycle (monitor -> decide -> act) BEFORE scheduling sends.
 
+import { escapeHtml } from "../html-escape.js";
+import { lookupTenantContactEmail } from "../db.js";
+import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
 import { isLifecycleFrozen, readLifecycleState } from "./billing-state.js";
@@ -167,8 +170,129 @@ async function applyReplaceDomain(
   });
 }
 
-/** Mutates DO state for every action the pure `evaluate` produced, auditing each. */
-export async function applyActions(ctx: TenantContext, actions: DeliverabilityAction[]): Promise<void> {
+/**
+ * SPEC.md §20.2's substitute remedy for a domain that cannot be
+ * burn-replaced: hard-pause ALL its mailboxes (never retire+replace), then
+ * best-effort dispatch the TWO required alert paths — the customer (it's
+ * their domain, dashboard-visible via this same deliverability_actions log +
+ * an account-contact email) and the owner (the §D6 digest already surfaces
+ * `deliverability.pausedMailboxesTotal`/`actionsInWindow` platform-wide; this
+ * adds a direct, immediate owner copy rather than waiting for the next digest
+ * cycle, mirroring admin/ops-sweep.ts's sendDunningSuspendNotice pattern
+ * exactly). Idempotent: only fires once, on the 'active' -> 'paused_primary'
+ * transition (the conditional UPDATE below), so a re-sweep of an
+ * already-paused domain never re-sends the alert.
+ */
+async function applyHardPauseDomain(
+  ctx: TenantContext,
+  action: Extract<DeliverabilityAction, { type: "HARD_PAUSE_DOMAIN" }>,
+  mailer: OpsMailer,
+): Promise<void> {
+  const res = ctx.sql.exec(
+    `UPDATE domains SET status = 'paused_primary' WHERE id = ? AND tenant_id = ? AND status = 'active'`,
+    action.domainId,
+    ctx.tenantId,
+  );
+  if (res.rowsWritten === 0) return; // already paused by a concurrent/prior sweep — no-op, no duplicate alert
+
+  pauseDomainMailboxes(ctx, action.domainId);
+  logAction(ctx, "HARD_PAUSE_DOMAIN", action.domain, { domainId: action.domainId, reason: action.reason });
+  await sendHardPauseDomainAlerts(ctx, mailer, action.domain, action.reason);
+}
+
+/**
+ * SPEC.md §20.2's soft response (below the volume floor — see byo-breaker.ts):
+ * halve every active mailbox's current effective cap on the domain + flag for
+ * human review via the action log (no email — this is a "worth a look", not
+ * an incident). `cap_override` is the SAME mechanism THROTTLE uses, so a
+ * later warmup recompute can't silently lift the halved cap back up.
+ */
+function applySoftFlagDomain(ctx: TenantContext, action: Extract<DeliverabilityAction, { type: "SOFT_FLAG_DOMAIN" }>): void {
+  const rows = ctx.sql
+    .exec<{ id: string; daily_cap: number }>(
+      `SELECT id, daily_cap FROM mailboxes WHERE tenant_id = ? AND domain_id = ? AND deliv_status != 'paused'`,
+      ctx.tenantId,
+      action.domainId,
+    )
+    .toArray();
+  for (const row of rows) {
+    const halved = Math.max(1, Math.floor(row.daily_cap / 2));
+    ctx.sql.exec(
+      `UPDATE mailboxes SET cap_override = ?, daily_cap = MIN(daily_cap, ?) WHERE id = ?`,
+      halved,
+      halved,
+      row.id,
+    );
+  }
+  logAction(ctx, "SOFT_FLAG_DOMAIN", action.domain, { domainId: action.domainId, mailboxesHalved: rows.length, reason: action.reason });
+}
+
+/** Best-effort dual alert — mirrors admin/ops-sweep.ts's sendDunningSuspendNotice exactly (tenant notice + owner copy, every send wrapped, never throws). */
+async function sendHardPauseDomainAlerts(ctx: TenantContext, mailer: OpsMailer, domain: string, reason: string): Promise<void> {
+  const profile = ctx.sql.exec<{ brand: string }>(`SELECT brand FROM tenant_profile WHERE id = ?`, ctx.tenantId).one();
+
+  let contactEmail: string | null = null;
+  try {
+    contactEmail = await lookupTenantContactEmail(ctx.env, ctx.tenantId);
+  } catch (err) {
+    console.error(`hard-pause-domain alert: contact-email lookup failed for tenant ${ctx.tenantId}`, err);
+  }
+
+  if (contactEmail) {
+    const text =
+      `Sending from your domain "${domain}" has been paused by the deliverability control loop.\n\n${reason}\n\n` +
+      `This is a primary/dedicated business domain, so it is never auto-replaced — sending stays paused until you review it. ` +
+      `See your account's activity feed for detail, or reply to this email and it will reach our team.`;
+    await trySendHardPauseAlert(mailer, {
+      to: contactEmail,
+      subject: `[coldrig] Sending from "${domain}" has been paused`,
+      text,
+      html:
+        `<p>Sending from your domain <strong>${escapeHtml(domain)}</strong> has been paused by the deliverability control loop.</p>` +
+        `<p>${escapeHtml(reason)}</p>` +
+        `<p>This is a primary/dedicated business domain, so it is never auto-replaced — sending stays paused until you review it. See your account's activity feed for detail, or reply to this email and it will reach our team.</p>`,
+    });
+  }
+
+  if (ctx.env.OPS_ALERT_EMAIL) {
+    const notified = contactEmail ? `tenant notified at ${contactEmail}` : "NO contact email on file — tenant NOT notified (flag)";
+    const text =
+      `Tenant "${profile.brand}" (${ctx.tenantId}) had domain "${domain}" hard-paused by the deliverability control loop (SPEC.md §20.2 — primary-domain substitute remedy, never auto-replaced).\n` +
+      `${reason}\n${notified}.`;
+    await trySendHardPauseAlert(mailer, {
+      to: ctx.env.OPS_ALERT_EMAIL,
+      subject: `[coldrig] tenant "${profile.brand}" — primary/dedicated domain "${domain}" hard-paused`,
+      text,
+      html:
+        `<p>Tenant <strong>${escapeHtml(profile.brand)}</strong> (<code>${escapeHtml(ctx.tenantId)}</code>) had domain <strong>${escapeHtml(domain)}</strong> hard-paused by the deliverability control loop (SPEC.md §20.2 — primary-domain substitute remedy, never auto-replaced).</p>` +
+        `<p>${escapeHtml(reason)}</p><p>${escapeHtml(notified)}.</p>`,
+    });
+  }
+}
+
+async function trySendHardPauseAlert(mailer: OpsMailer, msg: { to: string; subject: string; text: string; html: string }): Promise<void> {
+  try {
+    await mailer.send(msg);
+  } catch (err) {
+    // Dark/unconfigured OpsMailer or a transient send failure — log, never
+    // throw. The domain-pause + audit log already committed above; a failed
+    // notification must never roll that back or block the sweep.
+    console.error(`hard-pause-domain alert: send to ${msg.to} failed (dark or transient)`, err);
+  }
+}
+
+/**
+ * Mutates DO state for every action the pure `evaluate` produced, auditing
+ * each. `mailer` is injectable (default a real/dark-per-env OpsMailer, exactly
+ * like admin/ops-sweep.ts's runDunningSweep) so tests can assert the
+ * HARD_PAUSE_DOMAIN dual-alert content with a SandboxOpsMailer without any
+ * production call site needing to change.
+ */
+export async function applyActions(
+  ctx: TenantContext,
+  actions: DeliverabilityAction[],
+  mailer: OpsMailer = createOpsMailer(ctx.env),
+): Promise<void> {
   for (const action of actions) {
     switch (action.type) {
       case "THROTTLE":
@@ -190,6 +314,12 @@ export async function applyActions(ctx: TenantContext, actions: DeliverabilityAc
       case "REPLACE_DOMAIN":
         await applyReplaceDomain(ctx, action);
         break;
+      case "HARD_PAUSE_DOMAIN":
+        await applyHardPauseDomain(ctx, action, mailer);
+        break;
+      case "SOFT_FLAG_DOMAIN":
+        applySoftFlagDomain(ctx, action);
+        break;
     }
   }
 }
@@ -203,6 +333,7 @@ export async function applyActions(ctx: TenantContext, actions: DeliverabilityAc
 export async function runDeliverabilitySweep(
   ctx: TenantContext,
   thresholds: DeliverabilityThresholds = DEFAULT_THRESHOLDS,
+  mailer: OpsMailer = createOpsMailer(ctx.env),
 ): Promise<{ actions: DeliverabilityAction[] }> {
   // Lifecycle freeze — the SAME kill switch the tick has, but enforced INSIDE
   // the sweep so it also covers the standalone TenantDO.deliverabilitySweep()
@@ -225,6 +356,6 @@ export async function runDeliverabilitySweep(
     .one().n;
 
   const actions = evaluate(mailboxes, domains, thresholds, { pendingSends });
-  await applyActions(ctx, actions);
+  await applyActions(ctx, actions, mailer);
   return { actions };
 }

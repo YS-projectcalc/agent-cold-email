@@ -215,11 +215,71 @@ export interface MetricsPort {
   getPlacement(mailboxEmail: string): Promise<PlacementResult>;
 }
 
-/** All five VendorPort seams, grouped for a per-tenant adapter bundle. */
+/**
+ * SPEC.md §20.1 — the mandatory pre-flight live-infra scan a BYO domain's
+ * intake runs BEFORE any DNS-mode is offered. Raw DNS findings only (no
+ * decision-making — engine/byo-preflight.ts's `interpretPreflightScan`/
+ * `recommendDnsMode` are the pure decision layer that consumes this).
+ */
+export interface DnsScanResult {
+  hasMx: boolean;
+  aRecordResolved: boolean;
+  isParkingPage: boolean;
+  hasSpfInclude: boolean;
+  dmarcPolicy: "none" | "quarantine" | "reject" | null;
+  hasDnssecDs: boolean;
+  /**
+   * SPEC.md §20.1's `we_manage_zone` poll-verify signal: the hostname's
+   * authoritative NS records now resolve to OUR nameservers (a real adapter
+   * compares the live NS RRset against our known Cloudflare nameserver set).
+   */
+  delegatedToUs: boolean;
+  /**
+   * SPEC.md §20.1's `records_to_apply` poll-verify signal: the SPECIFIC
+   * record(s) we asked the customer to add (MX/SPF-include/tracking CNAME/
+   * DKIM selector) are now confirmed present with the expected value(s) — a
+   * real adapter diffs expected-vs-actual, never a bare "some record exists."
+   */
+  recordsApplied: boolean;
+}
+
+export interface DnsScanPort {
+  /** Scans the exact target hostname (not the registrable root — a subdomain and its apex can differ). */
+  scan(hostname: string): Promise<DnsScanResult>;
+}
+
+/**
+ * SPEC.md §20.5 — the non-primary reputation ladder's external signals. Age
+ * and blocklist status are readily DNS/RDAP-queryable; `activeSendingEvidence`
+ * is deliberately the hardest one to satisfy (real DMARC aggregate-report
+ * ingestion) — see vendors/real/reputation-port.ts for what's actually wired
+ * vs deferred.
+ */
+export interface DomainReputationResult {
+  /** Domain age in days, or null if unavailable (RDAP registration date unknown/unqueryable). */
+  ageDays: number | null;
+  /** Hit on a public blocklist (Spamhaus DBL/SURBL-class). */
+  blocklisted: boolean;
+  /**
+   * Positive evidence of an ACTIVE MX in real use (DMARC aggregate-report
+   * volume, or an equivalent actual-send-volume signal) — NEVER satisfied by
+   * passive-DNS/historical-resolution alone (SPEC.md §20.5's explicit
+   * anti-gaming requirement against aged-dormant/marketplace-flipped domains).
+   */
+  activeSendingEvidence: boolean;
+}
+
+export interface DomainReputationPort {
+  check(hostname: string): Promise<DomainReputationResult>;
+}
+
+/** All seven VendorPort seams, grouped for a per-tenant adapter bundle. */
 export interface VendorAdapters {
   domain: DomainPort;
   mailbox: MailboxPort;
   email: EmailPort;
   billing: BillingPort;
   metrics: MetricsPort;
+  dnsScan: DnsScanPort;
+  reputation: DomainReputationPort;
 }

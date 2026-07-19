@@ -1,9 +1,12 @@
-import { env, SELF } from "cloudflare:test";
+import { env, runInDurableObject, SELF } from "cloudflare:test";
 import type { TenantPlan } from "@coldstart/shared";
 import { generateApiToken, hashApiToken } from "../src/auth.js";
+import { VirtualClock } from "../src/clock.js";
 import { insertTenantIndex } from "../src/db.js";
 import { newId } from "../src/schema.js";
+import type { TenantContext } from "../src/tenant-context.js";
 import type { TenantDO } from "../src/tenant-do.js";
+import { createVendorAdapters } from "../src/vendors/factory.js";
 
 export interface ApiResult<T = unknown> {
   status: number;
@@ -31,6 +34,38 @@ export async function api<T = unknown>(
 
 export function tenantStub(tenantId: string): DurableObjectStub<TenantDO> {
   return env.TENANT.get(env.TENANT.idFromName(tenantId));
+}
+
+/**
+ * Builds a REAL `TenantContext` against the DO's own live SqlStorage/clock
+ * inside a `runInDurableObject` callback, and runs `fn` against it — for
+ * tests that need to call an `engine/*.ts` function DIRECTLY (bypassing the
+ * facade) with an injected dependency the RPC surface doesn't accept (e.g.
+ * `runDeliverabilitySweep`'s injectable OpsMailer — see
+ * deliverability-actions.ts). Mirrors the exact tenant_profile read every
+ * other runInDurableObject test in this suite already does for clock_base/
+ * clock_offset (e.g. tick-correctness.test.ts's send-window test).
+ */
+export async function withTenantContext<T>(tenantId: string, fn: (ctx: TenantContext) => Promise<T> | T): Promise<T> {
+  return runInDurableObject(tenantStub(tenantId), async (_instance, state) => {
+    const sql = state.storage.sql;
+    const profile = sql
+      .exec<{ plan: TenantPlan; clock_base: number; clock_offset: number; clock_multiplier: number }>(
+        `SELECT plan, clock_base, clock_offset, clock_multiplier FROM tenant_profile WHERE id = ?`,
+        tenantId,
+      )
+      .one();
+    const clock = new VirtualClock(profile.clock_base, profile.clock_offset, profile.clock_multiplier);
+    const ctx: TenantContext = {
+      sql,
+      tenantId,
+      plan: profile.plan,
+      clock,
+      adapters: createVendorAdapters(profile.plan, clock, false, undefined, tenantId, undefined),
+      env,
+    };
+    return fn(ctx);
+  });
 }
 
 // The test webhook secret — MUST match vitest.config.ts's miniflare binding.

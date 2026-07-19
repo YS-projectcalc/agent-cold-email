@@ -20,38 +20,30 @@ export function slugify(input: string): string {
 }
 
 /**
- * Provisions ONE domain + its mailboxes: buy → DNS → insert domain row → for
- * each mailbox provision + startWarmup + insert mailbox row (+ per-mailbox/mo
- * metering on paid tiers). The single implementation shared by
- * setup_infrastructure (initial provisioning) and the deliverability control
- * loop's REPLACE_DOMAIN (burn replacement) — CLAUDE.md rule c (no duplicated
- * logic). Idempotency keys are namespaced by `domainKey` (`domain#index`) so
- * distinct domains never collide.
+ * Provisions `inboxesEach` PLATFORM-OWNED mailboxes on an ALREADY-OWNED
+ * domain row (vendor provision + startWarmup + insert mailbox row +
+ * per-mailbox/mo metering on paid tiers). Extracted from
+ * `provisionDomainWithMailboxes` (CLAUDE.md rule c — no duplicated logic) so
+ * SPEC.md §20.6's shape (a) — a managed mailbox provisioned on a BYO domain
+ * (`engine/byo-intake.ts`'s `requestManagedByoMailboxes`) — reuses the exact
+ * same vendor-call + warmup-bootstrap + metering sequence as the existing
+ * lookalike-domain flow and REPLACE_DOMAIN, instead of a parallel
+ * implementation. `domainKey` namespaces idempotency keys (distinct domains
+ * never collide); `domainOrdinal` only affects the generated local-part
+ * numbering (cosmetic — uniqueness only requires the local part be unique
+ * WITHIN this one domain, which the mailboxIndex loop already guarantees).
  */
-export async function provisionDomainWithMailboxes(
+export async function provisionMailboxesForDomain(
   ctx: TenantContext,
-  opts: { domain: string; domainIndex: number; personaSlug: string; inboxesEach: number },
-): Promise<{ domainId: string; domain: string; mailboxEmails: string[] }> {
+  opts: { domainId: string; domain: string; domainKey: string; domainOrdinal: number; personaSlug: string; inboxesEach: number },
+): Promise<string[]> {
   const now = ctx.clock.now();
-  const domainKey = `${opts.domain}#${opts.domainIndex}`;
-
-  const purchased = await ctx.adapters.domain.buy(opts.domain, `buy:${ctx.tenantId}:${domainKey}`);
-  await ctx.adapters.domain.setDns(opts.domain, `dns:${ctx.tenantId}:${domainKey}`);
-
-  const domainId = newId("dom");
-  ctx.sql.exec(
-    `INSERT INTO domains (id, tenant_id, domain, status, purchased_at) VALUES (?, ?, ?, 'active', ?)`,
-    domainId,
-    ctx.tenantId,
-    purchased.domain,
-    purchased.purchasedAt,
-  );
-
   const mailboxEmails: string[] = [];
+
   for (let mailboxIndex = 0; mailboxIndex < opts.inboxesEach; mailboxIndex++) {
-    const localPart = `${opts.personaSlug}${opts.domainIndex + 1}${mailboxIndex + 1}`;
-    const provisionIdempotencyKey = `mbx:${ctx.tenantId}:${domainKey}:${localPart}`;
-    const provisioned = await ctx.adapters.mailbox.provision(purchased.domain, localPart, provisionIdempotencyKey);
+    const localPart = `${opts.personaSlug}${opts.domainOrdinal + 1}${mailboxIndex + 1}`;
+    const provisionIdempotencyKey = `mbx:${ctx.tenantId}:${opts.domainKey}:${localPart}`;
+    const provisioned = await ctx.adapters.mailbox.provision(opts.domain, localPart, provisionIdempotencyKey);
     const warmup = await ctx.adapters.mailbox.startWarmup(
       provisioned.email,
       `warmup:${ctx.tenantId}:${provisioned.email}`,
@@ -69,8 +61,8 @@ export async function provisionDomainWithMailboxes(
        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, -1)`,
       newId("mbx"),
       ctx.tenantId,
-      domainId,
-      purchased.domain,
+      opts.domainId,
+      opts.domain,
       provisioned.email,
       warmupDailyCap(day),
       epochDay(now),
@@ -104,6 +96,45 @@ export async function provisionDomainWithMailboxes(
       await reportUsageToStripeIfConfigured(ctx, 1, provisionIdempotencyKey);
     }
   }
+
+  return mailboxEmails;
+}
+
+/**
+ * Provisions ONE domain + its mailboxes: buy → DNS → insert domain row → for
+ * each mailbox provision + startWarmup + insert mailbox row (+ per-mailbox/mo
+ * metering on paid tiers). The single implementation shared by
+ * setup_infrastructure (initial provisioning) and the deliverability control
+ * loop's REPLACE_DOMAIN (burn replacement) — CLAUDE.md rule c (no duplicated
+ * logic). Idempotency keys are namespaced by `domainKey` (`domain#index`) so
+ * distinct domains never collide.
+ */
+export async function provisionDomainWithMailboxes(
+  ctx: TenantContext,
+  opts: { domain: string; domainIndex: number; personaSlug: string; inboxesEach: number },
+): Promise<{ domainId: string; domain: string; mailboxEmails: string[] }> {
+  const domainKey = `${opts.domain}#${opts.domainIndex}`;
+
+  const purchased = await ctx.adapters.domain.buy(opts.domain, `buy:${ctx.tenantId}:${domainKey}`);
+  await ctx.adapters.domain.setDns(opts.domain, `dns:${ctx.tenantId}:${domainKey}`);
+
+  const domainId = newId("dom");
+  ctx.sql.exec(
+    `INSERT INTO domains (id, tenant_id, domain, status, purchased_at) VALUES (?, ?, ?, 'active', ?)`,
+    domainId,
+    ctx.tenantId,
+    purchased.domain,
+    purchased.purchasedAt,
+  );
+
+  const mailboxEmails = await provisionMailboxesForDomain(ctx, {
+    domainId,
+    domain: purchased.domain,
+    domainKey,
+    domainOrdinal: opts.domainIndex,
+    personaSlug: opts.personaSlug,
+    inboxesEach: opts.inboxesEach,
+  });
 
   return { domainId, domain: purchased.domain, mailboxEmails };
 }

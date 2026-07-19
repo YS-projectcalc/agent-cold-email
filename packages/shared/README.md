@@ -11,17 +11,22 @@ Framework-free TypeScript shared by every app in the monorepo (currently just
 - `src/clock.ts` — the `Clock` interface only (ARCHITECTURE.md decision #4).
   Concrete `RealClock`/`VirtualClock` implementations live in
   `apps/platform/src/clock.ts` since they're a runtime concern.
-- `src/vendor-ports.ts` — the five `VendorPort` interfaces
-  (`DomainPort`, `MailboxPort`, `EmailPort`, `BillingPort`, `MetricsPort`)
-  every vendor integration sits behind (ARCHITECTURE.md decision #1). Every
-  side-effecting method takes an `idempotencyKey`.
+- `src/vendor-ports.ts` — the seven `VendorPort` interfaces
+  (`DomainPort`, `MailboxPort`, `EmailPort`, `BillingPort`, `MetricsPort`,
+  `DnsScanPort`, `DomainReputationPort` — the last two added by SPEC.md §20's
+  BYO domain intake) every vendor integration sits behind (ARCHITECTURE.md
+  decision #1). Every side-effecting method takes an `idempotencyKey`.
 - `src/errors.ts` — shared error classes, notably `NotActivatedError` (thrown
   by every `real/` adapter stub), `TenantIsolationError`, and
   `RevConflictError` (SPEC.md §19.4 — a dashboard-view rev CAS mismatch;
   carries `currentRev`/`currentLayout` so an agent can rebase).
 - `src/intents.ts` — zod request schemas + inferred types for the facade's
-  ~12 core intents (SPEC.md §6). The Worker validates every request body
-  against these at the boundary.
+  ~12 core intents (SPEC.md §6), plus SPEC.md §20's BYO domain/mailbox intake
+  intents (`RegisterByoDomainInput`, `AcknowledgeByoConsentInput`,
+  `RequestManagedByoMailboxesInput`, `ConnectByoMailboxInput` — the last maps
+  its `transport` field directly onto `apps/engine/src/config.ts`'s
+  per-mailbox send-transport discriminated union). The Worker validates every
+  request body against these at the boundary.
 - `src/dashboard.ts` — SPEC.md §19 (dashboard + unified inbox): the
   layout-as-data zod schema (12-col grid, the 8-type widget registry v1),
   `Provenance` (`'dashboard' | 'mcp' | 'api' | 'system'`, server-derived from
