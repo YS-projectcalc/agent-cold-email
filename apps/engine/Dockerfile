@@ -5,7 +5,9 @@
 # resolve the type-only @coldstart/shared import); the image carries only the
 # emitted dist/ plus the production runtime deps (nodemailer/imapflow/mailparser/
 # zod). @coldstart/shared is a type-only devDependency — erased at build, never
-# needed at runtime — so `npm install --omit=dev` never tries to resolve it.
+# needed at runtime — but `npm install --omit=dev` still resolves devDependency
+# registry metadata to compute its ideal tree before pruning, so it 404s on the
+# unpublished workspace package unless devDependencies is stripped first.
 #
 #   npm run build -w @coldstart/engine   # produces apps/engine/dist
 #   docker build -t coldstart-engine apps/engine
@@ -14,9 +16,12 @@ FROM node:24-alpine
 
 WORKDIR /app
 
-# Runtime deps only (dev/type-only deps are omitted; see note above).
+# Runtime deps only. `npm pkg delete devDependencies` first: --omit=dev alone
+# still needs registry metadata for devDependencies (incl. the unpublished
+# workspace-only @coldstart/shared) to build npm's ideal tree before pruning,
+# which 404s even though nothing in that subtree is ever installed.
 COPY package.json ./
-RUN npm install --omit=dev --no-package-lock && npm cache clean --force
+RUN npm pkg delete devDependencies && npm install --omit=dev --no-package-lock && npm cache clean --force
 
 COPY dist ./dist
 
