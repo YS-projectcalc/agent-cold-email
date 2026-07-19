@@ -16,6 +16,10 @@ import type { TokenCache } from "./oauth.js";
 //     tick's retry/bounce accounting is unchanged across transports.
 // The whole loop is bounded (one refresh + MAX_BACKOFF_RETRIES) and stays well
 // under the Worker's engine-request timeout, itself under the reclaim TTL.
+// Returns the success-response body text so a caller can read a provider-assigned
+// id (Gmail's messages.send returns the created message's `id`, which gmail.ts
+// then resolves to the wire Message-ID). Graph returns an empty 202 body and
+// ignores it.
 
 const MAX_BACKOFF_RETRIES = 2;
 const BASE_BACKOFF_MS = 500;
@@ -39,7 +43,7 @@ export async function apiSend(
   tokens: TokenCache,
   spec: ApiSendSpec,
   sleep: (ms: number) => Promise<void> = defaultSleep,
-): Promise<void> {
+): Promise<string> {
   let refreshed = false;
   let backoffAttempt = 0;
   for (;;) {
@@ -55,7 +59,7 @@ export async function apiSend(
       throw new UpstreamTransientError(`${spec.label} send failed (network): ${(err as Error).message}`, { cause: err });
     }
 
-    if (res.status === spec.okStatus) return;
+    if (res.status === spec.okStatus) return await res.text().catch(() => "");
 
     if (res.status === 401 && !refreshed) {
       refreshed = true;

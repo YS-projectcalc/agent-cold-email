@@ -87,14 +87,23 @@ export class EmailEngine {
     }
     try {
       const creds = this.resolve(input.fromEmail);
-      const messageId = mintMessageId(input.fromEmail, creds.messageIdDomain);
-      await this.dispatchSend(creds, input, messageId);
+      const mintedId = mintMessageId(input.fromEmail, creds.messageIdDomain);
+      // A transport may report a WIRE Message-ID that differs from the one we
+      // minted (Gmail rewrites it on send; gmail.ts reads it back). The canonical
+      // id — returned from /v1/send and stored as scheduled_sends.message_id — is
+      // the wire id when known, because that is the id an inbound reply/bounce
+      // carries. SMTP/Graph preserve the header, so they report undefined and the
+      // minted id stays canonical.
+      const wireId = await this.dispatchSend(creds, input, mintedId);
+      const canonicalId = wireId ?? mintedId;
       const sentAt = this.now();
       // Record AFTER a successful send: a failed send throws before this, so its
-      // key is never cached and a retry genuinely re-sends. The messageId→threadId
-      // mapping is what the poll path uses to reconstruct an inbound event's thread.
-      await this.store.recordSend(idempotencyKey, messageId, input.threadId, sentAt);
-      return { messageId, sentAt };
+      // key is never cached and a retry genuinely re-sends. Both the canonical and
+      // (when it differs) the minted id map to this thread, so the poll path
+      // reconstructs the thread whichever id the delivered message ended up with.
+      const aliasIds = canonicalId === mintedId ? [] : [mintedId];
+      await this.store.recordSend(idempotencyKey, canonicalId, input.threadId, sentAt, aliasIds);
+      return { messageId: canonicalId, sentAt };
     } finally {
       // Release whether the send succeeded (now cached) or threw (never cached,
       // so a retry SHOULD re-send). Either exit leaves the claim clear for the
@@ -166,25 +175,33 @@ export class EmailEngine {
   }
 
   /**
-   * Route the send to the mailbox's configured transport. The compliance-bearing
-   * raw message is built by the SAME message.ts builder for every wire, so which
-   * branch runs changes only the transport, never the bytes. An OMITTED `send`
-   * means SMTP (backward-compatible). An API transport whose sender wasn't wired
-   * is an internal misconfiguration surfaced as a transient error (the real
-   * daemon always wires both), never a silent wrong-transport send.
+   * Route the send to the mailbox's configured transport, returning the WIRE
+   * Message-ID when the transport learned one that differs from `messageId` (only
+   * Gmail does; it reads the header back after send), else undefined. The
+   * compliance-bearing raw message is built by the SAME message.ts builder for
+   * every wire, so which branch runs changes only the transport, never the bytes.
+   * An OMITTED `send` means SMTP (backward-compatible). An API transport whose
+   * sender wasn't wired is an internal misconfiguration surfaced as a transient
+   * error (the real daemon always wires both), never a silent wrong-transport send.
    */
-  private async dispatchSend(creds: MailboxCredentials, input: SendEmailInput, messageId: string): Promise<void> {
+  private async dispatchSend(
+    creds: MailboxCredentials,
+    input: SendEmailInput,
+    messageId: string,
+  ): Promise<string | undefined> {
     const send = creds.send;
     if (!send || send.kind === "smtp") {
       if (!creds.smtp) throw new Error(`internal: mailbox ${input.fromEmail} selected smtp transport but has no smtp endpoint`);
-      return this.smtp.send(creds.smtp, input, messageId);
+      await this.smtp.send(creds.smtp, input, messageId);
+      return undefined; // SMTP preserves the Message-ID header: wire == minted
     }
     if (send.kind === "gmail_api") {
       if (!this.gmail) throw new Error(`internal: mailbox ${input.fromEmail} needs the gmail_api transport but it is not wired`);
       return this.gmail.send(send, input, messageId);
     }
     if (!this.graph) throw new Error(`internal: mailbox ${input.fromEmail} needs the ms_graph transport but it is not wired`);
-    return this.graph.send(send, input, messageId);
+    await this.graph.send(send, input, messageId);
+    return undefined; // Graph honors the submitted MIME Message-ID: wire == minted (Gate-2 verifies)
   }
 
   private resolve(email: string) {

@@ -1,19 +1,29 @@
 #!/usr/bin/env node
-// One-time helper: mint a Gmail send-only OAuth2 refresh token for a BYO mailbox
-// via the loopback (installed-app) flow. Run by the mailbox owner ONCE; the
-// printed refresh_token goes into MAILBOX_CREDENTIALS_FILE under the mailbox's
-// `send` block — NEVER committed (CLAUDE.md rule g). Node built-ins only; no deps.
+// One-time helper: mint a Gmail OAuth2 refresh token for a BYO mailbox via the
+// loopback (installed-app) flow. Run by the mailbox owner ONCE; the printed
+// refresh_token goes into MAILBOX_CREDENTIALS_FILE under the mailbox's `send`
+// block — NEVER committed (CLAUDE.md rule g). Node built-ins only; no deps.
 //
 //   node apps/engine/scripts/mint-gmail-token.mjs <client_id> <client_secret>
 //
 // Prereqs (see apps/engine/README.md runbook): a Google Cloud project with the
 // Gmail API enabled and a Desktop-type OAuth client; the mailbox added as a test
 // user on the consent screen.
+//
+// SCOPES: gmail.send (submit the message) AND gmail.metadata (read the delivered
+// message's headers back). The metadata scope is REQUIRED because Gmail rewrites
+// the Message-ID on send — the engine reads the wire Message-ID back via
+// users.messages.get?format=metadata to record the id a reply will carry (see
+// src/gmail.ts). A token minted with gmail.send ALONE cannot make that read (403),
+// which silently breaks reply/bounce threading for the mailbox. gmail.metadata is
+// a RESTRICTED scope: on an unverified app the mailbox must be a listed test user
+// (it can then consent past the "unverified app" screen); it grants header/label
+// read only, never message bodies or attachments.
 
 import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
 
-const SCOPE = "https://www.googleapis.com/auth/gmail.send";
+const SCOPE = "https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.metadata";
 const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const PORT = Number(process.env.MINT_PORT || 42813);
@@ -84,5 +94,5 @@ const server = createServer(async (req, res) => {
 
 server.listen(PORT, "127.0.0.1", () => {
   console.log(`Listening on ${redirectUri} for the consent redirect.`);
-  console.log(`\nOpen this URL, sign in as the mailbox, and grant send access:\n\n${authUrl}\n`);
+  console.log(`\nOpen this URL, sign in as the mailbox, and grant send + metadata-read access:\n\n${authUrl}\n`);
 });

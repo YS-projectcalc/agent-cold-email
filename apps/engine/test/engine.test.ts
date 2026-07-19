@@ -166,6 +166,18 @@ class FakeApiSender<T> {
   }
 }
 
+// A Gmail sender that models the wire-rewrite: it is called with the MINTED id,
+// but reports back the WIRE id Gmail actually stamped (or undefined when the
+// read-back failed) — exactly what the real gmail.ts returns after messages.get.
+class WireRewritingGmail {
+  calls: { input: SendEmailInput; messageId: string }[] = [];
+  constructor(private readonly wireId: string | undefined) {}
+  async send(_t: unknown, input: SendEmailInput, messageId: string): Promise<string | undefined> {
+    this.calls.push({ input, messageId });
+    return this.wireId;
+  }
+}
+
 const GMAIL_BOX = "gmail@coldstart.test";
 const GRAPH_BOX = "graph@coldstart.test";
 const apiCreds: CredentialsMap = {
@@ -401,5 +413,84 @@ describe("EmailEngine.poll", () => {
     expect((retry.events[0] as { messageId: string }).messageId).toBe(
       (first.events[0] as { messageId: string }).messageId,
     );
+  });
+});
+
+const GMAIL_ONLY: CredentialsMap = {
+  [GMAIL_BOX]: {
+    imap: { host: "imap", port: 993, secure: true, user: GMAIL_BOX, pass: "p" },
+    send: { kind: "gmail_api", clientId: "c", clientSecret: "s", refreshToken: "rt" },
+  },
+};
+
+function gmailEngine(store: EngineStore, imap: FakeImap, gmail: WireRewritingGmail, now?: () => number): EmailEngine {
+  return new EmailEngine({
+    credentials: GMAIL_ONLY,
+    store,
+    smtp: new FakeSmtp(),
+    imap,
+    gmail: gmail as unknown as GmailSender,
+    graph: new FakeApiSender() as unknown as GraphSender,
+    now,
+  });
+}
+
+describe("EmailEngine.send — wire Message-ID reconciliation (gmail_api)", () => {
+  // The confirmed production bug (2026-07-19): Gmail's messages.send REWRITES the
+  // Message-ID, so a recipient's reply carries the WIRE id, which is not the id the
+  // engine minted. Pre-fix the engine recorded only the minted id, so the reply's
+  // In-Reply-To resolved to NOTHING and every reply/bounce to a gmail_api send was
+  // silently dropped. This models the real over-time flow: send -> reply arrives.
+  it("threads an inbound reply carrying Gmail's REWRITTEN wire Message-ID (this reply is LOST on the pre-fix engine)", async () => {
+    const store = new EngineStore(dir);
+    const wireId = "<CAMc35PQ9axcPb86Sr9hnWHhJDUTEa7CdKiAuqffNeZ06=vc3fw@mail.gmail.com>";
+    const gmail = new WireRewritingGmail(wireId);
+
+    const sent = await gmailEngine(store, new FakeImap({}), gmail).send(
+      baseInput({ fromEmail: GMAIL_BOX, threadId: "thr_g" }),
+      "k-gmail",
+    );
+
+    // The canonical id returned from /v1/send is the WIRE id — the id a reply carries.
+    expect(sent.messageId).toBe(wireId);
+    // Dual-record: the wire id AND the minted id both resolve to the thread.
+    const mintedId = gmail.calls[0]!.messageId;
+    expect(mintedId).not.toBe(wireId);
+    expect(store.resolveThread(wireId)).toBe("thr_g");
+    expect(store.resolveThread(mintedId)).toBe("thr_g");
+
+    // A recipient replies; the client sets In-Reply-To to the WIRE id (the only
+    // Message-ID that was ever on the delivered message).
+    const imap = new FakeImap({ [GMAIL_BOX]: [{ uid: 7, source: replyFrom(wireId) }] });
+    const { events } = await gmailEngine(store, imap, gmail).poll(GMAIL_BOX, 5);
+
+    // PRE-FIX: resolveThread(wireId) was undefined (only the minted id was stored),
+    // so events.length was 0 — the reply vanished. FIXED: threaded to thr_g.
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: "reply", threadId: "thr_g" });
+  });
+
+  it("keeps the minted id matchable when the wire-id read-back fails (send still succeeds, reply still threads)", async () => {
+    const store = new EngineStore(dir);
+    // Gmail accepted the send (200) but the metadata read-back failed → the
+    // transport reports undefined; the engine keeps the minted id as canonical.
+    const gmail = new WireRewritingGmail(undefined);
+
+    const sent = await gmailEngine(store, new FakeImap({}), gmail, () => 9).send(
+      baseInput({ fromEmail: GMAIL_BOX, threadId: "thr_fb" }),
+      "k-fb",
+    );
+
+    // The send is NOT failed: it returns a result at the send timestamp, and the
+    // minted id is canonical and recorded.
+    expect(sent.sentAt).toBe(9);
+    expect(sent.messageId).toBe(gmail.calls[0]!.messageId);
+    expect(store.resolveThread(sent.messageId)).toBe("thr_fb");
+
+    // A reply carrying that id threads (the fallback stays matchable).
+    const imap = new FakeImap({ [GMAIL_BOX]: [{ uid: 7, source: replyFrom(sent.messageId) }] });
+    const { events } = await gmailEngine(store, imap, gmail).poll(GMAIL_BOX, 5);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: "reply", threadId: "thr_fb" });
   });
 });

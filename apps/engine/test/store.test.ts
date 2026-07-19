@@ -30,4 +30,25 @@ describe("EngineStore", () => {
     expect(store2.getSend("k2")).toEqual({ messageId: "<m2@d>", sentAt: 222 });
     expect(store2.resolveThread("<m2@d>")).toBe("thr_2");
   });
+
+  it("dual-records the minted AND the wire Message-ID onto one thread (a reply matches on either)", async () => {
+    // Gmail rewrites the wire Message-ID: the canonical id (returned to the Worker)
+    // is the wire id, but a reply might carry either — so BOTH resolve to the thread.
+    const store = new EngineStore(dir);
+    const wire = "<CAMc35@mail.gmail.com>";
+    const minted = "<minted@coldstart.test>";
+    await store.recordSend("k3", wire, "thr_3", 333, [minted]);
+
+    // The canonical id stored on the send record is the wire id (what /v1/send returns).
+    expect(store.getSend("k3")).toEqual({ messageId: wire, sentAt: 333 });
+    // Both ids reverse-resolve to the same thread; an unrelated id does not.
+    expect(store.resolveThread(wire)).toBe("thr_3");
+    expect(store.resolveThread(minted)).toBe("thr_3");
+    expect(store.resolveThread("<unrelated@d>")).toBeUndefined();
+
+    // The dual mapping survives a reload (both keys are on disk).
+    const reloaded = new EngineStore(dir);
+    expect(reloaded.resolveThread(wire)).toBe("thr_3");
+    expect(reloaded.resolveThread(minted)).toBe("thr_3");
+  });
 });
