@@ -2,7 +2,6 @@ import { VendorError, type SequenceStep } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
 import { buildUnsubscribeUrl, signUnsubscribeToken } from "../unsubscribe-token.js";
-import { reportUsageToStripeIfConfigured } from "./billing.js";
 import { isLifecycleFrozen } from "./billing-state.js";
 import { runDeliverabilitySweep } from "./deliverability-actions.js";
 import { refreshMailboxWarmupState } from "./mailbox-state.js";
@@ -27,15 +26,13 @@ interface DueSend {
   [column: string]: SqlStorageValue;
 }
 
-const SEND_USAGE_FEE_CENTS = 2;
-
-// A4 (CLASS A) — retry ceiling for a RETRYABLE vendor failure on the post-send
-// billing step. At the cap the send is marked 'failed' (ops-visible) instead of
+// A4 (CLASS A) — retry ceiling for a RETRYABLE vendor failure on the send
+// path. At the cap the send is marked 'failed' (ops-visible) instead of
 // reverted-to-pending forever, so no infinite-retry path survives.
 const MAX_SEND_ATTEMPTS = 5;
 
 // Stuck-'sending' reclaim TTL (persist-before-confirm class). A row claimed
-// 'sending' is only held across ONE send()+billing round trip (seconds); a DO
+// 'sending' is only held across ONE send() round trip (seconds); a DO
 // that dies in that window leaves the row stuck 'sending' with no in-tick catch
 // to grade it. A later tick reclaims a 'sending' row older than this back to
 // 'pending' (send is idempotent on its key, so a re-send is a no-op). Sized far
@@ -126,10 +123,9 @@ function parseSendWindow(raw: string): SendWindow {
  * due, enforcing at SEND TIME (not just at launch): per-mailbox daily caps,
  * lead/campaign status, the suppressions table, and the campaign send window.
  * Each row is claimed atomically (status pending -> sending) before the network
- * send so a concurrent/retried tick cannot double-process it; usage is recorded
- * before the 'sent'/cap side-effects commit so a row is never left
- * sent-but-unbilled. Represents what a DO-alarm would do once fired; B0 exposes
- * it as a directly-callable RPC method since real alarm-driven scheduling is B2.
+ * send so a concurrent/retried tick cannot double-process it. Represents what
+ * a DO-alarm would do once fired; B0 exposes it as a directly-callable RPC
+ * method since real alarm-driven scheduling is B2.
  */
 export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipped: number; deferred: number }> {
   // D5 tenant-level freeze (kill switch). A suspended tenant (dunning SUSPEND
@@ -355,11 +351,11 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
     // never does): a transient VendorError (SMTP 4xx, engine 5xx, unreachable)
     // or a permanent one (unknown mailbox, engine 4xx). An unguarded throw
     // propagates out of runTick and leaves this row stuck 'sending' forever
-    // (only the TTL reclaim above would eventually free it). Grade it in place,
-    // mirroring the billing-failure taxonomy below: transient (or unknown, if
-    // under the attempt cap) reverts to 'pending' for a later tick; permanent
-    // or at-cap marks the row 'failed' (ops-visible). Either way the batch never
-    // throws. No message went out, so no 'sent' side effects run.
+    // (only the TTL reclaim above would eventually free it). Grade it in place:
+    // transient (or unknown, if under the attempt cap) reverts to 'pending' for
+    // a later tick; permanent or at-cap marks the row 'failed' (ops-visible).
+    // Either way the batch never throws. No message went out, so no 'sent'
+    // side effects run.
     let result: Awaited<ReturnType<typeof ctx.adapters.email.send>>;
     try {
       result = await ctx.adapters.email.send(
@@ -410,56 +406,8 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
       continue;
     }
 
-    // Record usage BEFORE committing 'sent' + cap consumption, so a row is
-    // never left sent-but-unbilled. Wrapped per-row: a billing failure is
-    // graded (A4, CLASS A) instead of retried forever. A RETRYABLE failure
-    // reverts JUST this row to 'pending' (email.send is idempotent on its key)
-    // and bumps an attempt counter, up to MAX_SEND_ATTEMPTS; a non-retryable
-    // failure (or the cap) marks the row 'failed' + records an ops-visible
-    // 'failed' event. Either way the batch never throws.
-    try {
-      await ctx.adapters.billing.recordUsage(
-        ctx.tenantId,
-        "email send",
-        SEND_USAGE_FEE_CENTS,
-        `usage:${ctx.tenantId}:${row.id}`,
-      );
-    } catch (err) {
-      // Unknown (non-VendorError) failures are treated as transient — but still
-      // capped, so even a mis-graded permanent error can't loop forever.
-      const retryable = err instanceof VendorError ? err.retryable : true;
-      const nextAttempts = row.attempts + 1;
-      if (retryable && nextAttempts < MAX_SEND_ATTEMPTS) {
-        ctx.sql.exec(`UPDATE scheduled_sends SET status = 'pending', sending_since = NULL, attempts = ? WHERE id = ?`, nextAttempts, row.id);
-        deferred++; // left pending — a later tick retries this row
-        continue;
-      }
-      // Non-retryable, or the retry cap is reached: the email already went out
-      // (send() precedes this step and is idempotent), but usage could not be
-      // recorded — fail the row so ops sees the unbilled send, rather than an
-      // infinite retry. metrics()/campaign_results surface the 'failed' event;
-      // ops-summary counts the failed row.
-      ctx.sql.exec(`UPDATE scheduled_sends SET status = 'failed', sending_since = NULL, attempts = ? WHERE id = ?`, nextAttempts, row.id);
-      ctx.sql.exec(
-        `INSERT OR IGNORE INTO events (id, tenant_id, campaign_id, lead_id, type, step, message_id, thread_id, ts, metadata_json)
-         VALUES (?, ?, ?, ?, 'failed', ?, ?, ?, ?, ?)`,
-        newId("evt"),
-        ctx.tenantId,
-        row.campaign_id,
-        row.lead_id,
-        row.step,
-        result.messageId,
-        row.thread_id,
-        now,
-        JSON.stringify({ reason: err instanceof Error ? err.message : String(err), retryable, attempts: nextAttempts }),
-      );
-      continue;
-    }
-
-    // Usage is durably recorded: now commit 'sent' + cap + event + local ledger
-    // mirror together. These are all synchronous with no await between them, so
-    // within the DO they land as one unit. The ledger insert is idempotent on
-    // source_send_id, a second defense against a double-counted usage entry.
+    // Commit 'sent' + cap + event together. These are all synchronous with no
+    // await between them, so within the DO they land as one unit.
     ctx.sql.exec(
       `UPDATE scheduled_sends SET status = 'sent', sending_since = NULL, mailbox_id = ?, message_id = ?, sent_at = ? WHERE id = ?`,
       picked.id,
@@ -474,9 +422,9 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
     // send would clear the streak just before the bounce it produced is counted
     // (threshold unreachable). The streak resets ONLY on positive engagement (a
     // reply) — see engine/reply-processor.ts.
-    // OR IGNORE mirrors the ledger insert below: the events dedupe index makes
-    // this a no-op on the (impossible-under-the-atomic-claim, but guarded)
-    // chance the same send lands twice, instead of crashing the batch.
+    // OR IGNORE: the events dedupe index makes this a no-op on the
+    // (impossible-under-the-atomic-claim, but guarded) chance the same send
+    // lands twice, instead of crashing the batch.
     ctx.sql.exec(
       `INSERT OR IGNORE INTO events (id, tenant_id, campaign_id, lead_id, type, step, message_id, thread_id, ts, metadata_json)
        VALUES (?, ?, ?, ?, 'sent', ?, ?, ?, ?, ?)`,
@@ -490,16 +438,6 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
       result.sentAt,
       JSON.stringify({ fromEmail: picked.email, toEmail: row.lead_email, subject: renderedSubject, body: sentBody }),
     );
-    ctx.sql.exec(
-      `INSERT OR IGNORE INTO ledger_entries (id, tenant_id, kind, amount_cents, description, ts, source_send_id)
-       VALUES (?, ?, 'usage', ?, 'email send', ?, ?)`,
-      newId("ledg"),
-      ctx.tenantId,
-      SEND_USAGE_FEE_CENTS,
-      result.sentAt,
-      row.id,
-    );
-    await reportUsageToStripeIfConfigured(ctx, 1, row.id); // inert without env.STRIPE_SECRET_KEY — see engine/billing.ts
 
     sent++;
   }

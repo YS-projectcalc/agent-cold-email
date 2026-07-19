@@ -122,8 +122,8 @@ describe("tick enforces the campaign send window (finding #5)", () => {
 });
 
 // panel-02 correctness-engine: read-check-send-write was non-atomic, so a
-// concurrent/retried tick could double-send + double-count. This FAILS on the
-// old code (two sends, usage 4c) — the atomic claim makes it exactly one.
+// concurrent/retried tick could double-send. This FAILS on the old code (two
+// sends) — the atomic claim makes it exactly one.
 describe("tick claims each row atomically — no double-send on concurrent ticks (finding #6)", () => {
   it("processes a due row exactly once when two ticks race over it", async () => {
     const { tenantId, token } = await setupReadyTenant("Atomic Co", "atomicco.com");
@@ -139,61 +139,5 @@ describe("tick claims each row atomically — no double-send on concurrent ticks
 
     const results = await api<CampaignResults>(`/campaigns/${launched.body.campaignId}/results`, { token });
     expect(results.body.sent).toBe(1);
-
-    const account = await api<{ usageCents: number }>("/account", { token });
-    expect(account.body.usageCents).toBe(2); // exactly one send billed, not two
-  });
-});
-
-// panel-02 correctness-engine: 'sent'/cap/event were committed before
-// recordUsage, and a recordUsage throw aborted the whole batch + lost usage.
-// This FAILS on the old code (tick throws / leaves a sent-but-unbilled row).
-describe("tick billing ordering — a recordUsage failure doesn't abort the batch (finding #7)", () => {
-  it("retries only the failed row and never leaves a sent-but-unbilled row", async () => {
-    const { tenantId } = await setupReadyTenant("Billing Co", "billingco.com");
-
-    await runInDurableObject(tenantStub(tenantId), async (instance, state) => {
-      // Two due rows in one batch.
-      await instance.launchCampaign({
-        name: "batch",
-        offer: "x",
-        leads: [
-          { email: "batch-1@leads-test.com", firstName: "A", company: "Co" },
-          { email: "batch-2@leads-test.com", firstName: "B", company: "Co" },
-        ],
-        sequence: ONE_STEP,
-        timezone: "UTC",
-        sendWindow: { startHour: 0, endHour: 23 },
-        stopOnReply: true,
-      });
-
-      // Build adapters without sending, then inject a one-shot billing failure.
-      await instance.infrastructureStatus();
-      const billing = (instance as unknown as { adapters: { billing: Record<string, unknown> } }).adapters.billing;
-      const orig = (billing.recordUsage as (...a: unknown[]) => Promise<unknown>).bind(billing);
-      let calls = 0;
-      billing.recordUsage = async (...args: unknown[]) => {
-        calls += 1;
-        if (calls === 1) throw new Error("sandbox injected billing failure");
-        return orig(...args);
-      };
-
-      // Must NOT throw out of the batch.
-      const tick = await instance.tick();
-      expect(tick.sent).toBe(1);
-
-      const one = (sql: string) => state.storage.sql.exec<{ n: number }>(sql).one().n;
-      expect(one(`SELECT COUNT(*) as n FROM scheduled_sends WHERE status = 'sent'`)).toBe(1);
-      expect(one(`SELECT COUNT(*) as n FROM scheduled_sends WHERE status = 'pending'`)).toBe(1); // reverted for retry
-      expect(one(`SELECT COUNT(*) as n FROM ledger_entries WHERE kind = 'usage'`)).toBe(1);
-      // The core invariant: no 'sent' row lacks its usage ledger entry.
-      expect(
-        one(
-          `SELECT COUNT(*) as n FROM scheduled_sends ss
-           WHERE ss.status = 'sent'
-             AND NOT EXISTS (SELECT 1 FROM ledger_entries le WHERE le.source_send_id = ss.id AND le.kind = 'usage')`,
-        ),
-      ).toBe(0);
-    });
   });
 });

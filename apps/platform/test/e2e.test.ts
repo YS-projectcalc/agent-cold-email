@@ -168,13 +168,14 @@ describe("B0 walking skeleton — signup through reply/bounce handling", () => {
     expect(metrics.body).toEqual(resultsCounts);
     expect(metrics.body).not.toHaveProperty("opens");
 
-    // 9. account() shows usage: 4 sends x 2c/send.
+    // 9. account() shows usage: demo/free tier accrues no fee (no mailbox
+    // fee — paid-tier only, see engine/provisioning.ts — and sends carry no fee).
     const account = await api<AccountSummary>("/account", { token });
     expect(account.body.domains).toBe(2);
     expect(account.body.mailboxes).toBe(4);
     expect(account.body.campaigns).toBe(1);
     expect(account.body.leads).toBe(3);
-    expect(account.body.usageCents).toBe(8);
+    expect(account.body.usageCents).toBe(0);
   });
 
   it("enforces per-mailbox daily send caps (behavior, not just existence)", async () => {

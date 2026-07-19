@@ -40,12 +40,6 @@ describe("POST /demo/run — sandbox-only accelerated pipeline run", () => {
 
     expect(res.body.sampleThread).not.toBeNull();
     expect(res.body.sampleThread!.messages.map((m) => m.type)).toContain("reply");
-
-    // Account usage reflects the sends /demo/run actually made (proves it's
-    // driving the SAME engine tick the rest of the platform uses, not a
-    // canned/fabricated summary).
-    const account = await api<{ usageCents: number }>("/account", { token });
-    expect(account.body.usageCents).toBeGreaterThan(0);
   });
 
   // panel-02 abuse-cost-dos: /demo/run had no per-tenant rate limit, so one
