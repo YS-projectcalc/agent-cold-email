@@ -1,7 +1,7 @@
 {
   "name": "coldrig",
   "version": "0.2.0",
-  "description": "Agent-native cold-email infrastructure. Bundles the hosted, 17-tool Coldrig MCP server (domains, mailboxes, campaigns, inbox, metrics) so your agent runs outbound email end to end with one bearer token — no dashboard required. Free sandbox demo now; early access — real sending is not yet active. $99/mo for 5 mailboxes once live.",
+  "description": "Agent-native cold-email infrastructure. Bundles the hosted, 21-tool Coldrig MCP server (domains, mailboxes, campaigns, inbox, metrics) so your agent runs outbound email end to end with one bearer token — no dashboard required. Real sending is live in production (Gmail API, HTTPS/443), plus a free sandbox demo. New accounts activate real sending via a short concierge step. $99/mo for 5 mailboxes.",
   "author": {
     "name": "EpiphanyMade",
     "url": "https://coldrig.dev"

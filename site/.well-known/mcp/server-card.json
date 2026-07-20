@@ -32,25 +32,90 @@
     "prompts": false
   },
   "tools": [
-    { "name": "setup_infrastructure", "description": "Buy branded lookalike domains, provision mailboxes, start warmup." },
-    { "name": "infrastructure_status", "description": "Provisioning + warmup progress, per-mailbox health, send-readiness date." },
-    { "name": "launch_campaign", "description": "Create and activate a sequence against a lead list." },
-    { "name": "campaign_results", "description": "Per-campaign sends, replies, bounces, complaints." },
-    { "name": "metrics", "description": "Account-wide deliverability + warmup health." },
-    { "name": "inbox", "description": "Unified reply inbox across all mailboxes." },
-    { "name": "thread", "description": "Full message history for one thread." },
-    { "name": "reply", "description": "Send a reply on a thread; stop-on-reply is automatic." },
-    { "name": "mark", "description": "Mark a thread read, unread, or archived." },
-    { "name": "pause", "description": "Pause one campaign." },
-    { "name": "pause_all", "description": "Pause every campaign for the tenant." },
-    { "name": "account", "description": "Usage, billing state, quota, and what the AI deliverability control loop has done." },
-    { "name": "get_dashboard", "description": "List every saved dashboard view, or fetch one view's full layout + rev." },
-    { "name": "configure_dashboard", "description": "Create, update, promote-to-default, or delete a dashboard saved view." },
-    { "name": "label_thread", "description": "Set or clear a triage label on an inbox thread." },
-    { "name": "list_campaigns", "description": "List every campaign with id, name, status, and event counts." },
-    { "name": "activity", "description": "Pollable, chronological feed of campaign events and deliverability control-loop actions." },
-    { "name": "get_webhooks", "description": "List outbound webhook subscriptions, or fetch one subscription plus its recent delivery and attempt log." },
-    { "name": "configure_webhook", "description": "Create, update, or delete an outbound webhook subscription. Push reply, bounce, soft_bounce, and complaint events to your own HTTPS endpoint, HMAC-SHA256 signed, as an alternative to polling activity." }
+    {
+      "name": "setup_infrastructure",
+      "description": "Buy branded lookalike domains, provision mailboxes, start warmup."
+    },
+    {
+      "name": "infrastructure_status",
+      "description": "Provisioning + warmup progress, per-mailbox health, send-readiness date."
+    },
+    {
+      "name": "launch_campaign",
+      "description": "Create and activate a sequence against a lead list."
+    },
+    {
+      "name": "campaign_results",
+      "description": "Per-campaign sends, replies, bounces, complaints."
+    },
+    {
+      "name": "metrics",
+      "description": "Account-wide deliverability + warmup health."
+    },
+    {
+      "name": "inbox",
+      "description": "Unified reply inbox across all mailboxes."
+    },
+    {
+      "name": "thread",
+      "description": "Full message history for one thread."
+    },
+    {
+      "name": "reply",
+      "description": "Send a reply on a thread; stop-on-reply is automatic."
+    },
+    {
+      "name": "mark",
+      "description": "Mark a thread read, unread, or archived."
+    },
+    {
+      "name": "pause",
+      "description": "Pause one campaign."
+    },
+    {
+      "name": "pause_all",
+      "description": "Pause every campaign for the tenant."
+    },
+    {
+      "name": "account",
+      "description": "Usage, billing state, quota, and what the AI deliverability control loop has done."
+    },
+    {
+      "name": "get_dashboard",
+      "description": "List every saved dashboard view, or fetch one view's full layout + rev."
+    },
+    {
+      "name": "configure_dashboard",
+      "description": "Create, update, promote-to-default, or delete a dashboard saved view."
+    },
+    {
+      "name": "label_thread",
+      "description": "Set or clear a triage label on an inbox thread."
+    },
+    {
+      "name": "list_campaigns",
+      "description": "List every campaign with id, name, status, and event counts."
+    },
+    {
+      "name": "activity",
+      "description": "Pollable, chronological feed of campaign events and deliverability control-loop actions."
+    },
+    {
+      "name": "get_webhooks",
+      "description": "List outbound webhook subscriptions, or fetch one subscription plus its recent delivery and attempt log."
+    },
+    {
+      "name": "configure_webhook",
+      "description": "Create, update, or delete an outbound webhook subscription. Push reply, bounce, soft_bounce, and complaint events to your own HTTPS endpoint, HMAC-SHA256 signed, as an alternative to polling activity."
+    },
+    {
+      "name": "get_byo_domains",
+      "description": "List your BYO (bring-your-own) domains, or fetch one domain's full intake detail, pre-flight scan results, and consent state."
+    },
+    {
+      "name": "configure_byo_domain",
+      "description": "Register or advance a bring-your-own domain/mailbox intake: pre-flight scan, consent tracking, and activation handoff for sending from a domain you already own."
+    }
   ],
   "guardrails": [
     "per-tenant domain and mailbox isolation",

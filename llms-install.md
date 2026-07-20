@@ -4,9 +4,9 @@ Machine-readable install guide for coding agents (Cline, Claude Code, Codex, or 
 
 ## What you're installing
 
-A hosted MCP server + CLI for agent-native cold-email infrastructure: 17 tools to provision isolated branded domains and mailboxes, run warmup, launch sequences, and manage replies. The MCP endpoint is hosted — nothing to clone, build, or run locally unless you specifically want the CLI's source.
+A hosted MCP server + CLI for agent-native cold-email infrastructure: 21 tools to provision isolated branded domains and mailboxes, run warmup, launch sequences, and manage replies. The MCP endpoint is hosted — nothing to clone, build, or run locally unless you specifically want the CLI's source.
 
-**Status: early access, test mode only.** Live now: the hosted MCP endpoint and the full HTTP API, both running against a sandbox vendor layer (no real domains/mailboxes/sends, no cost). Not yet available for real sending. No deliverability guarantees, ever.
+**Status: live in production.** The hosted MCP endpoint, the full HTTP API, and the free sandbox demo are all live now. Real sending is live in production (Gmail API, HTTPS/443) for activated tenants; new accounts activate real sending through a short concierge step while self-serve activation rolls out. Un-activated and demo tenants run against a fault-injecting sandbox vendor layer (no real domains/mailboxes/spend). No inbox-placement or deliverability guarantees, ever.
 
 ## Option A — remote MCP (recommended, no build)
 

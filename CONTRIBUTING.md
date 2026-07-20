@@ -43,7 +43,7 @@ npm run dev -w apps/platform
 - **Secrets never in code or git.** Env/wrangler secrets only.
 - **Tenant isolation is mandatory** in every query or Durable Object access that touches tenant data — every new endpoint or engine function scoped by `tenant_id`.
 - **Every new directory that holds code or content gets a `README.md`** at creation time: what it is, how to run/test it, what depends on it.
-- **Test mode only.** Nothing in this repo wires real vendor spend, real Stripe live keys, or real vendor credentials — that is gated behind `ACTIVATION.md` and is an owner-hands step, not something a PR should attempt.
+- **No live vendor credentials or Stripe live keys in the repo.** Real sending is live in production for activated tenants (Gmail API, HTTPS/443), but those credentials live outside this codebase as Cloudflare Worker secrets set through `ACTIVATION.md`'s owner-hands step — never something a PR wires in.
 
 ## Before opening a PR
 

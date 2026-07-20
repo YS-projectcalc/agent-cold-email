@@ -2,7 +2,7 @@
 
 ## Current state
 
-This project is in active build, running in **test mode only**: Stripe test keys, sandbox vendor adapters, no real vendor spend, no live production deployment with real customer data yet. There is no bug bounty program at this stage.
+This project is **live in production**: real sending is live for activated tenants (Gmail API, HTTPS/443), alongside a sandbox vendor layer for un-activated and demo tenants. Billing still runs on Stripe test keys (no real vendor spend yet), and there is no real customer data yet. There is no bug bounty program at this stage.
 
 That does not mean security reports are unwelcome — the control-plane, auth, tenancy-isolation, and billing-ledger code is real and is where a report is most valuable before real customers exist.
 
@@ -30,7 +30,7 @@ In scope:
 
 Out of scope (nothing to find yet, but reports acknowledged):
 
-- Real vendor adapters (`src/vendors/real/*`) — these are unreachable stubs (`NotActivatedError`) in the current build; no live credentials exist anywhere in the codebase or its deployment.
+- Real vendor adapters (`src/vendors/real/*`) for un-activated tenants — these throw `NotActivatedError` and are unreachable without a live vendor credential. Real sending (Gmail API, HTTPS/443) is live for activated tenants, but new-account activation still runs through a short concierge step, not automatic self-serve, and there is no established multi-year production track record yet.
 - Anything requiring physical access, social engineering of EpiphanyMade staff, or denial-of-service against infrastructure we don't yet operate at scale.
 
 ## Secrets handling
