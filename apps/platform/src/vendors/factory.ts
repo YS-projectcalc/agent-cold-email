@@ -10,6 +10,8 @@ import { RealBillingPort } from "./real/billing-port.js";
 import { RealDnsScanPort } from "./real/dns-scan-port.js";
 import { RealDomainPort } from "./real/domain-port.js";
 import { RealEmailPort, type EngineClientConfig } from "./real/email-port.js";
+import { type InboxKitClientConfig } from "./real/inboxkit-client.js";
+import { RealInboxKitDomainPort, type InboxKitDomainRegistrant } from "./real/inboxkit-domain-port.js";
 import { RealMailboxPort } from "./real/mailbox-port.js";
 import { RealMetricsPort } from "./real/metrics-port.js";
 import { RealDomainReputationPort } from "./real/reputation-port.js";
@@ -88,6 +90,24 @@ export function createVendorAdapters(
   engineConfig?: EngineClientConfig,
   tenantId?: string,
   engineTenantsRaw?: string,
+  /**
+   * InboxKit workspace credentials (ACTIVATION.md Gate 0, founder ruling
+   * 2026-07-20: "go inboxkit"). Absent in the deployed build today (no call
+   * site supplies it) — `RealMailboxPort`/`RealInboxKitDomainPort` stay dark
+   * regardless (their own `NotActivatedError` check, mirroring
+   * `engineConfig`'s absence keeping `RealEmailPort` dark above). Reused for
+   * BOTH the mailbox port and (if selected) the domain port — one InboxKit
+   * vendor account.
+   */
+  inboxKitConfig?: InboxKitClientConfig,
+  /**
+   * Registrant-of-record contact details for InboxKit domain registration
+   * (real/inboxkit-domain-port.ts's doc comment — a founder-level identity
+   * decision, deliberately never defaulted). Only consulted when
+   * `inboxKitConfig` is ALSO present; absent otherwise like every other
+   * activation-gated input here.
+   */
+  inboxKitDomainRegistrant?: InboxKitDomainRegistrant,
 ): VendorAdapterBundle {
   const isDemoOrFree = plan === "demo" || plan === "free";
   const isEngineAllowlisted = tenantId !== undefined && parseEngineTenants(engineTenantsRaw).has(tenantId);
@@ -115,8 +135,14 @@ export function createVendorAdapters(
 
   return {
     kind: "real",
-    domain: new RealDomainPort(),
-    mailbox: new RealMailboxPort(),
+    // Porkbun stays the default registrar path (SPEC.md §11/§12,
+    // ACTIVATION.md:25) unless a dedicated InboxKit domain config is
+    // supplied — see real/inboxkit-domain-port.ts's OPEN QUESTION doc
+    // comment on the unresolved Porkbun-vs-InboxKit registrar decision.
+    domain: inboxKitConfig ? new RealInboxKitDomainPort(inboxKitConfig, inboxKitDomainRegistrant) : new RealDomainPort(),
+    // InboxKit is the unambiguous, SPEC-decided mailbox vendor (§11/§12
+    // "primary = Inboxkit") — no fallback branch needed here.
+    mailbox: new RealMailboxPort(inboxKitConfig),
     email,
     billing: new RealBillingPort(),
     metrics: new RealMetricsPort(),
