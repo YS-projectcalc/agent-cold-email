@@ -5,3 +5,4 @@
 ## 2026-07-16-send-live-and-webhooks
 - `scratch-rescue/connectors-directory-listing.md` — prepped Anthropic Connectors Directory listing copy (name/desc/use-cases/auth-mode/reviewer-cred checklist); rescued from session scratchpad. Referenced by ROADMAP "Consumer-chat connector placement" (Team-org parked).
 - `scratch-rescue/mcp-review-email-draft.md` — draft email to mcp-review@anthropic.com; SUPERSEDED by workaround research (no pre-approval email needed) — kept for provenance.
+- [2026-07-20-post-two-waves/](2026-07-20-post-two-waves/) — handoff run after the 07-19 double ship wave (production 443 + fully-live reframe; byo 21-tool merge + 2¢ fee deletion). `scratch-rescue/render-og-image.js` = the Playwright SVG→PNG renderer used for og-image (repo has no other generator); `prior-HANDOFF.md` = pre-handoff copy.

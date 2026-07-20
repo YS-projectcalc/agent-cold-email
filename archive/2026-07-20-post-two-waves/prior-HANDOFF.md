@@ -41,7 +41,6 @@ All three lanes' evidence is frozen on disk (`docs/adversarial/byo-intake-2026-0
 
 ## In flight / next
 
-- Still running: **none** — every session agent (builders, adversaries, bookkeepers, panel shoppers) delivered and its output is committed; no background tasks, no in-progress git ops.
 - **This ship wave closed the entire prior decision queue** (commit-confirm, OAuth mint + deploy "go", the fully-live reframe) — see `## Where we are right now`. **The second wave, same day, then closed item 1 below** (byo-intake coordinated merge, ruling F) **and rulings A/D/C/E** — see `## Second wave (2026-07-19, same day)`. Nothing is staged-but-unrun anymore; the working tree is clean.
 - **No non-destructive build lane is currently open.** Everything buildable without a founder ruling has shipped. Remaining founder queue:
   1. ~~`byo-intake` coordinated merge pass~~ **DONE 2026-07-19** — merged + deployed live as one coordinated pass (ruling F); see `## Second wave`.
@@ -66,8 +65,6 @@ All three lanes' evidence is frozen on disk (`docs/adversarial/byo-intake-2026-0
 - **This is a shared/live worktree with multiple parallel-agent lanes** — the 07-16 four-lane batch (engine-443, directory-readiness, poll fix, webhooks) is now fully committed, but treat this as a standing pattern, not a one-off: before any `git add`, run `git status` and check what else is dirty — do not `git add -A` or commit one lane's files blind.
 
 ## Key files
-
-- `archive/2026-07-20-post-two-waves/scratch-rescue/render-og-image.js` — the Playwright SVG→PNG renderer used to regenerate `site/assets/og-image.png` from `og-image.svg` (run via `~/.claude/skills/playwright-cli/run.sh <script> <svg> <png>`); the repo has NO other og-image generator — use this next time the SVG changes.
 
 - `SPEC.md` (§0 locks · §12/§12.1 economics · §18 pricing · §19 dashboard · §20 BYO) · `ROADMAP.md` (`## Now`/`## Open` ledger — source of truth for all open items) · `ACTIVATION.md` (owner-hands gates; Gate-2 engine host = the SMTP-wall context) · `CLAUDE.md` (project law).
 - `apps/engine/` — the Node SMTP/IMAP daemon (committed `eb8ee42`). `apps/engine/dist/` — built; runnable from any SMTP-capable network for a local smoke (SMTP-wall path (b)).
