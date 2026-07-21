@@ -1,13 +1,15 @@
-// The 21 MCP tools (tools 13-15 added by SPEC.md §19.5, tools 16-17 by the
+// The 24 MCP tools (tools 13-15 added by SPEC.md §19.5, tools 16-17 by the
 // §19.0 parity-gap follow-up, tools 18-19 by the ROADMAP.md WIN-THE-COMPARISON
-// (d) webhooks lane, tools 20-21 by SPEC.md §20's BYO domain intake — AGENTS.md's
-// public tool table is a canonical doc folded by the orchestrator, not updated here).
+// (d) webhooks lane, tools 20-21 by SPEC.md §20's BYO domain intake, tools
+// 22-24 by SPEC.md §22's warm-lead thin layer (increments #1-#3, founder-gated
+// 2026-07-21) — AGENTS.md's public tool table is a canonical doc folded by the
+// orchestrator, not updated here).
 // Each tool dispatches to the SAME TenantDO method the equivalent HTTP route
 // calls (src/routes/*.ts) — the MCP surface is a second transport onto the
 // exact same facade, never a parallel implementation (CLAUDE.md rule c).
 
 import type { ZodType } from "zod";
-import { ActivityQueryInput, InboxQueryInput } from "@coldstart/shared";
+import { ActivityQueryInput, InboxQueryInput, ListLeadsQueryInput, SuppressLeadInput, UpdateLeadInput } from "@coldstart/shared";
 import type { TenantDO } from "../tenant-do.js";
 import {
   CampaignIdInput,
@@ -281,5 +283,36 @@ export const MCP_TOOLS: McpTool<any>[] = [
           return stub.connectByoMailbox(args.id!, { email: args.email!, transport: args.transport! });
       }
     },
+  ),
+  // --- SPEC.md §22 — warm-lead thin layer (increments #1-#3, ratified +
+  // founder-gated 2026-07-21). Tools 22-24: suppress_lead / update_lead /
+  // list_leads. schedule_followup (SPEC.md §22's tool 23 in the frozen dive's
+  // own numbering) is OUT OF SCOPE for this build — see docs/adversarial/
+  // warm-lead-thin-layer-design-2026-07-16.md R1/R2 (a new guarded
+  // single-send primitive is a build-gated increment #4). ---
+  tool(
+    "suppress_lead",
+    "Permanently suppress an email address tenant-wide (every current and future campaign) — the manual/free-text 'stop emailing me' path for opt-outs the strict typed-unsubscribe matcher misses. Inputs: email, reason (fixed 'manual' — the only value this tool honestly claims; bounce/complaint/unsubscribe are recorded automatically elsewhere), note (accepted, not persisted). Cancels every pending send + marks every campaign-lead row 'suppressed'. Last-write-wins: re-suppressing a bounce/complaint/unsubscribe row relabels its reason to 'manual'. There is no un-suppress tool.",
+    SuppressLeadInput,
+    // Cancels pending sends + permanently reclassifies every lead row sharing
+    // this email — irreversible via this API (no un-suppress tool exists).
+    { title: "Suppress Lead", destructiveHint: true },
+    (stub, args) => stub.suppressLead(args),
+  ),
+  tool(
+    "update_lead",
+    "Record what you learned about a contact (their reply, your triage) as a durable, contact-level disposition — keyed by email, visible across every campaign that lists them. Inputs: email, interestStatus (none|interested|meeting_booked|not_now|not_interested|bad_fit|out_of_office|wrong_person — a server-enforced enum; 'do not contact' is NOT a member, use suppress_lead instead), notes, tags (free-form). A PARTIAL patch — only the fields you pass are changed; at least one of interestStatus/notes/tags is required. Filterable via list_leads.",
+    UpdateLeadInput,
+    // Upserts a disposition row — never deletes/destroys anything; a later
+    // call always overwrites only the fields it names, freely revisable.
+    { title: "Update Lead Disposition", destructiveHint: false },
+    (stub, args) => stub.updateLead(args, "mcp"),
+  ),
+  tool(
+    "list_leads",
+    "List/export leads with their contact-level disposition, cursor-paginated. Returns { leads[], nextCursor }; each row: leadId, email, firstName, company, campaignId, campaignName, globalStatus, interestStatus, notes, tags, suppressed, lastEventType, lastEventTs, createdAt. Filters: campaign, interestStatus, suppressed, replied. This IS the export surface — paginate to dump the full book of business as JSON (no separate CSV endpoint). Use update_lead to write disposition, suppress_lead to opt an address out.",
+    ListLeadsQueryInput,
+    { title: "List Leads", readOnlyHint: true },
+    (stub, args) => stub.listLeads(args),
   ),
 ];

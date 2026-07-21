@@ -38,6 +38,11 @@ through the DO.
   `POST /byo-domains/:id/connect-mailbox` (SPEC.md §20). Authed (bearer OR
   cookie). Every mutating body validates at the boundary against a
   `@coldstart/shared` zod schema before it reaches the DO.
+- `leads.ts` — `GET /leads` (list/export, filterable + cursor-paginated),
+  `POST /leads/suppress`, `POST /leads/disposition` (SPEC.md §22 warm-lead
+  thin layer, increments #1-#3). Authed (bearer OR cookie). Body-keyed on
+  `email` (not URL-keyed) for the two mutating routes. Mirrors the MCP
+  `suppress_lead`/`update_lead`/`list_leads` tools exactly (parity law).
 - `checkout.ts` — `POST /checkout` (B1, authed): demo/free -> paid upgrade.
   Real Stripe TEST-mode Checkout Session if `env.STRIPE_SECRET_KEY` is set,
   else a simulated session. `GET /checkout/simulate` (UNAUTHENTICATED — the

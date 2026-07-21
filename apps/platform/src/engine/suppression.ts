@@ -3,8 +3,8 @@
 // previously private to reply-processor.ts (bounce/complaint); extracted here
 // so the B4 hosted RFC 8058 endpoint and the inbound typed-unsubscribe reply
 // matcher can reuse the EXACT same write path instead of a second one.
-import type { SuppressionReason } from "@coldstart/shared";
-import { newId } from "../schema.js";
+import type { SuppressionReason, SuppressLeadInput } from "@coldstart/shared";
+import { recordEventIfNew } from "./events.js";
 import type { TenantContext } from "../tenant-context.js";
 
 /** Writes/updates the permanent (tenant, email) suppression row. Idempotent
@@ -62,13 +62,26 @@ export interface UnsubscribeResult {
  * a repeat unsubscribe click would otherwise insert a fresh 'unsubscribe'
  * event on every call. `suppress()` itself still runs unconditionally so a
  * later manual/explicit unsubscribe can update the recorded reason.
+ *
+ * `reason` defaults to `"unsubscribe"` — the original hardcoded value both
+ * pre-existing callers (the hosted RFC 8058 endpoint via
+ * TenantDO.unsubscribeByEmail, and the inbound typed-unsubscribe reply
+ * matcher, engine/reply-processor.ts's processReply) rely on unchanged.
+ * SPEC.md §22's `suppress_lead` tool is the only caller that passes
+ * `"manual"` — the parametrization the design calls for
+ * (`suppression.ts:71`'s hardcoded reason).
  */
-export function unsubscribeEmail(ctx: TenantContext, email: string, ts: number): UnsubscribeResult {
+export function unsubscribeEmail(
+  ctx: TenantContext,
+  email: string,
+  ts: number,
+  reason: SuppressionReason = "unsubscribe",
+): UnsubscribeResult {
   const alreadySuppressed = ctx.sql
     .exec<{ email: string }>(`SELECT email FROM suppressions WHERE tenant_id = ? AND email = ?`, ctx.tenantId, email)
     .toArray().length > 0;
 
-  suppress(ctx, email, "unsubscribe", ts);
+  suppress(ctx, email, reason, ts);
   if (alreadySuppressed) return { suppressed: true, alreadySuppressed: true };
 
   const leads = ctx.sql
@@ -92,18 +105,48 @@ export function unsubscribeEmail(ctx: TenantContext, email: string, ts: number):
       .toArray()[0];
     if (!ref) continue;
 
-    ctx.sql.exec(
-      `INSERT INTO events (id, tenant_id, campaign_id, lead_id, type, step, message_id, thread_id, ts, metadata_json)
-       VALUES (?, ?, ?, ?, 'unsubscribe', 0, NULL, ?, ?, ?)`,
-      newId("evt"),
-      ctx.tenantId,
-      ref.campaign_id,
-      lead.id,
-      ref.thread_id,
+    // SPEC.md §22 — routed through the SAME once-per-new-event choke point
+    // (engine/events.ts's recordEventIfNew) every other event type already
+    // uses, so the outbound-webhook fan-out fires for 'unsubscribe' too (the
+    // enum addition to WEBHOOK_EVENT_TYPES alone is inert without this — the
+    // fan-out lives ONLY inside that choke). `messageId: null` (there is no
+    // real inbound Message-ID for a tenant-wide suppression event) is
+    // preserved rather than a synthetic non-null value: NULLs are distinct in
+    // the events unique index, so this loop still records one row per lead
+    // sharing the email instead of colliding on a shared key.
+    recordEventIfNew(ctx, {
+      campaignId: ref.campaign_id,
+      leadId: lead.id,
+      type: "unsubscribe",
+      step: 0,
+      messageId: null,
+      threadId: ref.thread_id,
       ts,
-      JSON.stringify({ email }),
-    );
+      metadata: { email },
+    });
   }
 
   return { suppressed: true, alreadySuppressed: false };
+}
+
+/**
+ * SPEC.md §22 — `suppress_lead` MCP tool / REST route: the free-text "stop
+ * emailing me" path the strict typed-unsubscribe matcher misses. Thin wrapper
+ * over `unsubscribeEmail` with `reason` pinned to `"manual"` (the only value
+ * an external caller can honestly claim — `bounce`/`complaint`/`unsubscribe`
+ * are exclusively system-derived elsewhere; see `SuppressLeadInput`'s zod
+ * schema, which accepts no other literal). `input.note` is accepted for
+ * schema symmetry with the ratified design's `{email, reason?='manual',
+ * note?}` shape but NOT persisted — `suppressions` carries no note column and
+ * SPEC.md §22's data-model deltas name none; mirrors `ConfigureWebhookInput`'s
+ * `note` field (mcp/schemas.ts), already accepted-but-ignored for the same
+ * reason. Last-write-wins on `reason` (adversary amendment, `docs/
+ * adversarial/warm-lead-thin-layer-design-2026-07-16.md` R2): re-suppressing
+ * a `complaint`/`unsubscribe` row via this tool overwrites its reason to
+ * `'manual'`, matching `unsubscribeEmail`'s pre-existing unconditional
+ * `suppress()` call — inert today (every consumer is reason-blind) and there
+ * is deliberately NO un-suppress tool in this design.
+ */
+export function suppressLead(ctx: TenantContext, input: SuppressLeadInput, ts: number): UnsubscribeResult {
+  return unsubscribeEmail(ctx, input.email, ts, input.reason);
 }

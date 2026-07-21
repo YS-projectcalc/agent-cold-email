@@ -7,11 +7,14 @@ import type {
   DashboardLayout,
   InboxQueryInput,
   LaunchCampaignInput,
+  ListLeadsQueryInput,
   Provenance,
   RegisterByoDomainInput,
   RequestManagedByoMailboxesInput,
   SetupInfrastructureInput,
+  SuppressLeadInput,
   TenantPlan,
+  UpdateLeadInput,
   WebhookCreateInput,
   WebhookUpdateInput,
 } from "@coldstart/shared";
@@ -38,7 +41,9 @@ import { runTick } from "./engine/tick.js";
 import { withRequestIdempotency } from "./engine/idempotency.js";
 import { runDeliverabilitySweep } from "./engine/deliverability-actions.js";
 import { runPollInbox } from "./engine/reply-processor.js";
-import { unsubscribeEmail, type UnsubscribeResult } from "./engine/suppression.js";
+import { suppressLead, unsubscribeEmail, type UnsubscribeResult } from "./engine/suppression.js";
+import { upsertLeadDisposition, type LeadDispositionView } from "./engine/lead-dispositions.js";
+import { listLeads, type LeadListPage } from "./engine/list-leads.js";
 import { getThread, markThread, replyToThread } from "./engine/threads.js";
 import { listInbox, type InboxPage } from "./engine/inbox.js";
 import { getActivityFeed, type ActivityPage } from "./engine/activity.js";
@@ -531,6 +536,25 @@ export class TenantDO extends DurableObject<Env> {
   unsubscribeByEmail(email: string): UnsubscribeResult {
     const ctx = this.requireContext();
     return unsubscribeEmail(ctx, email, ctx.clock.now());
+  }
+
+  // --- SPEC.md §22 — warm-lead thin layer (increments #1-#3, ratified +
+  // founder-gated 2026-07-21). The SAME facade both the HTTP routes
+  // (routes/leads.ts) and the MCP tools (suppress_lead/update_lead/list_leads)
+  // call — never a parallel implementation (CLAUDE.md rule c). ---
+
+  suppressLead(input: SuppressLeadInput): UnsubscribeResult {
+    const ctx = this.requireContext();
+    return suppressLead(ctx, input, ctx.clock.now());
+  }
+
+  updateLead(input: UpdateLeadInput, source: Provenance): LeadDispositionView {
+    const ctx = this.requireContext();
+    return upsertLeadDisposition(ctx, input, source, ctx.clock.now());
+  }
+
+  listLeads(query: ListLeadsQueryInput): LeadListPage {
+    return listLeads(this.requireContext(), query);
   }
 
   // --- D5 lifecycle: voluntary cancel (tenant-authed, POST /cancel) + abuse

@@ -2,7 +2,7 @@
 
 The hosted MCP surface (B5 brief) — a direct JSON-RPC 2.0 handler over
 streamable HTTP, mounted at `POST /mcp` (`../routes/mcp.ts`). Deliberately
-NOT the Agents SDK `McpAgent`: the facade started as 17 tools (now 21, with
+NOT the Agents SDK `McpAgent`: the facade started as 17 tools (now 24, with
 no resources, prompts, sampling, or SSE streaming — see `tools.ts`'s own
 header comment for the current count), so a thin hand-rolled handler keeps
 the surface small and auditable (ARCHITECTURE.md #7 called for `McpAgent`
@@ -24,7 +24,11 @@ for the transport implementation — the tool list/contract is unchanged).
   `GET /campaigns` / `GET /activity` DO methods, closing the last
   HTTP-only gap. Tools 18-19 (`get_webhooks`/`configure_webhook` — SPEC.md
   §21) and 20-21 (`get_byo_domains`/`configure_byo_domain` — SPEC.md §20)
-  follow the SAME get/configure-with-`.refine()` pattern.
+  follow the SAME get/configure-with-`.refine()` pattern. Tools 22-24
+  (`suppress_lead`, `update_lead`, `list_leads` — SPEC.md §22, warm-lead
+  thin layer increments #1-#3) reuse `@coldstart/shared`'s `leads.ts`
+  schemas directly (no `schemas.ts` wrapper needed — every field lives in
+  the tool's args, no id-in-URL split).
 - `schemas.ts` — zod schemas for MCP tool arguments: reuses the
   `@coldstart/shared` intent/dashboard schemas for tools whose HTTP body IS
   the argument object, and adds small schemas for the tools whose HTTP shape

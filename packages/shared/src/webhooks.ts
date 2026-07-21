@@ -10,10 +10,15 @@ import { z } from "zod";
 
 // The event kinds a subscription may push. These are exactly the inbound
 // `events.type` values a buyer cares about (engine/reply-processor.ts records
-// them): a genuine reply, a HARD bounce, a soft (transient) bounce, and a spam
-// complaint. A subscription's filter selects among these; an event type not in
-// a subscription's list is never delivered to it.
-export const WEBHOOK_EVENT_TYPES = ["reply", "bounce", "soft_bounce", "complaint"] as const;
+// them): a genuine reply, a HARD bounce, a soft (transient) bounce, a spam
+// complaint, and (SPEC.md §22) an unsubscribe/opt-out. A subscription's
+// filter selects among these; an event type not in a subscription's list is
+// never delivered to it. `unsubscribe` closes the poll-only gap SPEC.md §22
+// names — closing it ALSO required routing the opt-out event write through
+// the recordEventIfNew choke point (engine/suppression.ts's unsubscribeEmail),
+// since the enum addition alone is inert (the enqueue fan-out lives only
+// inside that choke point).
+export const WEBHOOK_EVENT_TYPES = ["reply", "bounce", "soft_bounce", "complaint", "unsubscribe"] as const;
 export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
 
 // A webhook endpoint URL: bounded length + basic shape only. The real security
