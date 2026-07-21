@@ -232,7 +232,7 @@ describe("both List-Unsubscribe forms + List-Unsubscribe-Post are emitted, and t
     }
     const sentInputs = await runInDurableObject(tenantStub(tenantId), async (instance) => {
       await instance.tick();
-      return (instance as unknown as { adapters: { email: { sentInputs: SentInput[] } } }).adapters.email.sentInputs;
+      return (instance as unknown as { buildAdapters(): { email: { sentInputs: SentInput[] } } }).buildAdapters().email.sentInputs;
     });
 
     const sent = sentInputs.find((s) => s.toEmail === email);
@@ -272,7 +272,7 @@ describe("both List-Unsubscribe forms + List-Unsubscribe-Post are emitted, and t
     }
     const sentInputs = await runInDurableObject(tenantStub(tenantId), async (instance) => {
       await instance.tick();
-      return (instance as unknown as { adapters: { email: { sentInputs: SentInput[] } } }).adapters.email.sentInputs;
+      return (instance as unknown as { buildAdapters(): { email: { sentInputs: SentInput[] } } }).buildAdapters().email.sentInputs;
     });
     const sent = sentInputs.find((s) => s.toEmail === email);
     expect(sent).toBeDefined();
@@ -308,7 +308,7 @@ describe("compliance fail-safe: an empty physical_address/sender_identity refuse
 
     const sentCountBefore = await runInDurableObject(tenantStub(tenantId), async (instance) => {
       await instance.tick();
-      return (instance as unknown as { adapters: { email: { sentInputs: unknown[] } } }).adapters.email.sentInputs.length;
+      return (instance as unknown as { buildAdapters(): { email: { sentInputs: unknown[] } } }).buildAdapters().email.sentInputs.length;
     });
     expect(sentCountBefore).toBe(0); // never sent
 

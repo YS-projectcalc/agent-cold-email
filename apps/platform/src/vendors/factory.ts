@@ -20,76 +20,64 @@ export type VendorAdapterKind = "sandbox" | "real";
 
 export interface VendorAdapterBundle extends VendorAdapters {
   /**
-   * Reflects domain/mailbox/billing/metrics only (the ENGINE_TENANTS
-   * comped-pilot lane below can hand out a real `email` port while this
-   * still reads "sandbox" — check `bundle.email`'s own class if you need the
-   * email port's real/sandbox status specifically).
+   * Reflects domain/mailbox/billing/metrics/dnsScan/reputation only — the
+   * I1 product-driven `activated` gate below can hand out a real `email`
+   * port while this still reads "sandbox" (check `bundle.email`'s own class
+   * if you need the email port's real/sandbox status specifically).
    */
   readonly kind: VendorAdapterKind;
 }
 
 /**
- * Parses `ENGINE_TENANTS` (a comma-separated allowlist of exact tenant IDs)
- * into a Set for membership lookup. Total and fail-closed by construction:
- *  - unset/empty -> empty Set. Default-empty means NOBODY is allowlisted,
- *    ever — there is no way to spell "activate everyone" here.
- *  - each entry is trimmed; blank tokens (whitespace, empty segments from a
- *    trailing/duplicate comma) are DROPPED rather than throwing.
- *  - a token containing `*` or `?` is dropped too: this allowlist has no
- *    wildcard/prefix syntax, so a literal "*" can never mean "match every
- *    tenant" — it's just another malformed entry that matches nothing.
- * Malformed entries are dropped INDIVIDUALLY rather than blanking the whole
- * variable on any bad token. That's the safer choice, not just the more
- * convenient one: a dropped entry is inert (Set membership below is exact
- * string equality, so it can only ever narrow, never widen, who matches) —
- * whereas "one bad token empties the whole list" would ALSO revoke every
- * OTHER correctly-specified tenant in the same var for zero extra safety
- * margin, which is a strictly worse operational footgun for the same
- * fail-closed guarantee.
- */
-export function parseEngineTenants(raw: string | undefined): ReadonlySet<string> {
-  const ids = new Set<string>();
-  if (!raw) return ids;
-  for (const token of raw.split(",")) {
-    const id = token.trim();
-    if (!id || id.includes("*") || id.includes("?")) continue;
-    ids.add(id);
-  }
-  return ids;
-}
-
-/**
  * The ONE place that decides sandbox vs real. ARCHITECTURE.md #8 / SPEC.md
  * §0.1: "free/demo tenants must be structurally unable to get a real
- * adapter." `realAdaptersActivated` models a future global activation flag
- * (ACTIVATION.md); it is always `false` for now — nothing in this build can
- * set it true. Even if it somehow were true, a demo/free-plan tenant STILL
- * gets sandbox: the plan check is unconditional and comes first.
+ * adapter" — the plan check is unconditional and comes first, so even a
+ * hypothetically-`activated=true` demo/free tenant still gets sandbox.
  *
- * ENGINE_TENANTS (ROADMAP "Mordy-pilot activation lane") layers a SECOND,
- * narrower gate on top, scoped to the EmailPort only: `tenantId` (the DO's
- * own verified identity — see tenant-do.ts) must be an exact member of the
- * parsed `engineTenantsRaw` allowlist. A tenant only ever reaches
- * RealEmailPort when ALL FOUR hold — global flag on, allowlisted, non-demo/
- * free plan, and `engineConfig` present (the last is enforced by
- * RealEmailPort's own dark-until-configured check, same as every other
- * activation-gated port). The allowlist can only ever narrow relative to the
- * base decision, never widen it: with `realAdaptersActivated` false, an
- * allowlisted paid tenant is still fully sandbox.
+ * `activated` (self-serve activation design §2.1, I1 — REPLACES the manual
+ * `ENGINE_TENANTS` allowlist and the hard-`false` `realAdaptersActivated`
+ * flag) is the caller-computed product-driven gate:
+ *   activated(tenant) = plan is paid && billing_state === 'active'
+ *                     && NOT isLifecycleFrozen(status, billing_state)
+ *                     && screening_status === 'clear'
+ * (see `engine/activation.ts`'s `isTenantActivated`/`readActivationState`).
+ * No operator ever touches an allowlist: paying flips `billing_state` to
+ * 'active', which flips this on; a frozen/unpaid tenant can never reach it.
  *
- * Being on the allowlist ALSO pins domain/mailbox/billing/metrics to sandbox
- * for that tenant, regardless of `realAdaptersActivated` — there is no
- * per-port activation for those ports yet (YAGNI/EmailPort-only, this
- * phase), so the comped-pilot shape must not accidentally hand them a real
- * adapter as a side effect of being allowlisted for email.
+ * `activated` gates the EmailPort ONLY (mirrors the retired ENGINE_TENANTS
+ * lane's own "EmailPort-only, this phase" scope discipline — I3/I4, the
+ * InboxKit mailbox-credential plumbing + arming gates, are separate unbuilt
+ * increments). Domain/mailbox/billing/metrics/dnsScan/reputation have no
+ * per-tenant activation path yet: they flip real only when BOTH `activated`
+ * AND `inboxKitConfig` are present — today no call site supplies
+ * `inboxKitConfig`, so they stay sandbox for every tenant regardless of
+ * activation (byte-identical to the current, already-shipped behavior).
+ *
+ * EmailPort itself ALSO requires the design's "global-armed: engine wired"
+ * conjunct (§2.1) — `activated` alone is NOT enough: `engineConfig` (derived
+ * from `ENGINE_BASE_URL`/`ENGINE_AUTH_SECRET`) must ALSO be present. Without
+ * this, a genuinely paid+active tenant in ANY environment that hasn't armed
+ * the engine yet (every test env, and production before the founder's
+ * one-time Cloudflare Tunnel arming step, ACTIVATION.md) would get a
+ * PERMANENTLY-DARK RealEmailPort — every send throws `NotActivatedError`
+ * (a `VendorError`, so `tick.ts` grades it non-retryable and marks the send
+ * 'failed' — no crash, but nothing ever actually sends) instead of the
+ * working sandbox simulator it gets today. Requiring `engineConfig` too
+ * preserves TODAY's behavior (paid-but-engine-not-armed tenants keep
+ * demonstrating the full sandbox experience) and only lets email go real
+ * once the founder has ACTUALLY wired the engine — exactly I1's intent
+ * (Mordy pays -> real send begins -> because the founder already armed the
+ * engine first, per the design's documented arming order).
+ * `inboxKitConfig` absence similarly keeps mailbox/domain dark as defense in
+ * depth — this factory's gate narrows who is ELIGIBLE for a real port, each
+ * real port's own dark-until-configured check narrows further to who is
+ * actually WIRED.
  */
 export function createVendorAdapters(
   plan: TenantPlan,
   clock: Clock,
-  realAdaptersActivated: boolean,
+  activated: boolean,
   engineConfig?: EngineClientConfig,
-  tenantId?: string,
-  engineTenantsRaw?: string,
   /**
    * InboxKit workspace credentials (ACTIVATION.md Gate 0, founder ruling
    * 2026-07-20: "go inboxkit"). Absent in the deployed build today (no call
@@ -110,14 +98,15 @@ export function createVendorAdapters(
   inboxKitDomainRegistrant?: InboxKitDomainRegistrant,
 ): VendorAdapterBundle {
   const isDemoOrFree = plan === "demo" || plan === "free";
-  const isEngineAllowlisted = tenantId !== undefined && parseEngineTenants(engineTenantsRaw).has(tenantId);
+  // `engineConfig` is the external email engine's address/secret (env-derived
+  // from ENGINE_BASE_URL/ENGINE_AUTH_SECRET, see tenant-do.ts) — required
+  // ALONGSIDE `activated` (design §2.1's "engine wired" conjunct; see the doc
+  // comment above for why `activated` alone is unsafe).
+  const useRealEmail = !isDemoOrFree && activated && engineConfig !== undefined;
+  // Domain/mailbox/billing/metrics stay sandbox unless BOTH activated AND
+  // InboxKit is wired — see the doc comment above.
+  const useSandbox = isDemoOrFree || !activated || !inboxKitConfig;
 
-  const useSandbox = isDemoOrFree || !realAdaptersActivated || isEngineAllowlisted;
-  const useRealEmail = !isDemoOrFree && realAdaptersActivated && isEngineAllowlisted;
-
-  // `engineConfig` is the external email engine's address/secret (env-derived,
-  // see tenant-do.ts). Absent -> RealEmailPort stays dark (NotActivatedError),
-  // matching the coded-but-unactivated posture of every other real/ adapter.
   const email = useRealEmail ? new RealEmailPort(engineConfig) : new SandboxEmailPort(clock);
 
   if (useSandbox) {
@@ -138,7 +127,13 @@ export function createVendorAdapters(
     // Porkbun stays the default registrar path (SPEC.md §11/§12,
     // ACTIVATION.md:25) unless a dedicated InboxKit domain config is
     // supplied — see real/inboxkit-domain-port.ts's OPEN QUESTION doc
-    // comment on the unresolved Porkbun-vs-InboxKit registrar decision.
+    // comment on the unresolved Porkbun-vs-InboxKit registrar decision
+    // (I4 gate (a), unbuilt — this pass does not resolve it). The
+    // `: new RealDomainPort()` arm is unreachable via THIS gate today (this
+    // whole branch requires `inboxKitConfig` truthy), same "coded but
+    // currently inert, not dead" posture as every other real/ stub above —
+    // kept so a future domain-specific gate (decoupled from mailbox's) is a
+    // config change here, not new code.
     domain: inboxKitConfig ? new RealInboxKitDomainPort(inboxKitConfig, inboxKitDomainRegistrant) : new RealDomainPort(),
     // InboxKit is the unambiguous, SPEC-decided mailbox vendor (§11/§12
     // "primary = Inboxkit") — no fallback branch needed here.

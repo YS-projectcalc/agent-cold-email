@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { runInDurableObject } from "cloudflare:test";
-import { api, signup, tenantStub } from "./helpers.js";
+import { env, runInDurableObject } from "cloudflare:test";
+import { api, mintTenant, signup, tenantStub } from "./helpers.js";
 
 interface CheckoutResponse {
   mode: "stripe" | "simulated";
@@ -129,5 +129,104 @@ describe("POST /checkout — simulated test-mode upgrade (B1 money path)", () =>
         .one().n,
     );
     expect(rows).toBe(1);
+  });
+});
+
+type Profile = {
+  plan: string;
+  billing_state: string;
+};
+
+function readProfile(tenantId: string): Promise<Profile> {
+  return runInDurableObject(tenantStub(tenantId), async (_i, state) =>
+    state.storage.sql.exec<Profile>(`SELECT plan, billing_state FROM tenant_profile WHERE id = ?`, tenantId).one(),
+  );
+}
+
+// F1 (adversarial 2026-07-21, BLOCKING —
+// docs/adversarial/selfserve-activation-design-review-2026-07-21.md):
+// unauthenticated GET /checkout/simulate was a free real-spend activation
+// bypass under I1 — it wrote plan+billing_state='active' for ANY pending
+// checkout_sessions row (e.g. a pre-arming test tenant's) with no gate on
+// STRIPE_SECRET_KEY presence. Reproduces the exact live-ammo scenario: a
+// PENDING session that predates live keys, hit AFTER a live key is
+// configured (arming-order-independent — the guard fires regardless of when
+// the session was created).
+describe("GET /checkout/simulate — fails closed once live Stripe keys are configured (F1)", () => {
+  it("refuses to complete a pending session and leaves the tenant untouched", async () => {
+    const { tenantId } = await signup("Preexisting Session Co", "founder@preexisting.test");
+
+    // A pending simulated session created BEFORE live keys were ever wired —
+    // exactly the "pre-arming test tenant" scenario F1 describes. Inserted
+    // directly (not via POST /checkout) so this test never depends on
+    // env.STRIPE_SECRET_KEY's value at session-creation time.
+    const sessionId = "cs_pre_arming_test_session";
+    await runInDurableObject(tenantStub(tenantId), async (_i, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO checkout_sessions (id, tenant_id, plan, status, created_at) VALUES (?, ?, 'launch', 'pending', ?)`,
+        sessionId,
+        tenantId,
+        Date.now(),
+      );
+    });
+
+    const before = await readProfile(tenantId);
+    expect(before.billing_state).toBe("none");
+
+    const saved = env.STRIPE_SECRET_KEY;
+    try {
+      (env as { STRIPE_SECRET_KEY?: string }).STRIPE_SECRET_KEY = "sk_test_fake_key_for_f1_test";
+
+      const res = await api(`/checkout/simulate?tenant=${tenantId}&session=${sessionId}`);
+      expect(res.status).toBe(404);
+    } finally {
+      (env as { STRIPE_SECRET_KEY?: string }).STRIPE_SECRET_KEY = saved;
+    }
+
+    // The activation-relevant write never landed.
+    const after = await readProfile(tenantId);
+    expect(after.billing_state).toBe("none");
+    expect(after.plan).toBe("demo");
+
+    // With no live key configured (the actual test-env default), the SAME
+    // session still completes normally — proves the guard is config-gated,
+    // not a dead/always-block branch.
+    const legit = await api(`/checkout/simulate?tenant=${tenantId}&session=${sessionId}`);
+    expect(legit.status).toBe(200);
+    const legitAfter = await readProfile(tenantId);
+    expect(legitAfter.billing_state).toBe("active");
+  });
+
+  it("completeSimulatedCheckout itself refuses when a live key is configured — defense in depth, even off the HTTP route", async () => {
+    const { tenantId } = await mintTenant("Direct DO Call Co", "demo");
+    const sessionId = "cs_direct_do_call_session";
+    await runInDurableObject(tenantStub(tenantId), async (_i, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO checkout_sessions (id, tenant_id, plan, status, created_at) VALUES (?, ?, 'launch', 'pending', ?)`,
+        sessionId,
+        tenantId,
+        Date.now(),
+      );
+    });
+
+    const saved = env.STRIPE_SECRET_KEY;
+    try {
+      (env as { STRIPE_SECRET_KEY?: string }).STRIPE_SECRET_KEY = "sk_test_fake_key_for_f1_test";
+      // Calls the method directly on the DO's own `instance` inside
+      // runInDurableObject (matching idempotency.test.ts's established
+      // pattern) rather than through the stub RPC boundary — avoids a
+      // spurious "unhandled rejection" double-report some vitest-pool-workers
+      // versions emit for an error thrown across the stub RPC call itself.
+      // `completeCheckoutSimulated` is synchronous on the instance (only the
+      // stub wraps it in a Promise), so it throws directly, not via rejection.
+      await runInDurableObject(tenantStub(tenantId), async (instance) => {
+        expect(() => instance.completeCheckoutSimulated(sessionId)).toThrow(/simulated checkout is disabled/);
+      });
+    } finally {
+      (env as { STRIPE_SECRET_KEY?: string }).STRIPE_SECRET_KEY = saved;
+    }
+
+    const after = await readProfile(tenantId);
+    expect(after.billing_state).toBe("none");
   });
 });

@@ -33,6 +33,16 @@ export interface StripeCheckoutSessionResult {
   url: string;
 }
 
+// I2 (self-serve activation design §2.5) — promo-eligible plan. Restricted to
+// `launch` in CODE (F2, adversarial 2026-07-21, BLOCKING): the founder's
+// 100%-off pilot coupon is for the flat-$99 launch tier only, so
+// `allow_promotion_codes`/`payment_method_collection` are only set on a
+// launch-plan session — a growth/scale checkout keeps requiring a card, same
+// as before this change, regardless of what coupon someone might try to
+// apply. This is defense-in-depth on OUR side; the actual redemption cap
+// lives at Stripe (see the REQUIRED COUPON CONSTRAINTS note below).
+const PROMO_ELIGIBLE_PLAN = "launch";
+
 /**
  * Creates a real Stripe TEST-mode Checkout Session (subscription mode, one
  * inline price per SPEC.md §18 — no pre-created Stripe Price object needed,
@@ -42,6 +52,22 @@ export interface StripeCheckoutSessionResult {
  * without a separate customer->tenant index; `subscription_data.metadata`
  * copies the same onto the subscription so later subscription-level events
  * (customer.subscription.updated/deleted) carry it too.
+ *
+ * REQUIRED COUPON CONSTRAINTS (founder-created in the Stripe dashboard —
+ * F2, adversarial 2026-07-21, BLOCKING; cite this comment in the arming
+ * runbook): the pilot's 100%-off promotion code MUST be minted with
+ * `max_redemptions: 1` (or restricted to the pilot customer), MUST be
+ * restricted to the `launch` price (this session only enables promo entry
+ * for `launch` — see `PROMO_ELIGIBLE_PLAN` above), and MUST be `duration:
+ * "forever"` (or a `repeating` duration covering the whole pilot term) — a
+ * duration-limited coupon that later expires leaves the renewal invoice
+ * charging a subscription with NO payment method on file (this is expected;
+ * see engine/billing.ts's `invoice.payment_failed` handling, which is what
+ * catches it and drives billing_state -> 'past_due' -> the I1 activation
+ * gate off). Without `max_redemptions`/plan restriction, ANY self-serve
+ * signup that discovers the code could activate real vendor spend for $0
+ * (adversarial finding F2) — this is a Stripe-dashboard-only control; no
+ * code here can enforce it, hence this comment.
  */
 export async function createStripeCheckoutSession(
   secretKey: string,
@@ -61,6 +87,13 @@ export async function createStripeCheckoutSession(
   body.set("line_items[0][price_data][unit_amount]", String(params.priceCents));
   body.set("line_items[0][price_data][recurring][interval]", "month");
   body.set("line_items[0][price_data][product_data][name]", `ColdStart ${params.label} (test mode)`);
+  if (params.plan === PROMO_ELIGIBLE_PLAN) {
+    // §2.5: enables the code-entry box + lets a 100%-off code complete with
+    // NO card (payment_method_collection "if_required" only asks for a
+    // payment method when the invoice total is actually > 0).
+    body.set("allow_promotion_codes", "true");
+    body.set("payment_method_collection", "if_required");
+  }
 
   const res = await fetch(`${STRIPE_API_BASE}/checkout/sessions`, {
     method: "POST",

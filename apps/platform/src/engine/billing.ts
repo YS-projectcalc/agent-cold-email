@@ -7,7 +7,7 @@
 // Stripe is the source of truth once activated (ARCHITECTURE.md #3); these
 // functions mirror that state onto tenant_profile.
 
-import { isPaidPlanTier, NotFoundError, PLAN_QUOTAS, type CheckoutInput, type TenantPlan } from "@coldstart/shared";
+import { isPaidPlanTier, NotFoundError, PLAN_QUOTAS, ValidationError, type CheckoutInput, type TenantPlan } from "@coldstart/shared";
 import { createStripeCheckoutSession, reportUsageRecord } from "../billing/stripe-client.js";
 import type { StripeEventInput } from "../billing/stripe-webhook.js";
 import { newId } from "../schema.js";
@@ -76,6 +76,15 @@ export interface CompleteCheckoutResult {
  * an error — mirrors a real user refreshing the Stripe success page.
  */
 export function completeSimulatedCheckout(ctx: TenantContext, sessionId: string): CompleteCheckoutResult {
+  // F1 (adversarial 2026-07-21, BLOCKING): defense in depth — even if the
+  // route guard (routes/checkout.ts) were ever bypassed/removed, this
+  // function itself must refuse to grant activation-relevant billing state
+  // once live Stripe keys are configured. A pre-arming pending session must
+  // never complete after this environment can do real vendor spend.
+  if (ctx.env.STRIPE_SECRET_KEY) {
+    throw new ValidationError("simulated checkout is disabled once live Stripe keys are configured");
+  }
+
   const session = ctx.sql
     .exec<{ plan: TenantPlan; status: string }>(
       `SELECT plan, status FROM checkout_sessions WHERE id = ? AND tenant_id = ?`,

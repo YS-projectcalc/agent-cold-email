@@ -200,7 +200,9 @@ describe("A2 — a single soft bounce is tallied, not permanently suppressed (G3
       };
       const scripted: PolledEvent[][] = [[soft(1)], [soft(2)], [reply], [soft(3)]];
       let i = 0;
-      const port = (instance as unknown as { adapters: { email: { poll: (m: string, c: number) => Promise<PollResult> } } }).adapters.email;
+      const port = (
+        instance as unknown as { buildAdapters(): { email: { poll: (m: string, c: number) => Promise<PollResult> } } }
+      ).buildAdapters().email;
       port.poll = async () => ({ events: scripted[i++] ?? [], cursor: 0 });
 
       const streak = () =>
