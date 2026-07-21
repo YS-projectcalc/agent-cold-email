@@ -40,6 +40,27 @@ into a god file:
   `stop_on_reply` flag) and bounces AND spam-complaints into `suppressions`
   (both always cancel remaining steps). Complaints carry the original send's
   message id so the deliverability loop can attribute them per-mailbox.
+  The typed-unsubscribe-intent reply matcher dispatches to
+  `suppression.ts`'s `unsubscribeEmail`.
+- `events.ts` — `recordEventIfNew`, the single once-per-new-event choke point
+  (extracted out of `reply-processor.ts`, its original home, so
+  `suppression.ts` can route its own tenant-wide unsubscribe event writes
+  through the SAME choke without a circular import). Every `events` insert
+  that should fan out to outbound webhooks goes through here.
+- `suppression.ts` — `suppress`/`cancelPendingSteps` (shared primitives) +
+  `unsubscribeEmail` (the tenant-wide (tenant,email) opt-out walk, shared by
+  the hosted RFC 8058 endpoint and the inbound typed-unsubscribe matcher;
+  `reason` is parametrized — `"unsubscribe"` by default, `"manual"` for
+  SPEC.md §22's `suppress_lead`) + `suppressLead` (the `suppress_lead`
+  MCP tool / REST route).
+- `lead-dispositions.ts` — SPEC.md §22's `update_lead`: upserts the
+  contact-level `lead_dispositions` row (server-enforced `interest_status`
+  enum + free-form notes/tags), keyed `(tenant_id, email)`, decoupled from
+  the campaign-scoped `leads` table.
+- `list-leads.ts` — SPEC.md §22's `list_leads`: read-only JOIN over
+  `leads`/`lead_dispositions`/`suppressions`/a last-event-per-lead CTE
+  (mirrors `inbox.ts`'s CTE pattern), cursor-paginated. Doubles as the
+  paginated-JSON export surface (Q6 — no separate CSV endpoint).
 - `deliverability.ts` — B6 control loop, DECIDE half. A PURE
   `evaluate(mailboxHealth[], domainStats[], thresholds) -> Action[]`
   (unit-testable in isolation) + `gatherMailboxHealth`/`gatherDomainStats`
@@ -92,7 +113,7 @@ into a god file:
   `get_webhooks`/`configure_webhook` tools (parity law). The signing secret is
   returned once at create/rotate; reads never re-expose it.
 - `webhook-enqueue.ts` — `enqueueEventWebhooks`: the event -> delivery-queue
-  fan-out. `recordEventIfNew` (reply-processor.ts) — the one once-per-new-event
+  fan-out. `recordEventIfNew` (events.ts) — the one once-per-new-event
   choke point — calls it, so a re-polled duplicate never enqueues twice.
 - `webhook-delivery.ts` — the at-least-once delivery pump: retry with
   exponential backoff, per-attempt logging, auto-disable after N consecutive

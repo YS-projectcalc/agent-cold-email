@@ -528,6 +528,57 @@ CREATE TABLE IF NOT EXISTS webhook_delivery_attempts (
   ts INTEGER NOT NULL
 );
 
+-- SPEC.md §22 (D1 of the warm-lead thin layer) — contact-level disposition,
+-- keyed (tenant_id, email) — decoupled from the campaign-scoped 'leads'
+-- table (one row per CAMPAIGN per email, schema.ts above) because disposition
+-- belongs to the CONTACT, not the campaign-lead: "interested on campaign A" is
+-- visible the instant campaign B lists the same address (founder-ratified Q1,
+-- docs/research/warm-lead-q1-q6-recommendations-2026-07-21.md). interest_status
+-- is a server-enforced enum (Q2 — see packages/shared's LEAD_INTEREST_STATUSES),
+-- never validated here (SQLite has no CHECK-enum shorthand; the zod boundary
+-- schema is the single enforcement point, matching every other enum-shaped
+-- column in this codebase). tags_json is the free-form escape hatch the
+-- hybrid design keeps alongside the enum. source is server-derived from
+-- transport exactly like thread_labels.source/dashboard_views.edited_by
+-- (never a client-supplied actor claim) — 'mcp' | 'api' | 'dashboard'.
+CREATE TABLE IF NOT EXISTS lead_dispositions (
+  tenant_id TEXT NOT NULL,
+  email TEXT NOT NULL,
+  interest_status TEXT NOT NULL DEFAULT 'none',
+  notes TEXT NOT NULL DEFAULT '',
+  tags_json TEXT NOT NULL DEFAULT '[]',
+  source TEXT NOT NULL DEFAULT 'mcp',
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (tenant_id, email)
+);
+
+-- SPEC.md §22 (D2) — one-off scheduled follow-up sends. SCHEMA ONLY in this
+-- build: the schedule_followup tool + tick-drain send mechanism are
+-- EXPLICITLY OUT OF SCOPE here (increment #4 — the adversary amendment
+-- requires a new shared guarded single-send primitive — daily cap + warmup
+-- ramp + deliv_status='paused' exclusion + suppression re-check — that
+-- neither replyToThread nor the tick's inline loop exposes as a callable
+-- unit today; docs/adversarial/warm-lead-thin-layer-design-2026-07-16.md
+-- R1/R2). Rejected reusing 'scheduled_sends': those rows carry SEQUENCE
+-- semantics (a step index rendered from campaigns.sequence_json at tick
+-- time) and no body column — a one-off custom-body send would force a
+-- synthetic step + a body side-channel + a tick render-path branch
+-- (patch-on-patch, CLAUDE.md rule f). idempotency_key mirrors
+-- request_idempotency's caller-retry-safety shape (a future tool would key on
+-- it the same way launch_campaign/setup_infrastructure do).
+CREATE TABLE IF NOT EXISTS followups (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  thread_id TEXT NOT NULL,
+  lead_id TEXT NOT NULL,
+  campaign_id TEXT NOT NULL,
+  run_at INTEGER NOT NULL,
+  body TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  idempotency_key TEXT,
+  created_at INTEGER NOT NULL
+);
+
 -- Enqueue idempotency: a given source event is delivered at most once per
 -- subscription (enqueue uses INSERT OR IGNORE against this key). These tables
 -- are always new (no DO predates them), so the unique/lookup indexes live

@@ -6,3 +6,4 @@ export * from "./intents.js";
 export * from "./pricing.js";
 export * from "./dashboard.js";
 export * from "./webhooks.js";
+export * from "./leads.js";

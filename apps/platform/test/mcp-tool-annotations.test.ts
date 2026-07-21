@@ -1,5 +1,5 @@
 import { runInDurableObject } from "cloudflare:test";
-import { ActivityQueryInput, InboxQueryInput } from "@coldstart/shared";
+import { ActivityQueryInput, InboxQueryInput, ListLeadsQueryInput } from "@coldstart/shared";
 import { beforeAll, describe, expect, it } from "vitest";
 import { ONE_DAY_MS, WARMUP_RAMP_DAYS } from "../src/engine/warmup.js";
 import type { TenantDO } from "../src/tenant-do.js";
@@ -32,6 +32,7 @@ const READ_ONLY_TOOLS = new Set([
   "activity",
   "get_webhooks",
   "get_byo_domains",
+  "list_leads",
 ]);
 
 // Tools whose worst-case action is genuinely destructive/irreversible via
@@ -42,12 +43,18 @@ const READ_ONLY_TOOLS = new Set([
 // infra + accrues metering, and connect_mailbox stores a connection secret —
 // neither destroys an existing resource, but both have real, non-reversible-
 // via-this-API side effects (SPEC.md §20), the same honesty bar as configure_webhook.
-const DESTRUCTIVE_TOOLS = new Set(["launch_campaign", "reply", "pause", "pause_all", "configure_dashboard", "configure_webhook", "configure_byo_domain"]);
+// suppress_lead joins this set (SPEC.md §22): it cancels pending sends +
+// permanently reclassifies every campaign-lead row sharing the email, and
+// there is deliberately no un-suppress tool — the same "worst-case action"
+// honesty bar as pause/pause_all's "no resume tool".
+const DESTRUCTIVE_TOOLS = new Set(["launch_campaign", "reply", "pause", "pause_all", "configure_dashboard", "configure_webhook", "configure_byo_domain", "suppress_lead"]);
 
 // Tools that mutate but only additively/reversibly: setup_infrastructure
 // (creates new resources, never deletes/overwrites existing ones), mark and
-// label_thread (fully reversible triage flags).
-const ADDITIVE_NONDESTRUCTIVE_TOOLS = new Set(["setup_infrastructure", "mark", "label_thread"]);
+// label_thread (fully reversible triage flags). update_lead joins this set
+// (SPEC.md §22): an upsert that only ever overwrites the disposition fields
+// named in the call — freely revisable, nothing destroyed.
+const ADDITIVE_NONDESTRUCTIVE_TOOLS = new Set(["setup_infrastructure", "mark", "label_thread", "update_lead"]);
 
 async function listTools(): Promise<ToolListResult["tools"]> {
   const res = await api<{ jsonrpc: "2.0"; id: number; result: ToolListResult }>("/mcp", {
@@ -59,9 +66,9 @@ async function listTools(): Promise<ToolListResult["tools"]> {
 }
 
 describe("tools/list — MCP tool annotations (Anthropic Connectors Directory requirement)", () => {
-  it("every one of the 21 tools carries a non-empty annotations.title", async () => {
+  it("every one of the 24 tools carries a non-empty annotations.title", async () => {
     const tools = await listTools();
-    expect(tools).toHaveLength(21);
+    expect(tools).toHaveLength(24);
     for (const t of tools) {
       expect(t.annotations, `${t.name} is missing annotations`).toBeDefined();
       expect(typeof t.annotations!.title, `${t.name}.annotations.title`).toBe("string");
@@ -106,10 +113,10 @@ describe("tools/list — MCP tool annotations (Anthropic Connectors Directory re
     }
   });
 
-  it("classification covers exactly the 21 tools with no overlap between sets", async () => {
+  it("classification covers exactly the 24 tools with no overlap between sets", async () => {
     const tools = await listTools();
     const classified = new Set([...READ_ONLY_TOOLS, ...DESTRUCTIVE_TOOLS, ...ADDITIVE_NONDESTRUCTIVE_TOOLS]);
-    expect(classified.size).toBe(21);
+    expect(classified.size).toBe(24);
     expect(tools.map((t) => t.name).sort()).toEqual([...classified].sort());
   });
 });
@@ -155,6 +162,9 @@ describe("write-detecting spy — every readOnlyHint:true tool performs ZERO wri
     // fixture tenant is still a genuine read — the SELECT runs regardless of
     // row count).
     get_byo_domains: (i) => i.byoDomains(),
+    // list_leads (SPEC.md §22) — a pure JOIN read; must issue ZERO writes even
+    // though the fixture tenant already has a real launched lead (fx.campaignId).
+    list_leads: (i) => i.listLeads(ListLeadsQueryInput.parse({})),
   };
 
   let fixture: ReadOnlyFixture;
