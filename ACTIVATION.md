@@ -90,7 +90,7 @@
   8. ~~Verify~~ — done 2026-07-20, see evidence above.
 
   ⚠️ **Adversary-ruled residual to carry into arming** (`docs/adversarial/watchtower-ops-email-review-2026-07-15.md` NB-2): a transient alert-email send failure on the exact healthy→unhealthy transition tick still advances `last_alert_ts`, so that alert is silently lost until the 6h cooldown re-fires (self-heals; not normal-path reachable). The step-7 external prober is the designed backstop — do not skip it; it remains the one open item on this line.
-- [ ] **OFAC screening provider** key (if using a paid list) — screening hook is built; wire the data source.
+- [ ] **OFAC screening provider** key (if using a paid list) — **CORRECTED 2026-07-21: the screening hook is NOT built** (design-lane audit found zero sanctions/screening code in apps/platform/src; the only screening is the brand-denylist BYO abuse gate; ROADMAP.md's D4 net-new framing was right, this line was wrong). OFAC = net-new build (self-serve design increment I5, docs/research/self-serve-activation-design-2026-07-21.md), required before PUBLIC self-serve GA; pilot-with-stub acceptance = pending founder ruling.
 
 ## Cron watchdog note (session-scoped)
 The autonomous build watchdog cron (`baf7d82d`, every 3h) is **session-only and auto-expires after 7 days** — it does not survive a machine restart. Not part of the product; just keeps this build session resilient to usage-limit interruptions.
