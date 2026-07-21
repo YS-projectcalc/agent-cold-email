@@ -12,7 +12,10 @@ export interface EnqueueEvent {
   campaignId: string;
   leadId: string;
   threadId: string;
-  messageId: string;
+  // `null` for a system-recorded event with no real inbound Message-ID (e.g.
+  // the tenant-wide unsubscribe walk, engine/suppression.ts) — passed through
+  // to the delivered payload as-is.
+  messageId: string | null;
   metadata: Record<string, unknown>;
 }
 
