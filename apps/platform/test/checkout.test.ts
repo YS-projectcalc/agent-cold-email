@@ -188,13 +188,57 @@ describe("GET /checkout/simulate — fails closed once live Stripe keys are conf
     expect(after.billing_state).toBe("none");
     expect(after.plan).toBe("demo");
 
-    // With no live key configured (the actual test-env default), the SAME
-    // session still completes normally — proves the guard is config-gated,
-    // not a dead/always-block branch.
+    // With NEITHER real-spend signal armed (no Stripe key, no engine — the
+    // actual test-env default), the SAME session still completes normally —
+    // proves the guard is config-gated, not a dead/always-block branch.
     const legit = await api(`/checkout/simulate?tenant=${tenantId}&session=${sessionId}`);
     expect(legit.status).toBe(200);
     const legitAfter = await readProfile(tenantId);
     expect(legitAfter.billing_state).toBe("active");
+  });
+
+  // Round-2 adversary re-attack (docs/adversarial/
+  // selfserve-i1i2-build-review-2026-07-21.md finding 1, BLOCKING): the
+  // ORIGINAL F1 window is "infra armed BEFORE Stripe keys" — i.e. exactly
+  // when STRIPE_SECRET_KEY is UNSET. A STRIPE_SECRET_KEY-only guard is INERT
+  // in that window. This reproduces the adversary's exact exploit sequence:
+  // engine wired (ENGINE_BASE_URL/ENGINE_AUTH_SECRET set), Stripe key still
+  // unset — the guard must ALSO fire here.
+  it("refuses a pending session when the ENGINE is armed even though STRIPE_SECRET_KEY is still unset (round-2 adversary finding 1)", async () => {
+    const { tenantId } = await signup("Engine Armed First Co", "founder@enginearmedfirst.test");
+    const sessionId = "cs_engine_armed_before_stripe_session";
+    await runInDurableObject(tenantStub(tenantId), async (_i, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO checkout_sessions (id, tenant_id, plan, status, created_at) VALUES (?, ?, 'launch', 'pending', ?)`,
+        sessionId,
+        tenantId,
+        Date.now(),
+      );
+    });
+
+    const savedBaseUrl = env.ENGINE_BASE_URL;
+    const savedAuthSecret = env.ENGINE_AUTH_SECRET;
+    const savedStripeKey = env.STRIPE_SECRET_KEY;
+    try {
+      (env as { ENGINE_BASE_URL?: string }).ENGINE_BASE_URL = "https://engine.example.internal";
+      (env as { ENGINE_AUTH_SECRET?: string }).ENGINE_AUTH_SECRET = "test-secret";
+      (env as { STRIPE_SECRET_KEY?: string }).STRIPE_SECRET_KEY = undefined; // the defining condition of the original window
+
+      const res = await api(`/checkout/simulate?tenant=${tenantId}&session=${sessionId}`);
+      expect(res.status).toBe(404);
+
+      await runInDurableObject(tenantStub(tenantId), async (instance) => {
+        expect(() => instance.completeCheckoutSimulated(sessionId)).toThrow(/simulated checkout is disabled/);
+      });
+    } finally {
+      (env as { ENGINE_BASE_URL?: string }).ENGINE_BASE_URL = savedBaseUrl;
+      (env as { ENGINE_AUTH_SECRET?: string }).ENGINE_AUTH_SECRET = savedAuthSecret;
+      (env as { STRIPE_SECRET_KEY?: string }).STRIPE_SECRET_KEY = savedStripeKey;
+    }
+
+    const after = await readProfile(tenantId);
+    expect(after.billing_state).toBe("none");
+    expect(after.plan).toBe("demo");
   });
 
   it("completeSimulatedCheckout itself refuses when a live key is configured — defense in depth, even off the HTTP route", async () => {
