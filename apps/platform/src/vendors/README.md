@@ -15,7 +15,7 @@ Implements the `VendorPort` interfaces from `@coldstart/shared` twice:
   them — never reachable from the deployed default):
   - `real/email-port.ts`'s `RealEmailPort` — the external engine
     (`apps/engine`); dark until `ENGINE_BASE_URL`/`ENGINE_AUTH_SECRET` are set
-    AND the factory's ENGINE_TENANTS gate below admits the tenant.
+    AND the factory's product-driven `activated` gate below admits the tenant.
   - `real/mailbox-port.ts`'s `RealMailboxPort` — InboxKit (ACTIVATION.md Gate
     0, founder ruling 2026-07-20 "go inboxkit"; SPEC.md §11/§12's decided
     mailbox vendor). Dark until an `InboxKitClientConfig`
@@ -53,27 +53,39 @@ Implements the `VendorPort` interfaces from `@coldstart/shared` twice:
   can drive every intake branch deterministically.
 
 `factory.ts` is the single choke point that decides which bundle a tenant
-gets (`createVendorAdapters(plan, clock, realAdaptersActivated, engineConfig?,
-tenantId?, engineTenantsRaw?, inboxKitConfig?, inboxKitDomainRegistrant?)`).
-The two trailing InboxKit params are additive/optional — no current call site
-(`tenant-do.ts`) supplies them, so `RealMailboxPort`/`RealInboxKitDomainPort`
-stay exactly as dark as every other real/ adapter today; see
-`test/inboxkit-adapter-dark-gating.test.ts` for the RED-provable guard.
-Demo/free plans are forced to `sandbox` unconditionally, before the
-activation flag is even consulted — see `test/demo-adapter-guard.test.ts` in
-`apps/platform` for the guardrail test that fails if this is ever weakened.
+gets (`createVendorAdapters(plan, clock, activated, engineConfig?,
+inboxKitConfig?, inboxKitDomainRegistrant?)`). The two trailing InboxKit
+params are additive/optional — no current call site (`tenant-do.ts`) supplies
+them, so `RealMailboxPort`/`RealInboxKitDomainPort` stay exactly as dark as
+every other real/ adapter today; see `test/inboxkit-adapter-dark-gating.test.ts`
+for the RED-provable guard. Demo/free plans are forced to `sandbox`
+unconditionally, before the activation flag is even consulted — see
+`test/demo-adapter-guard.test.ts` in `apps/platform` for the guardrail test
+that fails if this is ever weakened.
 
-`ENGINE_TENANTS` (ROADMAP "Mordy-pilot activation lane") layers a second,
-narrower gate scoped to the EmailPort only: a tenant reaches `RealEmailPort`
-solely when `realAdaptersActivated` is on, its `tenantId` (the DO's own
-verified identity, never request-supplied) is an exact member of the parsed
-`ENGINE_TENANTS` allowlist, its plan is non-demo/free, AND `engineConfig` is
-present. Being allowlisted also pins that tenant's domain/mailbox/billing/
-metrics to sandbox regardless of the global flag — there is no per-port
-activation for those ports yet (EmailPort-only, this phase). Default-empty
-and fail-closed: unset/malformed `ENGINE_TENANTS` activates nobody, ever (no
-wildcard syntax, exact string match only). See
-`test/engine-tenants-allowlist.test.ts` for the five guards this proves.
+`activated` (self-serve activation design §2.1, I1) is a PRODUCT-DRIVEN gate,
+not an operator-maintained allowlist: `engine/activation.ts`'s
+`readActivationState` re-derives it with a FRESH SQL read on every
+`buildAdapters()` call (`tenant-do.ts`) from persisted `tenant_profile` state —
+`isPaidPlanTier(plan) && billing_state === 'active' && NOT
+isLifecycleFrozen(status, billing_state) && screening_status === 'clear'`
+(the screening check is a documented STUB until I5 lands real OFAC screening).
+Paying flips `billing_state` to 'active', which flips this on; the existing
+freeze/abuse machine (dunning suspend, dispute, cancel) flips it back off —
+no allowlist to hand-edit, ever.
+
+`activated` gates the **EmailPort ONLY** (mirrors the retired ENGINE_TENANTS
+lane's own "EmailPort-only, this phase" scope discipline). Domain/mailbox/
+billing/metrics have no per-tenant activation path yet — they need BOTH
+`activated` AND `inboxKitConfig` to ever go real (I3/I4, unbuilt); since no
+call site supplies `inboxKitConfig` today, a genuinely activated paid tenant
+still gets sandbox domain/mailbox/billing (functional, not merely dark) and
+ONLY a real (dark-until-`ENGINE_BASE_URL`/`ENGINE_AUTH_SECRET`) EmailPort.
+`tenant-do.ts`'s `buildAdapters()` reflects this: it caches the sandbox bundle
+for the DO's lifetime (several sandbox ports hold in-memory state that must
+survive) and swaps in a fresh `email` port on each call based on the
+freshly-read activation state — see `test/activation-gate.test.ts` for the
+gate's own unit tests and the fresh-read (no-DO-restart-needed) proof.
 
 ## How to run
 

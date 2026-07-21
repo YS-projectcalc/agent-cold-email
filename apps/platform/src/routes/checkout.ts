@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { CheckoutInput, CheckoutSimulateQuery } from "@coldstart/shared";
 import type { Env } from "../env.js";
+import { isRealSpendArmed } from "../engine/billing.js";
 import type { AuthedVariables } from "../require-auth.js";
 import { parseJsonBody } from "../validate.js";
 
@@ -18,10 +19,32 @@ export const checkoutRoute = new Hono<{ Bindings: Env; Variables: AuthedVariable
 // own hosted checkout return page isn't bearer-token-gated either: the
 // session id is itself the (unguessable, single-use) credential, re-validated
 // tenant-scoped inside the target TenantDO (`WHERE id = ? AND tenant_id = ?`
-// — see engine/billing.ts). Test-mode simulation ONLY: this route has no
-// effect once a real STRIPE_SECRET_KEY is wired (checkout() then returns a
-// real Stripe-hosted url instead of one pointing back here).
+// — see engine/billing.ts). Test-mode simulation ONLY.
+//
+// F1 (adversarial 2026-07-21, BLOCKING — docs/adversarial/
+// selfserve-activation-design-review-2026-07-21.md, residual closed in
+// docs/adversarial/selfserve-i1i2-build-review-2026-07-21.md finding 1):
+// startCheckout() only takes the simulated branch when STRIPE_SECRET_KEY is
+// unset at CHECKOUT time (engine/billing.ts), but a PENDING simulated session
+// created before a live key was ever wired (e.g. a pre-arming test tenant)
+// persists in `checkout_sessions` regardless — this route would otherwise
+// complete it unconditionally. Under I1's product-driven activation gate that
+// write (plan + billing_state='active') is directly activation-relevant, so
+// this route must be UNREACHABLE for real activation the moment this
+// environment CAN do real vendor spend — fail closed at the route boundary
+// (never reaches the DO) whenever real spend is armed, regardless of arming
+// order elsewhere. A STRIPE_SECRET_KEY-only check is INERT during the
+// original arming-order window (engine armed BEFORE Stripe keys, i.e. exactly
+// when STRIPE_SECRET_KEY is unset) — `isRealSpendArmed` (engine/billing.ts)
+// also checks the engine-wired signal (`ENGINE_BASE_URL`/`ENGINE_AUTH_SECRET`)
+// so simulate works ONLY in a fully-unarmed environment.
+// `completeSimulatedCheckout` (engine/billing.ts) repeats this guard as
+// defense in depth.
 export const checkoutSimulateRoute = new Hono<{ Bindings: Env }>().get("/checkout/simulate", async (c) => {
+  if (isRealSpendArmed(c.env)) {
+    return c.json({ error: "simulated checkout is disabled once real vendor spend is armed" }, 404);
+  }
+
   const query = CheckoutSimulateQuery.safeParse({
     tenant: c.req.query("tenant"),
     session: c.req.query("session"),

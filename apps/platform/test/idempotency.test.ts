@@ -159,7 +159,9 @@ describe("B1 — inbound event idempotency across an at-least-once re-poll (G3 a
       // cursor failure mode (the cursor never advanced, so the same batch comes
       // back). This is the end-to-end proof that redelivery is SAFE: the Worker
       // dedupes on the event's stable Message-ID (events unique index).
-      const emailPort = (instance as unknown as { adapters: { email: { poll: (m: string, c: number) => Promise<PollResult> } } }).adapters.email;
+      const emailPort = (
+        instance as unknown as { buildAdapters(): { email: { poll: (m: string, c: number) => Promise<PollResult> } } }
+      ).buildAdapters().email;
       const realPoll = emailPort.poll.bind(emailPort);
       const captured = new Map<string, PollResult>();
       emailPort.poll = async (mbx: string, sinceCursor: number) => {
@@ -366,7 +368,9 @@ describe("NB4 — reply content-hash dedupe survives a cold DO", () => {
       const rep1 = await instance.reply(threadId, "cold-start body"); // no idempotency key
       // Simulate a DO cold start: the in-memory vendor send-cache is gone; DO
       // SQLite (the durable send-key map) persists.
-      const port = (instance as unknown as { adapters: { email: { sentByIdempotencyKey: Map<string, unknown> } } }).adapters.email;
+      const port = (
+        instance as unknown as { buildAdapters(): { email: { sentByIdempotencyKey: Map<string, unknown> } } }
+      ).buildAdapters().email;
       port.sentByIdempotencyKey.clear();
       const rep2 = await instance.reply(threadId, "cold-start body"); // same body, cold vendor
 
@@ -401,7 +405,9 @@ describe("poll cursor is owned + persisted by the consumer DO", () => {
       // Stub the port to record the sinceCursor it receives and return an
       // advancing cursor, so we can assert the DO round-trips it.
       const seen: number[] = [];
-      const port = (instance as unknown as { adapters: { email: { poll: (m: string, c: number) => Promise<PollResult> } } }).adapters.email;
+      const port = (
+        instance as unknown as { buildAdapters(): { email: { poll: (m: string, c: number) => Promise<PollResult> } } }
+      ).buildAdapters().email;
       port.poll = async (_m: string, sinceCursor: number) => {
         seen.push(sinceCursor);
         return { events: [], cursor: sinceCursor + 10 };

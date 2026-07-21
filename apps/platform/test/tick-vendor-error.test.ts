@@ -56,7 +56,7 @@ describe("tick grades a THROWING send() and reclaims orphaned 'sending' rows", (
       await launchOne(instance as never, "st@sendthrow-leads.com");
       await instance.infrastructureStatus();
 
-      const email = (instance as unknown as { adapters: { email: EmailLike } }).adapters.email;
+      const email = (instance as unknown as { buildAdapters(): { email: EmailLike } }).buildAdapters().email;
       email.send = async () => {
         throw new VendorError("simulated transient SMTP/engine outage", true);
       };
@@ -84,7 +84,7 @@ describe("tick grades a THROWING send() and reclaims orphaned 'sending' rows", (
       await launchOne(instance as never, "pt@permthrow-leads.com");
       await instance.infrastructureStatus();
 
-      const email = (instance as unknown as { adapters: { email: EmailLike } }).adapters.email;
+      const email = (instance as unknown as { buildAdapters(): { email: EmailLike } }).buildAdapters().email;
       email.send = async () => {
         throw new VendorError("simulated permanent unknown-mailbox", false);
       };

@@ -12,7 +12,11 @@ Workers runtime with real `DB`/`TENANT` bindings, per `vitest.config.ts`.
   token cannot read the first tenant's campaigns/inbox/account data.
 - `demo-adapter-guard.test.ts` — the required guardrail: a demo/free-plan
   tenant is structurally forced onto the sandbox `VendorPort` bundle even if
-  a `realAdaptersActivated` flag is (hypothetically) true.
+  the product-driven `activated` gate is (hypothetically) true.
+- `activation-gate.test.ts` — I1 self-serve activation: the product-driven
+  `activated(tenant)` gate (paid + billing-active + not frozen + screening
+  clear) replaces the old `ENGINE_TENANTS` allowlist, and a billing-state
+  flip is visible on the VERY NEXT adapter build (no DO restart needed).
 - `helpers.ts` — `api()` (wraps `SELF.fetch` with JSON + bearer-token
   headers), `signup()`, `tenantStub()` (direct DO access for the
   sandbox-only `advanceClock`/`tick`/`pollInbox` calls that aren't HTTP
