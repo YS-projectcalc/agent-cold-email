@@ -75,7 +75,7 @@ export const MCP_TOOLS: McpTool<any>[] = [
   ),
   tool(
     "infrastructure_status",
-    "Warmup + provisioning progress per mailbox. Returns { domains, mailboxes, sendReady, mailboxHealth[] }; each mailbox: warmupDay, dailyCap, sentToday, sendReady, delivStatus (healthy/throttled/paused), complaint/bounce/softBounce rates, reputationScore + placementRate, lastPolledAt. Use account/metrics for account-wide rollups.",
+    "Warmup + provisioning progress per mailbox. Returns { domains, mailboxes, sendReady, mailboxHealth[] }; each mailbox: warmupDay, dailyCap, sentToday, sendReady, delivStatus (healthy/throttled/paused), complaint/bounce/softBounce rates (first-party measured), vendorReputationScore + vendorPlacementRate (VENDOR-REPORTED approximations, not first-party measurements — the control loop uses local signals only), lastPolledAt. Use account/metrics for account-wide rollups.",
     EmptyInput,
     { title: "Infrastructure Status", readOnlyHint: true },
     (stub) => stub.infrastructureStatus(),

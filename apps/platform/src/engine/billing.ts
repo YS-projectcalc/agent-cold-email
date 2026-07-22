@@ -27,15 +27,20 @@ import { reactivateFromDunning } from "./ops-summary.js";
  *   - `STRIPE_SECRET_KEY` (payment-arming; the case already closed)
  *   - `ENGINE_BASE_URL` + `ENGINE_AUTH_SECRET` (spend-arming: the real
  *     EmailPort's own gate, factory.ts) — the actual hole this closes.
- * InboxKit (`inboxKitConfig`, the real mailbox/domain vendor) has NO env
- * binding anywhere in this repo yet (I3/I4 unbuilt — grep confirms zero
- * `INBOXKIT_*` fields in env.ts/wrangler.toml) — there is nothing to check.
- * The moment I3/I4 lands `INBOXKIT_API_KEY`/`INBOXKIT_WORKSPACE_ID`, this
- * function MUST be extended to OR those in too, or this exact class reopens
- * on the mailbox/domain vendor instead of the email one.
+ * InboxKit (`inboxKitConfig`, the real mailbox/domain vendor) landed its env
+ * binding in I3 (`INBOXKIT_API_KEY`/`INBOXKIT_WORKSPACE_ID`, env.ts) — so this
+ * function now ORs them in too (R3-1). A failing-by-construction coverage guard
+ * (spend-armed-env-coverage.test.ts) enforces that EVERY env field tagged
+ * `// spend-arming` in env.ts is referenced here, so the NEXT vendor binding
+ * trips RED at test time instead of silently reopening this class on a new
+ * vendor. A doc comment is not a systemic guard — the test is.
  */
 export function isRealSpendArmed(env: Env): boolean {
-  return Boolean(env.STRIPE_SECRET_KEY) || Boolean(env.ENGINE_BASE_URL && env.ENGINE_AUTH_SECRET);
+  return (
+    Boolean(env.STRIPE_SECRET_KEY) ||
+    Boolean(env.ENGINE_BASE_URL && env.ENGINE_AUTH_SECRET) ||
+    Boolean(env.INBOXKIT_API_KEY && env.INBOXKIT_WORKSPACE_ID)
+  );
 }
 
 export interface CheckoutResult {

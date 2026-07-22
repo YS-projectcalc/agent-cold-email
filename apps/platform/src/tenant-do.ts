@@ -39,6 +39,7 @@ import { getInfrastructureStatus, runSetupInfrastructure } from "./engine/provis
 import { launchCampaign, listCampaigns, pauseAllCampaigns, pauseCampaign, type CampaignListItem } from "./engine/campaigns.js";
 import { runTick } from "./engine/tick.js";
 import { withRequestIdempotency } from "./engine/idempotency.js";
+import { reconcileMailboxCredentialPushes } from "./engine/mailbox-credential-push.js";
 import { runDeliverabilitySweep } from "./engine/deliverability-actions.js";
 import { runPollInbox } from "./engine/reply-processor.js";
 import { suppressLead, unsubscribeEmail, type UnsubscribeResult } from "./engine/suppression.js";
@@ -619,7 +620,13 @@ export class TenantDO extends DurableObject<Env> {
 
   /** Cron-triggerable: runs just the monitor->decide->act loop (no send scheduling — that's tick()/B2). */
   async deliverabilitySweep() {
-    return runDeliverabilitySweep(this.requireContext());
+    const ctx = this.requireContext();
+    const result = await runDeliverabilitySweep(ctx);
+    // Self-serve I3 (F6) — retry any mailbox whose credential push to the engine
+    // is still 'pending'. INERT unless armed (config-gated inside), so a no-op in
+    // the default build and every test; a stuck push resolves on the next sweep.
+    await reconcileMailboxCredentialPushes(ctx);
+    return result;
   }
 
   /** D2 dunning sweep's "suspend after grace" action — a real local state transition (not a vendor call), armed now. */

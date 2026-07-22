@@ -125,8 +125,12 @@ export interface MailboxHealthReport {
   complaintRate: number;
   bounceRate: number;
   softBounceRate: number;
-  reputationScore: number;
-  placementRate: number;
+  // Gate (d) — VENDOR-REPORTED approximations (not first-party measurements);
+  // the `vendor*` prefix mirrors provisioning.ts's MailboxHealthReport so a
+  // reader never mistakes them for measured signals. Not rendered in the
+  // mailbox table today; kept typed for parity with the API shape.
+  vendorReputationScore: number;
+  vendorPlacementRate: number;
   // Surfaced by apps/platform/src/engine/provisioning.ts's
   // getInfrastructureStatus() (SPEC.md §19.2/[F7] — "backs the per-mailbox
   // last-sync UI claim"); null before that mailbox's first poll, a real epoch
