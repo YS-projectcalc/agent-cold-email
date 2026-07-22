@@ -25,6 +25,15 @@ silently dropped or a row is stuck forever. Known members + fixes:
   PLUS a TTL-bounded stuck-'sending' reclaim (`sending_since` column) mirroring the
   idempotency 'pending' reclaim.
 - **Idempotency 'pending' claim** (fixed earlier): TTL reclaim.
+- **I3 credential push (F6, 2026-07-22).** A vendor-provisioned (BILLED) mailbox
+  whose creds must be pushed to the droplet engine: if you push FIRST and only
+  record on success, a failed push (or DO crash mid-push) leaves NO durable
+  record ⇒ the billed mailbox is silently lost. FIX: `recordProvisionedMailboxForPush`
+  writes a 'pending' `mailbox_cred_pushes` row BEFORE the push; the push marks
+  'pushed' only on engine confirm, leaves 'pending' (+last_error) on failure and
+  NEVER throws into the provisioning saga; a reconcile sweep retries 'pending'
+  rows. RED-proof: remove the pre-push record ⇒ a failed push leaves status
+  `undefined` instead of 'pending' (billed mailbox lost).
 
 **The safe direction is vendor/effect AHEAD of the DB, never the reverse.**
 provisioning.ts / lifecycle.ts / threads.ts are NOT members: they persist the DB
