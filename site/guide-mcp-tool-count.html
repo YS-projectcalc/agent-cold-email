@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>21 Intent-Level Tools vs 116 Vendor Tools: MCP Scope Compared (2026)</title>
-<meta name="description" content="Compare Coldrig's 21 intent-level MCP tools with larger vendor tool surfaces. See lifecycle coverage, context and control tradeoffs, and current capability gaps.">
+<title>24 Intent-Level Tools vs 116 Vendor Tools: MCP Scope Compared (2026)</title>
+<meta name="description" content="Compare Coldrig's 24 intent-level MCP tools with larger vendor tool surfaces. See lifecycle coverage, context and control tradeoffs, and current capability gaps.">
 <link rel="canonical" href="https://coldrig.dev/guide-mcp-tool-count">
-<meta property="og:title" content="21 Intent-Level Tools vs 116 Vendor Tools: MCP Scope Compared (2026)">
+<meta property="og:title" content="24 Intent-Level Tools vs 116 Vendor Tools: MCP Scope Compared (2026)">
 <meta property="og:description" content="A fair comparison of smaller intent-level and larger granular MCP surfaces: lifecycle fit, context, control, and capability gaps.">
 <meta property="og:url" content="https://coldrig.dev/guide-mcp-tool-count">
 <meta property="og:type" content="article">
@@ -23,9 +23,9 @@
 {
   "@context": "https://schema.org",
   "@type": "TechArticle",
-  "headline": "21 intent-level tools vs 116 vendor tools: MCP scope compared",
+  "headline": "24 intent-level tools vs 116 vendor tools: MCP scope compared",
   "description": "A fair comparison of smaller intent-level and larger granular MCP surfaces, including lifecycle coverage, context and control tradeoffs, and current Coldrig gaps.",
-  "dateModified": "2026-07-14",
+  "dateModified": "2026-07-21",
   "about": { "@type": "SoftwareApplication", "name": "agent-cold-email", "applicationCategory": "BusinessApplication" }
 }
 </script>
@@ -46,9 +46,9 @@
 </nav>
 
 <main class="wrap">
-  <span class="draft-stamp">Verified 2026-07-14</span>
-  <h1>21 intent-level tools vs 116 vendor tools: MCP scope compared</h1>
-  <p class="lede">Tool count measures surface granularity, not automatic fitness. Coldrig's 21 tools cover its documented infrastructure-to-reply lifecycle with outcome-level intents; a larger vendor surface can be better when an agent needs low-level object control, native webhooks, or operations Coldrig does not expose. This page maps the tradeoff without claiming that 21 inherently “beats” 116—or that Coldrig's current sandbox is production-equivalent.</p>
+  <span class="draft-stamp">Verified 2026-07-21</span>
+  <h1>24 intent-level tools vs 116 vendor tools: MCP scope compared</h1>
+  <p class="lede">Tool count measures surface granularity, not automatic fitness. Coldrig's 24 tools cover its documented infrastructure-to-reply lifecycle with outcome-level intents; a larger vendor surface can be better when an agent needs low-level object control, native webhooks, or operations Coldrig does not expose. This page maps the tradeoff without claiming that 24 inherently “beats” 116—or that Coldrig's current sandbox is production-equivalent.</p>
 
   <div class="callout">
     <strong>The heuristic this page is answering</strong>
@@ -60,10 +60,10 @@
   <p>None of this means those tools are useless — a vendor-wrapper MCP is a legitimate design choice, especially for an agent that needs low-level access to every entity in that vendor's data model. It means tool count alone doesn't tell you how much of the actual cold-email pipeline is covered, only how granular the underlying REST API's object model is.</p>
 
   <h2>What does a large MCP tool surface cost in tokens and context?</h2>
-  <p>An MCP client typically loads the full tool list — every name, description, and JSON input schema — before an agent decides which single tool to call. A 116-tool server pays that cost on every session regardless of which one or two tools actually get used, and it adds a second cost beyond raw tokens: the agent has to disambiguate between many similarly-named, similarly-shaped per-entity tools instead of reasoning at the level of "provision infrastructure" or "launch a campaign." This is exactly why agent-cold-email's tool surface is deliberately kept to 21: each one maps to a pipeline stage, not a database table.</p>
+  <p>An MCP client typically loads the full tool list — every name, description, and JSON input schema — before an agent decides which single tool to call. A 116-tool server pays that cost on every session regardless of which one or two tools actually get used, and it adds a second cost beyond raw tokens: the agent has to disambiguate between many similarly-named, similarly-shaped per-entity tools instead of reasoning at the level of "provision infrastructure" or "launch a campaign." This is exactly why agent-cold-email's tool surface is deliberately kept to 24: each one maps to a pipeline stage, not a database table.</p>
   <p>This surface is already being priced by at least one vendor in the space: Woodpecker charges a separate $20/month add-on specifically for API/webhook/MCP access, on top of its base plan — the agent-operability surface is not treated as free or incidental.</p>
 
-  <h2>How do 21 tools cover Coldrig's documented lifecycle?</h2>
+  <h2>How do 24 tools cover Coldrig's documented lifecycle?</h2>
   <p>The table maps each stage Coldrig claims to support, the Smartlead categories reported by the cited research, and the Coldrig intent. It does not claim to cover every possible cold-outreach requirement.</p>
   <table>
     <thead><tr><th>Pipeline stage</th><th>Covered by Smartlead's reported categories</th><th>agent-cold-email tool(s)</th></tr></thead>
@@ -79,6 +79,7 @@
       <tr><td>Pausing one or all campaigns</td><td>"campaigns"</td><td><code>pause</code>, <code>pause_all</code></td></tr>
       <tr><td>Usage, billing, quota</td><td>Not present in the reported category list</td><td><code>account</code></td></tr>
       <tr><td>Reading/writing the optional human dashboard's layout</td><td>Not present in the reported category list</td><td><code>get_dashboard</code>, <code>configure_dashboard</code></td></tr>
+      <tr><td>Contact-level lead disposition, suppression, and list/export</td><td>"leads"</td><td><code>suppress_lead</code>, <code>update_lead</code>, <code>list_leads</code></td></tr>
     </tbody>
   </table>
   <p>Each stage in Coldrig's published scope has one, two, or three intents. That keeps the surface compact, but compactness trades away some low-level control. Exact input schemas: <a href="/guide-mcp-cold-email#tools">the MCP tool reference</a>. Important difference: Coldrig's <code>activity</code> feed is pollable; it is not a push-webhook subscription.</p>

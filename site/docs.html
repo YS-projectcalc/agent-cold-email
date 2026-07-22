@@ -104,7 +104,7 @@ npx agent-cold-email campaign launch --file campaign.json</code></pre>
   <p><code>POST /signup</code> mints a <code>demo</code>-plan tenant that is structurally incapable of reaching a real vendor adapter — enforced at the type level and covered by a test that fails if the guard is ever bypassed, not just documented policy. Every domain purchase, mailbox provisioning step, warmup tick, and send in demo mode runs against a fault-injecting sandbox: simulated rate limits, timeouts, bounces, and asynchronous replies, on a virtual clock so a multi-week warmup ramp resolves in the same session instead of in real time. This is the safe way to see the whole pipeline — provision, warm, send, reply, report — before anyone pays for anything.</p>
 
   <h2 id="tools">Tool reference</h2>
-  <p>All 21 authed intents, plus the one unauthenticated bootstrap call. Full JSON Schemas: <a href="openapi.yaml">openapi.yaml</a>.</p>
+  <p>All 24 authed intents, plus the one unauthenticated bootstrap call. Full JSON Schemas: <a href="openapi.yaml">openapi.yaml</a>.</p>
   <table>
     <thead><tr><th>Tool</th><th>HTTP</th><th>Body / params</th></tr></thead>
     <tbody>
@@ -130,6 +130,9 @@ npx agent-cold-email campaign launch --file campaign.json</code></pre>
       <tr><td><code>configure_webhook</code></td><td><code>POST /webhook-subscriptions</code>, <code>PUT/DELETE /webhook-subscriptions/{id}</code></td><td><code>{ action, url, eventTypes, secret, active }</code> (per action)</td></tr>
       <tr><td><code>get_byo_domains</code></td><td><code>GET /byo-domains</code>, <code>GET /byo-domains/{id}</code></td><td>—</td></tr>
       <tr><td><code>configure_byo_domain</code></td><td><code>POST /byo-domains</code>, <code>POST /byo-domains/{id}/poll-dns</code>, <code>POST /byo-domains/{id}/consent</code>, <code>POST /byo-domains/{id}/managed-mailboxes</code>, <code>POST /byo-domains/{id}/connect-mailbox</code></td><td><code>{ action, domain, domainRelationship, id, acknowledged, count, personaSlug, email, transport }</code> (per action)</td></tr>
+      <tr><td><code>suppress_lead</code></td><td><code>POST /leads/suppress</code></td><td><code>{ email, reason, note }</code></td></tr>
+      <tr><td><code>update_lead</code></td><td><code>POST /leads/disposition</code></td><td><code>{ email, interestStatus, notes, tags }</code></td></tr>
+      <tr><td><code>list_leads</code></td><td><code>GET /leads</code></td><td><code>?campaign&interestStatus&suppressed&replied&cursor&limit</code> (all optional)</td></tr>
     </tbody>
   </table>
   <p>Two optional helpers (<code>write_sequence</code>, <code>suggest_domains</code>) are designed but not yet built — do not assume they exist today.</p>

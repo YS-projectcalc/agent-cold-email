@@ -34,6 +34,11 @@ Framework-free TypeScript shared by every app in the monorepo (currently just
   (a UI recommendation, not a server-enforced enum), and the request/query
   schemas shared by the HTTP facade AND the MCP dashboard tools
   (`get_dashboard`/`configure_dashboard`/`label_thread`, `inbox` v2 filters).
+- `src/leads.ts` — SPEC.md §22 (warm-lead thin layer, increments #1-#3):
+  `LEAD_INTEREST_STATUSES` (the server-enforced `interest_status` enum, Q2)
+  + `SuppressLeadInput`/`UpdateLeadInput`/`ListLeadsQueryInput`, shared by the
+  HTTP facade (`routes/leads.ts`) AND the MCP `suppress_lead`/`update_lead`/
+  `list_leads` tools.
 
 ## How to run
 

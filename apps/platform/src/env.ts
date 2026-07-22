@@ -37,16 +37,6 @@ declare global {
       // is forced to sandbox first, unconditionally.
       ENGINE_BASE_URL?: string;
       ENGINE_AUTH_SECRET?: string;
-      // ROADMAP "Mordy-pilot activation lane" — comma-separated allowlist of
-      // exact tenant IDs permitted onto the real EmailPort once
-      // ENGINE_BASE_URL/ENGINE_AUTH_SECRET are also set (vendors/factory.ts's
-      // `parseEngineTenants` + the ENGINE_TENANTS gate). Unset/empty ->
-      // nobody is allowlisted, ever; there is no wildcard/"activate everyone"
-      // syntax. Narrows, never widens: domain/mailbox/billing/metrics and
-      // every non-listed tenant are unaffected. A wrangler secret at
-      // deployment (never in code/git — CLAUDE.md rule g), though the values
-      // themselves are just tenant IDs, not credentials.
-      ENGINE_TENANTS?: string;
       // Ops email + monitoring (watchtower/dunning/support). The Cloudflare
       // Email Service `send_email` binding (wrangler.toml `[[send_email]]`
       // name = "OPS_EMAIL") — NO api keys, sends from a domain onboarded via

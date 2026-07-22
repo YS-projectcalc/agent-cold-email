@@ -7,11 +7,14 @@ import type {
   DashboardLayout,
   InboxQueryInput,
   LaunchCampaignInput,
+  ListLeadsQueryInput,
   Provenance,
   RegisterByoDomainInput,
   RequestManagedByoMailboxesInput,
   SetupInfrastructureInput,
+  SuppressLeadInput,
   TenantPlan,
+  UpdateLeadInput,
   WebhookCreateInput,
   WebhookUpdateInput,
 } from "@coldstart/shared";
@@ -38,7 +41,9 @@ import { runTick } from "./engine/tick.js";
 import { withRequestIdempotency } from "./engine/idempotency.js";
 import { runDeliverabilitySweep } from "./engine/deliverability-actions.js";
 import { runPollInbox } from "./engine/reply-processor.js";
-import { unsubscribeEmail, type UnsubscribeResult } from "./engine/suppression.js";
+import { suppressLead, unsubscribeEmail, type UnsubscribeResult } from "./engine/suppression.js";
+import { upsertLeadDisposition, type LeadDispositionView } from "./engine/lead-dispositions.js";
+import { listLeads, type LeadListPage } from "./engine/list-leads.js";
 import { getThread, markThread, replyToThread } from "./engine/threads.js";
 import { listInbox, type InboxPage } from "./engine/inbox.js";
 import { getActivityFeed, type ActivityPage } from "./engine/activity.js";
@@ -84,6 +89,7 @@ import {
 } from "./engine/byo-mailbox-composition.js";
 import { newId, TENANT_DO_SCHEMA } from "./schema.js";
 import type { TenantContext } from "./tenant-context.js";
+import { readActivationState } from "./engine/activation.js";
 import { createVendorAdapters, type VendorAdapterBundle } from "./vendors/factory.js";
 import type { EngineClientConfig } from "./vendors/real/email-port.js";
 
@@ -106,7 +112,15 @@ export class TenantDO extends DurableObject<Env> {
   private tenantId: string | null = null;
   private plan: TenantPlan = "demo";
   private clock: VirtualClock | null = null;
-  private adapters: VendorAdapterBundle | null = null;
+  // Only the SANDBOX bundle instance is cached for the DO's lifetime — several
+  // sandbox ports hold in-memory state (SandboxEmailPort's send/poll queues,
+  // SandboxDomainPort/SandboxMailboxPort's seen/released sets,
+  // SandboxBillingPort's idempotency map) that must survive across calls
+  // within one DO instance, or (e.g.) a poll() right after a send() would
+  // never see what was just queued. The ACTIVATION DECISION itself is never
+  // cached (design §2.2 option-1 / adversarial finding F3) — see
+  // buildAdapters() below.
+  private sandboxAdapters: VendorAdapterBundle | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -270,29 +284,46 @@ export class TenantDO extends DurableObject<Env> {
     await this.buildAdapters().billing.createCustomer(input.tenantId, `create-customer:${input.tenantId}`);
   }
 
+  /**
+   * Product-driven activation gate (I1, self-serve activation design §2.1 —
+   * replaces `ENGINE_TENANTS`/`realAdaptersActivated`). Re-evaluates
+   * `activated(tenant)` with a FRESH SQL read on EVERY call — adversarial
+   * finding F3 (`docs/adversarial/selfserve-activation-design-review-2026-07-21.md`):
+   * caching this decision (like the old `this.adapters ??= …` did) would let a
+   * stale real/sandbox choice outlive a billing-state change (checkout,
+   * webhook, dunning suspend, dispute) until the next DO restart. The design's
+   * §2.2 option-1 (recommended, and REQUIRED per F3): only the SANDBOX bundle
+   * instance is cached (its ports hold in-memory state that must persist —
+   * see `sandboxAdapters` above); real ports are stateless HTTP clients, so
+   * constructing a fresh one every call is cheap and correct.
+   */
   private buildAdapters(): VendorAdapterBundle {
     if (!this.tenantId || !this.clock) throw new Error("tenant not initialized");
-    // Cached per DO instance: the sandbox EmailPort's in-memory send/poll
-    // queues must be the SAME instance across calls, or a poll() right
-    // after a send() would never see what was just queued.
-    // realAdaptersActivated is always false in this build — see vendors/factory.ts.
-    // engineConfig is threaded from env so the real EmailPort is wired for the
-    // moment activation flips the factory; it stays dark (both env vars unset)
-    // in the deployed build, so RealEmailPort throws NotActivatedError anyway.
+    this.sandboxAdapters ??= createVendorAdapters(this.plan, this.clock, false, this.engineConfig());
+    // Demo/free plans can NEVER activate (isTenantActivated requires
+    // isPaidPlanTier — ARCHITECTURE.md #8), so this skips the fresh SQL read
+    // entirely for them: there is no billing-state transition to go stale
+    // against when the plan itself already forecloses activation. `this.plan`
+    // is safe to trust here (kept in sync by initTenant/completeCheckoutSimulated/
+    // handleStripeWebhook, the only writers) — this is a pure perf win (avoids
+    // adding a query to every demo/free RPC call, e.g. GET /inbox's no-N+1
+    // guarantee), not a correctness shortcut for a paid tenant.
+    if (this.plan === "demo" || this.plan === "free") return this.sandboxAdapters;
     // `this.tenantId` is this DO's OWN verified identity (set from the
     // persisted tenant_profile row in the constructor, or from initTenant's
     // server-minted id — see routes/signup.ts's `newId("ten")` — never a
-    // per-call/request-supplied value), so the ENGINE_TENANTS allowlist check
-    // in the factory can't be spoofed by anything a caller passes in.
-    this.adapters ??= createVendorAdapters(
-      this.plan,
-      this.clock,
-      false,
-      this.engineConfig(),
-      this.tenantId,
-      this.env.ENGINE_TENANTS,
-    );
-    return this.adapters;
+    // per-call/request-supplied value), so this read can't be spoofed by
+    // anything a caller passes in.
+    const { activated } = readActivationState(this.ctx.storage.sql, this.tenantId);
+    if (!activated) return this.sandboxAdapters;
+    // Activated: `activated` gates the EmailPort ONLY (factory.ts's own doc
+    // comment — domain/mailbox/billing/metrics have no per-tenant activation
+    // path yet, I3/I4 unbuilt), so every OTHER port stays the SAME cached
+    // sandbox instance (their in-memory state — search/release sets,
+    // idempotency caches — must persist). `createVendorAdapters` stays the
+    // single place that decides email's real-vs-sandbox class; its other
+    // (thrown-away) sandbox ports here cost no I/O.
+    return { ...this.sandboxAdapters, email: createVendorAdapters(this.plan, this.clock, activated, this.engineConfig()).email };
   }
 
   private engineConfig(): EngineClientConfig | undefined {
@@ -531,6 +562,25 @@ export class TenantDO extends DurableObject<Env> {
   unsubscribeByEmail(email: string): UnsubscribeResult {
     const ctx = this.requireContext();
     return unsubscribeEmail(ctx, email, ctx.clock.now());
+  }
+
+  // --- SPEC.md §22 — warm-lead thin layer (increments #1-#3, ratified +
+  // founder-gated 2026-07-21). The SAME facade both the HTTP routes
+  // (routes/leads.ts) and the MCP tools (suppress_lead/update_lead/list_leads)
+  // call — never a parallel implementation (CLAUDE.md rule c). ---
+
+  suppressLead(input: SuppressLeadInput): UnsubscribeResult {
+    const ctx = this.requireContext();
+    return suppressLead(ctx, input, ctx.clock.now());
+  }
+
+  updateLead(input: UpdateLeadInput, source: Provenance): LeadDispositionView {
+    const ctx = this.requireContext();
+    return upsertLeadDisposition(ctx, input, source, ctx.clock.now());
+  }
+
+  listLeads(query: ListLeadsQueryInput): LeadListPage {
+    return listLeads(this.requireContext(), query);
   }
 
   // --- D5 lifecycle: voluntary cancel (tenant-authed, POST /cancel) + abuse

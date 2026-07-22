@@ -3,7 +3,7 @@ info:
   title: agent-cold-email API
   version: "0.1.0"
   description: >
-    Agent-native cold-email infrastructure, live in production. 21 curated
+    Agent-native cold-email infrastructure, live in production. 24 curated
     intents behind one bearer token per tenant (a subset — the /dashboard/*
     session + views endpoints — also accept an httpOnly session cookie minted
     by POST /dashboard/session, for the optional human dashboard SPA; see
@@ -35,6 +35,7 @@ tags:
   - name: dashboard
   - name: webhooks
   - name: byo-domains
+  - name: leads
   - name: compliance
 
 paths:
@@ -954,6 +955,101 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /leads:
+    get:
+      operationId: list_leads
+      tags: [leads]
+      summary: List/export leads with their contact-level disposition, cursor-paginated.
+      description: >
+        SPEC.md §22. Also the export surface — paginate to dump the full
+        book of business as JSON; there is no separate CSV endpoint.
+      parameters:
+        - name: campaign
+          in: query
+          schema: { type: string, minLength: 1, maxLength: 200 }
+        - name: interestStatus
+          in: query
+          schema: { $ref: '#/components/schemas/LeadInterestStatus' }
+        - name: suppressed
+          in: query
+          schema: { type: boolean }
+        - name: replied
+          in: query
+          schema: { type: boolean }
+        - name: cursor
+          in: query
+          schema: { type: string, minLength: 1, maxLength: 500 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: Lead list page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeadListPage'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /leads/suppress:
+    post:
+      operationId: suppress_lead
+      tags: [leads]
+      summary: Permanently suppress an email address tenant-wide.
+      description: >
+        SPEC.md §22. The manual/free-text "stop emailing me" path for
+        opt-outs the strict typed-unsubscribe matcher misses. Cancels every
+        pending send and marks every campaign-lead row for this email
+        suppressed. There is no un-suppress endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SuppressLeadInput'
+      responses:
+        '200':
+          description: Suppressed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuppressLeadResult'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /leads/disposition:
+    post:
+      operationId: update_lead
+      tags: [leads]
+      summary: Record a contact-level lead disposition (interest status, notes, tags).
+      description: >
+        SPEC.md §22. Upserts the durable, contact-level lead_dispositions
+        row keyed by email — visible across every campaign that lists the
+        contact. A partial patch: only the fields you pass are changed; at
+        least one of interestStatus, notes, or tags is required.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateLeadInput'
+      responses:
+        '200':
+          description: Disposition upserted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeadDispositionView'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /unsubscribe:
     get:
       operationId: unsubscribe_confirm_page
@@ -1595,3 +1691,88 @@ components:
         mailboxId: { type: string }
         email: { type: string }
         transportKind: { type: string }
+
+    LeadInterestStatus:
+      type: string
+      enum: [none, interested, meeting_booked, not_now, not_interested, bad_fit, out_of_office, wrong_person]
+      description: >
+        SPEC.md §22. out_of_office reschedules the follow-up past the
+        return date instead of treating silence as disinterest;
+        wrong_person drives a referral ask. do_not_contact is deliberately
+        not a member — that intent routes to POST /leads/suppress instead.
+
+    SuppressLeadInput:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email }
+        reason:
+          type: string
+          enum: [manual]
+          default: manual
+          description: >
+            Pinned to "manual" — the only value an external caller can
+            honestly claim. bounce/soft_bounce/complaint/unsubscribe are
+            exclusively system-derived elsewhere.
+        note: { type: string, maxLength: 2000, description: "Accepted for schema symmetry; not persisted (suppressions carries no note column)." }
+
+    SuppressLeadResult:
+      type: object
+      required: [suppressed, alreadySuppressed]
+      properties:
+        suppressed: { type: boolean, enum: [true] }
+        alreadySuppressed: { type: boolean }
+
+    UpdateLeadInput:
+      type: object
+      required: [email]
+      description: "At least one of interestStatus, notes, or tags must be present — a call with none has nothing to persist."
+      properties:
+        email: { type: string, format: email }
+        interestStatus: { $ref: '#/components/schemas/LeadInterestStatus' }
+        notes: { type: string, maxLength: 5000 }
+        tags:
+          type: array
+          maxItems: 50
+          items: { type: string, minLength: 1, maxLength: 100 }
+
+    LeadDispositionView:
+      type: object
+      required: [email, interestStatus, notes, tags, source, updatedAt]
+      properties:
+        email: { type: string }
+        interestStatus: { $ref: '#/components/schemas/LeadInterestStatus' }
+        notes: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        source: { type: string, enum: [dashboard, mcp, api, system] }
+        updatedAt: { type: integer }
+
+    LeadListPage:
+      type: object
+      required: [leads, nextCursor]
+      properties:
+        leads:
+          type: array
+          items:
+            type: object
+            required: [leadId, email, firstName, company, campaignId, campaignName, globalStatus, interestStatus, notes, tags, suppressed, lastEventType, lastEventTs, createdAt]
+            properties:
+              leadId: { type: string }
+              email: { type: string }
+              firstName: { type: string }
+              company: { type: string }
+              campaignId: { type: string }
+              campaignName: { type: string }
+              globalStatus: { type: string }
+              interestStatus: { $ref: '#/components/schemas/LeadInterestStatus' }
+              notes: { type: string }
+              tags:
+                type: array
+                items: { type: string }
+              suppressed: { type: boolean }
+              lastEventType: { type: string, nullable: true }
+              lastEventTs: { type: integer, nullable: true }
+              createdAt: { type: integer }
+        nextCursor: { type: string, nullable: true }

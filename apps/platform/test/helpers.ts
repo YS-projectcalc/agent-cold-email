@@ -3,6 +3,7 @@ import type { TenantPlan } from "@coldstart/shared";
 import { generateApiToken, hashApiToken } from "../src/auth.js";
 import { VirtualClock } from "../src/clock.js";
 import { insertTenantIndex } from "../src/db.js";
+import { readActivationState } from "../src/engine/activation.js";
 import { newId } from "../src/schema.js";
 import type { TenantContext } from "../src/tenant-context.js";
 import type { TenantDO } from "../src/tenant-do.js";
@@ -56,12 +57,15 @@ export async function withTenantContext<T>(tenantId: string, fn: (ctx: TenantCon
       )
       .one();
     const clock = new VirtualClock(profile.clock_base, profile.clock_offset, profile.clock_multiplier);
+    // Mirrors tenant-do.ts's buildAdapters(): the I1 activation gate is a
+    // FRESH SQL read, never a cached decision (adversarial finding F3).
+    const { activated } = readActivationState(sql, tenantId);
     const ctx: TenantContext = {
       sql,
       tenantId,
       plan: profile.plan,
       clock,
-      adapters: createVendorAdapters(profile.plan, clock, false, undefined, tenantId, undefined),
+      adapters: createVendorAdapters(profile.plan, clock, activated),
       env,
     };
     return fn(ctx);

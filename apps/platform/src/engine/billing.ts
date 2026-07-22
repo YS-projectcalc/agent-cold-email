@@ -7,13 +7,36 @@
 // Stripe is the source of truth once activated (ARCHITECTURE.md #3); these
 // functions mirror that state onto tenant_profile.
 
-import { isPaidPlanTier, NotFoundError, PLAN_QUOTAS, type CheckoutInput, type TenantPlan } from "@coldstart/shared";
+import { isPaidPlanTier, NotFoundError, PLAN_QUOTAS, ValidationError, type CheckoutInput, type TenantPlan } from "@coldstart/shared";
 import { createStripeCheckoutSession, reportUsageRecord } from "../billing/stripe-client.js";
 import type { StripeEventInput } from "../billing/stripe-webhook.js";
+import type { Env } from "../env.js";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
 import { clearTeardownRecord } from "./lifecycle.js";
 import { reactivateFromDunning } from "./ops-summary.js";
+
+/**
+ * F1 residual fix (adversarial re-attack round-2, 2026-07-21 —
+ * docs/adversarial/selfserve-i1i2-build-review-2026-07-21.md finding 1): a
+ * `STRIPE_SECRET_KEY`-only guard is INERT during the original arming-order
+ * window the design review named — infra (engine) armed BEFORE Stripe keys —
+ * because that window's DEFINING condition is `STRIPE_SECRET_KEY` unset. The
+ * actual threat is REAL VENDOR SPEND being reachable, not payment being live,
+ * so the guard must key off every signal that makes spend reachable:
+ *   - `STRIPE_SECRET_KEY` (payment-arming; the case already closed)
+ *   - `ENGINE_BASE_URL` + `ENGINE_AUTH_SECRET` (spend-arming: the real
+ *     EmailPort's own gate, factory.ts) — the actual hole this closes.
+ * InboxKit (`inboxKitConfig`, the real mailbox/domain vendor) has NO env
+ * binding anywhere in this repo yet (I3/I4 unbuilt — grep confirms zero
+ * `INBOXKIT_*` fields in env.ts/wrangler.toml) — there is nothing to check.
+ * The moment I3/I4 lands `INBOXKIT_API_KEY`/`INBOXKIT_WORKSPACE_ID`, this
+ * function MUST be extended to OR those in too, or this exact class reopens
+ * on the mailbox/domain vendor instead of the email one.
+ */
+export function isRealSpendArmed(env: Env): boolean {
+  return Boolean(env.STRIPE_SECRET_KEY) || Boolean(env.ENGINE_BASE_URL && env.ENGINE_AUTH_SECRET);
+}
 
 export interface CheckoutResult {
   mode: "stripe" | "simulated";
@@ -76,6 +99,17 @@ export interface CompleteCheckoutResult {
  * an error — mirrors a real user refreshing the Stripe success page.
  */
 export function completeSimulatedCheckout(ctx: TenantContext, sessionId: string): CompleteCheckoutResult {
+  // F1 (adversarial 2026-07-21, BLOCKING — round-2 residual fix): defense in
+  // depth — even if the route guard (routes/checkout.ts) were ever
+  // bypassed/removed, this function itself must refuse to grant
+  // activation-relevant billing state once REAL VENDOR SPEND is reachable
+  // (Stripe live keys AND/OR the sending engine armed — see
+  // isRealSpendArmed's doc comment for why a Stripe-key-only check is
+  // inert during the engine-armed-before-Stripe window).
+  if (isRealSpendArmed(ctx.env)) {
+    throw new ValidationError("simulated checkout is disabled once real vendor spend is armed (Stripe keys and/or the sending engine)");
+  }
+
   const session = ctx.sql
     .exec<{ plan: TenantPlan; status: string }>(
       `SELECT plan, status FROM checkout_sessions WHERE id = ? AND tenant_id = ?`,
