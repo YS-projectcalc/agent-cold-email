@@ -1691,3 +1691,88 @@ components:
         mailboxId: { type: string }
         email: { type: string }
         transportKind: { type: string }
+
+    LeadInterestStatus:
+      type: string
+      enum: [none, interested, meeting_booked, not_now, not_interested, bad_fit, out_of_office, wrong_person]
+      description: >
+        SPEC.md §22. out_of_office reschedules the follow-up past the
+        return date instead of treating silence as disinterest;
+        wrong_person drives a referral ask. do_not_contact is deliberately
+        not a member — that intent routes to POST /leads/suppress instead.
+
+    SuppressLeadInput:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email }
+        reason:
+          type: string
+          enum: [manual]
+          default: manual
+          description: >
+            Pinned to "manual" — the only value an external caller can
+            honestly claim. bounce/soft_bounce/complaint/unsubscribe are
+            exclusively system-derived elsewhere.
+        note: { type: string, maxLength: 2000, description: "Accepted for schema symmetry; not persisted (suppressions carries no note column)." }
+
+    SuppressLeadResult:
+      type: object
+      required: [suppressed, alreadySuppressed]
+      properties:
+        suppressed: { type: boolean, enum: [true] }
+        alreadySuppressed: { type: boolean }
+
+    UpdateLeadInput:
+      type: object
+      required: [email]
+      description: "At least one of interestStatus, notes, or tags must be present — a call with none has nothing to persist."
+      properties:
+        email: { type: string, format: email }
+        interestStatus: { $ref: '#/components/schemas/LeadInterestStatus' }
+        notes: { type: string, maxLength: 5000 }
+        tags:
+          type: array
+          maxItems: 50
+          items: { type: string, minLength: 1, maxLength: 100 }
+
+    LeadDispositionView:
+      type: object
+      required: [email, interestStatus, notes, tags, source, updatedAt]
+      properties:
+        email: { type: string }
+        interestStatus: { $ref: '#/components/schemas/LeadInterestStatus' }
+        notes: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        source: { type: string, enum: [dashboard, mcp, api, system] }
+        updatedAt: { type: integer }
+
+    LeadListPage:
+      type: object
+      required: [leads, nextCursor]
+      properties:
+        leads:
+          type: array
+          items:
+            type: object
+            required: [leadId, email, firstName, company, campaignId, campaignName, globalStatus, interestStatus, notes, tags, suppressed, lastEventType, lastEventTs, createdAt]
+            properties:
+              leadId: { type: string }
+              email: { type: string }
+              firstName: { type: string }
+              company: { type: string }
+              campaignId: { type: string }
+              campaignName: { type: string }
+              globalStatus: { type: string }
+              interestStatus: { $ref: '#/components/schemas/LeadInterestStatus' }
+              notes: { type: string }
+              tags:
+                type: array
+                items: { type: string }
+              suppressed: { type: boolean }
+              lastEventType: { type: string, nullable: true }
+              lastEventTs: { type: integer, nullable: true }
+              createdAt: { type: integer }
+        nextCursor: { type: string, nullable: true }
