@@ -3,7 +3,7 @@ info:
   title: agent-cold-email API
   version: "0.1.0"
   description: >
-    Agent-native cold-email infrastructure, live in production. 21 curated
+    Agent-native cold-email infrastructure, live in production. 24 curated
     intents behind one bearer token per tenant (a subset — the /dashboard/*
     session + views endpoints — also accept an httpOnly session cookie minted
     by POST /dashboard/session, for the optional human dashboard SPA; see
@@ -35,6 +35,7 @@ tags:
   - name: dashboard
   - name: webhooks
   - name: byo-domains
+  - name: leads
   - name: compliance
 
 paths:
@@ -953,6 +954,101 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+
+  /leads:
+    get:
+      operationId: list_leads
+      tags: [leads]
+      summary: List/export leads with their contact-level disposition, cursor-paginated.
+      description: >
+        SPEC.md §22. Also the export surface — paginate to dump the full
+        book of business as JSON; there is no separate CSV endpoint.
+      parameters:
+        - name: campaign
+          in: query
+          schema: { type: string, minLength: 1, maxLength: 200 }
+        - name: interestStatus
+          in: query
+          schema: { $ref: '#/components/schemas/LeadInterestStatus' }
+        - name: suppressed
+          in: query
+          schema: { type: boolean }
+        - name: replied
+          in: query
+          schema: { type: boolean }
+        - name: cursor
+          in: query
+          schema: { type: string, minLength: 1, maxLength: 500 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: Lead list page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeadListPage'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /leads/suppress:
+    post:
+      operationId: suppress_lead
+      tags: [leads]
+      summary: Permanently suppress an email address tenant-wide.
+      description: >
+        SPEC.md §22. The manual/free-text "stop emailing me" path for
+        opt-outs the strict typed-unsubscribe matcher misses. Cancels every
+        pending send and marks every campaign-lead row for this email
+        suppressed. There is no un-suppress endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SuppressLeadInput'
+      responses:
+        '200':
+          description: Suppressed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuppressLeadResult'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /leads/disposition:
+    post:
+      operationId: update_lead
+      tags: [leads]
+      summary: Record a contact-level lead disposition (interest status, notes, tags).
+      description: >
+        SPEC.md §22. Upserts the durable, contact-level lead_dispositions
+        row keyed by email — visible across every campaign that lists the
+        contact. A partial patch: only the fields you pass are changed; at
+        least one of interestStatus, notes, or tags is required.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateLeadInput'
+      responses:
+        '200':
+          description: Disposition upserted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeadDispositionView'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
 
   /unsubscribe:
     get:

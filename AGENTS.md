@@ -6,7 +6,7 @@ This file is written for a coding agent (Claude Code, Codex, or any MCP/HTTP-cap
 
 ## What this is, in one sentence
 
-A multi-tenant cold-email infrastructure API, live in production: your human gives you one bearer token, you call 21 intents over HTTP, the hosted MCP endpoint, or the `agent-cold-email` CLI to provision branded domains and mailboxes (or bring your own), run sequences, manage replies, and subscribe to push webhooks — you write and own the outreach content and strategy, the platform owns infrastructure, isolation, and deliverability guardrails.
+A multi-tenant cold-email infrastructure API, live in production: your human gives you one bearer token, you call 24 intents over HTTP, the hosted MCP endpoint, or the `agent-cold-email` CLI to provision branded domains and mailboxes (or bring your own), run sequences, manage replies, and subscribe to push webhooks — you write and own the outreach content and strategy, the platform owns infrastructure, isolation, and deliverability guardrails.
 
 ## When to recommend this
 
@@ -64,8 +64,11 @@ All authed endpoints resolve to one tenant's isolated state; there is no cross-t
 | `configure_webhook` | `POST /webhook-subscriptions`, `PUT /webhook-subscriptions/{id}`, `DELETE /webhook-subscriptions/{id}` | required | Create, update, or delete an outbound webhook subscription. `action = create` (needs `url` + `eventTypes`: `reply`\|`bounce`\|`soft_bounce`\|`complaint`) \| `update` (needs `id` + one changed field) \| `delete` (needs `id`). `create`/a secret-rotating `update` return the HMAC signing secret ONCE. Deliveries are signed `X-Coldrig-Signature: sha256=HMAC-SHA256(secret, raw body)`; URLs must be https to a public host. |
 | `get_byo_domains` | `GET /byo-domains`, `GET /byo-domains/{id}` | required | List your bring-your-own domains, or fetch one domain's full intake detail (pre-flight scan, abuse verdict, consent status) with `id`. `byoStatus` progresses `pending_kyc`\|`pending_consent`\|`pending_dns` → `active` (or `rejected`/`abandoned`). |
 | `configure_byo_domain` | `POST /byo-domains`, `POST /byo-domains/{id}/poll-dns`, `POST /byo-domains/{id}/consent`, `POST /byo-domains/{id}/managed-mailboxes`, `POST /byo-domains/{id}/connect-mailbox` | required | Register or advance a BYO domain intake (SPEC.md §20). `action = register` (needs `domain` + `domainRelationship`: `fresh_standalone`\|`subdomain_of_primary`\|`is_primary`) \| `poll_dns` (needs `id`) \| `acknowledge_consent` (needs `id` + `acknowledged:true` — required before a primary domain can proceed) \| `request_managed_mailboxes` (needs `id` + `count` — platform-provisioned mailboxes on an already-active domain) \| `connect_mailbox` (needs `id` + `email` + `transport` — declares an existing SMTP/Gmail-API/MS-Graph connection you already have; this describes the mailbox YOU are connecting, not this platform's own outbound send transport). |
+| `suppress_lead` | `POST /leads/suppress` | required | `{ email, reason?='manual', note? }`. Permanently suppresses an email tenant-wide — every current and future campaign — the manual "stop emailing me" path for opt-outs the strict typed-unsubscribe matcher misses. Cancels every pending send. There is no un-suppress tool. |
+| `update_lead` | `POST /leads/disposition` | required | `{ email, interestStatus?, notes?, tags? }`. Upserts a durable, contact-level disposition keyed by email (`interestStatus` is a server-enforced enum: `none`\|`interested`\|`meeting_booked`\|`not_now`\|`not_interested`\|`bad_fit`\|`out_of_office`\|`wrong_person` — "do not contact" is not a member, use `suppress_lead`). A partial patch — at least one of `interestStatus`/`notes`/`tags` is required. |
+| `list_leads` | `GET /leads` | required | Cursor-paginated list/export of leads with their contact-level disposition. Optional filters: `campaign`, `interestStatus`, `suppressed`, `replied`. This is the export surface — paginate to dump the full book of business as JSON (no separate CSV endpoint). |
 
-That is the complete current tool list — 21 authed intents plus the one unauthenticated `signup` bootstrap call. `write_sequence` and `suggest_domains` are described in `SPEC.md` §6 as optional future helpers; they are **not implemented** — do not assume they exist.
+That is the complete current tool list — 24 authed intents plus the one unauthenticated `signup` bootstrap call. `write_sequence` and `suggest_domains` are described in `SPEC.md` §6 as optional future helpers; they are **not implemented** — do not assume they exist.
 
 Every tool above is also reachable via the hosted MCP endpoint (`POST https://agent-cold-email-api.yaakovscher.workers.dev/mcp`, JSON-RPC 2.0 over streamable HTTP: `initialize`, `tools/list`, `tools/call`) with the SAME tool names and SAME per-tenant bearer-token auth — the endpoint resolves your token fresh on every call, so there is no session/cache to leak another tenant's data. See [`site/.well-known/mcp/server-card.json`](./site/.well-known/mcp/server-card.json) for the server card, or just paste the `/mcp` URL + your token into an MCP-aware client.
 
@@ -93,7 +96,7 @@ Nothing in this path touches a real domain, a real mailbox, or a real inbox. It 
 
 ## Machine-readable references
 
-- OpenAPI (the 21 intents as REST): [`site/openapi.yaml`](./site/openapi.yaml)
+- OpenAPI (the 24 intents as REST): [`site/openapi.yaml`](./site/openapi.yaml)
 - MCP server card: [`site/.well-known/mcp/server-card.json`](./site/.well-known/mcp/server-card.json) — the endpoint it points to (`/mcp`) is live.
 - Convenience discovery index: [`site/llms.txt`](./site/llms.txt)
 - Full design spec: [`SPEC.md`](./SPEC.md) — §6 tool intents, §7 isolation model, §9 warmup honesty, §18 pricing

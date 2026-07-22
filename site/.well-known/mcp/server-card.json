@@ -3,7 +3,7 @@
   "name": "agent-cold-email",
   "displayName": "Coldrig",
   "version": "0.2.0",
-  "description": "Agent-controlled cold-outreach infrastructure, live in production. One bearer token and 21 focused tools replace multiple vendor accounts, preserve durable infrastructure state, provision isolated domains and mailboxes, run sequences, manage replies and push webhooks, and enforce guardrails server-side. The customer's own agent remains the strategy and content layer. Free sandbox demo today, no card, no waitlist; real sending runs in production (Gmail API, HTTPS/443), with new accounts activating via a short concierge step while self-serve activation rolls out. Pricing starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox, with no send quota (sends are not the billing meter).",
+  "description": "Agent-controlled cold-outreach infrastructure, live in production. One bearer token and 24 focused tools replace multiple vendor accounts, preserve durable infrastructure state, provision isolated domains and mailboxes, run sequences, manage replies and push webhooks, track lead disposition, and enforce guardrails server-side. The customer's own agent remains the strategy and content layer. Free sandbox demo today, no card, no waitlist; real sending runs in production (Gmail API, HTTPS/443), with new accounts activating via a short concierge step while self-serve activation rolls out. Pricing starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox, with no send quota (sends are not the billing meter).",
   "homepage": "https://coldrig.dev/",
   "documentation": "https://coldrig.dev/docs",
   "license": "MIT",
@@ -115,6 +115,18 @@
     {
       "name": "configure_byo_domain",
       "description": "Register or advance a bring-your-own domain/mailbox intake: pre-flight scan, consent tracking, and activation handoff for sending from a domain you already own."
+    },
+    {
+      "name": "suppress_lead",
+      "description": "Permanently suppress an email address tenant-wide — the manual 'stop emailing me' path for opt-outs the typed-unsubscribe matcher misses. No un-suppress tool exists."
+    },
+    {
+      "name": "update_lead",
+      "description": "Record a durable, contact-level disposition (interest status, notes, tags) keyed by email, visible across every campaign that lists them."
+    },
+    {
+      "name": "list_leads",
+      "description": "List/export leads with their contact-level disposition, cursor-paginated — the export surface (JSON, no separate CSV endpoint)."
     }
   ],
   "guardrails": [

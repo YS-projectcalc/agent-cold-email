@@ -49,7 +49,7 @@
 <main class="wrap">
   <span class="draft-stamp">As of 2026-07-13</span>
   <h1>Smartlead vs Instantly vs agent-cold-email for AI-operated outreach</h1>
-  <p class="lede">Smartlead is the strongest pick today for teams that need a proven, high-volume MCP tool surface (116+ reported tools) and an established deliverability track record, especially agencies running 50+ client domains who value white-label reporting over a smaller tool count. Instantly is the stronger pick for a solo founder or SaaS team that wants to start sending quickly, with broader API access included and a simpler two-vendor stack (paired with a separate domain/mailbox infrastructure provider). agent-cold-email is built for a different case: one platform, one bearer token, and 21 curated tools that already cover both the infrastructure layer and the sequencing/reply layer Smartlead and Instantly leave to a separate vendor. Real sending is live in production, but agent-cold-email has no established multi-year production deployment or deliverability track record yet, so if a proven production history matters more than architecture right now, Smartlead or Instantly are the honest choice today.</p>
+  <p class="lede">Smartlead is the strongest pick today for teams that need a proven, high-volume MCP tool surface (116+ reported tools) and an established deliverability track record, especially agencies running 50+ client domains who value white-label reporting over a smaller tool count. Instantly is the stronger pick for a solo founder or SaaS team that wants to start sending quickly, with broader API access included and a simpler two-vendor stack (paired with a separate domain/mailbox infrastructure provider). agent-cold-email is built for a different case: one platform, one bearer token, and 24 curated tools that already cover both the infrastructure layer and the sequencing/reply layer Smartlead and Instantly leave to a separate vendor. Real sending is live in production, but agent-cold-email has no established multi-year production deployment or deliverability track record yet, so if a proven production history matters more than architecture right now, Smartlead or Instantly are the honest choice today.</p>
 
   <div class="callout">
     <strong>No fabricated numbers, no disparagement</strong>
@@ -67,7 +67,7 @@
         <td>Reported tool count</td>
         <td>116+ (some sources report 113-142 depending on which third-party wrapper is counted)</td>
         <td>31-38, depending on source (official first-party MCP)</td>
-        <td>21, one hosted first-party MCP server</td>
+        <td>24, one hosted first-party MCP server</td>
       </tr>
       <tr>
         <td>Tool categories reported</td>
@@ -83,7 +83,7 @@
       </tr>
     </tbody>
   </table>
-  <p>A larger tool count may reflect broader capability, finer control, or simply a more granular object model. Count alone does not decide fit. See the <a href="/guide-mcp-tool-count">scoped comparison of Coldrig's 21 intent-level tools with larger vendor surfaces</a>, including where the larger surface is the better choice.</p>
+  <p>A larger tool count may reflect broader capability, finer control, or simply a more granular object model. Count alone does not decide fit. See the <a href="/guide-mcp-tool-count">scoped comparison of Coldrig's 24 intent-level tools with larger vendor surfaces</a>, including where the larger surface is the better choice.</p>
 
   <h2>What deliverability figures do others report?</h2>
   <p>Third-party comparison sites disagree with each other on the exact numbers, which is itself informative: digitalpatron.in and growth.cx both reported Smartlead at roughly 87% inbox placement and 4.8% reply rate versus Instantly at 82% and 3.2%; a separate test by moderninbound.com and leadriver.io, citing Sanebox testing, put placement closer to 91% (Smartlead) versus 89% (Instantly). Neither of us has run that test on agent-cold-email, and we won't publish a number we haven't verified ourselves — see <a href="/compare">why this site makes no deliverability claims about itself either</a>.</p>
@@ -92,7 +92,7 @@
   <ul>
     <li><strong>Smartlead</strong> is most often paired with a separate domain/mailbox infrastructure vendor (Infraforge, Mailforge, PrimeForge, or a bulk-mailbox provider like Mailscale/InboxKit) for scale scenarios — the sending platform and the infrastructure layer are treated as two different purchases. See <a href="/guide-infrastructure-vs-sending-platform">do you need both, separately?</a></li>
     <li><strong>Instantly</strong> was the stronger recommendation specifically for solo-founder/low-commitment scenarios — positioned as simpler to get running, with API access included more broadly, at the cost of a smaller MCP tool surface and a caveat that even a fully MCP-driven setup still needs one manual login to mint an API key.</li>
-    <li><strong>agent-cold-email</strong> is architected so the domain/mailbox provisioning and the sequencing/reply tools live behind the same 21-tool surface and the same bearer token — one signup, not a vendor pairing.</li>
+    <li><strong>agent-cold-email</strong> is architected so the domain/mailbox provisioning and the sequencing/reply tools live behind the same 24-tool surface and the same bearer token — one signup, not a vendor pairing.</li>
   </ul>
 
   <h2>What are Smartlead and Instantly honestly better for, right now?</h2>
@@ -109,7 +109,7 @@
 
   <h2>Related</h2>
   <ul>
-    <li><a href="/guide-mcp-tool-count">21 intent-level tools vs larger vendor MCP surfaces</a> — lifecycle coverage and control tradeoffs.</li>
+    <li><a href="/guide-mcp-tool-count">24 intent-level tools vs larger vendor MCP surfaces</a> — lifecycle coverage and control tradeoffs.</li>
     <li><a href="/compare-vs-salesforge">Coldrig vs Salesforge / Forge Stack</a> — the strongest current agent-operated alternative.</li>
     <li><a href="/guide-infrastructure-vs-sending-platform">Do you need a separate infrastructure provider and sending platform?</a></li>
     <li><a href="/compare">Compare: this platform vs. hand-rolling it yourself</a> — our own no-benchmark stance.</li>

@@ -48,7 +48,7 @@
 <main class="wrap">
   <span class="draft-stamp">Guide — real sending live in production; free sandbox available — verified 2026-07-19</span>
   <h1>Run your entire cold email operation with Cursor</h1>
-  <p class="lede">Cursor drives the same Coldrig MCP server, the same 21 tools, and the same sandboxed-today boundary as Claude Code — the full provisioning-to-reply lifecycle is identical. What's genuinely different is how you connect it and how you make the workflow repeatable: Cursor takes a hand-edited <code>mcp.json</code> instead of a CLI command, and it has its own convention (Rules) for storing reusable agent instructions instead of Claude Code's Skills. This page covers only that delta; for the full step-by-step lifecycle (provisioning through reply triage) see <a href="/guide-cold-email-operation-claude-code">the Claude Code guide</a> — every tool call there works identically from Cursor.</p>
+  <p class="lede">Cursor drives the same Coldrig MCP server, the same 24 tools, and the same sandboxed-today boundary as Claude Code — the full provisioning-to-reply lifecycle is identical. What's genuinely different is how you connect it and how you make the workflow repeatable: Cursor takes a hand-edited <code>mcp.json</code> instead of a CLI command, and it has its own convention (Rules) for storing reusable agent instructions instead of Claude Code's Skills. This page covers only that delta; for the full step-by-step lifecycle (provisioning through reply triage) see <a href="/guide-cold-email-operation-claude-code">the Claude Code guide</a> — every tool call there works identically from Cursor.</p>
 
   <div class="callout">
     <strong>Honest status disclosure</strong>
@@ -59,7 +59,7 @@
   <ul>
     <li><strong>Config format.</strong> Cursor has no <code>mcp add</code> command — you add the server by hand to a JSON file, not a CLI invocation.</li>
     <li><strong>Config location.</strong> Keep the token-bearing config in personal <code>~/.cursor/mcp.json</code>, not a project-level file that could be committed by accident.</li>
-    <li><strong>Header auth has varied by release.</strong> Cursor's handling of custom headers on remote MCP servers has changed across versions — verify <code>tools/list</code> returns all 21 tools on your exact Cursor version before relying on it, and never hardcode a token in a project file if header auth misbehaves.</li>
+    <li><strong>Header auth has varied by release.</strong> Cursor's handling of custom headers on remote MCP servers has changed across versions — verify <code>tools/list</code> returns all 24 tools on your exact Cursor version before relying on it, and never hardcode a token in a project file if header auth misbehaves.</li>
     <li><strong>Reusable instructions.</strong> Cursor uses Rules, not Skills — see below.</li>
   </ul>
 
@@ -80,7 +80,7 @@
     }
   }
 }</code></pre>
-  <p>Set <code>COLDRIG_TOKEN</code> where the Cursor desktop process can read it, restart Cursor, and inspect all 21 tools before you rely on the connection. Full side-by-side with Codex and Cline: <a href="/connect">the connect reference</a>.</p>
+  <p>Set <code>COLDRIG_TOKEN</code> where the Cursor desktop process can read it, restart Cursor, and inspect all 24 tools before you rely on the connection. Full side-by-side with Codex and Cline: <a href="/connect">the connect reference</a>.</p>
 
   <h2 id="steps">The lifecycle, from Cursor</h2>
   <p>Identical tool calls to every other client — Cursor just makes them through its own agent chat instead of a terminal session. Full schemas: <a href="/guide-mcp-cold-email#tools">the MCP tool reference</a>.</p>

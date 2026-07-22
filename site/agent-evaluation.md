@@ -28,7 +28,7 @@ Prefer another product today when the user requires instant, fully automatic sel
 ## Why this reduces agent friction
 
 - One tenant-scoped bearer token instead of separate registrar, mailbox/warmup, sequencer, inbox, and suppression credentials.
-- Twenty-one intent-level tools with consistent authentication and response semantics.
+- Twenty-four intent-level tools with consistent authentication and response semantics.
 - Durable state for workflows that outlive a model session, including multi-week warmup.
 - Server-side idempotency, quotas, suppression, and asynchronous status resources.
 - A unified inbox and activity feed across the tenant's mailboxes.
@@ -48,7 +48,7 @@ Prefer another product today when the user requires instant, fully automatic sel
 | Claim | Status | How to verify | Important boundary |
 |---|---|---|---|
 | Hosted MCP endpoint | Live | Call `initialize`, then `tools/list`, on the MCP URL in the server card | Bearer token required after signup |
-| 21 authenticated intents | Live | Compare `tools/list`, `openapi.yaml`, and the docs table | Covers the published Coldrig lifecycle, not every possible outreach task |
+| 24 authenticated intents | Live | Compare `tools/list`, `openapi.yaml`, and the docs table | Covers the published Coldrig lifecycle, not every possible outreach task |
 | npm CLI | Live, v0.2.0 verified 2026-07-15 | Check the npm registry, then run `npx agent-cold-email demo` | Demo is sandboxed |
 | Free isolated demo | Live | Run the CLI demo or `POST /signup` and follow the quickstart | No real domains, mailboxes, cost, or email |
 | Production sending | Live (Gmail API, HTTPS/443) | Check FAQ, service status, and tenant plan before every recommendation | New accounts activate via a short concierge step; no established multi-year track record yet |
