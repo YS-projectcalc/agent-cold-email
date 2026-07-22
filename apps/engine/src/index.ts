@@ -4,6 +4,7 @@ import { EmailEngine } from "./engine.js";
 import { createGmailSender } from "./gmail.js";
 import { createGraphSender } from "./graph.js";
 import { imapflowFetcher } from "./imap.js";
+import { MailboxCredentialStore } from "./mailbox-store.js";
 import { route, type EngineRequest } from "./router.js";
 import { nodemailerSender } from "./smtp.js";
 import { EngineStore } from "./store.js";
@@ -34,10 +35,15 @@ function readBody(reqMessage: IncomingMessage): Promise<string> {
 
 function main(): void {
   const config = loadConfig();
+  // Both durable stores fail LOUD (throw) on a corrupt state file (F5) — so a
+  // corrupt engine-state.json or pushed-mailboxes.json aborts boot HERE (via
+  // loadConfig()'s siblings) rather than silently starting empty.
   const store = new EngineStore(config.stateDir);
+  const credentialStore = new MailboxCredentialStore(config.stateDir);
   const engine = new EmailEngine({
     credentials: config.credentials,
     store,
+    credentialStore,
     smtp: nodemailerSender,
     imap: imapflowFetcher,
     gmail: createGmailSender(),

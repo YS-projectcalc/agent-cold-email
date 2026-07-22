@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { SendEmailInput } from "@coldstart/shared";
+import { mailboxCredentialsSchema } from "./config.js";
 
 // The Worker↔engine HTTP boundary contract. These zod schemas validate every
 // inbound request at the boundary (CLAUDE.md rule h). The request `input` shape
@@ -37,8 +38,28 @@ export const pollRequestSchema = z.object({
   sinceCursor: z.number().int().min(-1),
 });
 
+// Self-serve activation I3 — the authed mailbox credential-push boundary
+// (POST /v1/mailboxes upsert, DELETE /v1/mailboxes revoke). `credentials` is
+// validated against the SAME schema the engine's static config uses, so a
+// pushed mailbox can never carry a shape the send/poll path can't resolve.
+// `idempotencyKey` is optional (content-hash replay-safety is the primary
+// mechanism, MailboxCredentialStore) — when present it makes a replayed push
+// return the recorded outcome and rejects key reuse with a different payload.
+export const mailboxWriteRequestSchema = z.object({
+  email: z.string().email(),
+  credentials: mailboxCredentialsSchema,
+  idempotencyKey: z.string().min(1).optional(),
+});
+
+export const mailboxRemoveRequestSchema = z.object({
+  email: z.string().email(),
+  idempotencyKey: z.string().min(1).optional(),
+});
+
 export type SendRequest = z.infer<typeof sendRequestSchema>;
 export type PollRequest = z.infer<typeof pollRequestSchema>;
+export type MailboxWriteRequest = z.infer<typeof mailboxWriteRequestSchema>;
+export type MailboxRemoveRequest = z.infer<typeof mailboxRemoveRequestSchema>;
 
 // Compile-time drift guard: the validated request `input` MUST satisfy the
 // frozen SendEmailInput. If a field is added/renamed/retyped on either side and

@@ -124,15 +124,58 @@ export class EngineStore {
 }
 
 function loadState(filePath: string): StoreState {
+  // F5 (selfserve-activation design review): distinguish MISSING (a normal
+  // first boot — start empty, the file is written on the first send/poll) from
+  // CORRUPT (the file exists but is unparseable/wrong-shaped). The pre-fix
+  // catch-all silently returned EMPTY on BOTH, so a corrupt engine-state.json
+  // would boot with a blank slate — re-sending already-sent leads and losing
+  // every Message-ID->thread mapping — and the next flush would OVERWRITE the
+  // corrupt file, destroying the only copy of the real state. A corrupt file
+  // must fail LOUD (refuse to start) so an operator repairs/quarantines it
+  // instead of the daemon silently dropping durable state. Same loader
+  // discipline the pushed-credential store (mailbox-store.ts) uses, where the
+  // dropped state would be OAuth refresh tokens.
+  return loadJsonStateFile(filePath, EMPTY, "engine state (send/thread idempotency)", (parsed) => ({
+    sends: (parsed.sends as StoreState["sends"]) ?? {},
+    threads: (parsed.threads as StoreState["threads"]) ?? {},
+  }));
+}
+
+/**
+ * Load a JSON-file-backed durable state file with FAIL-LOUD corruption
+ * handling, shared by every engine durable store (send/thread state here, the
+ * pushed-credential store in mailbox-store.ts). MISSING -> `emptyValue` (a
+ * normal first boot). CORRUPT (exists but unreadable-for-a-reason-other-than-
+ * absence, or invalid JSON, or not a JSON object) -> THROW, so the daemon
+ * refuses to start rather than silently discarding durable state and then
+ * overwriting the only copy of it on the next flush. `project` narrows a
+ * partially-shaped parse into the concrete state.
+ */
+export function loadJsonStateFile<T>(
+  filePath: string,
+  emptyValue: T,
+  label: string,
+  project: (parsed: Record<string, unknown>) => T,
+): T {
+  let raw: string;
   try {
-    const parsed = JSON.parse(readFileSync(filePath, "utf8")) as Partial<StoreState>;
-    return {
-      sends: parsed.sends ?? {},
-      threads: parsed.threads ?? {},
-    };
-  } catch {
-    // Missing/corrupt file on first boot -> start empty (the file is written on
-    // the first successful send/poll).
-    return structuredClone(EMPTY);
+    raw = readFileSync(filePath, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return structuredClone(emptyValue);
+    // A read error that is NOT "file absent" (permissions, I/O) is a real fault,
+    // not a first boot — fail loud rather than masquerade as an empty store.
+    throw new Error(`${label} file ${filePath} is unreadable — refusing to start: ${(err as Error).message}`);
   }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `${label} file ${filePath} is corrupt (invalid JSON) — refusing to start empty, which would silently drop durable state and overwrite the only copy on the next write. Repair or quarantine the file. Parse error: ${(err as Error).message}`,
+    );
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`${label} file ${filePath} is corrupt (not a JSON object) — refusing to start empty.`);
+  }
+  return project(parsed as Record<string, unknown>);
 }

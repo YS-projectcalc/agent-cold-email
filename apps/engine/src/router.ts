@@ -1,7 +1,7 @@
 import { assertAuthorized } from "./auth.js";
 import { BadRequestError, statusFor } from "./errors.js";
 import type { EmailEngine } from "./engine.js";
-import { pollRequestSchema, sendRequestSchema } from "./wire.js";
+import { mailboxRemoveRequestSchema, mailboxWriteRequestSchema, pollRequestSchema, sendRequestSchema } from "./wire.js";
 
 export interface EngineRequest {
   method: string;
@@ -26,6 +26,10 @@ const startedAt = Date.now();
  *   POST /v1/poll  -> 200 { events, cursor }         (bearer-authed; consumer
  *                    passes its stored sinceCursor and persists the returned
  *                    cursor AFTER processing the events)
+ *   POST   /v1/mailboxes -> 200 UpsertResult         (bearer-authed; self-serve
+ *                    I3 credential push — idempotent upsert, F4)
+ *   DELETE /v1/mailboxes -> 200 RemoveResult         (bearer-authed; revoke a
+ *                    pushed mailbox on cancel/teardown)
  *
  * Errors map to a status the Worker re-grades: 401/400/422 permanent, 5xx
  * transient (see errors.ts / RealEmailPort).
@@ -47,6 +51,20 @@ export async function route(engine: EmailEngine, authSecret: string, req: Engine
       assertAuthorized(req.authHeader, authSecret);
       const { mailboxEmail, sinceCursor } = pollRequestSchema.parse(parseJson(req.rawBody));
       const result = await engine.poll(mailboxEmail, sinceCursor);
+      return { status: 200, body: result };
+    }
+
+    if (req.method === "POST" && req.path === "/v1/mailboxes") {
+      assertAuthorized(req.authHeader, authSecret);
+      const parsed = mailboxWriteRequestSchema.parse(parseJson(req.rawBody));
+      const result = await engine.upsertMailbox(parsed);
+      return { status: 200, body: result };
+    }
+
+    if (req.method === "DELETE" && req.path === "/v1/mailboxes") {
+      assertAuthorized(req.authHeader, authSecret);
+      const parsed = mailboxRemoveRequestSchema.parse(parseJson(req.rawBody));
+      const result = await engine.removeMailbox(parsed);
       return { status: 200, body: result };
     }
 
