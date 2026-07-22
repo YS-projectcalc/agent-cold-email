@@ -6,7 +6,7 @@
     "url": "https://github.com/YS-projectcalc/agent-cold-email",
     "source": "github"
   },
-  "version": "0.2.1",
+  "version": "0.2.2",
   "websiteUrl": "https://coldrig.dev/",
   "packages": [
     {
@@ -19,7 +19,7 @@
       "environmentVariables": [
         {
           "name": "AGENT_COLD_EMAIL_API_KEY",
-          "description": "Bearer token from POST /signup (free, no card) \u2014 or run `npx agent-cold-email demo` first. Optional at startup: without it, `initialize`/`tools/list` still work (unauthenticated introspection), but every `tools/call` fails until a key is set.",
+          "description": "Bearer token from POST /signup (free, no card) — or run `npx agent-cold-email demo` first. Optional at startup: without it, `initialize`/`tools/list` still work (unauthenticated introspection), but every `tools/call` fails until a key is set.",
           "isRequired": false,
           "isSecret": true,
           "format": "string"
@@ -41,7 +41,7 @@
       "headers": [
         {
           "name": "Authorization",
-          "description": "Bearer token from POST /signup (free, no card) \u2014 or run `npx agent-cold-email demo` first",
+          "description": "Bearer token from POST /signup (free, no card) — or run `npx agent-cold-email demo` first",
           "isRequired": true,
           "isSecret": true,
           "format": "string"
