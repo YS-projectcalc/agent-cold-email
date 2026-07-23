@@ -39,10 +39,17 @@ closed (401 on every call) rather than falling open. Set it via
 - `dunning.ts` — **D2**: pure `decideDunningAction(failureCount)` — retry /
   escalate / suspend, mirroring `../engine/deliverability.ts`'s
   monitor-decide-act shape.
-- `db.ts` — D1 helpers for the two new control-plane tables
+- `db.ts` — D1 helpers for the control-plane tables
   (`migrations/0002_admin_ops.sql`): `support_tickets`, `dunning_events`,
   plus `listAllTenantIds` (the D1 tenants_index id list that drives every
-  cross-tenant sweep/digest).
+  cross-tenant sweep/digest). Also owns the G1 `screening_reviews` queue
+  (`migrations/0012_sdn_screening.sql`) — `upsertScreeningReview`/
+  `listPendingScreeningReviews`/`getScreeningReview`/`resolveScreeningReview`.
+- `terminate.ts` — the shared D5 "suspend + reclaim infra + lock the
+  control-plane token + log an enforcement_actions row" sequence, extracted
+  from the terminate route so G1b's screening-`reject` path
+  (`../routes/admin-screening.ts`) reuses the SAME mechanics instead of a
+  second implementation.
 - `ops-sweep.ts` — the actual cross-tenant iteration + aggregation logic
   (`runDunningSweep`, `runDeliverabilitySweepAllTenants`, `buildOpsDigest`),
   shared by `../routes/admin-ops.ts` (on-demand) AND `../scheduled.ts`
@@ -62,9 +69,22 @@ closed (401 on every call) rather than falling open. Set it via
   triage, persists an ops ticket, and forwards a copy to the founder. Never
   auto-replies (triage drafts stay drafts).
 
-Routes live in `../routes/admin-support.ts` / `../routes/admin-ops.ts` (see
-`../routes/README.md`) — kept with the other route files so "one file per
-intent cluster" stays a single convention, not two.
+Routes live in `../routes/admin-support.ts` / `../routes/admin-ops.ts` /
+`../routes/admin-screening.ts` (see `../routes/README.md`) — kept with the
+other route files so "one file per intent cluster" stays a single convention,
+not two.
+
+## G1 — OFAC/SDN screening review queue
+
+`GET /admin/screening/reviews` lists every tenant currently held for review;
+`POST /admin/tenants/:id/screening` (`{decision:'clear'|'reject', note}`)
+resolves one. `clear` un-blocks activation on the tenant's own DO (via a new
+`TenantDO.clearScreening()` RPC) and marks the D1 review row `'cleared'`.
+`reject` reuses `terminate.ts`'s exact D5 abuse-offboarding sequence (never a
+silent "still under review" — a confirmed match is suspended and its infra
+reclaimed) and marks the review row `'rejected'`. See `../ofac/README.md` for
+the screening pipeline itself (list build + matcher + the `screenTenant`
+write path).
 
 ## Cross-tenant aggregation — how it stays tenant-isolated
 

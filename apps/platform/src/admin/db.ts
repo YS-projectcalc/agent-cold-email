@@ -173,3 +173,108 @@ export async function countTerminatedTenants(env: Env): Promise<number> {
   ).first<{ n: number }>();
   return row?.n ?? 0;
 }
+
+// --- G1 OFAC screening review queue (migrations/0012_sdn_screening.sql) ---
+// Cross-tenant/admin-owned exactly like dunning_events/enforcement_actions
+// above — one row per tenant CURRENTLY OR PREVIOUSLY held for review
+// (tenant_id is the PK). See src/ofac/screening.ts (writer) and
+// src/routes/admin-screening.ts (reader/resolver).
+
+export interface ScreeningReviewRow {
+  tenantId: string;
+  matchedTerms: unknown;
+  screenedFields: unknown;
+  listVersion: string;
+  status: "pending" | "cleared" | "rejected";
+  createdAt: number;
+  resolvedAt: number | null;
+  resolvedBy: string | null;
+}
+
+interface ScreeningReviewD1Row {
+  tenant_id: string;
+  matched_terms: string;
+  screened_fields: string;
+  list_version: string;
+  status: "pending" | "cleared" | "rejected";
+  created_at: number;
+  resolved_at: number | null;
+  resolved_by: string | null;
+}
+
+function fromScreeningReviewD1Row(row: ScreeningReviewD1Row): ScreeningReviewRow {
+  return {
+    tenantId: row.tenant_id,
+    matchedTerms: JSON.parse(row.matched_terms),
+    screenedFields: JSON.parse(row.screened_fields),
+    listVersion: row.list_version,
+    status: row.status,
+    createdAt: row.created_at,
+    resolvedAt: row.resolved_at,
+    resolvedBy: row.resolved_by,
+  };
+}
+
+/**
+ * Records (or REOPENS) a tenant's screening-hold row. `tenant_id` is the PK —
+ * a re-hit on a re-screen (NB-1's brand-change re-screen) reopens this SAME
+ * row to 'pending' rather than appending a duplicate, so "list every pending
+ * review" stays a single query per tenant (design line 63).
+ */
+export async function upsertScreeningReview(
+  env: Env,
+  params: { tenantId: string; matchedTerms: unknown; screenedFields: unknown; listVersion: string; createdAt: number },
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO screening_reviews (tenant_id, matched_terms, screened_fields, list_version, status, created_at, resolved_at, resolved_by)
+     VALUES (?, ?, ?, ?, 'pending', ?, NULL, NULL)
+     ON CONFLICT(tenant_id) DO UPDATE SET
+       matched_terms = excluded.matched_terms,
+       screened_fields = excluded.screened_fields,
+       list_version = excluded.list_version,
+       status = 'pending',
+       created_at = excluded.created_at,
+       resolved_at = NULL,
+       resolved_by = NULL`,
+  )
+    .bind(params.tenantId, JSON.stringify(params.matchedTerms), JSON.stringify(params.screenedFields), params.listVersion, params.createdAt)
+    .run();
+}
+
+/** GET /admin/screening/reviews — every review still awaiting the founder. */
+export async function listPendingScreeningReviews(env: Env): Promise<ScreeningReviewRow[]> {
+  const result = await env.DB.prepare(
+    `SELECT tenant_id, matched_terms, screened_fields, list_version, status, created_at, resolved_at, resolved_by
+     FROM screening_reviews WHERE status = 'pending' ORDER BY created_at ASC`,
+  ).all<ScreeningReviewD1Row>();
+  return result.results.map(fromScreeningReviewD1Row);
+}
+
+export async function getScreeningReview(env: Env, tenantId: string): Promise<ScreeningReviewRow | null> {
+  const row = await env.DB.prepare(
+    `SELECT tenant_id, matched_terms, screened_fields, list_version, status, created_at, resolved_at, resolved_by
+     FROM screening_reviews WHERE tenant_id = ?`,
+  )
+    .bind(tenantId)
+    .first<ScreeningReviewD1Row>();
+  return row ? fromScreeningReviewD1Row(row) : null;
+}
+
+/** POST /admin/tenants/:id/screening — resolves a pending review. Returns
+ * `true` only when a row existed to resolve (a clear/reject on a tenant with
+ * no review row on file is still honored on tenant_profile by the caller, but
+ * has no queue row to close — see routes/admin-screening.ts). */
+export async function resolveScreeningReview(
+  env: Env,
+  tenantId: string,
+  status: "cleared" | "rejected",
+  resolvedBy: string,
+  resolvedAt: number,
+): Promise<boolean> {
+  const result = await env.DB.prepare(
+    `UPDATE screening_reviews SET status = ?, resolved_at = ?, resolved_by = ? WHERE tenant_id = ?`,
+  )
+    .bind(status, resolvedAt, resolvedBy, tenantId)
+    .run();
+  return (result.meta.changes ?? 0) > 0;
+}

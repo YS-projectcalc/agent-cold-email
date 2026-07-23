@@ -12,6 +12,7 @@ import { createStripeCheckoutSession, reportUsageRecord } from "../billing/strip
 import type { StripeEventInput } from "../billing/stripe-webhook.js";
 import type { Env } from "../env.js";
 import { newId } from "../schema.js";
+import { screenTenant } from "../ofac/screening.js";
 import type { TenantContext } from "../tenant-context.js";
 import { clearTeardownRecord } from "./lifecycle.js";
 import { reactivateFromDunning } from "./ops-summary.js";
@@ -108,7 +109,7 @@ export interface CompleteCheckoutResult {
  * already-completed session's link again is a no-op (`upgraded: false`), not
  * an error — mirrors a real user refreshing the Stripe success page.
  */
-export function completeSimulatedCheckout(ctx: TenantContext, sessionId: string): CompleteCheckoutResult {
+export async function completeSimulatedCheckout(ctx: TenantContext, sessionId: string): Promise<CompleteCheckoutResult> {
   // F1 (adversarial 2026-07-21, BLOCKING — round-2 residual fix): defense in
   // depth — even if the route guard (routes/checkout.ts) were ever
   // bypassed/removed, this function itself must refuse to grant
@@ -159,6 +160,11 @@ export function completeSimulatedCheckout(ctx: TenantContext, sessionId: string)
     `plan upgraded to ${session.plan} (simulated test-mode checkout)`,
     now,
   );
+  // G1 (ga-gates-design-2026-07-22.md §G1) — screen at the activation
+  // transition. Test-mode simulated checkout carries no Stripe billing name
+  // (there's no real Stripe session), so brand + contact email are the only
+  // screenable fields here.
+  await screenTenant(ctx, { trigger: "checkout" });
   return { upgraded: true, plan: session.plan };
 }
 
@@ -177,6 +183,21 @@ function readStripeMetadataPlan(obj: Record<string, unknown>): TenantPlan | null
   if (!metadata || typeof metadata !== "object") return null;
   const plan = (metadata as Record<string, unknown>).plan;
   return typeof plan === "string" && isPaidPlanTier(plan) ? plan : null;
+}
+
+/**
+ * G1 (design line 45) — best-effort Stripe billing name off a completed
+ * checkout session's `customer_details.name`. ⚠️ Under the pilot's 100%-off +
+ * `payment_method_collection:"if_required"` posture (self-serve design §2.5)
+ * this is typically ABSENT — never assumed present, only screened when the
+ * webhook object actually carries it (screening.ts records `screened_fields`
+ * either way, so a review honestly shows what was/wasn't checked).
+ */
+function readStripeBillingName(obj: Record<string, unknown>): string | null {
+  const customerDetails = obj.customer_details;
+  if (!customerDetails || typeof customerDetails !== "object") return null;
+  const name = (customerDetails as Record<string, unknown>).name;
+  return typeof name === "string" && name.trim().length > 0 ? name : null;
 }
 
 /**
@@ -214,7 +235,7 @@ function mapStripeSubscriptionStatus(status: unknown): "active" | "past_due" | "
  * writes zero rows, and this returns `{ applied: false, duplicate: true }`
  * WITHOUT re-running any of the mutation below.
  */
-export function applyStripeWebhookEvent(ctx: TenantContext, event: StripeEventInput): WebhookApplyResult {
+export async function applyStripeWebhookEvent(ctx: TenantContext, event: StripeEventInput): Promise<WebhookApplyResult> {
   const now = ctx.clock.now();
   const claim = ctx.sql.exec(
     `INSERT OR IGNORE INTO webhook_events (event_id, type, ts) VALUES (?, ?, ?)`,
@@ -261,6 +282,9 @@ export function applyStripeWebhookEvent(ctx: TenantContext, event: StripeEventIn
         `plan upgraded to ${plan} (stripe checkout.session.completed)`,
         now,
       );
+      // G1 — screen at the activation transition, including the Stripe
+      // billing name when the completed session actually carried one.
+      await screenTenant(ctx, { trigger: "checkout", billingName: readStripeBillingName(obj) });
       return { applied: true, duplicate: false, plan };
     }
 

@@ -36,6 +36,26 @@ CREATE TABLE IF NOT EXISTS tenant_profile (
   -- setup_infrastructure. The deliverability control loop reads it to derive a
   -- replacement lookalike when a domain burns (engine/deliverability.ts).
   primary_domain TEXT NOT NULL DEFAULT '',
+  -- G1 (ga-gates-design-2026-07-22.md §G1) — OFAC/SDN screening verdict.
+  -- 'clear' | 'review'. Read by engine/activation.ts's isTenantActivated as a
+  -- blocking conjunct (a 'review' tenant never activates — NEVER auto-
+  -- rejected, see src/ofac/screening.ts). DEFAULT 'clear' keeps every
+  -- EXISTING row byte-identical (the founder-accepted pilot-stub posture,
+  -- ROADMAP.md "FOUNDER RULED YES") — grandfathering of already-ACTIVE
+  -- tenants at G1 arming time is handled in tenant-do.ts's
+  -- grandfatherActiveScreening (self-applying, mirrors this file's own
+  -- ensureColumnMigrations idiom), which stamps screening_list_version below
+  -- so a grandfathered tenant is honestly distinguishable from a really-
+  -- screened one.
+  screening_status TEXT NOT NULL DEFAULT 'clear',
+  -- Which SDN list build this verdict was checked against — NULL means never
+  -- screened (a brand-new demo/free tenant that has never checked out).
+  -- 'grandfathered-2026-07-23' is the ONE non-list-version sentinel value
+  -- (tenant-do.ts's grandfather backfill); every other value is a real
+  -- sdn_list_meta.active_version this tenant was actually checked against
+  -- (src/ofac/screening.ts).
+  screening_list_version TEXT,
+  screened_at INTEGER,
   created_at INTEGER NOT NULL,
   clock_base INTEGER NOT NULL,
   clock_offset INTEGER NOT NULL DEFAULT 0,

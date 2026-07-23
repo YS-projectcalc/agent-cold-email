@@ -91,6 +91,7 @@ import {
 import { newId, TENANT_DO_SCHEMA } from "./schema.js";
 import type { TenantContext } from "./tenant-context.js";
 import { readActivationState } from "./engine/activation.js";
+import { clearScreeningStatus } from "./ofac/screening.js";
 import { createVendorAdapters, type VendorAdapterBundle } from "./vendors/factory.js";
 import type { EngineClientConfig } from "./vendors/real/email-port.js";
 
@@ -127,6 +128,7 @@ export class TenantDO extends DurableObject<Env> {
     super(ctx, env);
     this.ctx.storage.sql.exec(TENANT_DO_SCHEMA);
     this.ensureColumnMigrations();
+    this.grandfatherActiveScreening();
 
     const row = this.ctx.storage.sql
       .exec<{ id: string; plan: TenantPlan; clock_base: number; clock_offset: number; clock_multiplier: number }>(
@@ -201,6 +203,11 @@ export class TenantDO extends DurableObject<Env> {
     this.addColumnIfMissing("mailboxes", "transport_kind", "TEXT NOT NULL DEFAULT 'smtp'");
     this.addColumnIfMissing("mailboxes", "transport_json", "TEXT");
     this.addColumnIfMissing("deliverability_actions", "alerted_at", "INTEGER");
+    // G1 (ga-gates-design-2026-07-22.md §G1) — OFAC/SDN screening verdict
+    // columns (see schema.ts's tenant_profile comment for the field contract).
+    this.addColumnIfMissing("tenant_profile", "screening_status", "TEXT NOT NULL DEFAULT 'clear'");
+    this.addColumnIfMissing("tenant_profile", "screening_list_version", "TEXT");
+    this.addColumnIfMissing("tenant_profile", "screened_at", "INTEGER");
     // Created here, not in TENANT_DO_SCHEMA, so they run only after the columns
     // above are guaranteed to exist (safe for DOs that predate the column). Each
     // collapses any pre-existing rows that would violate the unique key BEFORE
@@ -216,6 +223,38 @@ export class TenantDO extends DurableObject<Env> {
     // is unique per real inbound message; NULLs are distinct in SQLite, so the
     // few event rows without a message id never collide.
     this.ensureDedupeIndex("idx_events_dedupe", "events", ["tenant_id", "type", "message_id"], "message_id");
+  }
+
+  // G1 (ga-gates-design-2026-07-22.md, Founder Q2 ADOPTED — "already-active
+  // pilot tenants are grandfathered clear ... so turning screening on can
+  // never strand the live pilot"). Self-applying exactly like
+  // ensureColumnMigrations()/addColumnIfMissing() above: runs on every DO
+  // construction, but is idempotent and a no-op after the first successful
+  // stamp — `screening_list_version IS NOT NULL` (set either by this stamp OR
+  // by a real screen at checkout, src/ofac/screening.ts) means "never touch
+  // this tenant's verdict again here". A tenant that was NOT yet
+  // billing_state='active' when this code first deploys (a fresh signup, or
+  // one that later checks out) gets screened for REAL at its next checkout
+  // instead — this only back-fills tenants that are ALREADY paying+active at
+  // the moment G1 ships, so screening can never retroactively strand them.
+  private static readonly SCREENING_GRANDFATHER_VERSION = "grandfathered-2026-07-23";
+
+  private grandfatherActiveScreening(): void {
+    const row = this.ctx.storage.sql
+      .exec<{ id: string; billing_state: string; screening_list_version: string | null }>(
+        `SELECT id, billing_state, screening_list_version FROM tenant_profile LIMIT 1`,
+      )
+      .toArray()[0];
+    if (!row) return; // fresh DO, no tenant_profile row yet (initTenant creates it)
+    if (row.screening_list_version !== null) return; // already screened (for real OR grandfathered) — never re-stamp
+    if (row.billing_state !== "active") return; // nothing to strand — not currently paid+active
+
+    this.ctx.storage.sql.exec(
+      `UPDATE tenant_profile SET screening_status = 'clear', screening_list_version = ?, screened_at = ? WHERE id = ?`,
+      TenantDO.SCREENING_GRANDFATHER_VERSION,
+      new RealClock().now(),
+      row.id,
+    );
   }
 
   /**
@@ -539,8 +578,8 @@ export class TenantDO extends DurableObject<Env> {
     return startCheckout(this.requireContext(), input, origin);
   }
 
-  completeCheckoutSimulated(sessionId: string): CompleteCheckoutResult {
-    const result = completeSimulatedCheckout(this.requireContext(), sessionId);
+  async completeCheckoutSimulated(sessionId: string): Promise<CompleteCheckoutResult> {
+    const result = await completeSimulatedCheckout(this.requireContext(), sessionId);
     // Keep the in-memory plan in sync for the REST of this DO instance's
     // lifetime (quota checks + the demo/free-only sandbox guards below both
     // read `this.plan`, not a fresh SQL read, on every call).
@@ -548,8 +587,8 @@ export class TenantDO extends DurableObject<Env> {
     return result;
   }
 
-  handleStripeWebhook(event: StripeEventInput): WebhookApplyResult {
-    const result = applyStripeWebhookEvent(this.requireContext(), event);
+  async handleStripeWebhook(event: StripeEventInput): Promise<WebhookApplyResult> {
+    const result = await applyStripeWebhookEvent(this.requireContext(), event);
     if (result.plan) this.plan = result.plan;
     return result;
   }
@@ -632,6 +671,11 @@ export class TenantDO extends DurableObject<Env> {
   /** D2 dunning sweep's "suspend after grace" action — a real local state transition (not a vendor call), armed now. */
   suspendForDunning(): void {
     suspendTenant(this.requireContext(), "dunning");
+  }
+
+  /** G1b admin resolution — POST /admin/tenants/:id/screening {decision:'clear'} (routes/admin-screening.ts). */
+  clearScreening(): void {
+    clearScreeningStatus(this.requireContext());
   }
 
   // --- POST /demo/run (B5) — sandbox-only, structurally gated to demo/free plans ---

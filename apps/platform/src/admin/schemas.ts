@@ -15,3 +15,16 @@ export const SupportTriageInput = z.object({
   messageId: z.string().min(1).max(998).optional(),
 });
 export type SupportTriageInput = z.infer<typeof SupportTriageInput>;
+
+// G1b — POST /admin/tenants/:id/screening body (ga-gates-design-2026-07-22.md
+// §G1). `clear` un-blocks activation on the tenant's own DO; `reject` chains
+// into the existing D5 terminate path (design line 59: "reject can chain into
+// the existing terminate path") — see routes/admin-screening.ts. NEVER a
+// third "leave pending" decision here: the admin route IS the resolution —
+// listing (`GET /admin/screening/reviews`) is the separate read path for
+// deciding which way to go.
+export const AdminScreeningDecisionInput = z.object({
+  decision: z.enum(["clear", "reject"]),
+  note: z.string().max(2000).default(""),
+});
+export type AdminScreeningDecisionInput = z.infer<typeof AdminScreeningDecisionInput>;

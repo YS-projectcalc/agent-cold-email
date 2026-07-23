@@ -12,20 +12,6 @@ import { isLifecycleFrozen } from "./billing-state.js";
 
 export type ScreeningStatus = "clear" | "review";
 
-/**
- * STUB — OFAC/sanctions screening. Increment I5 (unbuilt; see design §2.7 and
- * `docs/research/self-serve-activation-design-2026-07-21.md`) will replace
- * this with a real denied-party/SDN check backed by a persisted
- * `screening_status` column. Until then this ALWAYS returns "clear" so the
- * pilot's activation gate has a slot to consult without blocking on I5 (the
- * founder-accepted risk for the single trusted pilot — design Q2). Every
- * caller keys off the return value, not a hardcoded true, so widening this to
- * a real check needs no caller change.
- */
-export function screeningStatusStub(_tenantId: string): ScreeningStatus {
-  return "clear";
-}
-
 export interface ActivationState {
   readonly plan: TenantPlan;
   readonly status: string;
@@ -62,14 +48,24 @@ export function isTenantActivated(
  * independent freeze check of its own and relies entirely on this swap).
  * `tenant-do.ts`'s `buildAdapters()` calls this on every request instead of
  * caching the real/sandbox decision for the DO's lifetime.
+ *
+ * G1 (ga-gates-design-2026-07-22.md §G1) — `screening_status` is read in the
+ * SAME query, replacing the former `screeningStatusStub` (which always
+ * returned "clear" — the founder-accepted pilot risk, design Q2, now closed).
+ * The column is written by `src/ofac/screening.ts`'s `screenTenant` at
+ * checkout and at setup_infrastructure's brand rewrite (NB-1 disposition).
+ * This function's signature and every downstream consumer are unchanged
+ * (design line 38's explicit "no caller changes" guarantee) — the fresh-read
+ * discipline above means a screening verdict flip is visible on the VERY NEXT
+ * call too, exactly like a billing-state flip.
  */
 export function readActivationState(sql: SqlStorage, tenantId: string): ActivationState {
   const row = sql
-    .exec<{ plan: TenantPlan; status: string; billing_state: string }>(
-      `SELECT plan, status, billing_state FROM tenant_profile WHERE id = ?`,
+    .exec<{ plan: TenantPlan; status: string; billing_state: string; screening_status: ScreeningStatus }>(
+      `SELECT plan, status, billing_state, screening_status FROM tenant_profile WHERE id = ?`,
       tenantId,
     )
     .one();
-  const activated = isTenantActivated(row.plan, row.status, row.billing_state, screeningStatusStub(tenantId));
+  const activated = isTenantActivated(row.plan, row.status, row.billing_state, row.screening_status);
   return { plan: row.plan, status: row.status, billingState: row.billing_state, activated };
 }

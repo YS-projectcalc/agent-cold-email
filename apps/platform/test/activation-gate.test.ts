@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
-import { isTenantActivated, readActivationState, screeningStatusStub } from "../src/engine/activation.js";
+import { isTenantActivated, readActivationState } from "../src/engine/activation.js";
 import type { VendorAdapterBundle } from "../src/vendors/factory.js";
 import { RealEmailPort } from "../src/vendors/real/email-port.js";
 import { SandboxEmailPort } from "../src/vendors/sandbox/email-port.js";
@@ -43,10 +43,39 @@ describe("isTenantActivated — pure predicate (design §2.1's formula, verbatim
   });
 });
 
-describe("screeningStatusStub — documented STUB (I5 slot, design §2.7)", () => {
-  it("always returns 'clear' for any tenant id — the founder-accepted pilot risk, not a real OFAC check", () => {
-    expect(screeningStatusStub("ten_anything")).toBe("clear");
-    expect(screeningStatusStub("ten_someone_else")).toBe("clear");
+// G1 (ga-gates-design-2026-07-22.md §G1) — replaces the former
+// screeningStatusStub describe block above's "always clear" STUB test.
+// readActivationState now reads the REAL persisted tenant_profile.
+// screening_status column (src/ofac/screening.ts writes it) — a fresh row
+// defaults to 'clear' (schema.ts), a 'review' verdict blocks activation.
+describe("readActivationState — real screening_status column (G1, replaces the stub)", () => {
+  it("a brand-new tenant defaults screening_status='clear' (schema.ts DEFAULT — every existing row stays byte-identical)", async () => {
+    const { tenantId } = await mintTenant("Fresh Screening Co", "launch");
+    const row = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
+      state.storage.sql.exec<{ screening_status: string }>(`SELECT screening_status FROM tenant_profile WHERE id = ?`, tenantId).one(),
+    );
+    expect(row.screening_status).toBe("clear");
+  });
+
+  it("a directly-set 'review' status flips `activated` false even for an otherwise fully-activatable tenant, and back on 'clear'", async () => {
+    const { tenantId } = await mintTenant("Screening Flip Co", "launch");
+    await runInDurableObject(tenantStub(tenantId), async (_i, state) => {
+      state.storage.sql.exec(`UPDATE tenant_profile SET billing_state = 'active' WHERE id = ?`, tenantId);
+    });
+    const clear = await runInDurableObject(tenantStub(tenantId), async (_i, state) => readActivationState(state.storage.sql, tenantId));
+    expect(clear.activated).toBe(true);
+
+    await runInDurableObject(tenantStub(tenantId), async (_i, state) => {
+      state.storage.sql.exec(`UPDATE tenant_profile SET screening_status = 'review' WHERE id = ?`, tenantId);
+    });
+    const review = await runInDurableObject(tenantStub(tenantId), async (_i, state) => readActivationState(state.storage.sql, tenantId));
+    expect(review.activated).toBe(false);
+
+    await runInDurableObject(tenantStub(tenantId), async (_i, state) => {
+      state.storage.sql.exec(`UPDATE tenant_profile SET screening_status = 'clear' WHERE id = ?`, tenantId);
+    });
+    const clearedAgain = await runInDurableObject(tenantStub(tenantId), async (_i, state) => readActivationState(state.storage.sql, tenantId));
+    expect(clearedAgain.activated).toBe(true);
   });
 });
 
@@ -139,6 +168,40 @@ describe("TenantDO.buildAdapters — no cached real/sandbox DECISION (F3, design
       );
       expect(result.messageId).toMatch(/@sandbox\.local>$/);
     });
+  });
+
+  // G1 systemic guard (design line 181): "a test that a 'review' tenant's next
+  // buildAdapters() returns SandboxEmailPort even with engine+InboxKit armed
+  // — proves screening blocks activation, not just annotates it — fails on
+  // any code that reads activation without the screening conjunct." This is
+  // RED against the OLD screeningStatusStub (which always returned 'clear'
+  // regardless of any column), and GREEN now that readActivationState reads
+  // the real column — see the report's revert-fail-restore proof.
+  it("a 'review' tenant's buildAdapters() stays SandboxEmailPort even fully engine-armed — screening BLOCKS activation, doesn't just annotate it", async () => {
+    const { tenantId } = await mintTenant("Screening Review Co", "launch");
+    const savedBaseUrl = env.ENGINE_BASE_URL;
+    const savedAuthSecret = env.ENGINE_AUTH_SECRET;
+    (env as { ENGINE_BASE_URL?: string }).ENGINE_BASE_URL = "https://engine.example.internal";
+    (env as { ENGINE_AUTH_SECRET?: string }).ENGINE_AUTH_SECRET = "test-secret";
+    try {
+      await runInDurableObject(tenantStub(tenantId), async (instance, state) => {
+        const internals = instance as unknown as TenantDOWithBuildAdapters;
+        state.storage.sql.exec(`UPDATE tenant_profile SET billing_state = 'active' WHERE id = ?`, tenantId);
+        // Fully activatable but for screening: paid + billing active + not
+        // frozen + engine armed — every OTHER conjunct is satisfied.
+        expect(internals.buildAdapters().email).toBeInstanceOf(RealEmailPort);
+
+        state.storage.sql.exec(`UPDATE tenant_profile SET screening_status = 'review' WHERE id = ?`, tenantId);
+        expect(internals.buildAdapters().email).toBeInstanceOf(SandboxEmailPort);
+
+        // And clearing it un-blocks on the VERY NEXT call (fresh-read discipline).
+        state.storage.sql.exec(`UPDATE tenant_profile SET screening_status = 'clear' WHERE id = ?`, tenantId);
+        expect(internals.buildAdapters().email).toBeInstanceOf(RealEmailPort);
+      });
+    } finally {
+      (env as { ENGINE_BASE_URL?: string }).ENGINE_BASE_URL = savedBaseUrl;
+      (env as { ENGINE_AUTH_SECRET?: string }).ENGINE_AUTH_SECRET = savedAuthSecret;
+    }
   });
 });
 

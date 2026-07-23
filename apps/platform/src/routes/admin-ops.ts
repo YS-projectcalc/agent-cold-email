@@ -1,11 +1,11 @@
 import { Hono } from "hono";
 import { TerminateInput } from "@coldstart/shared";
-import { getTenantIndexById, insertEnforcementActionIfNew } from "../admin/db.js";
+import { getTenantIndexById } from "../admin/db.js";
 import { buildOpsDigest, runDunningSweep } from "../admin/ops-sweep.js";
+import { terminateTenantForAbuse } from "../admin/terminate.js";
 import { RealClock } from "../clock.js";
-import { listWaitlistEmails, setTenantIndexStatus } from "../db.js";
+import { listWaitlistEmails } from "../db.js";
 import type { Env } from "../env.js";
-import { newId } from "../schema.js";
 import { parseJsonBody } from "../validate.js";
 
 const DEFAULT_DIGEST_WINDOW_HOURS = 24;
@@ -61,21 +61,7 @@ export const adminOpsRoute = new Hono<{ Bindings: Env }>()
     const parsed = await parseJsonBody(c, TerminateInput);
     if (!parsed.ok) return parsed.response;
 
-    const stub = c.env.TENANT.get(c.env.TENANT.idFromName(tenantId));
-    const result = await stub.terminate();
+    const result = await terminateTenantForAbuse(c.env, tenantId, parsed.data.reason, parsed.data.evidence, new RealClock().now());
 
-    // Lock the control-plane token so the terminated tenant cannot re-provision
-    // or re-launch and undo the reclaim (see setTenantIndexStatus). Idempotent.
-    await setTenantIndexStatus(c.env, tenantId, "suspended");
-
-    const logged = await insertEnforcementActionIfNew(c.env, {
-      id: newId("enf"),
-      tenantId,
-      action: "TERMINATE",
-      reason: parsed.data.reason,
-      evidence: parsed.data.evidence,
-      ts: new RealClock().now(),
-    });
-
-    return c.json({ tenantId, terminated: true, enforcementLogged: logged, ...result });
+    return c.json({ tenantId, ...result });
   });
