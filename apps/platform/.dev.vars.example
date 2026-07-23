@@ -20,3 +20,11 @@ TOKEN_HASH_PEPPER=dev-only-pepper-change-me
 # string works for local dev; rotate via `wrangler secret put ADMIN_TOKEN`
 # for a deployed environment. Never a real production secret in this file.
 ADMIN_TOKEN=dev-only-admin-token-change-me
+
+# Hermetic-env guard canary (test/hermetic-env.test.ts). No production code
+# reads this key — it exists ONLY so that, in a fresh worktree where this file
+# is copied to .dev.vars, an ambient truthy value is present for the harness to
+# neutralize. The guard asserts env.HERMETIC_LEAK_CANARY is NOT visible in
+# tests: if it ever is, ambient .dev.vars content is leaking into the test env
+# (the coupling defect this canary protects against). Leave it set.
+HERMETIC_LEAK_CANARY=canary-value-must-not-reach-tests

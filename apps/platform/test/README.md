@@ -46,6 +46,28 @@ Workers runtime with real `DB`/`TENANT` bindings, per `vitest.config.ts`.
 augmentation in `../src/env.ts` (the same one Hono's `c.env` uses) — no
 separate test-only type declaration needed.
 
+## Hermetic test env (`hermetic-env.ts` + `hermetic-env.test.ts`)
+
+`@cloudflare/vitest-pool-workers` loads `apps/platform/.dev.vars` through
+wrangler and injects **every** key in it as a binding on the test `env`. Left
+unmanaged, a developer's locally-wired real secret (e.g. a truthy
+`STRIPE_SECRET_KEY` set for local E2E) silently flips behavior gates under test
+— `engine/billing.ts`'s `isRealSpendArmed` returns true, so the simulated-
+checkout tests get real-Stripe-mode behavior. The suite would then be green only
+in fresh worktrees (which copy the empty-key `.dev.vars.example`): its result
+would depend on ambient machine state.
+
+`hermetic-env.ts` closes this. `vitest.config.ts` CONSTRUCTS the test env from
+an allowlist: tests see only `TOKEN_HASH_PEPPER`, `ADMIN_TOKEN`, and
+`STRIPE_WEBHOOK_SECRET` (fixed in-repo test values), and **every other**
+`.dev.vars` key is neutralized to `null`. New env vars are hermetic by default —
+a key not on the allowlist is neutralized no matter when it was added, so a
+future binding cannot bypass this. `hermetic-env.test.ts` guards it at two
+layers: a unit test that the builder neutralizes any non-allowlisted key
+(including a novel one), and an end-to-end test that the `.dev.vars.example`
+canary (`HERMETIC_LEAK_CANARY`) and every `// spend-arming` binding read falsy
+in the live `env`.
+
 ## How to run
 
 ```
