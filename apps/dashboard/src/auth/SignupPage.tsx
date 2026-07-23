@@ -86,7 +86,7 @@ export function SignupPage() {
         </div>
         {signup.isError && <p role="alert" className="text-sm text-chip-danger-text">{signup.error instanceof Error ? signup.error.message : "Could not create the sandbox."}</p>}
         <button type="submit" disabled={signup.isPending || !brand.trim() || !contactEmail.trim()} className="w-full rounded-full border border-accent bg-accent px-4 py-2.5 text-sm font-semibold text-accent-contrast shadow-[0_9px_22px_rgba(46,92,255,.2)] disabled:opacity-45">
-          {signup.isPending ? "Creating isolated tenant…" : "Create free sandbox"}
+          {signup.isPending ? "Creating isolated tenant…" : "Free sign up"}
         </button>
       </form>
       <p className="mt-4 text-xs leading-5 text-ink-muted">By continuing, you agree to the <a href="https://coldrig.dev/terms" className="underline">terms</a>, <a href="https://coldrig.dev/aup" className="underline">acceptable-use policy</a>, and <a href="https://coldrig.dev/privacy" className="underline">privacy policy</a>.</p>

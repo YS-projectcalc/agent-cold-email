@@ -116,6 +116,25 @@ declare global {
       // code-literal default, so local dev/test needs no configuration and a
       // missing binding never breaks the hosted link.
       PUBLIC_BASE_URL?: string;
+      // Turnstile bot-challenge (design docs/research/human-signup-magic-
+      // link-design-2026-07-22.md §2.3) — `/login` ONLY, never `/signup`
+      // (signup.ts:15-16: signup must stay agent-drivable, so it cannot be
+      // gated by an interactive challenge). SECRET is server-only (`wrangler
+      // secret put TURNSTILE_SECRET` at ACTIVATION, never in code/git —
+      // CLAUDE.md rule g); SITE_KEY is PUBLIC by design (it embeds in client
+      // HTML for the widget to render) so it would be a plain [vars] entry
+      // once the turnstile-spin skill provisions a real widget — neither is
+      // declared in wrangler.toml yet (no real widget exists in this build).
+      // Both OPTIONAL, dark-safe: absent SECRET -> turnstile.ts's
+      // verifyTurnstile is a no-op (always passes); absent SITE_KEY -> the
+      // dashboard's TurnstileWidget renders nothing.
+      //
+      // NOT spend-arming — this is auth/bot-defense infrastructure, not a
+      // vendor-spend signal (adversary r1 guidance, design §4 collision
+      // note): excluded from isRealSpendArmed on purpose, and categorized
+      // into KNOWN_NON_SPEND_ARMING (spend-armed-env-coverage.test.ts).
+      TURNSTILE_SECRET?: string;
+      TURNSTILE_SITE_KEY?: string;
     }
   }
 }

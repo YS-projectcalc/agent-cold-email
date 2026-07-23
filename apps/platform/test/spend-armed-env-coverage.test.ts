@@ -32,6 +32,8 @@ const KNOWN_NON_SPEND_ARMING = new Set([
   "ASSETS",
   "PUBLIC_BASE_URL",
   "GMAIL_OAUTH_GRANTS", // I3 manual OAuth grants — inert without INBOXKIT_* + ENGINE_*, arms nothing itself
+  "TURNSTILE_SECRET", // magic-link bot-defense (design §2.3) — auth infra, not a vendor-spend signal
+  "TURNSTILE_SITE_KEY", // PUBLIC widget key, not a secret at all — arms nothing
 ]);
 
 function parseEnvFields(source: string): { all: Set<string>; spendArming: Set<string> } {

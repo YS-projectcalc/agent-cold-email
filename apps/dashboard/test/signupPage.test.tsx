@@ -35,7 +35,7 @@ describe("SignupPage", () => {
     renderSignup();
     fireEvent.change(screen.getByLabelText(/company or brand/i), { target: { value: "Northstar" } });
     fireEvent.change(screen.getByLabelText(/work email/i), { target: { value: "owner@northstar.example" } });
-    fireEvent.click(screen.getByRole("button", { name: /create free sandbox/i }));
+    fireEvent.click(screen.getByRole("button", { name: /free sign up/i }));
 
     expect(await screen.findByRole("heading", { name: /save your tenant token now/i })).toBeInTheDocument();
     expect(screen.getByText("coldrig_test_secret")).toBeInTheDocument();

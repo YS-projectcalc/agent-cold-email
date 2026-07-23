@@ -24,13 +24,13 @@ const CLIENTS: Record<ClientKey, { label: string; note: string; code: string; st
     label: "Cursor",
     note: "Cursor supports remote Streamable HTTP servers through mcp.json. Use personal ~/.cursor/mcp.json rather than a project file. Authorization-header behavior has varied across Cursor releases, so verify the connection on the exact version you use.",
     code: `{\n  "mcpServers": {\n    "coldrig": {\n      "url": "${MCP_URL}",\n      "headers": {\n        "Authorization": "Bearer \${env:COLDRIG_TOKEN}"\n      }\n    }\n  }\n}`,
-    steps: ["Set COLDRIG_TOKEN where the Cursor desktop process can read it.", "Add the remote server to personal ~/.cursor/mcp.json.", "Restart Cursor and inspect its 17 tools; if bearer auth fails, do not hardcode the token in a project file."],
+    steps: ["Set COLDRIG_TOKEN where the Cursor desktop process can read it.", "Add the remote server to personal ~/.cursor/mcp.json.", "Restart Cursor and inspect its 24 tools; if bearer auth fails, do not hardcode the token in a project file."],
   },
   cline: {
     label: "Cline",
     note: "Cline's current MCP manager supports hosted Streamable HTTP servers with URL and headers. Store the personal configuration outside source control and keep auto-approval empty while evaluating.",
     code: `{\n  "mcpServers": {\n    "coldrig": {\n      "type": "streamableHttp",\n      "url": "${MCP_URL}",\n      "headers": {\n        "Authorization": "Bearer <YOUR_TOKEN>"\n      },\n      "disabled": false,\n      "autoApprove": []\n    }\n  }\n}`,
-    steps: ["Open MCP Servers → Configure, or edit personal ~/.cline/mcp.json.", "Add the remote server and authorization header.", "Connect, verify all 17 tools, and approve calls individually during the sandbox."],
+    steps: ["Open MCP Servers → Configure, or edit personal ~/.cline/mcp.json.", "Add the remote server and authorization header.", "Connect, verify all 24 tools, and approve calls individually during the sandbox."],
   },
 };
 

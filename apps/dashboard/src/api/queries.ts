@@ -11,6 +11,8 @@ import type {
   InboxPage,
   InboxRow,
   InfrastructureStatus,
+  LoginConsumeResult,
+  LoginRequestResult,
   ReplyResult,
   SignupResult,
   ThreadDetail,
@@ -54,6 +56,25 @@ export function useSignup() {
 export function useLogout() {
   return useMutation({
     mutationFn: () => apiRequest<{ loggedOut: true }>("/dashboard/logout", { method: "POST" }),
+  });
+}
+
+// Magic-link login (design docs/research/human-signup-magic-link-design-
+// 2026-07-22.md §1.3/§1.4). Both suppress the global unauthorized-redirect —
+// their own 401/403s are this FORM's error state, not a signed-in session
+// dropping (mirrors useLogin/useSignup above).
+
+export function useRequestLoginLink() {
+  return useMutation({
+    mutationFn: (input: { email: string; turnstileToken?: string }) =>
+      apiRequest<LoginRequestResult>("/login", { method: "POST", body: input, suppressUnauthorizedRedirect: true }),
+  });
+}
+
+export function useConsumeLoginLink() {
+  return useMutation({
+    mutationFn: (input: { token: string; tenantId?: string }) =>
+      apiRequest<LoginConsumeResult>("/login/consume", { method: "POST", body: input, suppressUnauthorizedRedirect: true }),
   });
 }
 

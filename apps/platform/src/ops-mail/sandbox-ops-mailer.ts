@@ -1,4 +1,4 @@
-import { OPS_FROM_EMAIL, OPS_FROM_NAME, type OpsEmailMessage, type OpsMailer, type OpsSendResult } from "./ops-mailer.js";
+import { AUTH_FROM_EMAIL, AUTH_FROM_NAME, OPS_FROM_EMAIL, OPS_FROM_NAME, type OpsEmailMessage, type OpsMailer, type OpsSendResult } from "./ops-mailer.js";
 
 export interface RecordedOpsEmail extends OpsEmailMessage {
   from: { email: string; name: string };
@@ -18,7 +18,8 @@ export class SandboxOpsMailer implements OpsMailer {
 
   async send(message: OpsEmailMessage): Promise<OpsSendResult> {
     const messageId = `<${crypto.randomUUID()}@ops.sandbox.local>`;
-    this.sent.push({ ...message, from: { email: OPS_FROM_EMAIL, name: OPS_FROM_NAME }, messageId });
+    const from = message.sender === "auth" ? { email: AUTH_FROM_EMAIL, name: AUTH_FROM_NAME } : { email: OPS_FROM_EMAIL, name: OPS_FROM_NAME };
+    this.sent.push({ ...message, from, messageId });
     return { messageId };
   }
 }

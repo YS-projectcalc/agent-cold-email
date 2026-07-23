@@ -21,6 +21,13 @@ TOKEN_HASH_PEPPER=dev-only-pepper-change-me
 # for a deployed environment. Never a real production secret in this file.
 ADMIN_TOKEN=dev-only-admin-token-change-me
 
+# Turnstile bot-challenge (/login request form ONLY, never /signup) — design
+# docs/research/human-signup-magic-link-design-2026-07-22.md §2.3. OPTIONAL,
+# dark-safe: leave unset for local dev/test — turnstile.ts's verifyTurnstile
+# is then a no-op. A real value is a `wrangler secret put TURNSTILE_SECRET`
+# ACTIVATION step (turnstile-spin skill), never a real secret in this file.
+# TURNSTILE_SECRET=1x0000000000000000000000000000000AA
+
 # Hermetic-env guard canary (test/hermetic-env.test.ts). No production code
 # reads this key — it exists ONLY so that, in a fresh worktree where this file
 # is copied to .dev.vars, an ambient truthy value is present for the harness to

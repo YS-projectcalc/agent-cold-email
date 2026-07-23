@@ -15,6 +15,7 @@ const BillingPage = lazy(() => import("./pages/BillingPage").then((m) => ({ defa
 const SettingsPage = lazy(() => import("./pages/SettingsPage").then((m) => ({ default: m.SettingsPage })));
 const SignupPage = lazy(() => import("./auth/SignupPage").then((m) => ({ default: m.SignupPage })));
 const RecoveryPage = lazy(() => import("./auth/RecoveryPage").then((m) => ({ default: m.RecoveryPage })));
+const LoginVerifyPage = lazy(() => import("./auth/LoginVerifyPage").then((m) => ({ default: m.LoginVerifyPage })));
 
 function FullPageSpinner() {
   return (
@@ -44,6 +45,7 @@ export function App() {
       <Routes>
         <Route path="signup" element={<Suspense fallback={<FullPageSpinner />}><SignupPage /></Suspense>} />
         <Route path="recover" element={<Suspense fallback={<FullPageSpinner />}><RecoveryPage /></Suspense>} />
+        <Route path="login" element={<Suspense fallback={<FullPageSpinner />}><LoginVerifyPage /></Suspense>} />
         <Route path="*" element={<TokenGate />} />
       </Routes>
     );
@@ -56,6 +58,14 @@ export function App() {
         element={
           <Suspense fallback={<FullPageSpinner />}>
             <RecoveryPage />
+          </Suspense>
+        }
+      />
+      <Route
+        path="login"
+        element={
+          <Suspense fallback={<FullPageSpinner />}>
+            <LoginVerifyPage />
           </Suspense>
         }
       />

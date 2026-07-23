@@ -14,6 +14,19 @@ export interface SignupResult {
   token: string;
 }
 
+// Magic-link login (design docs/research/human-signup-magic-link-design-
+// 2026-07-22.md §1.3/§1.4). POST /login is always this identical shape,
+// exists-or-not (enumeration-safe) — the SPA copy is fixed regardless.
+export interface LoginRequestResult {
+  ok: true;
+  message: string;
+}
+
+/** POST /login/consume — a single-tenant email auto-completes (mints the
+ * session), a multi-tenant email returns the picker list WITHOUT consuming
+ * (§1.5). Narrow via `"tenantId" in result`. */
+export type LoginConsumeResult = { tenantId: string } | { tenants: { tenantId: string; brand: string }[] };
+
 export interface DashboardViewSummary {
   id: string;
   name: string;

@@ -20,6 +20,12 @@ interface AuthState {
 
 interface AuthContextValue extends AuthState {
   login: (token: string) => Promise<{ ok: true } | { ok: false; message: string }>;
+  /** Magic-link login (design §1.4) — POST /login/consume already minted the
+   * httpOnly cookie session server-side (the SAME mintDashboardSession() the
+   * bearer exchange uses), so there is no second network call here: this
+   * just flips local state to authed, mirroring what `login()` does after
+   * its own mutation succeeds. */
+  completeMagicLinkSession: (tenantId: string) => void;
   logout: () => Promise<void>;
   loginPending: boolean;
 }
@@ -81,8 +87,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [logoutMutation, queryClient]);
 
+  const completeMagicLinkSession = useCallback((tenantId: string) => {
+    setState({ status: "authed", tenantId, reason: null });
+  }, []);
+
   return (
-    <AuthContext.Provider value={{ ...state, login, logout, loginPending: loginMutation.isPending }}>
+    <AuthContext.Provider value={{ ...state, login, completeMagicLinkSession, logout, loginPending: loginMutation.isPending }}>
       {children}
     </AuthContext.Provider>
   );
