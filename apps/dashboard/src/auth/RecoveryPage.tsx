@@ -1,7 +1,9 @@
 import { useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { useRequestLoginLink } from "../api/queries";
+import { TURNSTILE_SITE_KEY } from "../lib/turnstile";
 import { PublicAuthShell } from "./PublicAuthShell";
+import { TurnstileWidget } from "./TurnstileWidget";
 
 // Magic-link login request (design docs/research/human-signup-magic-link-
 // design-2026-07-22.md §2.2 item 1) — replaces the prior "tokens cannot be
@@ -12,10 +14,11 @@ export function RecoveryPage() {
   const requestLink = useRequestLoginLink();
   const [email, setEmail] = useState("");
   const [submitted, setSubmitted] = useState(false);
+  const [turnstileToken, setTurnstileToken] = useState<string | undefined>(undefined);
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    requestLink.mutate({ email: email.trim() }, { onSuccess: () => setSubmitted(true) });
+    requestLink.mutate({ email: email.trim(), turnstileToken }, { onSuccess: () => setSubmitted(true) });
   }
 
   if (submitted) {
@@ -62,6 +65,7 @@ export function RecoveryPage() {
             className="w-full rounded-[var(--radius-card)] border border-line bg-canvas px-3 py-2.5 text-sm text-ink"
           />
         </div>
+        <TurnstileWidget siteKey={TURNSTILE_SITE_KEY} onVerify={setTurnstileToken} />
         {requestLink.isError && (
           <p role="alert" className="text-sm text-chip-danger-text">
             {requestLink.error instanceof Error ? requestLink.error.message : "Could not send a sign-in link right now."}

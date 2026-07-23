@@ -6,6 +6,7 @@ import { DEFAULT_PUBLIC_BASE_URL } from "../engine/tick.js";
 import { consumeLoginLink, insertLoginLink, lookupActiveTenantsByContactEmail, lookupLoginLinkByHash } from "../db.js";
 import { sendLoginLinkEmail } from "../ops-mail/auth-mailer.js";
 import { createOpsMailer } from "../ops-mail/ops-mailer.js";
+import { verifyTurnstile } from "../turnstile.js";
 import { parseJsonBody } from "../validate.js";
 import { mintDashboardSession } from "./dashboard-session.js";
 
@@ -62,6 +63,12 @@ export const loginRoute = new Hono<{ Bindings: Env }>()
     if (!emailDecision.allowed) {
       return c.json({ error: "rate limited — too many sign-in requests for this address, try again shortly" }, 429);
     }
+
+    // §2.3 — Turnstile, `/login` ONLY. Dark no-op (always passes) while
+    // TURNSTILE_SECRET is unconfigured; this failure is gated BEFORE the
+    // tenant lookup, so it never becomes an enumeration signal either way.
+    const turnstileOk = await verifyTurnstile(c.env.TURNSTILE_SECRET, parsed.data.turnstileToken, ip);
+    if (!turnstileOk) return c.json({ error: "turnstile verification failed" }, 400);
 
     // §1.3 steps 3-6 — enumeration-safe: identical response regardless of
     // whether the email matches an active tenant. The send (if any) is fired

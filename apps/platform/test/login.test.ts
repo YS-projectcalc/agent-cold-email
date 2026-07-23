@@ -261,6 +261,28 @@ describe("POST /login — rate limits (§1.6, reuses SIGNUP_LIMITER)", () => {
   });
 });
 
+describe("POST /login — Turnstile (§2.3, dark until TURNSTILE_SECRET is configured)", () => {
+  it("is a no-op when TURNSTILE_SECRET is unset (every other test in this file already proves this — sanity check)", async () => {
+    expect(env.TURNSTILE_SECRET).toBeFalsy();
+    const res = await requestLogin("turnstile-dark@login-test.example", "198.51.100.70");
+    expect(res.status).toBe(200);
+  });
+
+  it("rejects with 400 when TURNSTILE_SECRET is configured and no turnstileToken is submitted, gated BEFORE the tenant lookup", async () => {
+    await signup("Turnstile Co", "turnstile-gate@login-test.example");
+    const original = env.TURNSTILE_SECRET;
+    env.TURNSTILE_SECRET = "test-turnstile-secret";
+    try {
+      const res = await requestLogin("turnstile-gate@login-test.example", "198.51.100.71");
+      expect(res.status).toBe(400);
+      // Gated before the lookup — no login_links row was created either.
+      expect(await loginLinkCount("turnstile-gate@login-test.example")).toBe(0);
+    } finally {
+      env.TURNSTILE_SECRET = original;
+    }
+  });
+});
+
 describe("POST /login — send fires via ctx.waitUntil, never inline-awaited (adversary r1 NB2)", () => {
   it("responds fast even when the mail channel is slow (RED on code that awaits the send before responding)", async () => {
     await signup("Slow Mail Co", "slow-mail@login-test.example");
