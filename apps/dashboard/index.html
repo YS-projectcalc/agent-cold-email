@@ -5,6 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light" />
     <meta name="theme-color" content="#f7f7f2" />
+    <!-- Magic-link design §1.4/§1.8: the /login verification landing must
+         never leak its (token-bearing, now-stripped) URL via Referer. This
+         SPA has one shared index.html for every client route (SPA fallback),
+         so the policy applies globally — harmless everywhere else, since the
+         app makes no cross-origin calls and loads no third-party assets. -->
+    <meta name="referrer" content="no-referrer" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <title>Coldrig — Control room</title>
   </head>

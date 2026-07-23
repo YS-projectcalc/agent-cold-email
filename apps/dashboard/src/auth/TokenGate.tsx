@@ -79,7 +79,7 @@ export function TokenGate() {
         </form>
         <div className="mt-5 flex flex-wrap justify-between gap-3 border-t border-line pt-4 text-xs">
           <a href="/app/signup" className="font-semibold text-accent">Create a free sandbox</a>
-          <a href="/app/recover" className="text-ink-muted underline underline-offset-4">Lost your token?</a>
+          <a href="/app/recover" className="text-ink-muted underline underline-offset-4">Email me a sign-in link instead</a>
         </div>
     </PublicAuthShell>
   );
