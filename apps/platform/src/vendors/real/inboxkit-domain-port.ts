@@ -30,20 +30,20 @@ export interface InboxKitDomainRegistrant {
  * as `real/mailbox-port.ts`'s `RealMailboxPort` — activation-gated via
  * `InboxKitClient`, never reachable from the deployed default.
  *
- * ⚠ OPEN QUESTION (flag for adversary/founder pass, not resolved by this
- * adapter): `real/domain-port.ts`'s `RealDomainPort` (Porkbun) is SPEC.md
- * §11/§12's still-current documented registrar decision, and
- * ACTIVATION.md:25 ("Registrar account + card") still names Namecheap/
- * Porkbun, unchanged by the 2026-07-20 "go inboxkit" ruling recorded at
- * ACTIVATION.md:9 (which reads as mailbox-vendor-scoped, not an explicit
- * domain-registrar swap). This class exists because the task brief for this
- * pass explicitly asked for "domain port for the InboxKit-registered +
- * connect-existing-domain flows" with a verified endpoint catalog — it is
- * coded and contract-tested, but the factory only wires it in when a
- * DEDICATED `inboxKitConfig` is supplied (see factory.ts), independent of
- * and additional to the still-default Porkbun `RealDomainPort`. Which one is
- * the actually-decided registrar path is a founder-level call this adapter
- * does not make.
+ * ⚠ RESOLVED by G5 gate (a) (ROADMAP.md:19,33,43; adversary B1 2026-07-23),
+ * SUPERSEDING the note this replaced: the Porkbun-vs-InboxKit registrar
+ * question this doc comment used to flag as open is now moot — InboxKit is
+ * NOT the registrar for ANY tenant. Cloudflare Registrar is the founder-ruled
+ * default (Namecheap fallback), armed by its OWN `registrarConfig`
+ * (`REGISTRAR_PROVIDER`/`CLOUDFLARE_REGISTRAR_API_TOKEN`, env.ts) —
+ * `vendors/factory.ts` never wires THIS class in for `domain` regardless of
+ * `inboxKitConfig`; every real-eligible tenant's domain port hard-blocks via
+ * `real/domain-port.ts`'s `RegistrarUnarmedDomainPort` until the Cloudflare
+ * purchase adapter itself lands (deferred to the GA wave — its public API's
+ * new-domain-purchase coverage is unverified). This class remains
+ * coded-and-contract-tested (real-inboxkit-domain-port.test.ts exercises it
+ * directly) for the DNS-connect step of the BYO-domain flow — its own doc
+ * comment above — but it is not currently reachable via the factory.
  *
  * Endpoint coverage (verified live/doc-captured 2026-07-20,
  * https://docs.inboxkit.com/):

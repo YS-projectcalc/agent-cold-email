@@ -48,6 +48,34 @@ export class NotActivatedError extends VendorError {
   }
 }
 
+/**
+ * Thrown by the domain port's registrar seam whenever `domain.buy` (or any
+ * other DomainPort method) is reached without the registrar being armed — G5
+ * gate (a), ROADMAP.md:19,33,43 / adversary B1 2026-07-23. The prior factory
+ * logic welded `domain.buy` to the mailbox vendor's `inboxKitConfig`, so
+ * arming InboxKit for mailboxes silently also armed InboxKit-as-registrar —
+ * a money-out path the founder never authorized. `registrarConfig`
+ * (`REGISTRAR_PROVIDER`/`CLOUDFLARE_REGISTRAR_API_TOKEN`) is now the ONLY
+ * thing that can arm real registrar spend, and even once set, the Cloudflare
+ * purchase adapter itself is DEFERRED to the GA wave (its public API's
+ * new-domain-purchase coverage is unverified — this codebase does not build
+ * dark adapters against an unverified wire shape). So this error fires
+ * either way: registrar unarmed, or armed-but-not-yet-implemented. Always
+ * `retryable: false` (VendorError) — retrying can't fix either case. The
+ * Worker's onError maps it to HTTP 503 with a `registrar_unarmed` code
+ * (index.ts) so a caller can tell "try again once armed" apart from a
+ * generic internal error, never a silent sandbox/InboxKit fallthrough.
+ */
+export class RegistrarUnarmedError extends VendorError {
+  constructor(op: string) {
+    super(
+      `domain.${op} is blocked: the registrar is not armed (set REGISTRAR_PROVIDER + CLOUDFLARE_REGISTRAR_API_TOKEN and complete the registrar arming step, ACTIVATION.md gate (a)) or its purchase adapter is not yet built — real domain purchase never happens via the mailbox vendor credential alone.`,
+      false,
+    );
+    this.name = "RegistrarUnarmedError";
+  }
+}
+
 export class TenantIsolationError extends Error {
   constructor(message: string) {
     super(message);

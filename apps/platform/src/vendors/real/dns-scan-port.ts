@@ -2,7 +2,7 @@ import { NotActivatedError } from "@coldstart/shared";
 import type { DnsScanPort, DnsScanResult } from "@coldstart/shared";
 
 // Real DnsScanPort — coded to the interface shape, never called. Matches the
-// "coded-but-unactivated" posture of every other real/ port (RealDomainPort
+// "coded-but-unactivated" posture of every other real/ port (RealMailboxPort
 // et al.), even though a DNS-over-HTTPS lookup is a free read rather than
 // vendor spend: this scans a TENANT-SUPPLIED hostname on every intake call,
 // which is a new external network dependency + latency + an SSRF-adjacent

@@ -67,7 +67,17 @@ describe("R3-1 — isRealSpendArmed covers every spend-arming env field", () => 
   it("finds the vendor-arming bindings actually tagged in env.ts (non-vacuous)", () => {
     // If this ever reads empty, the parser drifted from env.ts's shape and the
     // whole guard would be silently vacuous — assert it caught the real ones.
-    expect(spendArming).toEqual(new Set(["STRIPE_SECRET_KEY", "ENGINE_BASE_URL", "ENGINE_AUTH_SECRET", "INBOXKIT_API_KEY", "INBOXKIT_WORKSPACE_ID"]));
+    expect(spendArming).toEqual(
+      new Set([
+        "STRIPE_SECRET_KEY",
+        "ENGINE_BASE_URL",
+        "ENGINE_AUTH_SECRET",
+        "INBOXKIT_API_KEY",
+        "INBOXKIT_WORKSPACE_ID",
+        "REGISTRAR_PROVIDER",
+        "CLOUDFLARE_REGISTRAR_API_TOKEN",
+      ]),
+    );
   });
 
   it("every `// spend-arming` env field is referenced by isRealSpendArmed", () => {

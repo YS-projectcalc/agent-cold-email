@@ -8,10 +8,9 @@ import { SandboxMetricsPort } from "./sandbox/metrics-port.js";
 import { SandboxDomainReputationPort } from "./sandbox/reputation-port.js";
 import { RealBillingPort } from "./real/billing-port.js";
 import { RealDnsScanPort } from "./real/dns-scan-port.js";
-import { RealDomainPort } from "./real/domain-port.js";
+import { RegistrarUnarmedDomainPort } from "./real/domain-port.js";
 import { RealEmailPort, type EngineClientConfig } from "./real/email-port.js";
 import { type InboxKitClientConfig } from "./real/inboxkit-client.js";
-import { RealInboxKitDomainPort, type InboxKitDomainRegistrant } from "./real/inboxkit-domain-port.js";
 import { RealMailboxPort } from "./real/mailbox-port.js";
 import { RealMetricsPort } from "./real/metrics-port.js";
 import { RealDomainReputationPort } from "./real/reputation-port.js";
@@ -53,6 +52,20 @@ export interface VendorAdapterBundle extends VendorAdapters {
  * `inboxKitConfig`, so they stay sandbox for every tenant regardless of
  * activation (byte-identical to the current, already-shipped behavior).
  *
+ * G5 gate (a) (ROADMAP.md:19,33,43; adversary B1 2026-07-23): `domain` is the
+ * ONE exception inside the "real" branch below — it does NOT flip real just
+ * because `inboxKitConfig` is present. The old logic welded `domain.buy` to
+ * the mailbox vendor's credential (`inboxKitConfig ? RealInboxKitDomainPort
+ * : RealDomainPort`), so arming InboxKit for mailboxes silently also armed
+ * InboxKit-as-registrar — a money-out path the founder never authorized.
+ * `domain` now hard-blocks (`RegistrarUnarmedDomainPort`, throws
+ * `RegistrarUnarmedError` on every call) whenever the bundle would otherwise
+ * go real, regardless of `inboxKitConfig` — a real registrar seam needs its
+ * own dedicated arming (`REGISTRAR_PROVIDER`/`CLOUDFLARE_REGISTRAR_API_TOKEN`,
+ * env.ts), and that adapter is deferred to the GA wave either way (scope note
+ * 2026-07-23). Mailbox is UNAFFECTED — InboxKit remains the sole mailbox
+ * vendor, gated on `inboxKitConfig` exactly as before.
+ *
  * EmailPort itself ALSO requires the design's "global-armed: engine wired"
  * conjunct (§2.1) — `activated` alone is NOT enough: `engineConfig` (derived
  * from `ENGINE_BASE_URL`/`ENGINE_AUTH_SECRET`) must ALSO be present. Without
@@ -68,10 +81,11 @@ export interface VendorAdapterBundle extends VendorAdapters {
  * once the founder has ACTUALLY wired the engine — exactly I1's intent
  * (Mordy pays -> real send begins -> because the founder already armed the
  * engine first, per the design's documented arming order).
- * `inboxKitConfig` absence similarly keeps mailbox/domain dark as defense in
- * depth — this factory's gate narrows who is ELIGIBLE for a real port, each
- * real port's own dark-until-configured check narrows further to who is
- * actually WIRED.
+ * `inboxKitConfig` absence similarly keeps mailbox dark as defense in depth —
+ * this factory's gate narrows who is ELIGIBLE for a real port, each real
+ * port's own dark-until-configured check narrows further to who is actually
+ * WIRED. `domain` is gate (a)'s hard block instead (see above) — it never
+ * reads `inboxKitConfig` at all.
  */
 export function createVendorAdapters(
   plan: TenantPlan,
@@ -81,21 +95,12 @@ export function createVendorAdapters(
   /**
    * InboxKit workspace credentials (ACTIVATION.md Gate 0, founder ruling
    * 2026-07-20: "go inboxkit"). Absent in the deployed build today (no call
-   * site supplies it) — `RealMailboxPort`/`RealInboxKitDomainPort` stay dark
-   * regardless (their own `NotActivatedError` check, mirroring
-   * `engineConfig`'s absence keeping `RealEmailPort` dark above). Reused for
-   * BOTH the mailbox port and (if selected) the domain port — one InboxKit
-   * vendor account.
+   * site supplies it) — `RealMailboxPort` stays dark regardless (its own
+   * `NotActivatedError` check, mirroring `engineConfig`'s absence keeping
+   * `RealEmailPort` dark above). Gates the MAILBOX port only — G5 gate (a)
+   * deliberately removed this from the domain-port decision (see above).
    */
   inboxKitConfig?: InboxKitClientConfig,
-  /**
-   * Registrant-of-record contact details for InboxKit domain registration
-   * (real/inboxkit-domain-port.ts's doc comment — a founder-level identity
-   * decision, deliberately never defaulted). Only consulted when
-   * `inboxKitConfig` is ALSO present; absent otherwise like every other
-   * activation-gated input here.
-   */
-  inboxKitDomainRegistrant?: InboxKitDomainRegistrant,
 ): VendorAdapterBundle {
   const isDemoOrFree = plan === "demo" || plan === "free";
   // `engineConfig` is the external email engine's address/secret (env-derived
@@ -124,19 +129,20 @@ export function createVendorAdapters(
 
   return {
     kind: "real",
-    // Porkbun stays the default registrar path (SPEC.md §11/§12,
-    // ACTIVATION.md:25) unless a dedicated InboxKit domain config is
-    // supplied — see real/inboxkit-domain-port.ts's OPEN QUESTION doc
-    // comment on the unresolved Porkbun-vs-InboxKit registrar decision
-    // (I4 gate (a), unbuilt — this pass does not resolve it). The
-    // `: new RealDomainPort()` arm is unreachable via THIS gate today (this
-    // whole branch requires `inboxKitConfig` truthy), same "coded but
-    // currently inert, not dead" posture as every other real/ stub above —
-    // kept so a future domain-specific gate (decoupled from mailbox's) is a
-    // config change here, not new code.
-    domain: inboxKitConfig ? new RealInboxKitDomainPort(inboxKitConfig, inboxKitDomainRegistrant) : new RealDomainPort(),
+    // G5 gate (a) — ALWAYS the hard-block port here, regardless of
+    // `inboxKitConfig` (see the doc comment above; adversary B1 2026-07-23).
+    // A real registrar (Cloudflare, founder-ruled default) needs its OWN
+    // `registrarConfig` arming (env.ts `REGISTRAR_PROVIDER`/
+    // `CLOUDFLARE_REGISTRAR_API_TOKEN`) before `domain.buy` can ever be
+    // considered — and even then the purchase adapter itself is deferred to
+    // the GA wave (scope note 2026-07-23: Cloudflare's public API coverage
+    // for NEW-domain purchase is unverified). So this branch never varies on
+    // `registrarConfig` either — there is no working adapter to select yet;
+    // wiring one in is a one-line change here once it exists.
+    domain: new RegistrarUnarmedDomainPort(),
     // InboxKit is the unambiguous, SPEC-decided mailbox vendor (§11/§12
-    // "primary = Inboxkit") — no fallback branch needed here.
+    // "primary = Inboxkit") — no fallback branch needed here. UNAFFECTED by
+    // gate (a): mailbox arming is exactly as before.
     mailbox: new RealMailboxPort(inboxKitConfig),
     email,
     billing: new RealBillingPort(),
