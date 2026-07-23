@@ -17,7 +17,15 @@ declare global {
       // repo); wiring a real Stripe TEST key is an ACTIVATION.md step. Every
       // code path that reads these must treat them as absent and fall back
       // to the simulated checkout / accept-without-verification webhook mode.
-      STRIPE_SECRET_KEY?: string;
+      //
+      // The `// spend-arming` marker below is a MACHINE-READABLE contract
+      // enforced by spend-armed-env-coverage.test.ts (R3-1): every field so
+      // tagged MUST be referenced by isRealSpendArmed (engine/billing.ts), and
+      // every NEW env field must be categorized as spend-arming-or-not, so the
+      // NEXT vendor binding trips RED instead of silently reopening the
+      // free-money simulate bypass. STRIPE_SECRET_KEY arms Stripe spend;
+      // STRIPE_WEBHOOK_SECRET only VERIFIES inbound events (arms nothing).
+      STRIPE_SECRET_KEY?: string; // spend-arming
       STRIPE_WEBHOOK_SECRET?: string;
       // D1/D2/D6 admin surface (apps/platform/src/admin/README.md) — bearer
       // secret gating every /admin/* route (cross-tenant data, never the
@@ -35,8 +43,32 @@ declare global {
       // even with both set, the adapter factory (vendors/factory.ts) still only
       // hands the real adapter to an activated paid tenant — a demo/free tenant
       // is forced to sandbox first, unconditionally.
-      ENGINE_BASE_URL?: string;
-      ENGINE_AUTH_SECRET?: string;
+      //
+      // Both `// spend-arming` (R3-1): the engine is the real send path AND the
+      // credential-push target — its presence means real vendor spend is
+      // reachable, so isRealSpendArmed must OR them in (they gate together, but
+      // each is tagged so removing either still trips the coverage guard).
+      ENGINE_BASE_URL?: string; // spend-arming
+      ENGINE_AUTH_SECRET?: string; // spend-arming
+      // Self-serve activation I3 — InboxKit workspace credentials (the real
+      // mailbox/domain vendor). Bearer JWT + X-Workspace-Id (inboxkit-client.ts).
+      // Unset in this build (CLAUDE.md rule g — set as a wrangler secret + var
+      // at arming, never in code/git); absent keeps every InboxKit-backed
+      // adapter dark and the credential-push flow inert. `// spend-arming`
+      // (R3-1): the moment these bind, real mailbox/domain spend is reachable —
+      // isRealSpendArmed MUST treat them as an arming signal so the free-money
+      // simulate checkout stays closed (the class the guard test enforces).
+      INBOXKIT_API_KEY?: string; // spend-arming
+      INBOXKIT_WORKSPACE_ID?: string; // spend-arming
+      // Self-serve I3 — operator-supplied gmail_api OAuth grants for the MANUAL
+      // mint path (the proven 2026-07-19 pilot path), a JSON secret
+      // {email:{clientId,clientSecret,refreshToken}}. NOT spend-arming: holding
+      // refresh tokens arms nothing on its own — provisioning still needs
+      // INBOXKIT_* and sending still needs ENGINE_*; this is inert without both.
+      // Absent -> the manual minter fails LOUD per-mailbox (the mailbox stays
+      // 'pending', reconcile retries once grants land). Set as a wrangler secret
+      // at arming (CLAUDE.md rule g), never in code/git.
+      GMAIL_OAUTH_GRANTS?: string;
       // Ops email + monitoring (watchtower/dunning/support). The Cloudflare
       // Email Service `send_email` binding (wrangler.toml `[[send_email]]`
       // name = "OPS_EMAIL") — NO api keys, sends from a domain onboarded via

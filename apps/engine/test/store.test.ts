@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -50,5 +50,20 @@ describe("EngineStore", () => {
     const reloaded = new EngineStore(dir);
     expect(reloaded.resolveThread(wire)).toBe("thr_3");
     expect(reloaded.resolveThread(minted)).toBe("thr_3");
+  });
+
+  // F5 (selfserve-activation design review, store.ts:126-137): a corrupt state
+  // file must FAIL LOUD, not silently start empty (which re-sends already-sent
+  // leads, loses every thread mapping, and overwrites the only copy on the next
+  // flush).
+  it("a MISSING state file is a normal first boot (empty, no throw)", () => {
+    const store = new EngineStore(dir); // dir has no engine-state.json yet
+    expect(store.getSend("anything")).toBeUndefined();
+    expect(store.resolveThread("<x@d>")).toBeUndefined();
+  });
+
+  it("a CORRUPT engine-state.json FAILS LOUD on construction (refuses to start empty)", () => {
+    writeFileSync(join(dir, "engine-state.json"), "{ half-written garba");
+    expect(() => new EngineStore(dir)).toThrow(/corrupt/i);
   });
 });

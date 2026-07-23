@@ -9,6 +9,8 @@
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
 import { pauseAllCampaigns } from "./campaigns.js";
+import { EngineMailboxClient } from "./engine-mailbox-client.js";
+import { engineConfigFromEnv, revokePushedMailboxCredentials } from "./mailbox-credential-push.js";
 import { suspendTenant } from "./ops-summary.js";
 import { ONE_DAY_MS } from "./warmup.js";
 
@@ -101,10 +103,18 @@ export function clearTeardownRecord(ctx: TenantContext): void {
  * re-releasing anything (re-cancel / re-terminate is a no-op). Suppression
  * lists are DELIBERATELY untouched — CAN-SPAM opt-outs survive account
  * teardown (a legal obligation the abuse-offboarding path must honor).
+ *
+ * `engineClient` is an injectable seam (mirrors mailbox-credential-push.ts's
+ * CredentialPushDeps pattern) defaulting to a real client built from
+ * `ctx.env` — production callers pass nothing. Each released mailbox's
+ * pushed credentials are best-effort revoked on the engine via
+ * revokePushedMailboxCredentials: dark unless the engine is configured, and a
+ * revoke failure never blocks or fails the teardown itself.
  */
 export async function teardownTenant(
   ctx: TenantContext,
   opts: { reason: TeardownReason; effective: string },
+  engineClient: EngineMailboxClient = new EngineMailboxClient(engineConfigFromEnv(ctx.env)),
 ): Promise<TeardownSummary> {
   const existing = readTeardownRecord(ctx);
   if (existing) return existing;
@@ -165,6 +175,10 @@ export async function teardownTenant(
       m.id,
       ctx.tenantId,
     );
+    // I3 credential lifecycle (adversary i3i4-build-review-2026-07-23 finding
+    // 2): a released vendor slot's pushed OAuth refresh token must stop
+    // resolving on the engine — best-effort, never fails the teardown.
+    await revokePushedMailboxCredentials(ctx, m.email, engineClient);
   }
 
   // 3. Stop all campaigns (reuse the existing pause-all path — CLAUDE.md rule c).

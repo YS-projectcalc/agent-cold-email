@@ -20,17 +20,16 @@ import { InboxKitClient, type InboxKitClientConfig } from "./inboxkit-client.js"
  *  - startWarmup -> POST /mailboxes/list (resolve uid) then POST /warmup/add
  *  - release     -> POST /mailboxes/list (resolve uid) then POST /mailboxes/cancel
  *
- * KNOWN GAP (flag for adversary/founder review before arming): InboxKit's
- * `/mailboxes/buy` has no idempotency-key parameter — the vendor API gives us
- * no at-least-once-safe primitive. `provision` mitigates the common retry
- * case (a redelivered `setup_infrastructure` call after a transient network
- * failure) by treating the vendor's own "already exists" business error as an
- * idempotent success, since the resulting email is fully deterministic from
- * (domain, localPart) regardless of vendor-side state. That does NOT cover
- * every failure window (e.g. the buy succeeded vendor-side but the response
- * never reached us before a hard timeout, or the response format changes) —
- * a true idempotency story here needs a persisted local record (out of scope
- * for this coded-but-dark adapter pass).
+ * PROVISION IDEMPOTENCY (gate (c), adversary finding 3): InboxKit's
+ * `/mailboxes/buy` has no idempotency-key parameter, so a redelivered
+ * `setup_infrastructure` could double-charge a paid mailbox. The retry-safety
+ * now lives at the CALLER (engine/provisioning.ts), which wraps this call in
+ * the repo's own `withRequestIdempotency` (the same primitive that guards
+ * launch_campaign/setup_infrastructure) keyed by the deterministic per-mailbox
+ * `provision:mbx:...` key — so a re-run returns the recorded ProvisionedMailbox
+ * WITHOUT a second vendor buy. This REPLACES the previous fragile
+ * `/already exists/i` message-substring detection (a vendor wording change
+ * would have silently broken it); provision() no longer inspects error text.
  *
  * KNOWN APPROXIMATION: `getHealth`'s `MailboxHealth` has fields InboxKit's
  * per-mailbox health endpoint does not expose directly (`complaintRate`,
@@ -47,25 +46,17 @@ export class RealMailboxPort implements MailboxPort {
   async provision(domain: string, localPart: string, _idempotencyKey: string): Promise<ProvisionedMailbox> {
     const email = `${localPart}@${domain}`;
     const { firstName, lastName } = nameFromLocalPart(localPart);
-    try {
-      const body = await this.client.request<BuyMailboxesResponse>("provision", "POST", "/mailboxes/buy", {
-        body: {
-          use_wallet_balance: true,
-          mailboxes: [{ first_name: firstName, last_name: lastName, username: localPart, platform: "GOOGLE", domain_name: domain }],
-        },
-      });
-      if (body.error || !Array.isArray(body.mailboxes) || body.mailboxes.length === 0) {
-        throw new VendorError(`inboxkit mailboxes/buy did not return a mailbox for ${email}: ${body.message ?? "no message"}`, false);
-      }
-    } catch (err) {
-      // See the KNOWN GAP doc comment above — an "already exists" business
-      // error for THIS exact (domain, localPart) is treated as an idempotent
-      // success, not a failure, since the resulting mailbox is the same one
-      // this call would otherwise have created.
-      if (err instanceof VendorError && /already exists/i.test(err.message)) {
-        return { email, provider: "google", provisionedAt: Date.now() };
-      }
-      throw err;
+    // Retry-safety is the CALLER's withRequestIdempotency wrap (gate (c), see the
+    // class doc) — provision() no longer inspects vendor error text for
+    // "already exists". A genuine vendor failure surfaces as a VendorError.
+    const body = await this.client.request<BuyMailboxesResponse>("provision", "POST", "/mailboxes/buy", {
+      body: {
+        use_wallet_balance: true,
+        mailboxes: [{ first_name: firstName, last_name: lastName, username: localPart, platform: "GOOGLE", domain_name: domain }],
+      },
+    });
+    if (body.error || !Array.isArray(body.mailboxes) || body.mailboxes.length === 0) {
+      throw new VendorError(`inboxkit mailboxes/buy did not return a mailbox for ${email}: ${body.message ?? "no message"}`, false);
     }
     return { email, provider: "google", provisionedAt: Date.now() };
   }
@@ -119,17 +110,96 @@ export class RealMailboxPort implements MailboxPort {
     return { released: true, releasedAt: Date.now() };
   }
 
-  /** Resolves a mailbox's InboxKit `uid` from its email (POST /mailboxes/list?keyword=). */
+  /**
+   * Fetches a provisioned mailbox's IMAP (+ optional SMTP) credentials for the
+   * self-serve I3 credential push (ROADMAP 2026-07-20 "GET show-mailbox-
+   * credentials (full smtp+imap creds)"). The engine needs the IMAP endpoint to
+   * read replies; the gmail_api SEND transport's OAuth grant comes separately
+   * from the OAuth-mint seam (oauth-mint.ts), not from here.
+   *
+   * ⚠️ UNVERIFIED (no live calls in this build): the endpoint path + response
+   * field names are a DOCUMENTED-SHAPE GUESS to confirm at the first live
+   * mailbox. Dark until the InboxKitClient is configured (NotActivatedError).
+   */
+  async showMailboxCredentials(email: string): Promise<InboxKitMailboxCredentials> {
+    const uid = await this.resolveMailboxUid(email);
+    const body = await this.client.request<ShowCredentialsResponse>("showMailboxCredentials", "GET", `/mailboxes/${uid}/credentials`);
+    const imap = body.imap ?? body.data?.imap;
+    if (!imap || !imap.host || !imap.port || !imap.username || !imap.password) {
+      throw new VendorError(`inboxkit show-mailbox-credentials for ${email} returned no usable IMAP credentials (UNVERIFIED response shape): ${body.message ?? "no message"}`, false);
+    }
+    const smtp = body.smtp ?? body.data?.smtp;
+    return {
+      imap: { host: imap.host, port: imap.port, secure: imap.secure ?? true, user: imap.username, pass: imap.password },
+      smtp: smtp && smtp.host && smtp.port && smtp.username && smtp.password
+        ? { host: smtp.host, port: smtp.port, secure: smtp.secure ?? true, user: smtp.username, pass: smtp.password }
+        : undefined,
+    };
+  }
+
+  /**
+   * Resolves a mailbox's InboxKit `uid` from its email (POST /mailboxes/list?
+   * keyword=).
+   *
+   * Gate (b) — EXACT-EMAIL assertion (adversary inboxkit-adapters-2026-07-20
+   * finding 2): `/mailboxes/list?keyword=` is a keyword search whose exact-vs-
+   * fuzzy semantics are UNVERIFIED, so trusting `mailboxes[0]` blind risks
+   * resolving the WRONG mailbox — catastrophic for `release()`, which then
+   * cancels a DIFFERENT paid mailbox (and wrong for getHealth/startWarmup/
+   * showMailboxCredentials too). We reconstruct the matched mailbox's own
+   * `username@domain_name` and require it to equal the requested email
+   * (case-insensitive) before returning its uid; a fuzzy near-match fails LOUD
+   * (permanent) rather than acting on the wrong mailbox. Enforced HERE (not just
+   * before cancel) so every uid consumer is exact by construction.
+   */
   private async resolveMailboxUid(email: string): Promise<string> {
     const body = await this.client.request<ListMailboxesResponse>("resolveMailboxUid", "POST", "/mailboxes/list", {
       body: { keyword: email, limit: 1 },
     });
-    const uid = body.mailboxes?.[0]?.uid;
-    if (!uid) {
+    const match = body.mailboxes?.[0];
+    if (!match?.uid) {
       throw new VendorError(`inboxkit has no mailbox matching ${email}`, false);
     }
-    return uid;
+    const resolvedEmail = `${match.username}@${match.domain_name}`;
+    if (resolvedEmail.toLowerCase() !== email.toLowerCase()) {
+      throw new VendorError(
+        `inboxkit keyword search for ${email} returned a NON-EXACT match (${resolvedEmail}) — refusing to act on the wrong mailbox`,
+        false,
+      );
+    }
+    return match.uid;
   }
+}
+
+/** An SMTP/IMAP endpoint in the engine's per-mailbox credential shape (apps/engine config.ts). */
+export interface MailboxEndpoint {
+  host: string;
+  port: number;
+  secure: boolean;
+  user: string;
+  pass: string;
+}
+
+/** What showMailboxCredentials returns — the IMAP endpoint (always) + SMTP (when the vendor exposes it). */
+export interface InboxKitMailboxCredentials {
+  imap: MailboxEndpoint;
+  smtp?: MailboxEndpoint;
+}
+
+// UNVERIFIED response shape (see showMailboxCredentials). Both a top-level and
+// a `data`-nested envelope are tolerated since InboxKit uses both across its API.
+interface RawEndpoint {
+  host?: string;
+  port?: number;
+  secure?: boolean;
+  username?: string;
+  password?: string;
+}
+interface ShowCredentialsResponse {
+  message?: string;
+  imap?: RawEndpoint;
+  smtp?: RawEndpoint;
+  data?: { imap?: RawEndpoint; smtp?: RawEndpoint };
 }
 
 interface BuyMailboxesResponse {

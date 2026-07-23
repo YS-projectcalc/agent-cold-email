@@ -195,6 +195,27 @@ export const IK_DOMAIN_REMOVE_SUCCESS = {
   },
 };
 
+/**
+ * show-mailbox-credentials response (self-serve I3 credential push). ⚠️
+ * UNVERIFIED SHAPE — a documented-guess placeholder (ROADMAP 2026-07-20 "GET
+ * show-mailbox-credentials (full smtp+imap creds)"); confirm at the first live
+ * mailbox. All values synthetic (CLAUDE.md rule g).
+ */
+export const IK_MAILBOX_CREDENTIALS_SUCCESS = {
+  data: {
+    imap: { host: "imap.gmail.com", port: 993, secure: true, username: "john.doe@example-lookalike.com", password: "imap-app-pass" },
+    smtp: { host: "smtp.gmail.com", port: 465, secure: true, username: "john.doe@example-lookalike.com", password: "smtp-app-pass" },
+  },
+};
+
+/** InboxKit programmatic OAuth consent response (I3c). ⚠️ UNVERIFIED SHAPE — documented guess. */
+export const IK_CONSENT_SUCCESS = {
+  error: false,
+  message: "Consent granted",
+  refresh_token: "1//refresh-token-from-consent",
+  client_secret: "google-oauth-client-secret",
+};
+
 /** Gateway/auth-layer error envelope — verified live 2026-07-20 (401/404, no `error` field). */
 export const IK_GATEWAY_ERROR_401 = { code: 401, message: "jwt malformed" };
 export const IK_GATEWAY_ERROR_404 = { code: 404, message: "Not found" };

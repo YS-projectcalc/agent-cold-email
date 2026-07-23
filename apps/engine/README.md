@@ -25,11 +25,30 @@ Request/response shapes mirror the frozen `EmailPort`
 (`packages/shared/src/vendor-ports.ts`); `src/wire.ts` carries a compile-time
 assertion that they can't drift.
 
-| Method | Path        | Auth | Body → Response |
-|--------|-------------|------|-----------------|
-| GET    | `/health`   | no   | `200 { status:"ok", uptimeSec }` |
-| POST   | `/v1/send`  | yes  | `{ input: SendEmailInput, idempotencyKey } → 200 SendEmailResult` |
-| POST   | `/v1/poll`  | yes  | `{ mailboxEmail, sinceCursor } → 200 { events: PolledEvent[], cursor }` |
+| Method | Path            | Auth | Body → Response |
+|--------|-----------------|------|-----------------|
+| GET    | `/health`       | no   | `200 { status:"ok", uptimeSec }` |
+| POST   | `/v1/send`      | yes  | `{ input: SendEmailInput, idempotencyKey } → 200 SendEmailResult` |
+| POST   | `/v1/poll`      | yes  | `{ mailboxEmail, sinceCursor } → 200 { events: PolledEvent[], cursor }` |
+| POST   | `/v1/mailboxes` | yes  | `{ email, credentials, idempotencyKey? } → 200 { email, outcome, contentHash, priorContentHash? }` |
+| DELETE | `/v1/mailboxes` | yes  | `{ email, idempotencyKey? } → 200 { email, removed }` |
+
+**Pushed credentials + resolve-union (self-serve activation I3).** `POST
+/v1/mailboxes` is the push-to-droplet credential path: the Worker provisions a
+mailbox at the vendor, collects its send+IMAP credentials, and PUSHes them here
+over the authed boundary (the internet-facing Worker never durably stores a
+refresh token — it lands only on this firewalled daemon, `src/mailbox-store.ts`).
+The write is idempotent — a byte-identical re-push is a content-hash no-op
+(`outcome:"unchanged"`), a replay under the same `idempotencyKey` returns
+`"replayed"`, a genuine credential rotation `"replaced"` (echoing the prior
+hash), and reusing a key for a different payload is rejected. Sends/polls
+resolve credentials as a UNION of the static `MAILBOX_CREDENTIALS(_FILE)` config
+and the pushed store, with the **static config taking precedence** — pinning a
+mailbox in the static file is the operator's override, so a self-serve bug or a
+stale push can never silently clobber a hand-fixed mailbox. `DELETE
+/v1/mailboxes` revokes a pushed mailbox (cancel/teardown); a corrupt
+`pushed-mailboxes.json` FAILS LOUD (refuses to boot) rather than silently
+dropping every refresh token.
 
 **Cursor ownership (consumer, not engine).** The engine holds NO poll cursor.
 The Worker DO stores each mailbox's IMAP UID high-water (`mailboxes.poll_cursor`),

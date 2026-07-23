@@ -5,6 +5,8 @@ import { reportUsageToStripeIfConfigured } from "./billing.js";
 import { assertNotLifecycleFrozen } from "./billing-state.js";
 import { assertBrandOwnership } from "./brand-guard.js";
 import { gatherMailboxHealth } from "./deliverability.js";
+import { withRequestIdempotency } from "./idempotency.js";
+import { maybePushProvisionedMailbox } from "./mailbox-credential-push.js";
 import { computeMailboxWarmupSnapshot } from "./mailbox-state.js";
 import { assertWithinProvisioningCap } from "./quota.js";
 import { computeWarmupDay, epochDay, warmupDailyCap, warmupStatus } from "./warmup.js";
@@ -43,7 +45,19 @@ export async function provisionMailboxesForDomain(
   for (let mailboxIndex = 0; mailboxIndex < opts.inboxesEach; mailboxIndex++) {
     const localPart = `${opts.personaSlug}${opts.domainOrdinal + 1}${mailboxIndex + 1}`;
     const provisionIdempotencyKey = `mbx:${ctx.tenantId}:${opts.domainKey}:${localPart}`;
-    const provisioned = await ctx.adapters.mailbox.provision(opts.domain, localPart, provisionIdempotencyKey);
+    // Gate (c) — provision idempotency via the repo's own withRequestIdempotency
+    // (adversary inboxkit-adapters-2026-07-20 finding 3). InboxKit's
+    // /mailboxes/buy has no idempotency-key primitive, so a redelivered
+    // setup_infrastructure (its outer request-idempotency claim expired mid-run,
+    // or the response was lost) would re-buy — a DOUBLE CHARGE on a paid slot.
+    // Wrapping the vendor call in withRequestIdempotency keyed by the
+    // DETERMINISTIC per-mailbox key makes a re-run return the recorded
+    // ProvisionedMailbox WITHOUT a second buy. This is the durable local record
+    // that REPLACES the fragile /already exists/i message-substring hack the
+    // adapter used to lean on (mailbox-port.ts provision()).
+    const provisioned = await withRequestIdempotency(ctx, `provision:${provisionIdempotencyKey}`, () =>
+      ctx.adapters.mailbox.provision(opts.domain, localPart, provisionIdempotencyKey),
+    );
     const warmup = await ctx.adapters.mailbox.startWarmup(
       provisioned.email,
       `warmup:${ctx.tenantId}:${provisioned.email}`,
@@ -95,6 +109,14 @@ export async function provisionMailboxesForDomain(
       );
       await reportUsageToStripeIfConfigured(ctx, 1, provisionIdempotencyKey);
     }
+
+    // Self-serve I3 credential push (F6): record-then-push the just-provisioned
+    // mailbox's credentials to the engine. INERT unless the vendor+engine are
+    // armed AND this is a real vendor mailbox (never sandbox) — so it is a no-op
+    // in the default build and every existing test. A push failure is swallowed
+    // (the mailbox is durably recorded 'pending'; the reconcile sweep retries),
+    // so it can never fail a provision whose vendor spend already happened.
+    await maybePushProvisionedMailbox(ctx, provisioned);
   }
 
   return mailboxEmails;
@@ -206,8 +228,16 @@ export interface MailboxHealthReport {
   bounceRate: number;
   /** Soft (transient 4.x.x) bounce fraction — visible here but never triggers pause/burn (A3). */
   softBounceRate: number;
-  reputationScore: number;
-  placementRate: number;
+  // Gate (d) — display honesty (adversary inboxkit-adapters-2026-07-20 finding
+  // 4): these are VENDOR-REPORTED approximations (InboxKit's coarse
+  // health_status enum -> a 0-100 score, and the bounce-rate complement as a
+  // placement PROXY — NOT a real inbox-placement test), never first-party
+  // measurements. The control loop's burn/pause decisions use local counts
+  // ONLY; these two are display-only. The `vendor*` prefix carries that
+  // provenance so a consuming agent never treats them as measured (the pre-fix
+  // `reputationScore`/`placementRate` names read as first-party truth).
+  vendorReputationScore: number;
+  vendorPlacementRate: number;
   /** SPEC.md §19.2/§19.6 [F7] — last time runPollInbox() polled this mailbox (engine/reply-processor.ts); null before the first poll. Backs the Settings→Mailboxes "last polled" UI claim. */
   lastPolledAt: number | null;
 }
@@ -235,7 +265,8 @@ export async function getInfrastructureStatus(ctx: TenantContext): Promise<Infra
   const mailboxHealth: MailboxHealthReport[] = await Promise.all(
     signals.map(async (s) => {
       // Vendor-reported reputation/placement (SPEC.md §10 raw signal, Inboxkit
-      // in the real adapter). On-demand here, NOT on the hot tick path.
+      // in the real adapter) — display-only, surfaced under `vendor*` names
+      // (gate (d)). On-demand here, NOT on the hot tick path.
       const vendor = await ctx.adapters.mailbox.getHealth(s.email);
       const snapshot = warmupSnapshot.get(s.mailboxId);
       return {
@@ -251,8 +282,8 @@ export async function getInfrastructureStatus(ctx: TenantContext): Promise<Infra
         complaintRate: s.complaintRate,
         bounceRate: s.bounceRate,
         softBounceRate: s.softBounceRate,
-        reputationScore: vendor.reputationScore,
-        placementRate: vendor.placementRate,
+        vendorReputationScore: vendor.reputationScore,
+        vendorPlacementRate: vendor.placementRate,
         lastPolledAt: s.lastPolledAt,
       };
     }),

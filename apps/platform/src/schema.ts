@@ -593,6 +593,27 @@ CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_sub
   ON webhook_deliveries(subscription_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_webhook_delivery_attempts_delivery
   ON webhook_delivery_attempts(delivery_id, attempt_no);
+
+-- Self-serve activation I3 (F6 partial-failure ordering) — the durable record
+-- of a provisioned (BILLED) mailbox whose credentials must reach the engine.
+-- Written 'pending' BEFORE the credential push (engine/mailbox-credential-push.ts),
+-- so a push that fails (or a DO crash mid-push) never silently loses a billed
+-- mailbox: reconcileMailboxCredentialPushes retries every 'pending' row and
+-- flips it 'pushed' only after the engine confirms the write. email is the PK
+-- (one push record per mailbox). Inert until arming (rows only ever written by
+-- the config-gated push flow). Always a new table (no DO predates it), so the
+-- reconcile index lives inline.
+CREATE TABLE IF NOT EXISTS mailbox_cred_pushes (
+  email TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mailbox_cred_pushes_pending
+  ON mailbox_cred_pushes(tenant_id, status, created_at);
 `;
 
 export function newId(prefix: string): string {

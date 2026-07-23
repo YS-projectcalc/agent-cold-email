@@ -5,9 +5,11 @@ import { SendInProgressError, UnknownMailboxError } from "./errors.js";
 import type { GmailSender } from "./gmail.js";
 import type { GraphSender } from "./graph.js";
 import type { ImapFetcher } from "./imap.js";
+import type { MailboxCredentialStore, RemoveResult, UpsertResult } from "./mailbox-store.js";
 import { mintMessageId } from "./message-id.js";
 import type { SmtpSender } from "./smtp.js";
 import type { EngineStore } from "./store.js";
+import type { MailboxRemoveRequest, MailboxWriteRequest } from "./wire.js";
 
 /**
  * Hard cap on how many UIDs a single incremental poll scans. Bounds the
@@ -24,6 +26,15 @@ const POLL_BATCH_CAP = 300;
 export interface EngineDeps {
   credentials: CredentialsMap;
   store: EngineStore;
+  /**
+   * Durable store for PUSHED per-tenant mailbox credentials (self-serve I3).
+   * Optional so existing tests that only exercise the static-config send/poll
+   * path need not wire it; the real daemon (index.ts) always provides it. When
+   * absent, `resolve` sees only the static `credentials` map (byte-identical to
+   * the pre-I3 behavior) and the mailbox write/remove methods reject as
+   * unconfigured.
+   */
+  credentialStore?: MailboxCredentialStore;
   smtp: SmtpSender;
   imap: ImapFetcher;
   /**
@@ -50,6 +61,7 @@ export interface EngineDeps {
 export class EmailEngine {
   private readonly credentials: CredentialsMap;
   private readonly store: EngineStore;
+  private readonly credentialStore?: MailboxCredentialStore;
   private readonly smtp: SmtpSender;
   private readonly imap: ImapFetcher;
   private readonly gmail?: GmailSender;
@@ -59,6 +71,7 @@ export class EmailEngine {
   constructor(deps: EngineDeps) {
     this.credentials = deps.credentials;
     this.store = deps.store;
+    this.credentialStore = deps.credentialStore;
     this.smtp = deps.smtp;
     this.imap = deps.imap;
     this.gmail = deps.gmail;
@@ -204,8 +217,40 @@ export class EmailEngine {
     return undefined; // Graph honors the submitted MIME Message-ID: wire == minted (Gate-2 verifies)
   }
 
+  /**
+   * Upsert PUSHED credentials for a mailbox (self-serve I3, POST /v1/mailboxes).
+   * Delegates idempotency + the overwrite policy to MailboxCredentialStore (F4).
+   * Throws if the daemon has no credential store wired (a static-only engine
+   * can't accept pushed mailboxes) — surfaced as a 500 by the router.
+   */
+  async upsertMailbox(req: MailboxWriteRequest): Promise<UpsertResult> {
+    if (!this.credentialStore) throw new Error("internal: this engine has no pushed-credential store; POST /v1/mailboxes is unavailable");
+    return this.credentialStore.upsert(req.email, req.credentials, req.idempotencyKey);
+  }
+
+  /**
+   * Remove PUSHED credentials for a mailbox (self-serve I3 revoke path, used by
+   * cancel/teardown so a released vendor slot's tokens stop resolving here).
+   * Naturally idempotent (removing an unknown email is not an error). Only the
+   * pushed store is affected — a static-config mailbox is operator-owned.
+   */
+  async removeMailbox(req: MailboxRemoveRequest): Promise<RemoveResult> {
+    if (!this.credentialStore) throw new Error("internal: this engine has no pushed-credential store; DELETE /v1/mailboxes is unavailable");
+    return this.credentialStore.remove(req.email);
+  }
+
+  /**
+   * Resolve-union (self-serve I3): the static operator config takes PRECEDENCE
+   * over the pushed store. Rationale — the static `MAILBOX_CREDENTIALS(_FILE)`
+   * is the operator's deliberately-curated configuration and their emergency
+   * override: pinning a mailbox there forces its credentials regardless of what
+   * self-serve pushed, so a self-serve bug (or a stale/rotated push) can never
+   * silently clobber a mailbox an operator has explicitly fixed by hand. A
+   * mailbox present ONLY in the pushed store (the normal self-serve case)
+   * resolves from it; a mailbox in neither is an UnknownMailboxError (permanent).
+   */
   private resolve(email: string) {
-    const creds = this.credentials[email];
+    const creds = this.credentials[email] ?? this.credentialStore?.get(email);
     if (!creds) throw new UnknownMailboxError(email);
     return creds;
   }

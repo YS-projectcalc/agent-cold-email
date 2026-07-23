@@ -114,8 +114,8 @@ export class RealEmailPort implements EmailPort {
   }
 }
 
-/** https required, except a localhost/loopback bootstrap (see call()). */
-function isSecureEngineUrl(baseUrl: string): boolean {
+/** https required, except a localhost/loopback bootstrap (see call()). Shared with the I3 credential-push client. */
+export function isSecureEngineUrl(baseUrl: string): boolean {
   let url: URL;
   try {
     url = new URL(baseUrl);
