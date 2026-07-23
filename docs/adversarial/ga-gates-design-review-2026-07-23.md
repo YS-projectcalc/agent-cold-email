@@ -108,3 +108,43 @@ Re-ran my original attack one layer up. The weld is closed at two layers:
 ### NEW (out-of-scope) observation
 
 Setting `INBOXKIT_*` secrets alone does **not** enable real mailbox provisioning via the vendor factory — no call site passes `inboxKitConfig` to `createVendorAdapters`; only `mailbox-credential-push.ts` reads `INBOXKIT_*`. So real vendor provisioning (and thus the real domain hard-block, N-G5-1, N-G5-2) requires a further code change beyond secret-arming. Informational for the arming sequence and confirms why the two findings above are dark — not a G5 defect.
+
+---
+
+## OFAC build review — 2026-07-23
+
+**Reviewer:** adversary (fresh re-attack) · **Target:** the OFAC/SDN screening lane (§G1 + round-1 NB-1/3/4 + Founder Q2, all adopted).
+**Ground ref:** branch `worktree-ofac-20260723` @ `413a4ae` (G1a `52420c1` + G1b `413a4ae`), on `main` @ `de6a044`. `main` has since gained the signup-auth merge — reviewed the branch as-is; integration conflicts are the team-lead's.
+**Read-only git; ran the battery locally; no live treasury.gov fetch (fixtures only).**
+
+### VERDICT: SHIP (0 blocking) — safe to MERGE (screening path is dark until the SDN list is loaded + real-send is armed; pilot grandfathered). One required-before-open condition below — "SHIP" means safe to merge dark, NOT safe to open checkout to strangers as-is.
+
+The lead fail-open attack is closed for every webhook/reactivation path; the shadow-swap, async conversion, grandfather race, terminate extraction, and test-fetch hygiene all hold; suite 698/698, typecheck clean. The one genuine unscreened-active hole is the empty-list startup window (below), which is closable at the arming step and dark until then — non-blocking for the merge, required before opening checkout to non-grandfathered customers.
+
+### Lead attack (FAIL-OPEN) — traced, and the one hole found
+
+I enumerated every writer of `billing_state='active'` and every writer of `plan`→paid:
+- **`plan`→paid is written ONLY by the two checkout paths** (`completeSimulatedCheckout`, `applyStripeWebhookEvent`'s `checkout.session.completed`), and **both now call `screenTenant` in the same invocation.** `customer.subscription.updated` (status→active) and `charge.dispute.closed` (won) only move `billing_state`/`status`, never `plan`. Since `isTenantActivated` requires `isPaidPlanTier(plan)`, a tenant cannot be activated without having transited a screened checkout. **`isPaidPlanTier ⟹ screened-at-least-once`, and `screening_status` persists.** The webhook-reorder case (subscription.updated arrives before checkout.session.completed) leaves the tenant active-but-**free** (not activated) until the checkout screen runs. **No unscreened-active path via webhooks/reactivation.** HELD.
+- **D1-throw after the billing write is fail-CLOSED.** `screenTenant`'s pre-verdict D1 reads (`getActiveSdnListVersion`, `getActiveSdnEntries`) propagate errors (they don't swallow), so a D1 hiccup throws after `billing_state='active'` was written. The DO invocation's implicit transaction rolls back that synchronous `ctx.storage.sql` write on the throw (awaiting external D1 does not commit the DO's SQLite; the codebase relies on this transactionality throughout) — the checkout errors out and retries, never leaving the tenant active+clear. (The post-verdict throws — `upsertScreeningReview`, `alertScreeningHit` — run *after* `persistVerdict('review')`, so they're fail-closed too.) HELD.
+
+**N-OF-1 (NON-BLOCKING for merge, REQUIRED before opening checkout — the one hole).** When no SDN list has been built yet, `screenTenant` (`ofac/screening.ts:87-89`) persists `'clear'` (with a null `list_version`) and returns — and the column default is `'clear'` (`schema.ts:50`). So on first deploy, and during any window where no list build has yet succeeded, a paying tenant's checkout screens `'clear'`, unscreened — **activated, not blocked**, only audit-distinguishable via the null `list_version`. The list is loaded solely by the 5-min sweep's `maybeRefreshSdnList` (no deploy/migration seed), so the window is post-deploy until the first successful fetch+parse+swap (longer if the first fetch fails). The honesty doc claims "checked against the SDN list at checkout" without this caveat. **Direction is wrong for a sanctions gate** (fail-open). Non-blocking for the merge because the screen is dark until the list loads, the real-send path is independently dark, and the pilot is grandfathered — but signup+checkout can go live before real-send arming, so this **must** be closed before opening checkout to non-grandfathered tenants. **Fix (main loop owns scope):** (a) an arming-order gate — verify `sdn_list_meta.active_version` is non-null before opening checkout; AND (b) caveat the startup window in the honesty doc. Durable code fix to consider: default `screening_status`/empty-list verdict to `'review'` (fail-closed) — closes the empty-list AND the (already-safe) throw case independent of any semantics; tradeoff is that a prolonged fetch outage lands new tenants in `'review'` needing manual clear.
+
+### Other findings (NON-BLOCKING)
+
+**N-OF-2 (minor, dark).** The `setup_infrastructure` re-screen (`provisioning.ts:212`) flips `screening_status` to `'review'` on a sanctioned brand-change but does NOT abort the in-flight provisioning in the same call (the swap only takes effect on the next `buildAdapters`), so a brand-change-to-sanctioned still provisions once before it's gated. Bounded to one provision and dark until the real vendor path is armed.
+
+**N-OF-3 (rare).** Two-read TOCTOU in `screenTenant`: `getActiveSdnListVersion` then `getActiveSdnEntries` are separate D1 reads; a concurrent daily refresh that swaps + deletes the old version (`sdn-list.ts:136`) between them yields an empty entry set → false `'clear'` for that one checkout. Once-daily × ms-window, bounded to one missed screen. Fix: grace-period delete of old versions, or a single consistent read.
+
+### Attacks that failed (why the PASS is meaningful)
+
+- **Shadow-swap partial-list poisoning:** rows insert under a NEW version; the active pointer flips atomically only after all inserts; a mid-batch failure best-effort-deletes the partial version and rethrows WITHOUT touching the pointer; even if that cleanup fails, orphans live under a non-active version that `getActiveSdnEntries(activeVersion)` never reads. Crash-safe. Versions are `sdn-${nowMs}` (unique per refresh — no collision).
+- **Async fire-and-forget:** both now-async functions are awaited at their only callers (`tenant-do.ts:582,591`; routes `checkout.ts:55`, `webhooks.ts:62`); `screenTenant`'s three call sites all `await`. No unhandled rejection.
+- **Grandfather race:** `grandfatherActiveScreening` runs synchronously in the constructor (before any RPC), guarded by `screening_list_version IS NOT NULL → return`; and `persistVerdict` always sets a non-null version alongside `'review'`, so a real `'review'` verdict always has a non-null version and can never be re-stamped `'clear'`. Can't stamp over a real verdict.
+- **`admin/terminate.ts` extraction:** byte-for-byte behavior-preserving — identical response shape (`{tenantId, terminated:true, enforcementLogged, suspended, alreadyTornDown, teardown}`), identical order, same idempotent `insertEnforcementActionIfNew` (re-terminate → `enforcementLogged:false`).
+- **Test live-fetch:** the only production global-`fetch` path (`maybeRefreshSdnList` via the sweep) is stubbed in `scheduled.test.ts`; `ofac-sdn-refresh.test.ts` injects a fake fetch; no other test reaches the sweep. `maybeRefreshSdnList` is fully try/caught (alerts + keeps prior list; never throws), so a refresh failure can't abort the sweep.
+- **Matcher honesty / flood:** the code does exactly what the honesty doc states (exact + 2-token subset, no single-token/edit-distance); the false-positive flood is the accepted NB-3 review-not-reject tradeoff with match context carried. No overclaim.
+- **Suite/typecheck:** ran `npm run test --workspace apps/platform` → 698 passed / 101 files; typecheck clean across workspaces.
+
+### UNVERIFIABLE (arming-time only)
+
+The real `SDN.CSV` wire shape (parser assumes 12-column, no-header, `"-0-"` placeholder) and the Worker cron CPU budget for ~17k rows — both flagged by the honesty doc as verified once at the arming session's live fetch (no live gov fetch permitted in-build). Resolves at arming.
