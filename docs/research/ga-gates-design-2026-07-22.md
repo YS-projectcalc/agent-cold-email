@@ -111,7 +111,7 @@ activationState(tenant, env) =
       && !realSendPathLive(env)                -> 'pending_provisioning'
     else (past_due/frozen/canceled)            -> 'suspended' | 'canceled' (existing billing_state)
 ```
-`realSendPathLive(env)` = the same conjunct the factory uses to hand out a real email port — `engineConfig` present (`ENGINE_BASE_URL && ENGINE_AUTH_SECRET`, `env.ts:38-39`, `factory.ts:105`). This is exactly what distinguishes "paid but silently sandboxed" from "paid and really sending." (`'capacity_pending'` from G2 and G4 is a further sub-state of `pending_provisioning` — surface it when present.)
+`realSendPathLive(env)` = `engineConfig` present (`ENGINE_BASE_URL && ENGINE_AUTH_SECRET`, `env.ts:38-39`, `factory.ts:105`) **AND** `inboxKitConfig` present (`INBOXKIT_API_KEY && INBOXKIT_WORKSPACE_ID`) — BOTH conjuncts, per adversary B2 (2026-07-23): an engine-armed-but-InboxKit-unbound paid tenant gets a real `EmailPort` with sandbox mailboxes, so an engine-only formula reports `'active'` while nothing really sends — the exact confident-wrong G3 exists to kill. This is exactly what distinguishes "paid but silently sandboxed" from "paid and really sending." (`'capacity_pending'` from G2 and G4 is a further sub-state of `pending_provisioning` — surface it when present.)
 
 **Where it surfaces** (three parity surfaces — SPEC §19.0 parity law: the agent reads everything the human reads):
 1. **`account()` JSON** — add `activationState` to `AccountSummary` (`reporting.ts:85-104`, `getAccount:155-193`). The reader already selects `plan/status/billing_state` (`reporting.ts:157`); add the derivation. **Collides** with the I3/I4 lane's `AccountSummary`/`api/types.ts` edits (Collisions).
@@ -141,6 +141,18 @@ activationState(tenant, env) =
 
 ---
 
+## G5 — Gate (a): domain-port arming decoupling (ADDED 2026-07-23, adversary B1)
+
+**The hole (adversary-confirmed on both trees):** `factory.ts:137` welds the domain port to the mailbox `inboxKitConfig`, and the default `RealDomainPort` arm is a Porkbun stub (a registrar the founder DROPPED). So at the authorized autonomous arming, setting `INBOXKIT_API_KEY`/`INBOXKIT_WORKSPACE_ID` silently co-arms InboxKit-as-registrar for `domain.buy` — a money-out site — the exact posture the founder-ruled gate (a) (`ROADMAP.md:19`, registrarConfig decoupling) forbids. Zero `registrarConfig` exists in either tree.
+
+**Design:** introduce a separate `registrarConfig` arming group — `REGISTRAR_PROVIDER` (`'cloudflare'`, the founder-ruled default registrar) + `CLOUDFLARE_REGISTRAR_API_TOKEN`, BOTH tagged spend-arming (extend `isRealSpendArmed` + the `spend-armed-env-coverage.test.ts` tripwire). The factory hands out a real domain port ONLY when `registrarConfig` is present; when absent, `domain.buy` is HARD-BLOCKED fail-closed — explicit `registrar_unarmed` error + ops alert + graceful `capacity_pending`-style surface, NEVER a silent sandbox fallthrough and NEVER an InboxKit fallback. Rewrite `RealDomainPort` for Cloudflare Registrar (replacing the Porkbun stub); InboxKit "Connect Existing Domain" remains the DNS-connect path for BYO domains (it is not a registrar).
+
+**Guard (R3-1 style):** a test that `INBOXKIT_*` set + `registrarConfig` absent → the `domain.buy` path hard-blocks (RED on the old welded factory logic, proven by revert-fail-restore) + the env-coverage tripwire extension for the new registrar vars.
+
+**Sequencing (load-bearing):** gate (a) **BLOCKS credential-push activation** (`ROADMAP.md:19`) — it must land BEFORE the arming step, i.e. as a **micro-lane immediately at the I3/I4 merge** (the ROADMAP's own alternative), NOT waiting for the full GA wave. Size **S**.
+
+---
+
 ## Ordered build increments
 
 Sizes: **S** ≤ ½ day · **M** ~1 day · **L** ~2 days. G0 is the shared foundation both G2 and G4 stand on; build it first.
@@ -153,6 +165,7 @@ Sizes: **S** ≤ ½ day · **M** ~1 day · **L** ~2 days. G0 is the shared found
 | **G1b** | Screening at activation: `tenant_profile.screening_status`/`list_version`/`screened_at` columns; real `screeningStatusStub`→column read; screen-at-checkout (both `billing.ts` write sites); D1 `screening_reviews` queue; `POST /admin/tenants/:id/screening` clear/reject (reuse `admin-ops.ts` pattern) + ops alert. | **M** | G1a | after G1a |
 | **G3** | Derive `activationState`; add to `AccountSummary` + `account` MCP tool description + dashboard banner (honest copy). | **S** | G1b (reads `screening_status`) — or stub `'clear'` first | ‖ with G2 (both edit tenant-do/account) |
 | **G4** | `slots_used` counter on provision/release; `INBOXKIT_PLAN_SLOTS`; over-capacity → attempt-then-`capacity_pending` + alert; `kind`-aware slot accounting. | **S** | G0, G2 (shares ledger + choke-point) | after G2 |
+| **G5 (gate a)** | `registrarConfig` decoupling + Cloudflare `RealDomainPort` (replaces Porkbun stub) + `domain.buy` fail-closed hard-block + spend-arming tripwire extension + welded-factory RED-proof. | **S** | I3/I4 merged (edits `factory.ts`/`env.ts` that lane touches) | **micro-lane at I3/I4 merge — FIRST; BLOCKS arming** |
 
 **Long pole: G1 (G1a + G1b), ~2 days combined.** It's the only gate that is net-new build with an external-data unknown (SDN.CSV size/parse-in-Worker-cron budget, list-version semantics) AND a new admin surface AND a schema change AND a review-queue. G2/G4 are mechanical once G0's ledger + choke-point exist; G3 is pure derivation (S). Everything else can proceed in parallel with G1.
 
@@ -164,7 +177,7 @@ Sizes: **S** ≤ ½ day · **M** ~1 day · **L** ~2 days. G0 is the shared found
 
 - **G0/G2 (spend-bypass class):** `spend-ceiling-coverage.test.ts` — enumerate every `adapters.{mailbox.provision,mailbox.startWarmup,domain.buy}` (+ future prewarm) call site in `apps/platform/src`; assert each is lexically wrapped by `withSpendCeiling`. A new unwrapped spend site → RED. (Direct sibling of the I3/I4 `spend-armed-env-coverage.test.ts` the lane just shipped.) Plus a behavior test: two concurrent reserves that jointly exceed the ceiling → exactly one succeeds, one lands `capacity_pending` (proves the atomic UPDATE).
 - **G1 (screening fail-open class):** a test that a `'review'` tenant's next `buildAdapters()` returns `SandboxEmailPort` even with engine+InboxKit armed (proves screening blocks activation, not just annotates it) — fails on any code that reads activation without the screening conjunct. Plus a fail-loud test: a corrupt/empty SDN fetch does NOT silently clear the list (keeps prior good version), mirroring F5.
-- **G3 (confident-wrong class):** a test that a paid+active tenant with `engineConfig` UNSET reports `activationState:'pending_provisioning'` (not `'active'`) AND that `account()`/dashboard never claim `'active'` while `factory.ts` would hand out sandbox — the RED-on-old-code proof that the silent-sandbox confident-wrong is closed.
+- **G3 (confident-wrong class):** a test that a paid+active tenant with `engineConfig` UNSET reports `activationState:'pending_provisioning'` (not `'active'`) AND a test that a paid+active tenant with `engineConfig` SET but `inboxKitConfig` UNSET ALSO reports `'pending_provisioning'` (adversary B2 — the engine-armed/InboxKit-unbound arming window must not bless `'active'`) AND that `account()`/dashboard never claim `'active'` while `factory.ts` would hand out sandbox — the RED-on-old-code proof that the silent-sandbox confident-wrong is closed.
 - **G4 (over-provision class):** a test that provisioning the (`INBOXKIT_PLAN_SLOTS`+1)th real mailbox under the ceiling attempts-then-lands `capacity_pending` + emits an alert (never a silent success or a hard crash), and that `mailbox.release` decrements `slots_used`.
 
 Per CLAUDE.md Bug Response + Model Tiering: these are correctness/spend/security classes → each gate's build must ship its guard, and the whole wave gates on a **fresh-context adversary** re-attack (clean pass = the gate, not a green suite), not just the battery.
@@ -209,3 +222,15 @@ Per CLAUDE.md Bug Response + Model Tiering: these are correctness/spend/security
 1. **Spend-ceiling period & scope.** Is `SPEND_CEILING_CENTS` a **per-calendar-month** budget that resets on the 1st (or aligned to the InboxKit renewal on the 20th, `ROADMAP.md:45`), a rolling-30-day window, or a lifetime cumulative cap? And does the **base $39/mo InboxKit subscription** count against it, or only marginal per-call spend? *Recommendation: per-calendar-month, base sub included in the tally, default $150, warn at 80% / hard-block at 100%.*
 
 2. **OFAC posture + pilot grandfathering.** Confirm the v1 posture: a screen **hit → `review` + block activation + ops-alert for manual clear, never auto-reject** (false-positive dignity; review copy says "account review," not "sanctions match"). And confirm **already-active pilot tenants (Mordy + any current) are grandfathered `clear`** — screened retroactively into the review queue if you want, but **not deactivated** on G1 arming — so turning screening on can never strand the live pilot. *Recommendation: yes to both; SDN list only for v1 (add the free Consolidated Sanctions list later if you want non-SDN programs).*
+
+---
+
+## Adversary round 1 — 2026-07-23 (verdict: SHIP-AFTER-FIXES, applied same day)
+
+Frozen verdict: `docs/adversarial/ga-gates-design-review-2026-07-23.md`. Both BLOCKING findings fixed in this doc: **B1** → new §G5 (gate (a) registrarConfig decoupling, micro-lane at I3/I4 merge, blocks arming) · **B2** → `realSendPathLive` formula corrected to `engineConfig && inboxKitConfig` + G3 guard test extended.
+
+Non-blocking dispositions (build lane MUST carry these):
+1. **Brand re-screen at rewrite** — G1b screens the signup brand at checkout, but the operative brand is rewritten later at `setup_infrastructure` and never re-screened (evasion vector). Build: re-screen on brand change at `setup_infrastructure`; same review-queue path.
+2. **`reserved_cents` crash/replay leak** — reserve fails CLOSED but a crash between reserve and commit/release leaks reservation → false `capacity_pending`. Build: a stale-reserve reaper/reconcile in `scheduled()` (sibling of the stale-'pending' idempotency-claim reclaim already on ACTIVATION Gate-2).
+3. **SDN subset-token match false-positive flood** — accepted for v1 (review-queue absorbs it; founder Q2 covers posture), but the review queue MUST show match context so a human can clear fast; no refund/SLA promise on customer surfaces while held.
+4. **Honesty statement** — add an explicit "what OFAC v1 does and does NOT catch" paragraph to the compliance page/legal inventory at build time; never claim "OFAC compliant," claim "SDN-screened."
