@@ -3,6 +3,7 @@ import { DESKTOP_QUERY, useMediaQuery } from "../lib/useMediaQuery";
 import { NavRail } from "./NavRail";
 import { BottomTabs } from "./BottomTabs";
 import { MailboxHealthBanner } from "./MailboxHealthBanner";
+import { ActivationBanner } from "./ActivationBanner";
 
 // §19.1 shell: desktop (≥1024px) icon nav rail + content pane; mobile
 // (<768px) bottom tab bar. The 768-1024px band gets the mobile shell (a
@@ -35,6 +36,7 @@ export function AppShell() {
 
   return (
     <div className="flex h-dvh flex-col bg-canvas text-ink">
+      <ActivationBanner />
       <MailboxHealthBanner />
       <div className="flex min-h-0 flex-1">
         {isDesktop && <NavRail />}

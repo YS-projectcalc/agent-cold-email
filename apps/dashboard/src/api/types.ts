@@ -162,12 +162,26 @@ export interface DeliverabilitySummary {
   recentActions: DeliverabilityAudit[];
 }
 
+// G3 (ga-gates-design-2026-07-22.md §G3) — mirrors the platform's
+// ActivationSurfaceState. The HONEST send state; the ActivationBanner reads it.
+export type ActivationSurfaceState =
+  | "sandbox"
+  | "suspended"
+  | "canceled"
+  | "screening_hold"
+  | "capacity_pending"
+  | "pending_provisioning"
+  | "active";
+
 export interface AccountSummary {
   tenantId: string;
   brand: string;
   plan: string;
   status: string;
   billingState: string;
+  // G3 — the honest activation state; NEVER claims 'active' while really on the
+  // sandbox port. Drives the app-wide ActivationBanner.
+  activationState: ActivationSurfaceState;
   domains: number;
   mailboxes: number;
   campaigns: number;

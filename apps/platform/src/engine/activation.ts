@@ -8,6 +8,7 @@
 // IS the deactivation mechanism, for free. See design §2.1.
 
 import { isPaidPlanTier, type TenantPlan } from "@coldstart/shared";
+import type { Env } from "../env.js";
 import { isLifecycleFrozen } from "./billing-state.js";
 
 export type ScreeningStatus = "clear" | "review";
@@ -72,4 +73,64 @@ export function readActivationState(sql: SqlStorage, tenantId: string): Activati
     .one();
   const activated = isTenantActivated(row.plan, row.status, row.billing_state, screeningStatusStub(tenantId));
   return { plan: row.plan, status: row.status, billingState: row.billing_state, activated };
+}
+
+// G3 (ga-gates-design-2026-07-22.md §G3) — the HONEST activation state a paid
+// tenant is actually in, surfaced to the agent (account JSON + MCP tool) and the
+// human (dashboard banner). Fixes the confident-wrong where a PAID,
+// billing_state='active' tenant whose real send path isn't live silently gets a
+// SandboxEmailPort and sees "successful" sends that never leave.
+export type ActivationSurfaceState =
+  | "sandbox" // demo/free — sandbox is expected + honest
+  | "suspended" // billing frozen / lapsed (dunning suspend, dispute, past_due)
+  | "canceled" // cancellation finalized/scheduled
+  | "screening_hold" // held for OFAC/sanctions review (G1b; stubbed 'clear' for now)
+  | "capacity_pending" // paid+armed but a spend-ceiling / plan-slot gate is holding provisioning (G2/G4)
+  | "pending_provisioning" // paid+active but the real send path (engine+InboxKit) isn't live yet
+  | "active"; // paid, active, real send path live — really sending
+
+/**
+ * The FULL real end-to-end send path (adversary B2 corrected formula): the
+ * external engine (real EmailPort) AND InboxKit (real mailboxes) must BOTH be
+ * armed. An engine-armed-but-InboxKit-unbound paid tenant gets a real EmailPort
+ * but SANDBOX mailboxes (factory.ts:113 `useSandbox = … || !inboxKitConfig`) —
+ * nothing actually leaves — so an engine-ONLY check would falsely report
+ * 'active', recreating the exact confident-wrong G3 exists to kill. The domain
+ * REGISTRAR is deliberately NOT part of this conjunct: a tenant sends from
+ * already-provisioned / BYO-connected mailboxes without ever buying a domain.
+ */
+export function realSendPathLive(env: Env): boolean {
+  return Boolean(env.ENGINE_BASE_URL && env.ENGINE_AUTH_SECRET && env.INBOXKIT_API_KEY && env.INBOXKIT_WORKSPACE_ID);
+}
+
+/**
+ * PURE activation-surface derivation (design §G3). Derive-don't-store, mirroring
+ * isTenantActivated. Branch order is load-bearing: the billing freeze is checked
+ * BEFORE screening (adversary minor) so a disputed+in-review tenant shows its
+ * dispute freeze, not a masking "account review". `capacity_pending` is a
+ * sub-state of an otherwise-active tenant (a spend/slot gate is holding new
+ * provisioning) — surfaced only when the marker is set.
+ */
+export function deriveActivationState(args: {
+  plan: TenantPlan;
+  status: string;
+  billingState: string;
+  screening: ScreeningStatus;
+  realSendPathLive: boolean;
+  capacityPending: boolean;
+}): ActivationSurfaceState {
+  if (!isPaidPlanTier(args.plan)) return "sandbox";
+  if (isLifecycleFrozen(args.status, args.billingState)) {
+    return args.billingState === "canceled" || args.billingState === "canceling" ? "canceled" : "suspended";
+  }
+  if (args.billingState === "past_due") return "suspended"; // billing lapsed — not isLifecycleFrozen, but display as suspended
+  if (args.screening === "review") return "screening_hold";
+  if (args.billingState === "active") {
+    if (!args.realSendPathLive) return "pending_provisioning";
+    if (args.capacityPending) return "capacity_pending";
+    return "active";
+  }
+  // Paid tier but billing_state still 'none' (minted, never completed checkout):
+  // infrastructure not armed — honestly pending, never a fake 'active'.
+  return "pending_provisioning";
 }

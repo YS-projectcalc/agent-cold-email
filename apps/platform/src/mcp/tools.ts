@@ -160,7 +160,7 @@ export const MCP_TOOLS: McpTool<any>[] = [
   ),
   tool(
     "account",
-    "Account overview: brand, plan, status, billingState, resource counts, usageCents, quota, deliverability (loop state: paused/throttled mailboxes, burning domains, auto-replacements, recentActions[]), and teardown (reclaim summary once canceled, else null). Use metrics for counts, infrastructure_status for per-mailbox health.",
+    "Account overview: brand, plan, status, billingState, activationState, resource counts, usageCents, quota, deliverability (loop state: paused/throttled mailboxes, burning domains, auto-replacements, recentActions[]), and teardown (reclaim summary once canceled, else null). activationState is the HONEST send state — trust it over 'sent' counts: 'active' = real sending live; 'pending_provisioning' = paid but infrastructure still being armed, sends shown are sandbox previews that DON'T leave; 'capacity_pending' = provisioning held at a spend/plan-slot limit; 'screening_hold' = account under review; 'sandbox' = demo/free. Use metrics for counts, infrastructure_status for per-mailbox health.",
     EmptyInput,
     { title: "Account Overview", readOnlyHint: true },
     (stub) => stub.account(),
