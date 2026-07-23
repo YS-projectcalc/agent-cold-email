@@ -86,7 +86,17 @@ export async function createStripeCheckoutSession(
   body.set("line_items[0][price_data][currency]", "usd");
   body.set("line_items[0][price_data][unit_amount]", String(params.priceCents));
   body.set("line_items[0][price_data][recurring][interval]", "month");
-  body.set("line_items[0][price_data][product_data][name]", `ColdStart ${params.label} (test mode)`);
+  // The customer-visible brand is Coldrig (2026-07-22 founder ORDER,
+  // ROADMAP.md; the prior internal working name is retired and must never
+  // render here again — see the brand-copy guard test in
+  // stripe-client-checkout.test.ts, which scans this file's raw source for
+  // that retired name so this comment deliberately does not spell it out).
+  // The "(test mode)" suffix is DERIVED from the secret key already threaded
+  // into this function — never hardcoded — so a real sk_live_ key
+  // (post-activation) never shows a test-mode label to a paying customer.
+  const isTestModeKey = secretKey.startsWith("sk_test_");
+  const productName = isTestModeKey ? `Coldrig ${params.label} (test mode)` : `Coldrig ${params.label}`;
+  body.set("line_items[0][price_data][product_data][name]", productName);
   if (params.plan === PROMO_ELIGIBLE_PLAN) {
     // §2.5: enables the code-entry box + lets a 100%-off code complete with
     // NO card (payment_method_collection "if_required" only asks for a

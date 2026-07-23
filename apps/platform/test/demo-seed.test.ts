@@ -8,14 +8,14 @@ describe("buildDemoLeads", () => {
   it("count<=3 is EXACTLY the original canned demo set (byte-for-byte) — the default-unchanged contract", () => {
     const leads = buildDemoLeads(3);
     expect(leads).toEqual([
-      { email: "morgan.reply@demo-leads.coldstart.dev", firstName: "Morgan", company: "Reply Co", kind: "reply" },
-      { email: "casey.bounce@demo-leads.coldstart.dev", firstName: "Casey", company: "Bounce Co", kind: "bounce" },
-      { email: "jordan.prospect@demo-leads.coldstart.dev", firstName: "Jordan", company: "Prospect Co", kind: "silent" },
+      { email: "morgan.reply@demo-leads.coldrig.dev", firstName: "Morgan", company: "Reply Co", kind: "reply" },
+      { email: "casey.bounce@demo-leads.coldrig.dev", firstName: "Casey", company: "Bounce Co", kind: "bounce" },
+      { email: "jordan.prospect@demo-leads.coldrig.dev", firstName: "Jordan", company: "Prospect Co", kind: "silent" },
     ]);
   });
 
   it("count<3 slices the canned set from the front", () => {
-    expect(buildDemoLeads(1)).toEqual([{ email: "morgan.reply@demo-leads.coldstart.dev", firstName: "Morgan", company: "Reply Co", kind: "reply" }]);
+    expect(buildDemoLeads(1)).toEqual([{ email: "morgan.reply@demo-leads.coldrig.dev", firstName: "Morgan", company: "Reply Co", kind: "reply" }]);
   });
 
   it("is deterministic: the Nth lead is identical across repeated calls", () => {
