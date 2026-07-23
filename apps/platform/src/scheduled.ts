@@ -17,6 +17,7 @@ import type { Env } from "./env.js";
 import { buildOpsDigest, runDeliverabilitySweepAllTenants, runDunningSweep, runWebhookDeliveriesAllTenants } from "./admin/ops-sweep.js";
 import { runWatchtower } from "./admin/watchtower.js";
 import { createOpsMailer } from "./ops-mail/ops-mailer.js";
+import { maybeRefreshSdnList } from "./ofac/sdn-refresh.js";
 
 export async function runScheduledOpsSweep(env: Env): Promise<void> {
   const now = new RealClock().now();
@@ -30,6 +31,12 @@ export async function runScheduledOpsSweep(env: Env): Promise<void> {
   // (ROADMAP.md WIN-THE-COMPARISON (d)). Last so a webhook fan-out failure
   // can't delay the health/dunning/watchtower legs above.
   const webhooks = await runWebhookDeliveriesAllTenants(env);
+  // G1a — once-daily SDN (OFAC) list refresh, piggybacked on this same 5-min
+  // cron (design ga-gates-design-2026-07-22.md §G1a line 49) rather than a
+  // second `[triggers] crons` entry. Self-contained: its own internal guard
+  // no-ops on every tick but one per day, and it never throws (fail-loud means
+  // "alert + keep the prior list", not "abort this sweep" — see sdn-refresh.ts).
+  const sdnRefresh = await maybeRefreshSdnList(env, now, fetch, mailer);
 
-  console.log("scheduled ops sweep", JSON.stringify({ deliverability, dunning, digest, watchtower, webhooks }));
+  console.log("scheduled ops sweep", JSON.stringify({ deliverability, dunning, digest, watchtower, webhooks, sdnRefresh }));
 }

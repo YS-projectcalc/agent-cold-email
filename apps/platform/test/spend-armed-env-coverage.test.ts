@@ -32,6 +32,7 @@ const KNOWN_NON_SPEND_ARMING = new Set([
   "ASSETS",
   "PUBLIC_BASE_URL",
   "GMAIL_OAUTH_GRANTS", // I3 manual OAuth grants — inert without INBOXKIT_* + ENGINE_*, arms nothing itself
+  "OFAC_LIST_URL", // G1a — a public, no-auth CSV download URL; fetching it costs nothing and arms no vendor spend
 ]);
 
 function parseEnvFields(source: string): { all: Set<string>; spendArming: Set<string> } {

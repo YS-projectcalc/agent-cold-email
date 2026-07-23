@@ -1,7 +1,16 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createExecutionContext, createScheduledController, env, waitOnExecutionContext } from "cloudflare:test";
 import worker from "../src/index.js";
+import sdnValidCsv from "./fixtures/ofac/sdn-valid.csv?raw";
 import { failPayment, mintTenant } from "./helpers.js";
+
+// G1a — `scheduled()` now also drives the once-daily SDN refresh
+// (src/ofac/sdn-refresh.ts), which fetches `env.OFAC_LIST_URL` (a real public
+// Treasury URL — a plain wrangler.toml `[vars]` entry, not neutralized by the
+// .dev.vars hermetic sweep). Stub `fetch` here so this test NEVER makes a real
+// network call to treasury.gov (build brief hard rule) — same pattern as
+// real-inboxkit-client.test.ts.
+afterEach(() => vi.restoreAllMocks());
 
 // D2 (brief) — "Wire it [the dunning sweep] + the deliverability sweep +
 // metrics as Cron-triggerable handlers." Proves the `scheduled()` export
@@ -13,6 +22,7 @@ describe("scheduled() — the Cron Trigger entry point", () => {
     const { tenantId } = await mintTenant("Cron Co", "launch");
     await failPayment(tenantId);
 
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(sdnValidCsv, { status: 200 }));
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const ctx = createExecutionContext();
     await worker.scheduled(createScheduledController(), env, ctx);
