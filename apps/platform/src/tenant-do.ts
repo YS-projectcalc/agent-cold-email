@@ -91,6 +91,7 @@ import {
 import { newId, TENANT_DO_SCHEMA } from "./schema.js";
 import type { TenantContext } from "./tenant-context.js";
 import { readActivationState } from "./engine/activation.js";
+import { clearScreeningStatus, LIST_UNAVAILABLE_VERSION, screenTenant } from "./ofac/screening.js";
 import { createVendorAdapters, type VendorAdapterBundle } from "./vendors/factory.js";
 import type { EngineClientConfig } from "./vendors/real/email-port.js";
 import type { InboxKitClientConfig } from "./vendors/real/inboxkit-client.js";
@@ -128,6 +129,7 @@ export class TenantDO extends DurableObject<Env> {
     super(ctx, env);
     this.ctx.storage.sql.exec(TENANT_DO_SCHEMA);
     this.ensureColumnMigrations();
+    this.grandfatherActiveScreening();
 
     const row = this.ctx.storage.sql
       .exec<{ id: string; plan: TenantPlan; clock_base: number; clock_offset: number; clock_multiplier: number }>(
@@ -206,6 +208,11 @@ export class TenantDO extends DurableObject<Env> {
     // GA gate G4 — real-plan-slot marker for precise teardown slot accounting (see schema.ts).
     this.addColumnIfMissing("mailboxes", "slot_counted", "INTEGER NOT NULL DEFAULT 0");
     this.addColumnIfMissing("deliverability_actions", "alerted_at", "INTEGER");
+    // G1 (ga-gates-design-2026-07-22.md §G1) — OFAC/SDN screening verdict
+    // columns (see schema.ts's tenant_profile comment for the field contract).
+    this.addColumnIfMissing("tenant_profile", "screening_status", "TEXT NOT NULL DEFAULT 'clear'");
+    this.addColumnIfMissing("tenant_profile", "screening_list_version", "TEXT");
+    this.addColumnIfMissing("tenant_profile", "screened_at", "INTEGER");
     // Created here, not in TENANT_DO_SCHEMA, so they run only after the columns
     // above are guaranteed to exist (safe for DOs that predate the column). Each
     // collapses any pre-existing rows that would violate the unique key BEFORE
@@ -221,6 +228,38 @@ export class TenantDO extends DurableObject<Env> {
     // is unique per real inbound message; NULLs are distinct in SQLite, so the
     // few event rows without a message id never collide.
     this.ensureDedupeIndex("idx_events_dedupe", "events", ["tenant_id", "type", "message_id"], "message_id");
+  }
+
+  // G1 (ga-gates-design-2026-07-22.md, Founder Q2 ADOPTED — "already-active
+  // pilot tenants are grandfathered clear ... so turning screening on can
+  // never strand the live pilot"). Self-applying exactly like
+  // ensureColumnMigrations()/addColumnIfMissing() above: runs on every DO
+  // construction, but is idempotent and a no-op after the first successful
+  // stamp — `screening_list_version IS NOT NULL` (set either by this stamp OR
+  // by a real screen at checkout, src/ofac/screening.ts) means "never touch
+  // this tenant's verdict again here". A tenant that was NOT yet
+  // billing_state='active' when this code first deploys (a fresh signup, or
+  // one that later checks out) gets screened for REAL at its next checkout
+  // instead — this only back-fills tenants that are ALREADY paying+active at
+  // the moment G1 ships, so screening can never retroactively strand them.
+  private static readonly SCREENING_GRANDFATHER_VERSION = "grandfathered-2026-07-23";
+
+  private grandfatherActiveScreening(): void {
+    const row = this.ctx.storage.sql
+      .exec<{ id: string; billing_state: string; screening_list_version: string | null }>(
+        `SELECT id, billing_state, screening_list_version FROM tenant_profile LIMIT 1`,
+      )
+      .toArray()[0];
+    if (!row) return; // fresh DO, no tenant_profile row yet (initTenant creates it)
+    if (row.screening_list_version !== null) return; // already screened (for real OR grandfathered) — never re-stamp
+    if (row.billing_state !== "active") return; // nothing to strand — not currently paid+active
+
+    this.ctx.storage.sql.exec(
+      `UPDATE tenant_profile SET screening_status = 'clear', screening_list_version = ?, screened_at = ? WHERE id = ?`,
+      TenantDO.SCREENING_GRANDFATHER_VERSION,
+      new RealClock().now(),
+      row.id,
+    );
   }
 
   /**
@@ -567,8 +606,8 @@ export class TenantDO extends DurableObject<Env> {
     return startCheckout(this.requireContext(), input, origin);
   }
 
-  completeCheckoutSimulated(sessionId: string): CompleteCheckoutResult {
-    const result = completeSimulatedCheckout(this.requireContext(), sessionId);
+  async completeCheckoutSimulated(sessionId: string): Promise<CompleteCheckoutResult> {
+    const result = await completeSimulatedCheckout(this.requireContext(), sessionId);
     // Keep the in-memory plan in sync for the REST of this DO instance's
     // lifetime (quota checks + the demo/free-only sandbox guards below both
     // read `this.plan`, not a fresh SQL read, on every call).
@@ -576,8 +615,8 @@ export class TenantDO extends DurableObject<Env> {
     return result;
   }
 
-  handleStripeWebhook(event: StripeEventInput): WebhookApplyResult {
-    const result = applyStripeWebhookEvent(this.requireContext(), event);
+  async handleStripeWebhook(event: StripeEventInput): Promise<WebhookApplyResult> {
+    const result = await applyStripeWebhookEvent(this.requireContext(), event);
     if (result.plan) this.plan = result.plan;
     return result;
   }
@@ -660,6 +699,52 @@ export class TenantDO extends DurableObject<Env> {
   /** D2 dunning sweep's "suspend after grace" action — a real local state transition (not a vendor call), armed now. */
   suspendForDunning(): void {
     suspendTenant(this.requireContext(), "dunning");
+  }
+
+  /** G1b admin resolution — POST /admin/tenants/:id/screening {decision:'clear'} (routes/admin-screening.ts). */
+  clearScreening(): void {
+    clearScreeningStatus(this.requireContext());
+  }
+
+  /**
+   * N-OF-1 fix (adversary OFAC build review, 2026-07-23) — called ONLY by the
+   * ops-sweep recovery pass (ofac/screening-recovery.ts) for a tenant whose
+   * `screening_list_version` is STILL the `LIST_UNAVAILABLE_VERSION` sentinel
+   * (screening.ts). Fresh-SQL-read guarded (not a cached value): if the
+   * verdict has already moved on since (a manual admin decision, or a prior
+   * recovery pass already ran), this is a no-op — never re-screens a tenant
+   * whose hold has a real resolution already.
+   *
+   * Race-guard addendum (adversary re-attack, 2026-07-23): the sweep reads its
+   * pending-review list, THEN calls this RPC per tenant — an admin clear/
+   * reject can land in that window. `clearScreening()` flips
+   * `screening_status` to 'clear' but leaves `screening_list_version`
+   * unchanged (by design, for audit — see clearScreeningStatus's doc
+   * comment), so version-only guarding would let a recovery re-screen
+   * OVERRIDE an admin's explicit 'clear' decision (re-blocking a tenant the
+   * admin just cleared). ANDing in `screening_status === 'review'` closes
+   * that: once an admin has cleared, this is a permanent no-op for that hold.
+   * (A `reject` leaves `screening_status` at 'review' — unchanged by
+   * terminate — but the tenant is suspended/token-locked regardless, so a
+   * redundant re-screen here can't reactivate it; the review-QUEUE audit
+   * corruption that scenario risked is closed at the write side instead —
+   * `resolveScreeningReview`'s now-conditional-on-'pending' UPDATE, admin/
+   * db.ts — so a stale re-screen here can never overwrite an already-
+   * 'rejected' row.)
+   */
+  async rescreenIfListUnavailable(): Promise<{ rescreened: boolean; status?: string }> {
+    const ctx = this.requireContext();
+    const row = ctx.sql
+      .exec<{ screening_status: string; screening_list_version: string | null }>(
+        `SELECT screening_status, screening_list_version FROM tenant_profile WHERE id = ?`,
+        ctx.tenantId,
+      )
+      .one();
+    if (row.screening_list_version !== LIST_UNAVAILABLE_VERSION || row.screening_status !== "review") {
+      return { rescreened: false };
+    }
+    const result = await screenTenant(ctx, { trigger: "list_unavailable_recovery" });
+    return { rescreened: true, status: result.status };
   }
 
   // --- POST /demo/run (B5) — sandbox-only, structurally gated to demo/free plans ---

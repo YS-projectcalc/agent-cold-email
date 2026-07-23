@@ -10,6 +10,7 @@ import { withRequestIdempotency } from "./idempotency.js";
 import { maybePushProvisionedMailbox } from "./mailbox-credential-push.js";
 import { computeMailboxWarmupSnapshot } from "./mailbox-state.js";
 import { assertWithinProvisioningCap } from "./quota.js";
+import { screenTenant } from "../ofac/screening.js";
 import { alertRegistrarUnarmed } from "./registrar-alert.js";
 import { withSpendCeiling } from "./spend-ceiling.js";
 import { computeWarmupDay, epochDay, warmupDailyCap, warmupStatus } from "./warmup.js";
@@ -223,6 +224,18 @@ export async function runSetupInfrastructure(
     input.senderIdentity,
     ctx.tenantId,
   );
+
+  // G1b re-screen (NB-1 disposition, adversary round 1 2026-07-23): the
+  // operative sending brand is REWRITTEN right here and was never re-screened
+  // — a tenant could screen-clean at checkout, then set a sanctioned brand at
+  // setup_infrastructure and evade G1 entirely. Scoped to paid tiers only:
+  // demo/free can never activate regardless of screening_status
+  // (isTenantActivated requires isPaidPlanTier), so screening an
+  // exploration-only sandbox tenant here would just be wasted D1 reads on the
+  // common demo path.
+  if (isPaidPlanTier(ctx.plan)) {
+    await screenTenant(ctx, { trigger: "brand_change" });
+  }
 
   // G5 gate (a) — a real (non-sandbox) tenant whose registrar isn't armed
   // hits RegistrarUnarmedError on the very first vendor touch below

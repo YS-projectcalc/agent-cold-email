@@ -152,6 +152,16 @@ declare global {
       // into KNOWN_NON_SPEND_ARMING (spend-armed-env-coverage.test.ts).
       TURNSTILE_SECRET?: string;
       TURNSTILE_SITE_KEY?: string;
+      // G1a OFAC screening — the public US Treasury SDN.CSV download URL
+      // (ga-gates-design-2026-07-22.md §G1a). NOT a secret (no auth/API key —
+      // a plain public download), so a plain `[vars]` entry like
+      // PUBLIC_BASE_URL/OPS_ALERT_EMAIL above, not a wrangler secret.
+      // NOT `// spend-arming` — fetching a public list costs nothing and arms
+      // no vendor spend; isRealSpendArmed does not read it. Optional: absent
+      // falls back to the real Treasury URL as a code-literal default
+      // (src/ofac/sdn-refresh.ts), matching PUBLIC_BASE_URL's own
+      // no-configuration-needed-in-dev/test posture.
+      OFAC_LIST_URL?: string;
     }
   }
 }

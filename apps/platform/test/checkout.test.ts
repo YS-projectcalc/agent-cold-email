@@ -228,7 +228,10 @@ describe("GET /checkout/simulate — fails closed once live Stripe keys are conf
       expect(res.status).toBe(404);
 
       await runInDurableObject(tenantStub(tenantId), async (instance) => {
-        expect(() => instance.completeCheckoutSimulated(sessionId)).toThrow(/simulated checkout is disabled/);
+        // G1 (ga-gates-design-2026-07-22.md) made completeCheckoutSimulated
+        // async (it now awaits screenTenant) — the throw surfaces as a
+        // rejection, not a synchronous throw.
+        await expect(instance.completeCheckoutSimulated(sessionId)).rejects.toThrow(/simulated checkout is disabled/);
       });
     } finally {
       (env as { ENGINE_BASE_URL?: string }).ENGINE_BASE_URL = savedBaseUrl;
@@ -261,10 +264,11 @@ describe("GET /checkout/simulate — fails closed once live Stripe keys are conf
       // pattern) rather than through the stub RPC boundary — avoids a
       // spurious "unhandled rejection" double-report some vitest-pool-workers
       // versions emit for an error thrown across the stub RPC call itself.
-      // `completeCheckoutSimulated` is synchronous on the instance (only the
-      // stub wraps it in a Promise), so it throws directly, not via rejection.
+      // G1 (ga-gates-design-2026-07-22.md) made completeCheckoutSimulated
+      // itself async (it now awaits screenTenant), so this rejects rather
+      // than throwing synchronously.
       await runInDurableObject(tenantStub(tenantId), async (instance) => {
-        expect(() => instance.completeCheckoutSimulated(sessionId)).toThrow(/simulated checkout is disabled/);
+        await expect(instance.completeCheckoutSimulated(sessionId)).rejects.toThrow(/simulated checkout is disabled/);
       });
     } finally {
       (env as { STRIPE_SECRET_KEY?: string }).STRIPE_SECRET_KEY = saved;

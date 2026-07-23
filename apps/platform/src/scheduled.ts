@@ -18,6 +18,8 @@ import { buildOpsDigest, runDeliverabilitySweepAllTenants, runDunningSweep, runW
 import { runWatchtower } from "./admin/watchtower.js";
 import { createOpsMailer } from "./ops-mail/ops-mailer.js";
 import { reapStaleReservations } from "./engine/spend-ceiling.js";
+import { maybeRefreshSdnList } from "./ofac/sdn-refresh.js";
+import { rescreenListUnavailableReviews } from "./ofac/screening-recovery.js";
 
 export async function runScheduledOpsSweep(env: Env): Promise<void> {
   const now = new RealClock().now();
@@ -33,12 +35,23 @@ export async function runScheduledOpsSweep(env: Env): Promise<void> {
   const webhooks = await runWebhookDeliveriesAllTenants(env);
   // GA gate G2 (design NB-2) — reclaim vendor-spend reservations orphaned by a
   // crash between reserve and commit/release, so leaked reservations can't
-  // silently shrink the effective ceiling. Last, and its own concern (D1
-  // account ledger), so it can't delay the health/dunning/watchtower legs.
+  // silently shrink the effective ceiling. Its own concern (D1 account
+  // ledger), so it can't delay the health/dunning/watchtower legs.
   const spendReservations = await reapStaleReservations(env, now);
+  // G1a — once-daily SDN (OFAC) list refresh, piggybacked on this same 5-min
+  // cron (design ga-gates-design-2026-07-22.md §G1a line 49) rather than a
+  // second `[triggers] crons` entry. Self-contained: its own internal guard
+  // no-ops on every tick but one per day, and it never throws (fail-loud means
+  // "alert + keep the prior list", not "abort this sweep" — see sdn-refresh.ts).
+  const sdnRefresh = await maybeRefreshSdnList(env, now, fetch, mailer);
+  // N-OF-1 fix (adversary OFAC build review, 2026-07-23) — recovers any
+  // tenant fail-closed to 'review' ONLY because no list had loaded yet at
+  // screening time, now that a refresh above may have just loaded one. Cheap
+  // no-op whenever no list is available or nothing is stuck.
+  const sdnRecovery = await rescreenListUnavailableReviews(env);
 
   console.log(
     "scheduled ops sweep",
-    JSON.stringify({ deliverability, dunning, digest, watchtower, webhooks, spendReservations }),
+    JSON.stringify({ deliverability, dunning, digest, watchtower, webhooks, spendReservations, sdnRefresh, sdnRecovery }),
   );
 }

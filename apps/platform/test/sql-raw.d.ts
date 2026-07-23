@@ -10,3 +10,9 @@ declare module "*.ts?raw" {
   const content: string;
   export default content;
 }
+
+// G1a — fixture SDN.CSV text (test/fixtures/ofac/*.csv), same `?raw` mechanism.
+declare module "*.csv?raw" {
+  const content: string;
+  export default content;
+}

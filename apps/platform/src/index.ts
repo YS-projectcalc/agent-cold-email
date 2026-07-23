@@ -17,6 +17,7 @@ import { mcpRoute } from "./routes/mcp.js";
 import { waitlistRoute } from "./routes/waitlist.js";
 import { adminSupportRoute } from "./routes/admin-support.js";
 import { adminOpsRoute } from "./routes/admin-ops.js";
+import { adminScreeningRoute } from "./routes/admin-screening.js";
 import { statusRoute } from "./routes/status.js";
 import { dashboardSessionRoute } from "./routes/dashboard-session.js";
 import { loginRoute } from "./routes/login.js";
@@ -74,6 +75,7 @@ const admin = new Hono<{ Bindings: Env }>();
 admin.use("/admin/*", requireAdminAuth);
 admin.route("/", adminSupportRoute);
 admin.route("/", adminOpsRoute);
+admin.route("/", adminScreeningRoute);
 app.route("/", admin);
 
 // Every literal top-level path this API exposes behind requireAuth (bearer OR
