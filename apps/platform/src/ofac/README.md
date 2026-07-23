@@ -44,10 +44,22 @@ never "OFAC compliant."
   `screening_list_version`/`screened_at`, and on a hit writes a
   `screening_reviews` D1 row + fires a founder-only ops alert) and
   `clearScreeningStatus` (the admin `clear` resolution's write path).
-- `screening-alert.ts` — the founder ops alert on a hit. Mirrors
-  `../engine/registrar-alert.ts`'s exact pattern: injectable mailer, never
-  fails the screening write that triggered it, founder-only framing (never
-  "sanctions match" on any customer-visible surface).
+- `screening-alert.ts` — founder ops alerts: `alertScreeningHit` (a real SDN
+  match) and `alertScreeningListUnavailable` (N-OF-1 fix — the fail-closed
+  hold fired when no list is loaded yet; deliberately NOT framed as "Matches:"
+  since it isn't one). Both mirror `../engine/registrar-alert.ts`'s exact
+  pattern: injectable mailer, never fails the screening write that triggered
+  it, founder-only framing (never "sanctions match" on any customer-visible
+  surface).
+- `screening-recovery.ts` — N-OF-1 fix (adversary OFAC build review,
+  2026-07-23). `rescreenListUnavailableReviews`, called from the same 5-min
+  cron right after the list refresh: once a real list is loaded, re-screens
+  every tenant still holding the `LIST_UNAVAILABLE_VERSION` sentinel (via
+  `TenantDO.rescreenIfListUnavailable`) — clears the genuinely-clean ones
+  automatically (closing the stale `screening_reviews` row too, since
+  `screenTenant`'s own 'clear' branch never touches that table) and upgrades a
+  genuine match to a real, list-versioned hold. No-ops cheaply whenever no
+  list is loaded yet or nothing is stuck.
 
 ## Where this plugs into the rest of the platform
 
@@ -68,6 +80,9 @@ never "OFAC compliant."
   ALREADY `billing_state='active'` at the moment this code first deploys
   `'clear'` with a `'grandfathered-2026-07-23'` sentinel version — turning
   screening on can never strand the live pilot.
+- `../tenant-do.ts`'s `rescreenIfListUnavailable` RPC is the recovery sweep's
+  per-tenant target (fresh-SQL-read guarded — a no-op once the hold has
+  already been resolved by anything else).
 
 ## How to run
 

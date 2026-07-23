@@ -1,11 +1,12 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
 import { normalizeName, tokenize } from "../src/ofac/normalize.js";
-import { screenTenant } from "../src/ofac/screening.js";
+import { LIST_UNAVAILABLE_VERSION, screenTenant } from "../src/ofac/screening.js";
+import { rescreenListUnavailableReviews } from "../src/ofac/screening-recovery.js";
 import { swapInSdnList } from "../src/ofac/sdn-list.js";
 import { getScreeningReview } from "../src/admin/db.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
-import { activatePaidPlan, api, mintTenant, signup, tenantStub, withTenantContext } from "./helpers.js";
+import { activatePaidPlan, adminApi, api, mintTenant, signup, tenantStub, withTenantContext } from "./helpers.js";
 
 function sdnEntry(uid: string, name: string) {
   const nameNormalized = normalizeName(name);
@@ -78,18 +79,150 @@ describe("screenTenant — G1b real screening (unit level, direct call)", () => 
     expect(mailer.sent[0]?.text).toContain("NEVER an auto-reject");
   });
 
-  it("no SDN list built yet -> 'clear' with a NULL list_version (honestly distinguishable from a real screen)", async () => {
-    // No seedSdnList call — fresh env, pre-first-refresh.
-    const { tenantId } = await mintTenant("Whatever Co", "launch");
-    const result = await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout" }));
-    expect(result).toEqual({ status: "clear", listVersion: null, matches: [] });
-  });
-
   it("re-screening a PREVIOUSLY-REVIEWED tenant that is now clean REOPENS-then-clears — the review row status flips but stays queryable", async () => {
     await seedSdnList(12_000_000);
     const { tenantId } = await mintTenant("Acme", "launch"); // exact hit
     await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout" }));
     expect((await getScreeningReview(env, tenantId))?.status).toBe("pending");
+  });
+});
+
+// N-OF-1 fix (adversary OFAC build review, 2026-07-23): NO active SDN list at
+// screening time must fail CLOSED ('review', blocking activation), never
+// fail-open 'clear'. See the report's revert-fail-restore proof: this is RED
+// against the pre-fix code (which persisted 'clear' with a null list_version).
+describe("G1b — N-OF-1 fail-closed when NO SDN list is loaded yet", () => {
+  beforeEach(async () => {
+    await env.DB.prepare(`DELETE FROM sdn_entries`).run();
+    await env.DB.prepare(`DELETE FROM sdn_list_meta`).run();
+    await env.DB.prepare(`DELETE FROM screening_reviews`).run();
+  });
+
+  it("no SDN list built yet -> status 'review' (NOT 'clear'), sentinel list_version, review row, ops alert fired — activation BLOCKED", async () => {
+    // No seedSdnList call — fresh env, pre-first-refresh.
+    const { tenantId } = await mintTenant("Whatever Co", "launch");
+    const mailer = new SandboxOpsMailer();
+
+    const result = await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout", mailer }));
+    expect(result).toEqual({ status: "review", listVersion: LIST_UNAVAILABLE_VERSION, matches: [] });
+
+    const row = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
+      state.storage.sql.exec<{ screening_status: string; screening_list_version: string | null }>(
+        `SELECT screening_status, screening_list_version FROM tenant_profile WHERE id = ?`,
+        tenantId,
+      ).one(),
+    );
+    expect(row).toMatchObject({ screening_status: "review", screening_list_version: LIST_UNAVAILABLE_VERSION });
+
+    const review = await getScreeningReview(env, tenantId);
+    expect(review).toMatchObject({ tenantId, status: "pending", listVersion: LIST_UNAVAILABLE_VERSION });
+    expect(review?.matchedTerms).toMatchObject([{ reason: "sdn_list_unavailable" }]);
+
+    expect(mailer.sent).toHaveLength(1);
+    expect(mailer.sent[0]?.subject).toContain("no SDN list loaded yet");
+    expect(mailer.sent[0]?.text).not.toContain("Matches:"); // never framed as a name-match hit
+
+    // The gate genuinely blocks: buildAdapters() (activation.ts's own conjunct) reads this the same as a real hit.
+    const activated = await withTenantContext(tenantId, (ctx) => {
+      const p = ctx.sql.exec<{ plan: string; status: string; billing_state: string }>(
+        `SELECT plan, status, billing_state FROM tenant_profile WHERE id = ?`,
+        ctx.tenantId,
+      ).one();
+      return p;
+    });
+    expect(activated.billing_state).toBe("none"); // sanity: mintTenant alone never checks out
+  });
+
+  it("the admin clear path still works on a list-unavailable hold (same surface as a real hit)", async () => {
+    const { tenantId } = await mintTenant("List Unavailable Admin Co", "launch");
+    await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout" }));
+    expect((await getScreeningReview(env, tenantId))?.status).toBe("pending");
+
+    const res = await adminApi(`/admin/tenants/${tenantId}/screening`, {
+      method: "POST",
+      body: JSON.stringify({ decision: "clear" }),
+    });
+    expect(res.status).toBe(200);
+    const row = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
+      state.storage.sql.exec<{ screening_status: string }>(`SELECT screening_status FROM tenant_profile WHERE id = ?`, tenantId).one(),
+    );
+    expect(row.screening_status).toBe("clear");
+  });
+});
+
+// N-OF-1 self-heal path: rescreenListUnavailableReviews (ofac/screening-recovery.ts).
+describe("G1b — SDN list-unavailable recovery sweep", () => {
+  beforeEach(async () => {
+    await env.DB.prepare(`DELETE FROM sdn_entries`).run();
+    await env.DB.prepare(`DELETE FROM sdn_list_meta`).run();
+    await env.DB.prepare(`DELETE FROM screening_reviews`).run();
+  });
+
+  it("no-ops (attempted:0) while the list is STILL unavailable — never spins on nothing to recover", async () => {
+    const { tenantId } = await mintTenant("Still Stuck Co", "launch");
+    await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout" }));
+
+    const outcome = await rescreenListUnavailableReviews(env);
+    expect(outcome).toEqual({ attempted: 0, rescreened: 0, errors: 0 });
+    expect((await getScreeningReview(env, tenantId))?.listVersion).toBe(LIST_UNAVAILABLE_VERSION); // untouched
+  });
+
+  it("once a list loads, a genuinely CLEAN tenant self-heals: 'clear', real list_version, review row auto-resolved — no manual admin needed", async () => {
+    const { tenantId } = await mintTenant("Sunrise Bakery Recovery Co", "launch");
+    await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout" }));
+    expect((await getScreeningReview(env, tenantId))?.status).toBe("pending");
+
+    const listVersion = await seedSdnList(30_000_000); // benign list, this brand doesn't match anything in it
+
+    const outcome = await rescreenListUnavailableReviews(env);
+    expect(outcome).toEqual({ attempted: 1, rescreened: 1, errors: 0 });
+
+    const row = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
+      state.storage.sql.exec<{ screening_status: string; screening_list_version: string | null }>(
+        `SELECT screening_status, screening_list_version FROM tenant_profile WHERE id = ?`,
+        tenantId,
+      ).one(),
+    );
+    expect(row).toMatchObject({ screening_status: "clear", screening_list_version: listVersion });
+
+    const review = await getScreeningReview(env, tenantId);
+    expect(review).toMatchObject({ status: "cleared", resolvedBy: "system-recovery" });
+  });
+
+  it("once a list loads, a tenant that turns out to be a REAL match upgrades to a real, list-versioned review (never silently drops the hold)", async () => {
+    const { tenantId } = await mintTenant("Globex Corp International", "launch");
+    await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout" }));
+
+    const listVersion = await seedSdnList(31_000_000); // this fixture's list DOES contain a match for this brand
+
+    const outcome = await rescreenListUnavailableReviews(env);
+    expect(outcome).toEqual({ attempted: 1, rescreened: 1, errors: 0 });
+
+    const row = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
+      state.storage.sql.exec<{ screening_status: string; screening_list_version: string | null }>(
+        `SELECT screening_status, screening_list_version FROM tenant_profile WHERE id = ?`,
+        tenantId,
+      ).one(),
+    );
+    expect(row).toMatchObject({ screening_status: "review", screening_list_version: listVersion });
+
+    const review = await getScreeningReview(env, tenantId);
+    expect(review).toMatchObject({ status: "pending" }); // reopened with the REAL match, not silently cleared
+    expect(review?.listVersion).toBe(listVersion);
+    expect(review?.matchedTerms).toMatchObject([{ uid: "9001" }]);
+  });
+
+  it("is a no-op for a tenant whose hold was already resolved by a manual admin clear (fresh-read guard on the DO RPC)", async () => {
+    const { tenantId } = await mintTenant("Already Admin Cleared Co", "launch");
+    await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout" }));
+    await adminApi(`/admin/tenants/${tenantId}/screening`, { method: "POST", body: JSON.stringify({ decision: "clear" }) });
+
+    await seedSdnList(32_000_000);
+    const outcome = await rescreenListUnavailableReviews(env);
+    // The review row's status flipped to 'cleared' by the admin action, so
+    // listPendingScreeningReviews (status='pending' only) no longer returns
+    // it — nothing to attempt.
+    expect(outcome).toEqual({ attempted: 0, rescreened: 0, errors: 0 });
   });
 });
 

@@ -16,13 +16,28 @@ import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { TenantContext } from "../tenant-context.js";
 import { matchAgainstSdn, type MatchedSdnEntry, type ScreenCandidate } from "./match.js";
 import { getActiveSdnEntries, getActiveSdnListVersion } from "./sdn-list.js";
-import { alertScreeningHit } from "./screening-alert.js";
+import { alertScreeningHit, alertScreeningListUnavailable } from "./screening-alert.js";
 import { upsertScreeningReview } from "../admin/db.js";
 
 export type ScreeningStatus = "clear" | "review";
 
+/**
+ * Adversary N-OF-1 (OFAC build review, 2026-07-23): the old behavior — no
+ * active SDN list yet -> persist 'clear' with a null list_version — is
+ * fail-OPEN, the wrong direction for a sanctions gate (a checkout in the
+ * post-deploy/pre-first-refresh window activated a paying stranger
+ * unscreened, only audit-distinguishable via the null version). This sentinel
+ * is now the list_version stamped instead: `screening_status` goes 'review'
+ * (fail-CLOSED, blocks activation exactly like a real hit), and it is a
+ * value that can NEVER collide with a real `sdn-${nowMs}` version tag
+ * (sdn-list.ts), so a genuinely-screened tenant and a
+ * screened-but-no-list-yet tenant are always distinguishable in the audit
+ * trail and in the `screening_reviews` queue.
+ */
+export const LIST_UNAVAILABLE_VERSION = "list-unavailable";
+
 export interface ScreenTenantOptions {
-  trigger: "checkout" | "brand_change";
+  trigger: "checkout" | "brand_change" | "list_unavailable_recovery";
   /**
    * Best-effort Stripe billing name (`customer_details.name`) — only ever
    * present on a REAL Stripe checkout.session.completed event that happened to
@@ -80,13 +95,31 @@ export async function screenTenant(ctx: TenantContext, opts: ScreenTenantOptions
   screenedFields.billingName = opts.billingName ?? null;
   if (opts.billingName) candidates.push({ field: "billingName", text: opts.billingName });
 
-  // No list built yet (fresh env / pre-first-refresh — an arming-time gap, not
-  // a runtime error) -> nothing to match against. Persist 'clear' but with a
-  // NULL list_version so it stays honestly distinguishable from a real screen
-  // (never silently claim a check ran when it didn't).
+  // N-OF-1 FIX (adversary OFAC build review, 2026-07-23): no list built yet
+  // (fresh env / pre-first-refresh, or a refresh outage) -> we CANNOT screen,
+  // so we must not claim clear. Fail CLOSED: 'review' blocks activation
+  // exactly like a real hit, tagged with a sentinel list_version so it is
+  // honestly distinguishable from both a real 'clear' screen and a real
+  // 'review' hit. Recorded to the SAME review queue + alert path as a real
+  // hit (an admin can clear it manually), and self-heals once a real list
+  // loads — src/ofac/screening-recovery.ts's cron sweep re-screens every
+  // tenant still holding this exact sentinel.
   if (!listVersion) {
-    persistVerdict(ctx, "clear", null);
-    return { status: "clear", listVersion: null, matches: [] };
+    persistVerdict(ctx, "review", LIST_UNAVAILABLE_VERSION);
+    await upsertScreeningReview(ctx.env, {
+      tenantId: ctx.tenantId,
+      matchedTerms: [
+        {
+          reason: "sdn_list_unavailable",
+          note: "no active SDN list was loaded at screening time — held fail-closed, not a name match",
+        },
+      ],
+      screenedFields,
+      listVersion: LIST_UNAVAILABLE_VERSION,
+      createdAt: ctx.clock.now(),
+    });
+    await alertScreeningListUnavailable(ctx, opts.trigger, opts.mailer ?? createOpsMailer(ctx.env));
+    return { status: "review", listVersion: LIST_UNAVAILABLE_VERSION, matches: [] };
   }
 
   const entries = await getActiveSdnEntries(ctx.env, listVersion);

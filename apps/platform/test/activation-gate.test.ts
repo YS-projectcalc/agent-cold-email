@@ -1,10 +1,30 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
 import { isTenantActivated, readActivationState } from "../src/engine/activation.js";
+import { normalizeName, tokenize } from "../src/ofac/normalize.js";
+import { swapInSdnList } from "../src/ofac/sdn-list.js";
 import type { VendorAdapterBundle } from "../src/vendors/factory.js";
 import { RealEmailPort } from "../src/vendors/real/email-port.js";
 import { SandboxEmailPort } from "../src/vendors/sandbox/email-port.js";
 import { activatePaidPlan, failPayment, mintTenant, postWebhook, tenantStub } from "./helpers.js";
+
+// N-OF-1 fix (adversary OFAC build review, 2026-07-23): a checkout now
+// genuinely fail-CLOSES (screening_status='review') when NO SDN list is
+// loaded — see test/ofac-screening.test.ts's own dedicated coverage of that.
+// Every test in THIS file that drives a tenant through checkout and expects
+// I1's activation gate to flip true is testing BILLING-state wiring, not
+// screening — seed a small benign list first so a real screen genuinely
+// completes 'clear' (none of these brands match it), matching what a real
+// deployment looks like once the SDN list has loaded at least once.
+async function seedBenignSdnList(nowMs: number): Promise<void> {
+  const name = normalizeName("Totally Unrelated Sanctioned Entity");
+  await swapInSdnList(env, {
+    listVersion: `benign-${nowMs}`,
+    entries: [{ uid: "0", nameNormalized: name, tokens: tokenize(name), entityType: null, program: "TEST" }],
+    publishedDate: "2026-07-23",
+    fetchedAt: nowMs,
+  });
+}
 
 // I1 (self-serve activation design §2.1) — the product-driven activation gate
 // that REPLACES the manual `ENGINE_TENANTS` allowlist and the hard-`false`
@@ -209,6 +229,12 @@ describe("TenantDO.buildAdapters — no cached real/sandbox DECISION (F3, design
 // drive the I1 gate" — checkout.completed -> gate-on, cancel/payment-failed
 // -> gate-off, exercised through the REAL webhook HTTP surface (not raw SQL).
 describe("webhook-driven billing transitions flip the I1 activation gate", () => {
+  beforeEach(async () => {
+    await env.DB.prepare(`DELETE FROM sdn_entries`).run();
+    await env.DB.prepare(`DELETE FROM sdn_list_meta`).run();
+    await seedBenignSdnList(Date.now());
+  });
+
   it("checkout.session.completed activates; invoice.payment_failed deactivates", async () => {
     const { tenantId } = await mintTenant("Webhook Gate Co", "launch");
 

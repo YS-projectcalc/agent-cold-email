@@ -91,7 +91,7 @@ import {
 import { newId, TENANT_DO_SCHEMA } from "./schema.js";
 import type { TenantContext } from "./tenant-context.js";
 import { readActivationState } from "./engine/activation.js";
-import { clearScreeningStatus } from "./ofac/screening.js";
+import { clearScreeningStatus, LIST_UNAVAILABLE_VERSION, screenTenant } from "./ofac/screening.js";
 import { createVendorAdapters, type VendorAdapterBundle } from "./vendors/factory.js";
 import type { EngineClientConfig } from "./vendors/real/email-port.js";
 
@@ -676,6 +676,25 @@ export class TenantDO extends DurableObject<Env> {
   /** G1b admin resolution — POST /admin/tenants/:id/screening {decision:'clear'} (routes/admin-screening.ts). */
   clearScreening(): void {
     clearScreeningStatus(this.requireContext());
+  }
+
+  /**
+   * N-OF-1 fix (adversary OFAC build review, 2026-07-23) — called ONLY by the
+   * ops-sweep recovery pass (ofac/screening-recovery.ts) for a tenant whose
+   * `screening_list_version` is STILL the `LIST_UNAVAILABLE_VERSION` sentinel
+   * (screening.ts). Fresh-SQL-read guarded (not a cached value): if the
+   * verdict has already moved on since (a manual admin decision, or a prior
+   * recovery pass already ran), this is a no-op — never re-screens a tenant
+   * whose hold has a real resolution already.
+   */
+  async rescreenIfListUnavailable(): Promise<{ rescreened: boolean; status?: string }> {
+    const ctx = this.requireContext();
+    const row = ctx.sql
+      .exec<{ screening_list_version: string | null }>(`SELECT screening_list_version FROM tenant_profile WHERE id = ?`, ctx.tenantId)
+      .one();
+    if (row.screening_list_version !== LIST_UNAVAILABLE_VERSION) return { rescreened: false };
+    const result = await screenTenant(ctx, { trigger: "list_unavailable_recovery" });
+    return { rescreened: true, status: result.status };
   }
 
   // --- POST /demo/run (B5) — sandbox-only, structurally gated to demo/free plans ---

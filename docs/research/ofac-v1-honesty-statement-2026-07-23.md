@@ -61,6 +61,32 @@ warrant sanctions compliance."
   (records `screened_fields.billingName: null`), it never fabricates a check
   that didn't happen.
 
+## Fail-closed, not fail-open, when no list is loaded yet (adversary N-OF-1, 2026-07-23)
+
+**Updated posture — this is the one behavior change from the original build.**
+The very first version of this screen persisted `'clear'` (with a `null` list
+version) whenever no SDN list had been built yet — e.g. the post-deploy
+window before the first 5-minute refresh succeeds. The adversary correctly
+flagged this as fail-**open**, the wrong direction for a sanctions gate: it
+meant a checkout completing in that window activated a paying stranger
+genuinely unscreened, distinguishable only via a `null` `screening_list_version`
+in the audit trail.
+
+**Fixed:** when no active SDN list exists at screening time, the tenant is now
+held `'review'` (fail-**closed** — blocks activation exactly like a real
+match) with a distinct sentinel list version (`list-unavailable`), a
+`screening_reviews` row explaining why (`reason: "sdn_list_unavailable"` — not
+a name match), and the same founder ops alert path as a real hit (worded
+honestly: "no SDN list loaded yet," never "Matches:"). This self-heals once a
+real list loads — the ops-sweep cron's recovery pass (`src/ofac/
+screening-recovery.ts`) re-screens every tenant still holding the sentinel: a
+genuinely clean tenant is cleared automatically (no manual admin step needed
+for the common case), and a genuine match is upgraded to a real,
+list-versioned hold. A manual admin clear also works at any time in the
+meantime. So: **"checked against the SDN list at checkout"** is now true
+without caveat for every activated tenant — a tenant is never activated
+without either a real screen or an explicit admin override of a held review.
+
 ## Operational honesty commitments
 
 - A screening **hit never auto-rejects.** It holds the tenant on `'review'`

@@ -8,10 +8,12 @@ import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { TenantContext } from "../tenant-context.js";
 import type { MatchedSdnEntry } from "./match.js";
 
+type ScreeningTrigger = "checkout" | "brand_change" | "list_unavailable_recovery";
+
 export async function alertScreeningHit(
   ctx: TenantContext,
   matches: MatchedSdnEntry[],
-  trigger: "checkout" | "brand_change",
+  trigger: ScreeningTrigger,
   mailer: OpsMailer = createOpsMailer(ctx.env),
 ): Promise<void> {
   if (!ctx.env.OPS_ALERT_EMAIL) return;
@@ -32,5 +34,37 @@ export async function alertScreeningHit(
     });
   } catch (mailErr) {
     console.error(`screening-hit alert: send to ${ctx.env.OPS_ALERT_EMAIL} failed (dark or transient)`, mailErr);
+  }
+}
+
+/**
+ * N-OF-1 fix (adversary OFAC build review, 2026-07-23) — fired when a tenant
+ * is held fail-CLOSED because NO SDN list was loaded yet at screening time
+ * (never a real name match, so this is a DISTINCT alert from
+ * `alertScreeningHit` — "Matches:" framing would be misleading here). Honest
+ * about the self-heal path: `screening-recovery.ts`'s cron sweep re-screens
+ * every tenant still holding the `list-unavailable` sentinel once a real list
+ * loads, but a manual admin clear works too in the meantime.
+ */
+export async function alertScreeningListUnavailable(
+  ctx: TenantContext,
+  trigger: ScreeningTrigger,
+  mailer: OpsMailer = createOpsMailer(ctx.env),
+): Promise<void> {
+  if (!ctx.env.OPS_ALERT_EMAIL) return;
+  const text =
+    `Tenant ${ctx.tenantId} completed ${trigger} but NO SDN list was loaded yet — screening could not run.\n\n` +
+    `Fail-CLOSED: status set to 'review' (activation BLOCKED) rather than assuming clear.\n\n` +
+    `This resolves automatically once the SDN list loads (the next ops-sweep recovery pass re-screens it), ` +
+    `or can be cleared manually now (POST /admin/tenants/${ctx.tenantId}/screening).`;
+  try {
+    await mailer.send({
+      to: ctx.env.OPS_ALERT_EMAIL,
+      subject: `[coldrig] screening held — no SDN list loaded yet (tenant ${ctx.tenantId})`,
+      text,
+      html: `<p>${escapeHtml(text).replace(/\n/g, "<br>")}</p>`,
+    });
+  } catch (mailErr) {
+    console.error(`screening-list-unavailable alert: send to ${ctx.env.OPS_ALERT_EMAIL} failed (dark or transient)`, mailErr);
   }
 }
