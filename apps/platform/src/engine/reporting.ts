@@ -3,7 +3,6 @@ import type { TenantContext } from "../tenant-context.js";
 import {
   deriveActivationState,
   realSendPathLive,
-  screeningStatusStub,
   type ActivationSurfaceState,
 } from "./activation.js";
 import { getTeardownSummary, type TeardownSummary } from "./lifecycle.js";
@@ -165,8 +164,8 @@ export function getDeliverabilitySummary(ctx: TenantContext): DeliverabilitySumm
 
 export function getAccount(ctx: TenantContext): AccountSummary {
   const profile = ctx.sql
-    .exec<{ brand: string; plan: string; status: string; billing_state: string; provisioning_state: string }>(
-      `SELECT brand, plan, status, billing_state, provisioning_state FROM tenant_profile WHERE id = ?`,
+    .exec<{ brand: string; plan: string; status: string; billing_state: string; provisioning_state: string; screening_status: "clear" | "review" }>(
+      `SELECT brand, plan, status, billing_state, provisioning_state, screening_status FROM tenant_profile WHERE id = ?`,
       ctx.tenantId,
     )
     .one();
@@ -185,15 +184,15 @@ export function getAccount(ctx: TenantContext): AccountSummary {
     )
     .one().total ?? 0;
 
-  // G3 — derive the honest activation state. `screeningStatusStub` is the G1b
-  // seam (the real OFAC column read lands in a parallel lane; deriveActivationState
-  // takes `screening` as a param so that swap is one line here). realSendPathLive
-  // reads env (engine + InboxKit both armed — adversary B2).
+  // G3 — derive the honest activation state. `screening` is the REAL G1b
+  // column read (same row as the rest of this profile query — the stub this
+  // seam carried pre-OFAC-merge is gone). realSendPathLive reads env (engine +
+  // InboxKit both armed — adversary B2).
   const activationState = deriveActivationState({
     plan: ctx.plan,
     status: profile.status,
     billingState: profile.billing_state,
-    screening: screeningStatusStub(ctx.tenantId),
+    screening: profile.screening_status,
     realSendPathLive: realSendPathLive(ctx.env),
     capacityPending: profile.provisioning_state === "capacity_pending",
   });
