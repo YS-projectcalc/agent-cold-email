@@ -19,9 +19,9 @@ export interface DemoLeadSeed {
 // /demo/run (leads defaulted to 3) must reproduce this byte-for-byte, never
 // just "close enough".
 const BASE_LEADS: readonly DemoLeadSeed[] = [
-  { email: "morgan.reply@demo-leads.coldstart.dev", firstName: "Morgan", company: "Reply Co", kind: "reply" },
-  { email: "casey.bounce@demo-leads.coldstart.dev", firstName: "Casey", company: "Bounce Co", kind: "bounce" },
-  { email: "jordan.prospect@demo-leads.coldstart.dev", firstName: "Jordan", company: "Prospect Co", kind: "silent" },
+  { email: "morgan.reply@demo-leads.coldrig.dev", firstName: "Morgan", company: "Reply Co", kind: "reply" },
+  { email: "casey.bounce@demo-leads.coldrig.dev", firstName: "Casey", company: "Bounce Co", kind: "bounce" },
+  { email: "jordan.prospect@demo-leads.coldrig.dev", firstName: "Jordan", company: "Prospect Co", kind: "silent" },
 ];
 
 const EXTRA_FIRST_NAMES = ["Alex", "Sam", "Riley", "Taylor", "Drew", "Jamie", "Quinn", "Avery", "Rowan", "Skyler"];
@@ -68,7 +68,7 @@ export function buildDemoLeads(count: number): DemoLeadSeed[] {
     // A different stride than firstName's cycle so the (name, company)
     // pairing doesn't repeat in lockstep every EXTRA_FIRST_NAMES.length leads.
     const company = EXTRA_COMPANIES[(i * 3) % EXTRA_COMPANIES.length]!;
-    leads.push({ email: `lead${i}.${triggerFor(kind)}@demo-leads.coldstart.dev`, firstName, company, kind });
+    leads.push({ email: `lead${i}.${triggerFor(kind)}@demo-leads.coldrig.dev`, firstName, company, kind });
   }
   return leads;
 }

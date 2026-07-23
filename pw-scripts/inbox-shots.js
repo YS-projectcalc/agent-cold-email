@@ -71,7 +71,7 @@ async function swipeLeft(cdp, x, y, distance) {
         // 2. Land on Dashboard, then navigate to Inbox.
         await page.waitForSelector('h1:has-text("Dashboard")', { timeout: 15000 });
         await page.getByRole('link', { name: /inbox/i }).click();
-        await page.waitForSelector('text=morgan.reply@demo-leads.coldstart.dev', { timeout: 15000 });
+        await page.waitForSelector('text=morgan.reply@demo-leads.coldrig.dev', { timeout: 15000 });
         await page.waitForTimeout(300); // let the mailbox/campaign filter queries settle visually
 
         // 3. Inbox list — populated, mixed labels (interested / wrong_person /
@@ -79,7 +79,7 @@ async function swipeLeft(cdp, x, y, distance) {
         await shoot(page, `inbox-list-${tag}`);
 
         // 4. Thread detail + composer — open the labeled "interested" thread.
-        await page.getByText('morgan.reply@demo-leads.coldstart.dev').click();
+        await page.getByText('morgan.reply@demo-leads.coldrig.dev').click();
         await page.waitForSelector('text=Replying from', { timeout: 15000 });
         await page.waitForTimeout(200);
         await shoot(page, `thread-detail-${tag}`);
@@ -102,7 +102,7 @@ async function swipeLeft(cdp, x, y, distance) {
           // in"), since the underlying list stays mounted under the detail
           // overlay (SPEC.md §19.6 "back returns to list position").
           await page.getByRole('button', { name: '← Back', exact: true }).click();
-          await page.waitForSelector('text=morgan.reply@demo-leads.coldstart.dev', { timeout: 15000 });
+          await page.waitForSelector('text=morgan.reply@demo-leads.coldrig.dev', { timeout: 15000 });
           await page.waitForTimeout(200); // let the list settle back into place before measuring a row's box
 
           const cdp = await ctx.newCDPSession(page);
@@ -124,7 +124,7 @@ async function swipeLeft(cdp, x, y, distance) {
 
         // 7. Empty-filtered state — filter by a label nothing has.
         await page.goto(`${BASE}/app/inbox`, { waitUntil: 'load' });
-        await page.waitForSelector('text=morgan.reply@demo-leads.coldstart.dev', { timeout: 15000 });
+        await page.waitForSelector('text=morgan.reply@demo-leads.coldrig.dev', { timeout: 15000 });
         await page.getByLabel(/filter by label/i).fill('no_such_label_zzz');
         await page.waitForSelector('text=No threads match these filters', { timeout: 15000 });
         await page.waitForTimeout(150);
