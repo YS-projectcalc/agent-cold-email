@@ -52,8 +52,16 @@ export class EngineMailboxClient {
     return Boolean(this.config?.baseUrl && this.config?.authSecret);
   }
 
-  /** POST /v1/mailboxes — idempotent credential upsert (the engine owns F4 replay-safety). */
-  async pushMailbox(email: string, credentials: EnginePushCredentials, idempotencyKey: string): Promise<PushResult> {
+  /**
+   * POST /v1/mailboxes — idempotent credential upsert. `idempotencyKey` is
+   * OPTIONAL (matches the engine's wire.ts schema): the store's content-hash
+   * replay-safety (F4) is the primary safety net, so a caller need not supply
+   * one — and the ONLY production caller (mailbox-credential-push.ts)
+   * deliberately does not, since a deterministic key would instead REJECT any
+   * retry whose re-minted content differs (adversary
+   * i3i4-build-review-2026-07-23 finding 1).
+   */
+  async pushMailbox(email: string, credentials: EnginePushCredentials, idempotencyKey?: string): Promise<PushResult> {
     const body = await this.call("POST", { email, credentials, idempotencyKey });
     if (typeof body.email !== "string" || typeof body.outcome !== "string" || typeof body.contentHash !== "string") {
       throw new VendorError("engine POST /v1/mailboxes returned a malformed UpsertResult", false);
@@ -61,8 +69,8 @@ export class EngineMailboxClient {
     return { email: body.email, outcome: body.outcome, contentHash: body.contentHash };
   }
 
-  /** DELETE /v1/mailboxes — revoke a pushed mailbox (cancel/teardown). Naturally idempotent engine-side. */
-  async removeMailbox(email: string, idempotencyKey: string): Promise<{ email: string; removed: boolean }> {
+  /** DELETE /v1/mailboxes — revoke a pushed mailbox (cancel/teardown). Naturally idempotent engine-side; `idempotencyKey` is unused by the remove path (engine.ts ignores it) so it's optional here too. */
+  async removeMailbox(email: string, idempotencyKey?: string): Promise<{ email: string; removed: boolean }> {
     const body = await this.call("DELETE", { email, idempotencyKey });
     return { email: typeof body.email === "string" ? body.email : email, removed: body.removed === true };
   }

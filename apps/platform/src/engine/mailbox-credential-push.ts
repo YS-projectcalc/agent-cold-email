@@ -60,14 +60,18 @@ export function isCredentialPushConfigured(env: Env): boolean {
 export function buildCredentialPushDeps(env: Env): CredentialPushDeps | undefined {
   if (!isCredentialPushConfigured(env)) return undefined;
   const inboxKitConfig = { apiKey: env.INBOXKIT_API_KEY as string, workspaceId: env.INBOXKIT_WORKSPACE_ID as string };
-  const engineConfig: EngineClientConfig = { baseUrl: env.ENGINE_BASE_URL as string, authSecret: env.ENGINE_AUTH_SECRET as string };
   const mailboxPort = new RealMailboxPort(inboxKitConfig);
   const minter: OAuthMinter = new ManualOAuthMinter(parseGrants(env.GMAIL_OAUTH_GRANTS));
   return {
     fetchCredentials: (email) => mailboxPort.showMailboxCredentials(email),
     mintGrant: (mailbox) => minter.mintGmailGrant(mailbox),
-    push: new EngineMailboxClient(engineConfig),
+    push: new EngineMailboxClient(engineConfigFromEnv(env)),
   };
+}
+
+/** Shared ENGINE_* config lookup (independent of the InboxKit vendor fields) — used by the push path (gated behind isCredentialPushConfigured) AND the revoke path (gated only on the engine itself, see revokePushedMailboxCredentials). */
+export function engineConfigFromEnv(env: Env): EngineClientConfig | undefined {
+  return env.ENGINE_BASE_URL && env.ENGINE_AUTH_SECRET ? { baseUrl: env.ENGINE_BASE_URL, authSecret: env.ENGINE_AUTH_SECRET } : undefined;
 }
 
 /** F6 step 1 — durable record BEFORE the push. INSERT OR IGNORE so a re-provision of the same mailbox doesn't reset a 'pushed' row. */
@@ -101,10 +105,17 @@ export async function assembleEngineCredentials(mailbox: MailboxRef, deps: Crede
  * for reconcile).
  */
 export async function pushRecordedMailbox(ctx: TenantContext, mailbox: MailboxRef, deps: CredentialPushDeps): Promise<PushOutcome> {
-  const idempotencyKey = `credpush:${ctx.tenantId}:${mailbox.email}`;
   try {
     const credentials = await assembleEngineCredentials(mailbox, deps);
-    await deps.push.pushMailbox(mailbox.email, credentials, idempotencyKey);
+    // NO idempotency key: the store's content-hash replay-safety (F4) already
+    // makes a same-content retry a no-op and a differing-content retry a
+    // first-class rotation ('replaced') — mailbox-store.ts. A deterministic
+    // key here would instead REJECT any retry whose re-minted content differs
+    // (BadRequestError), which is exactly what a lost-response retry or a
+    // fresh OAuth re-mint (InboxKitOAuthMinter mints a NEW refresh token on
+    // every call) produces — permanently stranding the row 'pending'
+    // (adversary i3i4-build-review-2026-07-23 finding 1).
+    await deps.push.pushMailbox(mailbox.email, credentials);
     ctx.sql.exec(
       `UPDATE mailbox_cred_pushes SET status = 'pushed', attempts = attempts + 1, last_error = NULL, updated_at = ? WHERE email = ? AND tenant_id = ?`,
       ctx.clock.now(),
@@ -168,26 +179,76 @@ export async function reconcileMailboxCredentialPushes(
   return { attempted: pending.length, pushed, stillPending: pending.length - pushed };
 }
 
+/**
+ * The credential REVOKE path (self-serve I3 lifecycle, wired into
+ * lifecycle.ts's teardownTenant for cancel/abuse-terminate). Best-effort: a
+ * released vendor mailbox's pushed credentials — including its gmail_api
+ * refresh token — must stop resolving on the engine, but a revoke failure
+ * must NEVER block or fail the teardown itself (the vendor slot is already
+ * released; cancellation must complete regardless). Naturally idempotent
+ * (MailboxCredentialStore.remove is a no-op on an unknown/already-removed
+ * email), so a retried teardown is safe. Dark unless the engine is configured
+ * — `client.isConfigured` is false in the default (unarmed) build, so a
+ * teardown never attempts the call there (matches the deployed-default-is-
+ * inert guarantee every other I3 seam here holds).
+ */
+export async function revokePushedMailboxCredentials(
+  ctx: TenantContext,
+  email: string,
+  client: EngineMailboxClient = new EngineMailboxClient(engineConfigFromEnv(ctx.env)),
+): Promise<void> {
+  if (!client.isConfigured) return;
+  try {
+    await client.removeMailbox(email);
+  } catch (err) {
+    // Best-effort — log + ops-alert only; NEVER throw into cancel/teardown.
+    console.error(`credential revoke: engine DELETE /v1/mailboxes failed for ${email} (best-effort, teardown continues)`, err);
+  }
+}
+
 function domainOf(email: string): string {
   return email.split("@")[1] ?? "";
 }
 
 function parseGrants(raw: string | undefined): Record<string, GmailGrant> {
   if (!raw) return {};
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== "object") return {};
-    const out: Record<string, GmailGrant> = {};
-    for (const [email, g] of Object.entries(parsed as Record<string, unknown>)) {
-      if (g && typeof g === "object") {
-        const grant = g as Record<string, unknown>;
-        if (typeof grant.clientId === "string" && typeof grant.clientSecret === "string" && typeof grant.refreshToken === "string") {
-          out[email] = { clientId: grant.clientId, clientSecret: grant.clientSecret, refreshToken: grant.refreshToken };
-        }
-      }
-    }
-    return out;
-  } catch {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    logMalformedGrants(`invalid JSON: ${err instanceof Error ? err.message : String(err)}`);
     return {};
   }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    logMalformedGrants(`expected a JSON object keyed by mailbox email, got ${Array.isArray(parsed) ? "an array" : typeof parsed}`);
+    return {};
+  }
+  const out: Record<string, GmailGrant> = {};
+  for (const [email, g] of Object.entries(parsed as Record<string, unknown>)) {
+    if (g && typeof g === "object") {
+      const grant = g as Record<string, unknown>;
+      if (typeof grant.clientId === "string" && typeof grant.clientSecret === "string" && typeof grant.refreshToken === "string") {
+        out[email] = { clientId: grant.clientId, clientSecret: grant.clientSecret, refreshToken: grant.refreshToken };
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * F5-equivalent loud-corrupt convention (store.ts's loadJsonStateFile): a
+ * malformed GMAIL_OAUTH_GRANTS secret must NOT be silently treated as "no
+ * grants" — the downstream already fails closed per-mailbox
+ * (ManualOAuthMinter throws "no manually-minted grant supplied"), but that
+ * per-mailbox error hides the ROOT CAUSE (the secret itself is broken). Log
+ * loud so an operator sees the real defect instead of chasing per-mailbox
+ * symptoms. Does NOT throw: aborting mid-parse would propagate out of
+ * maybePushProvisionedMailbox's/reconcileMailboxCredentialPushes' default-param
+ * evaluation (uncaught at provisioning.ts:119) and fail an ALREADY-BILLED
+ * provisioning saga — violating the F6 invariant that a credential-push
+ * failure must never fail the provision (adversary i3i4-build-review-2026-07-23
+ * finding 3).
+ */
+function logMalformedGrants(reason: string): void {
+  console.error(`GMAIL_OAUTH_GRANTS is malformed — treating as no manual grants (${reason}); every mailbox push will fail loud at mint time until this operator secret is fixed.`);
 }

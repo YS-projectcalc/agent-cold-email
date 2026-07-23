@@ -1,6 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { runInDurableObject } from "cloudflare:test";
-import { activatePaidPlan, api, mintTenant, tenantStub } from "./helpers.js";
+import type { EngineMailboxClient } from "../src/engine/engine-mailbox-client.js";
+import { teardownTenant } from "../src/engine/lifecycle.js";
+import { activatePaidPlan, api, mintTenant, tenantStub, withTenantContext } from "./helpers.js";
 
 interface TeardownSummary {
   reason: string;
@@ -216,5 +218,81 @@ describe("POST /cancel — voluntary cancellation + teardown/reclaim (D5)", () =
     const oversized = JSON.stringify({ immediate: false, pad: "x".repeat(9 * 1024) });
     const res = await api("/cancel", { method: "POST", token, body: oversized });
     expect(res.status).toBe(413);
+  });
+});
+
+// I3 credential lifecycle (adversary i3i4-build-review-2026-07-23 finding 2,
+// NON-BLOCKING): the engine's DELETE/revoke path was fully coded+tested but
+// had ZERO production callers — a canceled tenant's released mailboxes left
+// their pushed OAuth refresh tokens lingering on the engine daemon forever.
+// teardownTenant now calls revokePushedMailboxCredentials for every released
+// mailbox via an injectable `engineClient` seam (mirrors mailbox-credential-
+// push.ts's CredentialPushDeps pattern).
+describe("teardownTenant — I3 credential revoke wired into cancel/teardown (best-effort)", () => {
+  async function releasedMailboxEmails(tenantId: string): Promise<string[]> {
+    return withTenantContext(tenantId, (ctx) =>
+      ctx.sql
+        .exec<{ email: string }>(`SELECT email FROM mailboxes WHERE tenant_id = ? ORDER BY email ASC`, tenantId)
+        .toArray()
+        .map((r) => r.email),
+    );
+  }
+
+  it("calls the engine's revoke for every released mailbox when the engine is armed", async () => {
+    const { tenantId, token } = await mintTenant("Revoke Wired Co", "launch");
+    await activatePaidPlan(tenantId, "launch");
+    await provisionAndLaunch(token);
+    const expectedEmails = await releasedMailboxEmails(tenantId);
+    expect(expectedEmails).toHaveLength(4);
+
+    const calls: string[] = [];
+    const fakeClient = {
+      isConfigured: true,
+      removeMailbox: async (email: string) => {
+        calls.push(email);
+        return { email, removed: true };
+      },
+    } as unknown as EngineMailboxClient;
+
+    const summary = await withTenantContext(tenantId, (ctx) =>
+      teardownTenant(ctx, { reason: "voluntary_cancel", effective: "immediate" }, fakeClient),
+    );
+    expect(summary.mailboxesReleased).toBe(4);
+    expect(calls.sort()).toEqual(expectedEmails.sort());
+  });
+
+  it("teardown still succeeds (correct summary, no throw) when the engine is armed but unreachable — best-effort never blocks/fails the cancel", async () => {
+    const { tenantId, token } = await mintTenant("Revoke Unreachable Co", "launch");
+    await activatePaidPlan(tenantId, "launch");
+    await provisionAndLaunch(token);
+    const expectedEmails = await releasedMailboxEmails(tenantId);
+
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fakeClient = {
+      isConfigured: true,
+      removeMailbox: async () => {
+        throw new Error("engine unreachable");
+      },
+    } as unknown as EngineMailboxClient;
+
+    const summary = await withTenantContext(tenantId, (ctx) =>
+      teardownTenant(ctx, { reason: "voluntary_cancel", effective: "immediate" }, fakeClient),
+    );
+    expect(summary.mailboxesReleased).toBe(expectedEmails.length);
+    expect(summary.domainsReleased).toBe(2);
+    // One best-effort log per failed revoke — never an uncaught throw.
+    expect(spy).toHaveBeenCalledTimes(expectedEmails.length);
+    vi.restoreAllMocks();
+  });
+
+  it("is a no-op (no revoke calls, no throw) when the engine is dark — the deployed default, matching every OTHER cancel test in this file", async () => {
+    const { tenantId, token } = await mintTenant("Revoke Dark Co", "launch");
+    await activatePaidPlan(tenantId, "launch");
+    await provisionAndLaunch(token);
+
+    // No engineClient injected -> the production default (built from
+    // ctx.env, which has no ENGINE_BASE_URL/ENGINE_AUTH_SECRET in tests).
+    const summary = await withTenantContext(tenantId, (ctx) => teardownTenant(ctx, { reason: "voluntary_cancel", effective: "immediate" }));
+    expect(summary.mailboxesReleased).toBe(4);
   });
 });
