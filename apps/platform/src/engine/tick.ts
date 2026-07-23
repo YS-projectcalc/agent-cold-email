@@ -44,8 +44,10 @@ const SEND_CLAIM_TTL_MS = 5 * 60 * 1000;
 // unsubscribe URL below. `env.PUBLIC_BASE_URL` (wrangler.toml `[vars]`, not a
 // secret) overrides this; this exact string is that var's own default value
 // (see wrangler.toml/env.ts), so an unconfigured local/test run still builds
-// a well-formed (if inert) link instead of throwing.
-const DEFAULT_PUBLIC_BASE_URL = "https://agent-cold-email-api.yaakovscher.workers.dev";
+// a well-formed (if inert) link instead of throwing. Exported — routes/
+// login.ts reuses the identical fallback for the magic-link URL (CLAUDE.md
+// rule c: one literal, not two copies to drift out of sync).
+export const DEFAULT_PUBLIC_BASE_URL = "https://agent-cold-email-api.yaakovscher.workers.dev";
 
 interface ListUnsubscribe {
   /** `List-Unsubscribe` header value — BOTH forms, per RFC 8058: the

@@ -19,6 +19,7 @@ import { adminSupportRoute } from "./routes/admin-support.js";
 import { adminOpsRoute } from "./routes/admin-ops.js";
 import { statusRoute } from "./routes/status.js";
 import { dashboardSessionRoute } from "./routes/dashboard-session.js";
+import { loginRoute } from "./routes/login.js";
 import { dashboardRoute } from "./routes/dashboard.js";
 import { activityRoute } from "./routes/activity.js";
 import { webhookSubscriptionsRoute } from "./routes/webhook-subscriptions.js";
@@ -54,6 +55,11 @@ app.route("/", statusRoute);
 // /webhooks/stripe are unauthenticated (their own credential lives somewhere
 // other than a bearer header).
 app.route("/", dashboardSessionRoute);
+// POST /login + POST /login/consume — UNAUTHENTICATED (magic-link design
+// §1.3/§1.4): same reasoning as /dashboard/session above — the credential
+// (email-possession, then the emailed single-use token) lives in the body,
+// not an Authorization header, until AFTER a session is minted.
+app.route("/", loginRoute);
 
 // D1/D2/D6 admin surface (src/admin/README.md) — gated by a SEPARATE
 // ADMIN_TOKEN secret bearer, never the per-tenant token below: these routes

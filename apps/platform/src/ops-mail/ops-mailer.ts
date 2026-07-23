@@ -19,6 +19,15 @@ import type { Env } from "../env.js";
 export const OPS_FROM_EMAIL = "ops@coldrig.dev";
 export const OPS_FROM_NAME = "coldrig ops";
 
+// Magic-link auth mail (design docs/research/human-signup-magic-link-design-
+// 2026-07-22.md §1.7) — a distinct, recognizable transactional sender,
+// separable from ops alerts for deliverability reputation. Still a FIXED
+// identity, same as OPS_FROM_EMAIL above (never caller-supplied) — `sender`
+// below picks between exactly these two sanctioned identities, it does not
+// open up an arbitrary From.
+export const AUTH_FROM_EMAIL = "login@coldrig.dev";
+export const AUTH_FROM_NAME = "coldrig sign-in";
+
 export interface OpsEmailMessage {
   /** Single recipient (founder alert address, or a tenant's contact email). */
   to: string;
@@ -27,6 +36,11 @@ export interface OpsEmailMessage {
    * (cloudflare-email-service skill). Callers must supply both, not one. */
   text: string;
   html: string;
+  /** Which FIXED sender identity to send from — defaults to the ops identity
+   * (`ops@coldrig.dev`) when omitted, preserving every existing caller's
+   * behavior. `"auth"` sends from `login@coldrig.dev` (magic-link mail
+   * only) — never an arbitrary caller-supplied address. */
+  sender?: "ops" | "auth";
 }
 
 export interface OpsSendResult {

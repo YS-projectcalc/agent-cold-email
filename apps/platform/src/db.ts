@@ -15,10 +15,15 @@ export async function insertTenantIndex(
   env: Env,
   params: { id: string; apiTokenHash: string; brand: string; plan: string; createdAt: number; contactEmail?: string | null },
 ): Promise<void> {
+  // Adversary r1 NB4 (2026-07-23) — normalize-on-write: lowercase at the ONE
+  // write site so magic-link login (routes/login.ts) can match a mixed-case
+  // signup email with a plain (non-LOWER()) index (migrations/0009). The
+  // 0009 migration backfills every pre-existing row the same way.
+  const contactEmail = params.contactEmail ? params.contactEmail.toLowerCase() : (params.contactEmail ?? null);
   await env.DB.prepare(
     `INSERT INTO tenants_index (id, api_token_hash, brand, plan, status, created_at, contact_email) VALUES (?, ?, ?, ?, 'active', ?, ?)`,
   )
-    .bind(params.id, params.apiTokenHash, params.brand, params.plan, params.createdAt, params.contactEmail ?? null)
+    .bind(params.id, params.apiTokenHash, params.brand, params.plan, params.createdAt, contactEmail)
     .run();
 }
 
@@ -95,6 +100,65 @@ export async function deleteDashboardSession(env: Env, sessionHash: string): Pro
  */
 export async function setTenantIndexStatus(env: Env, id: string, status: string): Promise<void> {
   await env.DB.prepare(`UPDATE tenants_index SET status = ? WHERE id = ?`).bind(status, id).run();
+}
+
+/** Active tenants (id, brand) owned by a contact email — the magic-link
+ * lookup (routes/login.ts). `email` MUST already be lowercased by the caller
+ * (insertTenantIndex normalizes on write, migrations/0009 backfills existing
+ * rows) — this function does not re-normalize, so a caller that forgets to
+ * lowercase gets a silent zero-row miss, matching the enumeration-safe "do
+ * nothing" branch rather than a crash. Suspended/terminated tenants are
+ * excluded (`status = 'active'`), same posture as bearer-token resolution. */
+export async function lookupActiveTenantsByContactEmail(
+  env: Env,
+  email: string,
+): Promise<Array<{ id: string; brand: string }>> {
+  const result = await env.DB.prepare(`SELECT id, brand FROM tenants_index WHERE contact_email = ? AND status = 'active'`)
+    .bind(email)
+    .all<{ id: string; brand: string }>();
+  return result.results;
+}
+
+// --- Magic-link login (migrations/0009_login_links.sql) — email-possession
+// login (design docs/research/human-signup-magic-link-design-2026-07-22.md
+// §1.2). `token_hash` mirrors dashboard_sessions.session_hash exactly (same
+// SHA-256(+pepper) discipline); the row is bound to `contact_email`, not a
+// tenant, because one email can own several tenants (§1.5 picker). ---
+
+export interface LoginLinkRow {
+  contact_email: string;
+  expires_at: number;
+  consumed_at: number | null;
+}
+
+export async function insertLoginLink(
+  env: Env,
+  params: { tokenHash: string; contactEmail: string; createdAt: number; expiresAt: number },
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO login_links (token_hash, contact_email, created_at, expires_at, consumed_at) VALUES (?, ?, ?, ?, NULL)`,
+  )
+    .bind(params.tokenHash, params.contactEmail, params.createdAt, params.expiresAt)
+    .run();
+}
+
+export async function lookupLoginLinkByHash(env: Env, tokenHash: string): Promise<LoginLinkRow | null> {
+  const row = await env.DB.prepare(`SELECT contact_email, expires_at, consumed_at FROM login_links WHERE token_hash = ?`)
+    .bind(tokenHash)
+    .first<LoginLinkRow>();
+  return row ?? null;
+}
+
+/** Atomic single-use consume (adversary-held attack: `changes()===1`) — the
+ * conditional UPDATE closes the double-submit/replay race at the DB layer,
+ * not in app logic. Returns `true` iff THIS call was the one that consumed
+ * it; a concurrent second call (or a replay of an already-consumed token)
+ * gets `false` and must NOT mint a session. */
+export async function consumeLoginLink(env: Env, tokenHash: string, consumedAt: number): Promise<boolean> {
+  const result = await env.DB.prepare(`UPDATE login_links SET consumed_at = ? WHERE token_hash = ? AND consumed_at IS NULL`)
+    .bind(consumedAt, tokenHash)
+    .run();
+  return (result.meta.changes ?? 0) === 1;
 }
 
 // --- C6 waitlist (migrations/0004_waitlist.sql) — durable lead store for the
