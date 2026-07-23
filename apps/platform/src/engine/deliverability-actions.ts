@@ -3,11 +3,13 @@
 // the pure `evaluate` produced; `runDeliverabilitySweep` is the one entry point
 // the tick calls each cycle (monitor -> decide -> act) BEFORE scheduling sends.
 
+import { RegistrarUnarmedError, VendorError } from "@coldstart/shared";
 import { escapeHtml } from "../html-escape.js";
 import { lookupTenantContactEmail } from "../db.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
+import { alertRegistrarUnarmed } from "./registrar-alert.js";
 import { isLifecycleFrozen, readLifecycleState } from "./billing-state.js";
 import {
   DEFAULT_THRESHOLDS,
@@ -110,6 +112,7 @@ async function pickReplacementDomain(ctx: TenantContext, brand: string, primaryD
 async function applyReplaceDomain(
   ctx: TenantContext,
   action: Extract<DeliverabilityAction, { type: "REPLACE_DOMAIN" }>,
+  mailer: OpsMailer,
 ): Promise<void> {
   // Retire the burning domain + stop all its mailboxes FIRST, unconditionally —
   // even if we can't provision a replacement, we must stop sending from it.
@@ -153,21 +156,46 @@ async function applyReplaceDomain(
     .exec<{ n: number }>(`SELECT COUNT(*) as n FROM domains WHERE tenant_id = ?`, ctx.tenantId)
     .one().n;
 
-  const replacementDomain = await pickReplacementDomain(ctx, profile.brand, profile.primary_domain);
-  const provisioned = await provisionDomainWithMailboxes(ctx, {
-    domain: replacementDomain,
-    domainIndex,
-    personaSlug: slugify(profile.brand),
-    inboxesEach,
-  });
+  // N-G5-2 (ga-gates G5 build review) — VendorError isolation. The burning domain
+  // is already retired + its mailboxes paused ABOVE (unconditionally), so no
+  // unsafe sending continues regardless of what happens next. The replacement's
+  // vendor calls (searchLookalikes → domain.buy → mailbox.provision) CAN throw a
+  // VendorError once the real vendor path is armed — a RegistrarUnarmedError (G5
+  // gate (a) hard-block), a CapacityPendingError (G2/G4 ceiling), or a transient
+  // upstream error. Unlike setup_infrastructure (a request the caller can 503),
+  // this runs inside the tick's deliverability sweep — an unguarded throw would
+  // crash the WHOLE tick for this tenant (no sends scheduled) and produce only a
+  // console.error, no founder alert. Isolate it here (mirroring
+  // runSetupInfrastructure's catch): alert the founder on the registrar block,
+  // log the withheld replacement ops-visibly, and let the sweep/tick continue.
+  try {
+    const replacementDomain = await pickReplacementDomain(ctx, profile.brand, profile.primary_domain);
+    const provisioned = await provisionDomainWithMailboxes(ctx, {
+      domain: replacementDomain,
+      domainIndex,
+      personaSlug: slugify(profile.brand),
+      inboxesEach,
+    });
 
-  logAction(ctx, "REPLACE_DOMAIN", action.domain, {
-    burningDomainId: action.domainId,
-    replacementDomain: provisioned.domain,
-    replacementDomainId: provisioned.domainId,
-    mailboxesProvisioned: provisioned.mailboxEmails.length,
-    reason: action.reason,
-  });
+    logAction(ctx, "REPLACE_DOMAIN", action.domain, {
+      burningDomainId: action.domainId,
+      replacementDomain: provisioned.domain,
+      replacementDomainId: provisioned.domainId,
+      mailboxesProvisioned: provisioned.mailboxEmails.length,
+      reason: action.reason,
+    });
+  } catch (err) {
+    if (!(err instanceof VendorError)) throw err; // a genuine bug (not a vendor signal) must NOT be swallowed
+    if (err instanceof RegistrarUnarmedError) {
+      await alertRegistrarUnarmed(ctx, profile.primary_domain, err, mailer);
+    }
+    logAction(ctx, "REPLACE_DOMAIN_FAILED", action.domain, {
+      burningDomainId: action.domainId,
+      reason: action.reason,
+      error: err.message,
+      note: "burning domain retired + mailboxes paused; replacement withheld (vendor error) — isolated so the tick continues",
+    });
+  }
 }
 
 /**
@@ -312,7 +340,7 @@ export async function applyActions(
         });
         break;
       case "REPLACE_DOMAIN":
-        await applyReplaceDomain(ctx, action);
+        await applyReplaceDomain(ctx, action, mailer);
         break;
       case "HARD_PAUSE_DOMAIN":
         await applyHardPauseDomain(ctx, action, mailer);
