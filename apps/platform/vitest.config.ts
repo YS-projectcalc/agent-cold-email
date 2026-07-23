@@ -1,28 +1,58 @@
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
+import { buildHermeticBindings, parseDevVarKeys } from "./test/hermetic-env.js";
+
+// Resolve a path next to THIS config file (apps/platform), robust to whether
+// vitest loads the config from cwd or a bundled temp module.
+function configRelative(name: string): string {
+  const candidates: string[] = [];
+  try {
+    candidates.push(resolve(dirname(fileURLToPath(import.meta.url)), name));
+  } catch {
+    // import.meta.url unavailable (bundled config) — fall through to cwd.
+  }
+  candidates.push(resolve(process.cwd(), name));
+  for (const p of candidates) if (existsSync(p)) return p;
+  return candidates[candidates.length - 1] as string;
+}
+
+// HERMETIC TEST ENV (see test/hermetic-env.ts for the full WHY). The pool
+// auto-loads apps/platform/.dev.vars via wrangler and injects every key as a
+// test binding, so a developer's locally-wired real secret (e.g. a truthy
+// STRIPE_SECRET_KEY wired for local E2E) would silently flip behavior gates
+// under test (engine/billing.ts). We enumerate the KEYS present in .dev.vars
+// (+ .dev.vars.example, which fresh worktrees copy to .dev.vars) and neutralize
+// every non-allowlisted key, so AMBIENT state can never leak in. Values are
+// never read or logged — only key NAMES are inspected.
+const examplePath = configRelative(".dev.vars.example");
+if (!existsSync(examplePath)) {
+  // Fail loud rather than run non-hermetically: if we cannot see the documented
+  // dev-var key set, an ambient secret could slip past the sweep.
+  throw new Error(
+    `[vitest hermetic env] cannot locate .dev.vars.example next to vitest.config.ts (looked at ${examplePath}). ` +
+      `The hermetic binding sweep needs it to enumerate dev-var keys; refusing to run non-hermetically.`,
+  );
+}
+const ambientKeys = new Set<string>();
+for (const p of [configRelative(".dev.vars"), examplePath]) {
+  if (existsSync(p)) for (const key of parseDevVarKeys(readFileSync(p, "utf8"))) ambientKeys.add(key);
+}
 
 export default defineConfig({
   plugins: [
     cloudflareTest({
       wrangler: { configPath: "./wrangler.toml" },
-      // ADMIN_TOKEN (D1/D2/D6 admin surface, src/admin/README.md) is a
-      // SECRET — deliberately absent from wrangler.toml's committed `[vars]`
-      // (CLAUDE.md rule g). This test-only binding is the equivalent of a
-      // local `.dev.vars` value, scoped to the test runner, never checked in
-      // as a real value. Every admin-route test presents this exact string
-      // via `test/helpers.ts`'s `adminApi()`.
-      // STRIPE_WEBHOOK_SECRET is likewise a test-only secret (never a real
-      // value — CLAUDE.md rule g). The webhook route fails CLOSED when it is
-      // unset (adversarial panel-03 finding #1: an unsigned event on an
-      // unset-secret deployment forged any tenant's billing_state), so the
-      // suite configures a test secret and signs its fixtures via
-      // test/helpers.ts's `postWebhook()` — matching how a real deployment
-      // MUST have the secret set before any webhook is trusted.
       miniflare: {
-        bindings: {
-          ADMIN_TOKEN: "test-admin-token-for-vitest",
-          STRIPE_WEBHOOK_SECRET: "whsec_test_secret_for_vitest",
-        },
+        // Constructed hermetic binding set (test/hermetic-env.ts): the
+        // allowlisted test secrets (ADMIN_TOKEN, STRIPE_WEBHOOK_SECRET,
+        // TOKEN_HASH_PEPPER — fixed in-repo values, never real secrets per
+        // CLAUDE.md rule g) plus every other ambient .dev.vars key neutralized
+        // to null. These OVERRIDE the pool's wrangler-derived .dev.vars
+        // bindings, so no ambient value reaches the test env.
+        bindings: buildHermeticBindings(ambientKeys),
       },
     }),
   ],
