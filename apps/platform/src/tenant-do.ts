@@ -686,13 +686,35 @@ export class TenantDO extends DurableObject<Env> {
    * verdict has already moved on since (a manual admin decision, or a prior
    * recovery pass already ran), this is a no-op — never re-screens a tenant
    * whose hold has a real resolution already.
+   *
+   * Race-guard addendum (adversary re-attack, 2026-07-23): the sweep reads its
+   * pending-review list, THEN calls this RPC per tenant — an admin clear/
+   * reject can land in that window. `clearScreening()` flips
+   * `screening_status` to 'clear' but leaves `screening_list_version`
+   * unchanged (by design, for audit — see clearScreeningStatus's doc
+   * comment), so version-only guarding would let a recovery re-screen
+   * OVERRIDE an admin's explicit 'clear' decision (re-blocking a tenant the
+   * admin just cleared). ANDing in `screening_status === 'review'` closes
+   * that: once an admin has cleared, this is a permanent no-op for that hold.
+   * (A `reject` leaves `screening_status` at 'review' — unchanged by
+   * terminate — but the tenant is suspended/token-locked regardless, so a
+   * redundant re-screen here can't reactivate it; the review-QUEUE audit
+   * corruption that scenario risked is closed at the write side instead —
+   * `resolveScreeningReview`'s now-conditional-on-'pending' UPDATE, admin/
+   * db.ts — so a stale re-screen here can never overwrite an already-
+   * 'rejected' row.)
    */
   async rescreenIfListUnavailable(): Promise<{ rescreened: boolean; status?: string }> {
     const ctx = this.requireContext();
     const row = ctx.sql
-      .exec<{ screening_list_version: string | null }>(`SELECT screening_list_version FROM tenant_profile WHERE id = ?`, ctx.tenantId)
+      .exec<{ screening_status: string; screening_list_version: string | null }>(
+        `SELECT screening_status, screening_list_version FROM tenant_profile WHERE id = ?`,
+        ctx.tenantId,
+      )
       .one();
-    if (row.screening_list_version !== LIST_UNAVAILABLE_VERSION) return { rescreened: false };
+    if (row.screening_list_version !== LIST_UNAVAILABLE_VERSION || row.screening_status !== "review") {
+      return { rescreened: false };
+    }
     const result = await screenTenant(ctx, { trigger: "list_unavailable_recovery" });
     return { rescreened: true, status: result.status };
   }

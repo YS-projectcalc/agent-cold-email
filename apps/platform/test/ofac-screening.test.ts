@@ -4,7 +4,7 @@ import { normalizeName, tokenize } from "../src/ofac/normalize.js";
 import { LIST_UNAVAILABLE_VERSION, screenTenant } from "../src/ofac/screening.js";
 import { rescreenListUnavailableReviews } from "../src/ofac/screening-recovery.js";
 import { swapInSdnList } from "../src/ofac/sdn-list.js";
-import { getScreeningReview } from "../src/admin/db.js";
+import { getScreeningReview, resolveScreeningReview } from "../src/admin/db.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
 import { activatePaidPlan, adminApi, api, mintTenant, signup, tenantStub, withTenantContext } from "./helpers.js";
 
@@ -223,6 +223,79 @@ describe("G1b — SDN list-unavailable recovery sweep", () => {
     // listPendingScreeningReviews (status='pending' only) no longer returns
     // it — nothing to attempt.
     expect(outcome).toEqual({ attempted: 0, rescreened: 0, errors: 0 });
+  });
+
+  // Adversary re-attack (2026-07-23) on the N-OF-1 self-heal: the sweep reads
+  // its pending-review list, THEN calls the per-tenant RPC — an admin
+  // clear/reject can land in that window. These two tests exercise the
+  // race's WORST cases directly: they call the exact same functions the
+  // sweep calls (TenantDO.rescreenIfListUnavailable, resolveScreeningReview),
+  // on a tenant whose admin resolution has ALREADY landed — the state-based
+  // proof that the guard holds regardless of which side actually won the
+  // wall-clock race (the standard way to test this class without literal
+  // thread interleaving in a single-threaded test harness).
+  it("RACE GUARD: an admin 'clear' that lands before the recovery RPC fires is NEVER overridden, even by a genuine matching list (adversary-named worst case: admin-clear + recovery-hit)", async () => {
+    const { tenantId } = await mintTenant("Globex Corp International", "launch"); // WILL match once a real list loads
+    await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout" })); // held list-unavailable
+
+    const clearRes = await adminApi(`/admin/tenants/${tenantId}/screening`, {
+      method: "POST",
+      body: JSON.stringify({ decision: "clear" }),
+    });
+    expect(clearRes.status).toBe(200);
+    expect((await getScreeningReview(env, tenantId))?.status).toBe("cleared");
+
+    // A real list loads that WOULD re-block this tenant — the adversary's
+    // named worst case ("recovery-hit") — if the recovery ignored the
+    // admin's decision.
+    await seedSdnList(44_000_000);
+
+    // The sweep's per-tenant sequence, invoked directly on this tenant (the
+    // stale-pending-snapshot simulation).
+    const rpcResult = await tenantStub(tenantId).rescreenIfListUnavailable();
+    expect(rpcResult).toEqual({ rescreened: false }); // guard #1 (tenant-do.ts): screening_status is no longer 'review' -> short-circuits BEFORE any re-screen
+
+    const row = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
+      state.storage.sql.exec<{ screening_status: string }>(`SELECT screening_status FROM tenant_profile WHERE id = ?`, tenantId).one(),
+    );
+    expect(row.screening_status).toBe("clear"); // never re-blocked
+
+    const review = await getScreeningReview(env, tenantId);
+    expect(review).toMatchObject({ status: "cleared", resolvedBy: "admin" }); // untouched
+  });
+
+  it("RACE GUARD: an admin 'reject' that lands before the recovery RPC fires is NEVER overwritten to 'cleared'/'system-recovery' (adversary-named worst case: admin-reject + recovery-clean)", async () => {
+    const { tenantId, token } = await mintTenant("Sunrise Bakery Reject Race Co", "launch"); // benign -> a re-screen would find 'clear'
+    await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout" })); // held list-unavailable
+
+    const rejectRes = await adminApi(`/admin/tenants/${tenantId}/screening`, {
+      method: "POST",
+      body: JSON.stringify({ decision: "reject", note: "confirmed match" }),
+    });
+    expect(rejectRes.status).toBe(200);
+    expect((await getScreeningReview(env, tenantId))?.status).toBe("rejected");
+
+    await seedSdnList(45_000_000); // benign — a re-screen finds no match ('clear')
+
+    // The sweep's per-tenant sequence, invoked directly (mirrors
+    // screening-recovery.ts's loop body exactly). `reject` never touches
+    // `screening_status` (terminate doesn't write it — it stays 'review'), so
+    // guard #1 alone does NOT block this call: the DO genuinely re-screens.
+    // Guard #2 (admin/db.ts's resolveScreeningReview, now conditional on
+    // status='pending') is what must hold here.
+    const rpcResult = await tenantStub(tenantId).rescreenIfListUnavailable();
+    expect(rpcResult.rescreened).toBe(true);
+    expect(rpcResult.status).toBe("clear");
+    if (rpcResult.rescreened && rpcResult.status === "clear") {
+      await resolveScreeningReview(env, tenantId, "cleared", "system-recovery", Date.now());
+    }
+
+    const review = await getScreeningReview(env, tenantId);
+    expect(review).toMatchObject({ status: "rejected", resolvedBy: "admin" }); // NEVER overwritten
+
+    // The tenant stays terminated regardless of the redundant re-screen.
+    const account = await api("/account", { token });
+    expect(account.status).toBe(401);
   });
 });
 

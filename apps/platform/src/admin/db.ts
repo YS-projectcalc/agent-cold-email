@@ -260,10 +260,24 @@ export async function getScreeningReview(env: Env, tenantId: string): Promise<Sc
   return row ? fromScreeningReviewD1Row(row) : null;
 }
 
-/** POST /admin/tenants/:id/screening — resolves a pending review. Returns
- * `true` only when a row existed to resolve (a clear/reject on a tenant with
- * no review row on file is still honored on tenant_profile by the caller, but
- * has no queue row to close — see routes/admin-screening.ts). */
+/**
+ * POST /admin/tenants/:id/screening — resolves a PENDING review. Returns
+ * `true` only when a row existed AND was still 'pending' to resolve (a
+ * clear/reject on a tenant with no review row on file is still honored on
+ * tenant_profile by the caller, but has no queue row to close — see
+ * routes/admin-screening.ts).
+ *
+ * Race-guard (adversary re-attack, 2026-07-23): the atomic conditional
+ * `WHERE status = 'pending'` (the house pattern — mirrors the spend-ledger's
+ * conditional reserve UPDATE) is what actually prevents the audit-corruption
+ * case: the N-OF-1 recovery sweep (ofac/screening-recovery.ts) calls THIS
+ * function after re-screening a tenant clean, and without this guard it could
+ * overwrite an admin's already-'rejected' (or already-'cleared') row with
+ * 'cleared'/'system-recovery' — silently erasing a real admin decision from
+ * the audit trail. Now that write simply matches zero rows (a no-op,
+ * `false`) whenever the row has already moved on, regardless of which side
+ * got there first.
+ */
 export async function resolveScreeningReview(
   env: Env,
   tenantId: string,
@@ -272,7 +286,7 @@ export async function resolveScreeningReview(
   resolvedAt: number,
 ): Promise<boolean> {
   const result = await env.DB.prepare(
-    `UPDATE screening_reviews SET status = ?, resolved_at = ?, resolved_by = ? WHERE tenant_id = ?`,
+    `UPDATE screening_reviews SET status = ?, resolved_at = ?, resolved_by = ? WHERE tenant_id = ? AND status = 'pending'`,
   )
     .bind(status, resolvedAt, resolvedBy, tenantId)
     .run();
