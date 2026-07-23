@@ -1,5 +1,11 @@
 import { NotFoundError } from "@coldstart/shared";
 import type { TenantContext } from "../tenant-context.js";
+import {
+  deriveActivationState,
+  realSendPathLive,
+  screeningStatusStub,
+  type ActivationSurfaceState,
+} from "./activation.js";
 import { getTeardownSummary, type TeardownSummary } from "./lifecycle.js";
 import { capFor } from "./quota.js";
 
@@ -88,6 +94,11 @@ export interface AccountSummary {
   plan: string;
   status: string;
   billingState: string;
+  /** G3 — the HONEST activation state (design §G3 parity law). NEVER claims
+   *  'active' while the tenant is really on the sandbox port. 'pending_provisioning'
+   *  = paid, infra being armed, sandbox previews only; 'capacity_pending' = a
+   *  spend/slot gate is holding provisioning; 'screening_hold' = under review. */
+  activationState: ActivationSurfaceState;
   domains: number;
   mailboxes: number;
   campaigns: number;
@@ -154,8 +165,8 @@ export function getDeliverabilitySummary(ctx: TenantContext): DeliverabilitySumm
 
 export function getAccount(ctx: TenantContext): AccountSummary {
   const profile = ctx.sql
-    .exec<{ brand: string; plan: string; status: string; billing_state: string }>(
-      `SELECT brand, plan, status, billing_state FROM tenant_profile WHERE id = ?`,
+    .exec<{ brand: string; plan: string; status: string; billing_state: string; provisioning_state: string }>(
+      `SELECT brand, plan, status, billing_state, provisioning_state FROM tenant_profile WHERE id = ?`,
       ctx.tenantId,
     )
     .one();
@@ -174,12 +185,26 @@ export function getAccount(ctx: TenantContext): AccountSummary {
     )
     .one().total ?? 0;
 
+  // G3 — derive the honest activation state. `screeningStatusStub` is the G1b
+  // seam (the real OFAC column read lands in a parallel lane; deriveActivationState
+  // takes `screening` as a param so that swap is one line here). realSendPathLive
+  // reads env (engine + InboxKit both armed — adversary B2).
+  const activationState = deriveActivationState({
+    plan: ctx.plan,
+    status: profile.status,
+    billingState: profile.billing_state,
+    screening: screeningStatusStub(ctx.tenantId),
+    realSendPathLive: realSendPathLive(ctx.env),
+    capacityPending: profile.provisioning_state === "capacity_pending",
+  });
+
   return {
     tenantId: ctx.tenantId,
     brand: profile.brand,
     plan: profile.plan,
     status: profile.status,
     billingState: profile.billing_state,
+    activationState,
     domains: count("domains"),
     mailboxes: count("mailboxes"),
     campaigns: count("campaigns"),

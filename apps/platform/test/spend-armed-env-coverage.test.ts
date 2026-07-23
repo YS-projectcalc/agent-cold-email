@@ -34,6 +34,14 @@ const KNOWN_NON_SPEND_ARMING = new Set([
   "GMAIL_OAUTH_GRANTS", // I3 manual OAuth grants — inert without INBOXKIT_* + ENGINE_*, arms nothing itself
   "TURNSTILE_SECRET", // magic-link bot-defense (design §2.3) — auth infra, not a vendor-spend signal
   "TURNSTILE_SITE_KEY", // PUBLIC widget key, not a secret at all — arms nothing
+  // GA gates G2/G4 spend BOUNDS, not spend ENABLERS — a ceiling/cost-table/
+  // slot-cap with no armed vendor spends $0 (see env.ts's comment on why these
+  // are deliberately NOT `// spend-arming`). isRealSpendArmed must NOT read them.
+  "SPEND_CEILING_CENTS",
+  "COST_MAILBOX_CENTS",
+  "COST_DOMAIN_CENTS",
+  "COST_PREWARM_MAILBOX_CENTS",
+  "INBOXKIT_PLAN_SLOTS",
 ]);
 
 function parseEnvFields(source: string): { all: Set<string>; spendArming: Set<string> } {

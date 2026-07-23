@@ -17,6 +17,7 @@ import type { Env } from "./env.js";
 import { buildOpsDigest, runDeliverabilitySweepAllTenants, runDunningSweep, runWebhookDeliveriesAllTenants } from "./admin/ops-sweep.js";
 import { runWatchtower } from "./admin/watchtower.js";
 import { createOpsMailer } from "./ops-mail/ops-mailer.js";
+import { reapStaleReservations } from "./engine/spend-ceiling.js";
 
 export async function runScheduledOpsSweep(env: Env): Promise<void> {
   const now = new RealClock().now();
@@ -30,6 +31,14 @@ export async function runScheduledOpsSweep(env: Env): Promise<void> {
   // (ROADMAP.md WIN-THE-COMPARISON (d)). Last so a webhook fan-out failure
   // can't delay the health/dunning/watchtower legs above.
   const webhooks = await runWebhookDeliveriesAllTenants(env);
+  // GA gate G2 (design NB-2) — reclaim vendor-spend reservations orphaned by a
+  // crash between reserve and commit/release, so leaked reservations can't
+  // silently shrink the effective ceiling. Last, and its own concern (D1
+  // account ledger), so it can't delay the health/dunning/watchtower legs.
+  const spendReservations = await reapStaleReservations(env, now);
 
-  console.log("scheduled ops sweep", JSON.stringify({ deliverability, dunning, digest, watchtower, webhooks }));
+  console.log(
+    "scheduled ops sweep",
+    JSON.stringify({ deliverability, dunning, digest, watchtower, webhooks, spendReservations }),
+  );
 }

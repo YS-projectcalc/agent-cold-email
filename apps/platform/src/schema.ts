@@ -36,6 +36,13 @@ CREATE TABLE IF NOT EXISTS tenant_profile (
   -- setup_infrastructure. The deliverability control loop reads it to derive a
   -- replacement lookalike when a domain burns (engine/deliverability.ts).
   primary_domain TEXT NOT NULL DEFAULT '',
+  -- GA gate G3 (ga-gates-design-2026-07-22.md §G3) — provisioning back-pressure
+  -- marker: 'ok' (normal) | 'capacity_pending' (a real money-out reserve hit the
+  -- G2 spend ceiling or the G4 InboxKit plan-slot cap, so provisioning is held —
+  -- no charge, no infra). Set/cleared by engine/spend-ceiling.ts's
+  -- withSpendCeiling; surfaced as a sub-state of activationState. DEFAULT 'ok'
+  -- keeps every existing row byte-identical.
+  provisioning_state TEXT NOT NULL DEFAULT 'ok',
   created_at INTEGER NOT NULL,
   clock_base INTEGER NOT NULL,
   clock_offset INTEGER NOT NULL DEFAULT 0,
@@ -175,7 +182,15 @@ CREATE TABLE IF NOT EXISTS mailboxes (
   -- never re-exposed on read" convention). NULL for 'provisioned' mailboxes
   -- (their credentials are injected into the engine out-of-band, via the
   -- existing droplet/env runbook -- unchanged by this lane).
-  transport_json TEXT
+  transport_json TEXT,
+  -- GA gate G4 (ga-gates-design-2026-07-22.md §G4) — 1 iff this mailbox consumed
+  -- one real InboxKit plan slot at provision (the real, non-sandbox path
+  -- incremented vendor_slot_state). Teardown reads it to decrement the account
+  -- slot counter precisely: at teardown the tenant is frozen and reads sandbox,
+  -- so the live adapter kind can no longer tell a real slot from a sandbox one —
+  -- this durable marker records the truth at provision time. DEFAULT 0 keeps
+  -- every existing (sandbox) mailbox byte-identical and never double-decrements.
+  slot_counted INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS campaigns (
