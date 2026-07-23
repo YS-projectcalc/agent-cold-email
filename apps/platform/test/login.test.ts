@@ -155,6 +155,11 @@ describe("POST /login/consume — expiry", () => {
     expect(res.status).toBe(401);
     expect((res.body as { error: string }).error).toMatch(/invalid|expired/i);
   });
+
+  it("a token that was never minted at all is rejected 401 (never 500)", async () => {
+    const res = await consumeLogin(generateDashboardSessionId());
+    expect(res.status).toBe(401);
+  });
 });
 
 describe("GET never consumes (prefetch-safety, §1.4)", () => {
