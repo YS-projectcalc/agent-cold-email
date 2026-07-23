@@ -42,7 +42,11 @@ OPS_ALERT_EMAIL = "yaakovscher@gmail.com"
 # [vars] entry like the two above, not a wrangler secret. src/ofac/
 # sdn-refresh.ts falls back to this exact URL as a code-literal default if
 # unset, so this line is explicitness/override-ability, not a hard requirement.
-OFAC_LIST_URL = "https://www.treasury.gov/ofac/downloads/sdn.csv"
+# Direct final host — the legacy www.treasury.gov path 30x-redirects there, and
+# Workers fetch dies HTTP 525 (SSL handshake) on the treasury.gov front-end
+# (proven live 2026-07-23: cron alert "SDN.CSV fetch failed: HTTP 525"; direct
+# URL curl-verified 200, 12-column CSV).
+OFAC_LIST_URL = "https://sanctionslistservice.ofac.treas.gov/api/publicationpreview/exports/sdn.csv"
 
 # Cloudflare Email Service (2025) outbound binding — the OpsMailer's channel
 # (src/ops-mail/). NO api keys: the binding IS the credential. Ships DARK: this
