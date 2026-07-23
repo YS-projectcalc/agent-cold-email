@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
 import type { VendorAdapterBundle } from "../src/vendors/factory.js";
 import { RealMailboxPort } from "../src/vendors/real/mailbox-port.js";
@@ -6,7 +6,7 @@ import { SandboxMailboxPort } from "../src/vendors/sandbox/mailbox-port.js";
 import { RegistrarUnarmedDomainPort } from "../src/vendors/real/domain-port.js";
 import { RealInboxKitDomainPort } from "../src/vendors/real/inboxkit-domain-port.js";
 import { RealEmailPort } from "../src/vendors/real/email-port.js";
-import { activatePaidPlan, mintTenant, tenantStub } from "./helpers.js";
+import { activatePaidPlan, mintTenant, seedBenignSdnList, tenantStub } from "./helpers.js";
 
 // GA increment #1 — factory wiring (closes the dark gap the G5 verdict named:
 // createVendorAdapters was NEVER passed inboxKitConfig, so real mailbox
@@ -26,6 +26,15 @@ const saved = {
   INBOXKIT_WORKSPACE_ID: env.INBOXKIT_WORKSPACE_ID,
 };
 afterEach(() => Object.assign(env, saved));
+
+// N-OF-1 (adversary OFAC build review, 2026-07-23): a checkout now genuinely
+// fail-CLOSES (screening_status='review') when NO SDN list is loaded — every
+// test below drives a tenant through activatePaidPlan and expects it to
+// genuinely reach 'activated' (this file's intent is factory/vendor-port
+// wiring, not screening), so seed a real, non-matching list first.
+beforeEach(async () => {
+  await seedBenignSdnList();
+});
 
 describe("createVendorAdapters wiring — INBOXKIT_* arming makes real mailbox provisioning REACHABLE", () => {
   it("paid+activated + BOTH engine & InboxKit armed → real bundle: RealMailboxPort, RealEmailPort, and the G5 gate-(a) hard-block domain", async () => {
