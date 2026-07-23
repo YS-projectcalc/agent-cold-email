@@ -1,9 +1,9 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 import type { Env } from "../src/env.js";
 import { deriveActivationState, realSendPathLive } from "../src/engine/activation.js";
 import { getAccount } from "../src/engine/reporting.js";
-import { activatePaidPlan, mintTenant, withTenantContext } from "./helpers.js";
+import { activatePaidPlan, mintTenant, seedBenignSdnList, withTenantContext } from "./helpers.js";
 
 // getAccount via withTenantContext (not the RPC stub): the stub's `.account()`
 // return type collapses to `never` because AccountSummary carries a
@@ -92,6 +92,14 @@ describe("account().activationState — end-to-end honest state through the real
   }
   afterEach(() => {
     setEnv(saved); // restore the hermetic (null) values so no cross-test leak
+  });
+  // N-OF-1 (adversary OFAC build review, 2026-07-23): activatePaidPlan below
+  // now genuinely fail-CLOSES (screening_status='review') when NO SDN list is
+  // loaded — this describe block's intent is activationState derivation
+  // (billing/engine/InboxKit wiring), not screening, so seed a real,
+  // non-matching list first so each tenant genuinely screens 'clear'.
+  beforeEach(async () => {
+    await seedBenignSdnList();
   });
 
   it("paid+active, NOTHING armed → pending_provisioning (silent-sandbox confident-wrong closed)", async () => {

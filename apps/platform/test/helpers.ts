@@ -4,6 +4,8 @@ import { generateApiToken, hashApiToken } from "../src/auth.js";
 import { VirtualClock } from "../src/clock.js";
 import { insertTenantIndex } from "../src/db.js";
 import { readActivationState } from "../src/engine/activation.js";
+import { normalizeName, tokenize } from "../src/ofac/normalize.js";
+import { swapInSdnList } from "../src/ofac/sdn-list.js";
 import { newId } from "../src/schema.js";
 import type { TenantContext } from "../src/tenant-context.js";
 import type { TenantDO } from "../src/tenant-do.js";
@@ -198,6 +200,26 @@ export async function mintTenant(brand: string, plan: TenantPlan): Promise<{ ten
   const stub = env.TENANT.get(env.TENANT.idFromName(tenantId));
   await stub.initTenant({ tenantId, brand, plan });
   return { tenantId, token };
+}
+
+/**
+ * G1 OFAC screening (N-OF-1 fix, adversary OFAC build review 2026-07-23) — a
+ * checkout now genuinely fail-CLOSES (`screening_status='review'`) when NO
+ * SDN list is loaded (src/ofac/screening.ts). Any test that drives a tenant
+ * through checkout/activatePaidPlan and expects the tenant to end up genuinely
+ * activated (not held for screening review) needs a real list loaded first so
+ * the real screen completes 'clear' — matching what a real deployment looks
+ * like once the SDN list has loaded at least once. Seeds a small list whose
+ * one entry doesn't match any brand these tests use.
+ */
+export async function seedBenignSdnList(nowMs: number = Date.now()): Promise<void> {
+  const name = normalizeName("Totally Unrelated Sanctioned Entity");
+  await swapInSdnList(env, {
+    listVersion: `benign-${nowMs}`,
+    entries: [{ uid: "0", nameNormalized: name, tokens: tokenize(name), entityType: null, program: "TEST" }],
+    publishedDate: "2026-07-23",
+    fetchedAt: nowMs,
+  });
 }
 
 // --- SPEC.md §19.1 (M1 dashboard+inbox) — dashboard cookie-session test
