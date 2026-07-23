@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { api, signup } from "./helpers.js";
+// The served MCP version is single-sourced from the worker's package.json (see
+// mcp/handler.ts) — assert against THAT, not a literal, so a version bump can
+// never leave serverInfo claiming a stale version again (the "0.1.0" defect).
+import { version as SERVER_VERSION } from "../package.json";
 
 interface JsonRpcSuccess<T = unknown> {
   jsonrpc: "2.0";
@@ -72,7 +76,7 @@ describe("POST /mcp — hosted MCP JSON-RPC 2.0 endpoint", () => {
     );
     expect(res.status).toBe(200);
     expect(res.body.result.protocolVersion).toBe("2025-06-18");
-    expect(res.body.result.serverInfo).toEqual({ name: "agent-cold-email", version: "0.1.0" });
+    expect(res.body.result.serverInfo).toEqual({ name: "agent-cold-email", version: SERVER_VERSION });
     expect(res.body.result.capabilities).toEqual({ tools: {} });
   });
 

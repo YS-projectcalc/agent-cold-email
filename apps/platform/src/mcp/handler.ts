@@ -15,8 +15,14 @@ import type { Env } from "../env.js";
 import { resolveRequestToken } from "../auth.js";
 import { resolveTenantFromToken } from "../require-auth.js";
 import { MCP_TOOLS } from "./tools.js";
+// Single-source the served MCP version from the deployed worker's own
+// package.json (set to the real published release, 0.2.2 — the Glama registry
+// version), so serverInfo can no longer drift into a stale hardcoded claim (the
+// prior "0.1.0" while the registry published 0.2.2). `name` stays the npm/registry
+// identity "agent-cold-email".
+import { version as SERVER_VERSION } from "../../package.json";
 
-const SERVER_INFO = { name: "agent-cold-email", version: "0.1.0" };
+const SERVER_INFO = { name: "agent-cold-email", version: SERVER_VERSION };
 // No full version-negotiation table here (thin facade, YAGNI) — the server
 // echoes back whatever protocolVersion the client requested in `initialize`
 // and otherwise defaults to the latest spec date this was built against.
