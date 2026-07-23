@@ -138,3 +138,76 @@ Log the parse failure. Dark until arming.
   field escape categorization. No such field exists today; noted for the next env.ts editor.
 - The engine `MailboxCredentialStore` idempotency map has no eviction (bounded by distinct mailbox count —
   fine for the single-daemon pilot).
+
+---
+
+## Round 2 — 2026-07-23 (fix commit `6f46b7e`, parent `a38fae3`)
+
+### VERDICT: SHIP
+
+All three round-1 findings closed. Suites RUN in the worktree: engine 95 pass / 3 skip (unchanged),
+platform 635 pass / 90 files (625 + 10 new). Both packages typecheck clean (RAN `tsc --noEmit`, per the
+vitest-green-tsc-red hazard — no errors). Diff is 5 files, all `apps/platform`; env.ts/billing.ts and the
+R3-1 guard are untouched. No BLOCKING finding survives.
+
+**FIX1 (round-1 blocker) — CLOSED.** The deterministic key is gone from `pushRecordedMailbox`, which now
+calls `pushMailbox(email, credentials)` keyless (`mailbox-credential-push.ts:118`). Grep confirms it is the
+**only** `pushMailbox(` caller and there is **no remaining `credpush:` construction** anywhere — the reconcile
+path routes through the same keyless `pushRecordedMailbox`, so it is covered transitively. `pushMailbox`'s
+`idempotencyKey` is now `?`-optional matching the wire schema. **Verified end-to-end against the REAL engine
+store** (`MailboxCredentialStore`): keyless `created → unchanged (same-content retry no-op) → replaced
+(re-mint rotation) → resolves the NEW token`. The regression test (`mailbox-credential-push.test.ts`, the
+"a retry with re-minted (different) credentials" case) is a valid revert-fail-restore RED-proof: its fake
+store faithfully mirrors the real store's keyed-rejection + content-hash branches, so re-adding the key would
+make the second differing push throw and the `pushed:true`/`error:undefined` assertions fail. Retry-safety AND
+rotation both hold.
+
+**FIX2 (round-1 NB revoke wiring) — CLOSED, with one narrow dark residual (NON-BLOCKING).**
+`revokePushedMailboxCredentials` is wired into `teardownTenant`'s mailbox-release loop (`lifecycle.ts:181`),
+reached by both production teardown callers (`:267` voluntary_cancel, `:289` abuse_terminate) via the default
+`engineClient`. It is genuinely best-effort: `isConfigured` gates it to a no-op in the unarmed build,
+try/catch+log means an armed-but-unreachable engine never blocks or fails the cancel, and it is idempotent-safe
+(the engine `store.remove` is a no-op for an unknown/unpushed/already-removed email, so the unconditional
+revoke-per-released-mailbox cannot error even for mailboxes that were never pushed). The three new
+`lifecycle-cancel.test.ts` cases (armed→revokes-each, unreachable→teardown-still-succeeds, dark→no-op) confirm
+each branch.
+
+- *Residual (NON-BLOCKING):* the revoke runs AFTER the `released_at` UPDATE inside the loop, and the teardown
+  record is written only after the loop (`lifecycle.ts:203`), while the loop filters `released_at IS NULL`.
+  Under the DO output-gate model the `released_at` write is durable before the revoke fetch leaves, so a crash
+  that loses a single revoke fetch leaves that mailbox skipped on the teardown retry → its pushed token lingers
+  on the daemon. This is the SAME class as the founder-accepted crash-after-vendor-accept-before-record residual
+  (ACTIVATION Gate 2), it is DARK (armed-only) and best-effort by design, and it strictly *narrows* the round-1
+  exposure (100% never-revoked → a crash window). Trivial hardening if desired: order the revoke BEFORE the
+  `released_at` UPDATE so a crash-retry re-releases + re-revokes (both idempotent). Not a blocker.
+
+**FIX3 (round-1 NB parseGrants) — CLOSED.** `parseGrants` now logs loud via `logMalformedGrants` on both
+invalid JSON and wrong top-level shape (incl. the `Array.isArray` case), while still returning `{}` rather than
+throwing. The log-loud-but-return-`{}` choice is correct: a throw would propagate out of
+`maybePushProvisionedMailbox`'s default-param evaluation at `provisioning.ts:119` and fail an ALREADY-BILLED
+provisioning saga, violating the F6 invariant. The armed+malformed end state is fail-closed and **recoverable**,
+not wedged: each mailbox stays `'pending'` with a per-mailbox `last_error` ("no manually-minted grant
+supplied") until the operator fixes the secret, after which the next reconcile sweep re-parses the now-valid
+grants and pushes successfully. Loud at both layers (parse-time + per-mailbox), no send with wrong creds.
+
+### Attacks that failed (round 2)
+
+- **FIX1 completeness (all push callers, reconcile included).** Grep: one `pushMailbox(` caller, keyless; zero
+  `credpush:` constructions; `removeMailbox` called once, keyless. No caller re-introduces a key. Held.
+- **R3-1 guard + spend-armed coverage.** `env.ts`, `billing.ts` (`isRealSpendArmed`), and
+  `spend-armed-env-coverage.test.ts` are NOT in the diff; the guard remains green in the 635-pass run. Held.
+- **Tenant isolation on the new revoke.** `teardownTenant` iterates `mailboxes WHERE tenant_id = ?`
+  (`lifecycle.ts:165`) and revokes those emails only; the engine store is email-keyed but emails are
+  tenant-domain-unique. No new unscoped query. Held.
+- **Secret leakage on the new log lines.** The revoke log carries the email + a `VendorError` (HTTP status /
+  "unreachable") — never the bearer token (header-only) or credential values. `logMalformedGrants` logs a
+  generic reason, not the raw `GMAIL_OAUTH_GRANTS` value. Held.
+- **Circular import / typecheck.** `lifecycle.ts → mailbox-credential-push.ts` has no back-edge to lifecycle;
+  `tsc --noEmit` clean on both packages. Held.
+
+### NEW (round 2, out of scope, no verdict weight)
+
+- `logMalformedGrants` interpolates `err.message` from `JSON.parse`; modern V8 includes a ~10-char input
+  snippet in that message. For `GMAIL_OAUTH_GRANTS` the object structure puts the mailbox email first (secrets
+  are nested deep), so a first-syntax-error snippet is email-shaped, not token-shaped, and it only reaches the
+  daemon's own console on operator misconfiguration. Negligible, noted for completeness.

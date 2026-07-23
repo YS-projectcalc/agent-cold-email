@@ -151,6 +151,8 @@ activationState(tenant, env) =
 
 **Sequencing (load-bearing):** gate (a) **BLOCKS credential-push activation** (`ROADMAP.md:19`) — it must land BEFORE the arming step, i.e. as a **micro-lane immediately at the I3/I4 merge** (the ROADMAP's own alternative), NOT waiting for the full GA wave. Size **S**.
 
+**Scope note (2026-07-23, at dispatch):** the micro-lane ships the arming-blocking half only — `registrarConfig` decoupling + fail-closed `domain.buy` hard-block + guards (adversary B1 explicitly allowed "or hard-block the domain-buy path"). The Cloudflare `RealDomainPort` rewrite is DEFERRED to the GA wave: whether Cloudflare Registrar supports NEW-domain purchase via public API is unverified (their API covers transfers/settings; purchase may be dashboard-only), and this codebase does not build dark adapters against unverified wire shapes. Until then the registrar seam fails loud `registrar_unarmed` — which is also the correct pilot posture (Mordy's shape is BYO connect, not domain purchase). Verify the CF purchase API (fallback: Namecheap, founder-ruled) before building the real adapter.
+
 ---
 
 ## Ordered build increments
