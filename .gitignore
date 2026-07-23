@@ -12,3 +12,4 @@ pw-shots/
 shots/
 # Engine durable state (idempotency + Message-ID→threadId maps) — runtime data.
 apps/engine/state/
+.claude/worktrees/
