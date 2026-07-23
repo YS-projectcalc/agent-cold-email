@@ -16,6 +16,11 @@ export const LARGE_BODY_MAX_BYTES = 4 * 1024 * 1024; // launch_campaign (5000 le
 // with up to a 10,000-char agent_note markdown prop: 512 KiB comfortably
 // bounds the worst case (~500 KB) with headroom, well under LARGE_BODY_MAX_BYTES.
 export const DASHBOARD_LAYOUT_MAX_BYTES = 512 * 1024;
+// G1a droplet-relay — POST /admin/sdn/ingest's raw SDN.CSV body (routes/
+// admin-sdn-ingest.ts). The real feed is ~10-15 MB; 30 MiB gives headroom
+// without accepting an unbounded upload from a route gated by a narrow,
+// droplet-held token (require-admin-auth.ts's SDN_INGEST_TOKEN carve-out).
+export const SDN_INGEST_MAX_BYTES = 30 * 1024 * 1024;
 
 // Query-string booleans need their OWN parsing — zod's `z.coerce.boolean()`
 // treats ANY non-empty string (including the literal string "false") as

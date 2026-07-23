@@ -34,6 +34,11 @@ export const ALLOWLISTED_TEST_BINDINGS: Record<string, string> = {
   TOKEN_HASH_PEPPER: "test-only-pepper-for-vitest",
   // Bearer secret every /admin/* route test presents (helpers.ts adminApi()).
   ADMIN_TOKEN: "test-admin-token-for-vitest",
+  // G1a droplet-relay — the narrow bearer secret gating ONLY
+  // POST /admin/sdn/ingest (require-admin-auth.ts's carve-out), never
+  // ADMIN_TOKEN itself. Test files present this via `Bearer` headers built
+  // directly against env.SDN_INGEST_TOKEN (test/admin-sdn-ingest-route.test.ts).
+  SDN_INGEST_TOKEN: "test-sdn-ingest-token-for-vitest",
   // Webhook HMAC secret the suite signs its Stripe fixtures with (helpers.ts
   // postWebhook()); the webhook route fails CLOSED when it is unset, so the
   // suite must always have it set — matching a real deployment.

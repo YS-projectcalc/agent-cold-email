@@ -43,6 +43,7 @@ const KNOWN_NON_SPEND_ARMING = new Set([
   "COST_PREWARM_MAILBOX_CENTS",
   "INBOXKIT_PLAN_SLOTS",
   "OFAC_LIST_URL", // G1a — a public, no-auth CSV download URL; fetching it costs nothing and arms no vendor spend
+  "SDN_INGEST_TOKEN", // G1a droplet-relay — bearer secret gating POST /admin/sdn/ingest; ingesting a CSV costs nothing and arms no vendor spend
 ]);
 
 function parseEnvFields(source: string): { all: Set<string>; spendArming: Set<string> } {

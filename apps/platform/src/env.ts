@@ -162,6 +162,23 @@ declare global {
       // (src/ofac/sdn-refresh.ts), matching PUBLIC_BASE_URL's own
       // no-configuration-needed-in-dev/test posture.
       OFAC_LIST_URL?: string;
+      // G1a droplet-relay (2026-07-24) — Treasury's TLS front-end 525s every
+      // Worker-origin fetch to the OFAC_LIST_URL host above (proven live by
+      // two persistent cron alerts, both the legacy and direct URLs), so a
+      // droplet that CAN reach it (routes/admin-sdn-ingest.ts, tools/
+      // sdn-relay/) relays the raw CSV here instead. UNLIKE OFAC_LIST_URL,
+      // this genuinely IS a secret (a bearer token, not a public URL) — set
+      // via `wrangler secret put SDN_INGEST_TOKEN`, never in code/git (CLAUDE.md
+      // rule g). Deliberately its OWN dedicated secret, never ADMIN_TOKEN: the
+      // relay droplet must never hold cross-tenant admin power — this token's
+      // blast radius is exactly "can submit a candidate SDN CSV" (bounded
+      // further by the MIN_SDN_ENTRIES floor guard, src/ofac/sdn-ingest.ts).
+      // Fails closed same as ADMIN_TOKEN: unset means every ingest attempt
+      // 401s (require-admin-auth.ts's carve-out for this one path), never an
+      // open-by-default bypass. NOT `// spend-arming` — ingesting a CSV costs
+      // nothing and arms no vendor spend; categorized in
+      // KNOWN_NON_SPEND_ARMING (spend-armed-env-coverage.test.ts).
+      SDN_INGEST_TOKEN?: string;
     }
   }
 }

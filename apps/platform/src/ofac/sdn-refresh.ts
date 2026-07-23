@@ -8,11 +8,11 @@
 // advances `sdn_list_meta` on that throw, and this function catches it, alerts
 // the founder, and leaves the once-daily guard's cursor UNCHANGED so the next
 // 5-min sweep retries sooner than waiting a full day.
-import { escapeHtml } from "../html-escape.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { Env } from "../env.js";
 import { parseSdnCsv } from "./sdn-parse.js";
 import { getSdnListFetchedAt, swapInSdnList } from "./sdn-list.js";
+import { alertSdnListFailure } from "./sdn-alert.js";
 
 // Public Treasury OFAC download — no API key, no auth (design "Founder-tunable
 // knobs" table: `OFAC_LIST_URL`, overridable if OFAC moves the endpoint).
@@ -69,18 +69,8 @@ export async function maybeRefreshSdnList(
 }
 
 async function alertSdnRefreshFailure(env: Env, message: string, mailer: OpsMailer): Promise<void> {
-  if (!env.OPS_ALERT_EMAIL) return;
   const text =
     `The daily SDN (OFAC sanctions) list refresh FAILED — the platform is continuing to screen against the PRIOR good list, ` +
     `not a corrupt/partial one.\n\nError: ${message}\n\nThis will retry on the next ops-sweep cron tick (~5 min).`;
-  try {
-    await mailer.send({
-      to: env.OPS_ALERT_EMAIL,
-      subject: `[coldrig] SDN list refresh failed — kept prior good list`,
-      text,
-      html: `<p>${escapeHtml(text).replace(/\n/g, "<br>")}</p>`,
-    });
-  } catch (mailErr) {
-    console.error(`SDN refresh-failure alert: send to ${env.OPS_ALERT_EMAIL} failed (dark or transient)`, mailErr);
-  }
+  await alertSdnListFailure(env, { subject: `[coldrig] SDN list refresh failed — kept prior good list`, text }, mailer);
 }

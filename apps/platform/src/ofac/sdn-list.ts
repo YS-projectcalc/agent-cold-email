@@ -7,11 +7,23 @@
 import type { Env } from "../env.js";
 import type { ParsedSdnEntry } from "./sdn-parse.js";
 
-// Rows per multi-row INSERT — bounded well under SQLite's ~999 bind-param
-// ceiling (6 columns * 100 rows = 600 params) while still batching (design
-// line 47's "parse+upsert must be batched to stay inside the cron CPU
-// budget" — this is the batching; see sdn-refresh.ts for the CPU-budget note).
-const INSERT_BATCH_SIZE = 100;
+// Rows per multi-row INSERT. CORRECTED 2026-07-24 (droplet-relay build,
+// first code path to ever exercise this at realistic ~5k+ entry scale): the
+// original comment assumed vanilla SQLite's ~999 bind-param ceiling, but
+// Cloudflare D1's REAL per-statement limit is 100 bound parameters —
+// empirically confirmed (101 params throws `D1_ERROR: too many SQL variables`,
+// 100 succeeds). 6 columns * 100 rows = 600 params silently could never have
+// worked at any real scale; it just never got exercised (every existing test
+// fixture is 4-5 rows, and the real ~17k Treasury feed has never successfully
+// reached swapInSdnList — Workers fetch to Treasury 525s, see sdn-refresh.ts).
+// floor(100 / 6 columns) = 16 rows/statement is the max that stays under the
+// real ceiling. To preserve the ORIGINAL design intent (design line 47:
+// "batched to stay inside the cron CPU budget" — i.e. few network round
+// trips, not many small statements), every 16-row chunk's INSERT is queued
+// into ONE `env.DB.batch()` call below rather than awaited one at a time —
+// batch() sends every statement in a single round trip while each statement
+// independently still respects the 100-param ceiling.
+const INSERT_BATCH_SIZE = 16;
 
 export interface SdnListMeta {
   activeVersion: string | null;
@@ -99,6 +111,7 @@ export async function swapInSdnList(
   params: { listVersion: string; entries: ParsedSdnEntry[]; publishedDate: string; fetchedAt: number },
 ): Promise<void> {
   try {
+    const statements: D1PreparedStatement[] = [];
     for (let i = 0; i < params.entries.length; i += INSERT_BATCH_SIZE) {
       const chunk = params.entries.slice(i, i + INSERT_BATCH_SIZE);
       const placeholders = chunk.map(() => "(?, ?, ?, ?, ?, ?)").join(", ");
@@ -106,12 +119,19 @@ export async function swapInSdnList(
       for (const entry of chunk) {
         values.push(params.listVersion, entry.uid, entry.nameNormalized, JSON.stringify(entry.tokens), entry.entityType, entry.program);
       }
-      await env.DB.prepare(
-        `INSERT INTO sdn_entries (list_version, uid, name_normalized, tokens_json, entity_type, program) VALUES ${placeholders}`,
-      )
-        .bind(...values)
-        .run();
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO sdn_entries (list_version, uid, name_normalized, tokens_json, entity_type, program) VALUES ${placeholders}`,
+        ).bind(...values),
+      );
     }
+    // One network round trip for every chunked INSERT (D1's `.batch()`) —
+    // preserves the ORIGINAL design intent (stay inside the cron CPU budget)
+    // even though each individual statement is now capped at 16 rows (see
+    // INSERT_BATCH_SIZE's comment above). Empirically verified working up to
+    // 1100+ statements in one batch() call, comfortably above the ~1063 a
+    // real ~17k-entry list needs at 16 rows/statement.
+    if (statements.length > 0) await env.DB.batch(statements);
   } catch (err) {
     // Best-effort cleanup of the orphaned partial version — never touches the
     // active pointer, so correctness does not depend on this succeeding.
