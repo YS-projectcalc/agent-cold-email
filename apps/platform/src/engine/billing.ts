@@ -39,7 +39,12 @@ export function isRealSpendArmed(env: Env): boolean {
   return (
     Boolean(env.STRIPE_SECRET_KEY) ||
     Boolean(env.ENGINE_BASE_URL && env.ENGINE_AUTH_SECRET) ||
-    Boolean(env.INBOXKIT_API_KEY && env.INBOXKIT_WORKSPACE_ID)
+    Boolean(env.INBOXKIT_API_KEY && env.INBOXKIT_WORKSPACE_ID) ||
+    // G5 gate (a) — registrar arming is its OWN leg, independent of the
+    // INBOXKIT_* leg above (adversary B1 2026-07-23): the whole point of
+    // decoupling is that arming one vendor must never be read as arming the
+    // other.
+    Boolean(env.REGISTRAR_PROVIDER && env.CLOUDFLARE_REGISTRAR_API_TOKEN)
   );
 }
 

@@ -60,6 +60,20 @@ declare global {
       // simulate checkout stays closed (the class the guard test enforces).
       INBOXKIT_API_KEY?: string; // spend-arming
       INBOXKIT_WORKSPACE_ID?: string; // spend-arming
+      // G5 gate (a) — domain-registrar arming, DELIBERATELY DECOUPLED from
+      // INBOXKIT_* above (ROADMAP.md:19,33,43; adversary B1 2026-07-23: the
+      // old factory logic welded `domain.buy` to the mailbox vendor
+      // credential, so arming InboxKit for mailboxes silently also armed
+      // InboxKit-as-registrar). Cloudflare Registrar is the founder-ruled
+      // default provider (Namecheap fallback) — see vendors/factory.ts and
+      // vendors/real/domain-port.ts. Setting these does NOT yet wire a
+      // working purchase adapter (the Cloudflare purchase-API wire shape is
+      // unverified — GA-wave scope note 2026-07-23), but the moment they
+      // bind, real registrar-spend intent is signaled, so `// spend-arming`
+      // (R3-1): isRealSpendArmed MUST treat them as an arming signal same as
+      // INBOXKIT_*, enforced by spend-armed-env-coverage.test.ts.
+      REGISTRAR_PROVIDER?: string; // spend-arming
+      CLOUDFLARE_REGISTRAR_API_TOKEN?: string; // spend-arming
       // Self-serve I3 — operator-supplied gmail_api OAuth grants for the MANUAL
       // mint path (the proven 2026-07-19 pilot path), a JSON secret
       // {email:{clientId,clientSecret,refreshToken}}. NOT spend-arming: holding

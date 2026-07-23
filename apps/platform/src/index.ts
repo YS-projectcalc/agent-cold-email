@@ -138,6 +138,12 @@ app.onError((err, c) => {
   if (name === "TenantIsolationError") return c.json({ error: err.message }, 403);
   if (name === "RateLimitError") return c.json({ error: err.message }, 429);
   if (name === "RequestInProgressError") return c.json({ error: err.message }, 409);
+  // G5 gate (a) (ROADMAP.md:19,33,43; adversary B1 2026-07-23) — a domain
+  // purchase blocked because the registrar isn't armed (or its adapter isn't
+  // built yet) is a graceful, retry-later state, never an opaque internal
+  // error: a `registrar_unarmed` code lets a caller/agent distinguish "try
+  // again once armed" from a real 500.
+  if (name === "RegistrarUnarmedError") return c.json({ error: err.message, code: "registrar_unarmed" }, 503);
   // SPEC.md §19.4 [F5] — a stale dashboard-view rev is a STRUCTURED 409: the
   // agent needs currentRev + currentLayout to rebase its edit, not just an
   // opaque "conflict" string.

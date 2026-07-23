@@ -1,5 +1,6 @@
-import { isPaidPlanTier, type SetupInfrastructureInput } from "@coldstart/shared";
+import { isPaidPlanTier, RegistrarUnarmedError, type SetupInfrastructureInput } from "@coldstart/shared";
 import { newId } from "../schema.js";
+import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { TenantContext } from "../tenant-context.js";
 import { reportUsageToStripeIfConfigured } from "./billing.js";
 import { assertNotLifecycleFrozen } from "./billing-state.js";
@@ -9,6 +10,7 @@ import { withRequestIdempotency } from "./idempotency.js";
 import { maybePushProvisionedMailbox } from "./mailbox-credential-push.js";
 import { computeMailboxWarmupSnapshot } from "./mailbox-state.js";
 import { assertWithinProvisioningCap } from "./quota.js";
+import { alertRegistrarUnarmed } from "./registrar-alert.js";
 import { computeWarmupDay, epochDay, warmupDailyCap, warmupStatus } from "./warmup.js";
 
 // Per-mailbox/mo metering fee (SPEC.md §18 ballpark fully-loaded cost) —
@@ -172,6 +174,11 @@ export async function provisionDomainWithMailboxes(
 export async function runSetupInfrastructure(
   ctx: TenantContext,
   input: SetupInfrastructureInput,
+  // Injectable (default a real/dark-per-env OpsMailer) — same pattern as
+  // admin/ops-sweep.ts's runDunningSweep / deliverability-actions.ts's
+  // runDeliverabilitySweep, so a test can assert the gate (a) alert content
+  // with a SandboxOpsMailer without any production call site needing to change.
+  mailer: OpsMailer = createOpsMailer(ctx.env),
 ): Promise<{ jobId: string }> {
   // Lifecycle freeze — BEFORE any spend. A suspended/disputed/canceled tenant
   // must not provision fresh infra (real registrar/mailbox spend at activation
@@ -194,18 +201,32 @@ export async function runSetupInfrastructure(
     ctx.tenantId,
   );
 
-  const candidates = await ctx.adapters.domain.searchLookalikes(input.brand, input.primaryDomain, input.domains);
-  const personaSlug = slugify(input.persona);
+  // G5 gate (a) — a real (non-sandbox) tenant whose registrar isn't armed
+  // hits RegistrarUnarmedError on the very first vendor touch below
+  // (searchLookalikes, before any domain is ever bought — see
+  // vendors/real/domain-port.ts). Caught here (not left to fall through to
+  // index.ts's generic 500) so the founder gets a same-request alert AND the
+  // tenant gets the graceful, distinguishable `registrar_unarmed` HTTP
+  // response (index.ts onError) instead of an opaque internal error.
+  try {
+    const candidates = await ctx.adapters.domain.searchLookalikes(input.brand, input.primaryDomain, input.domains);
+    const personaSlug = slugify(input.persona);
 
-  for (let domainIndex = 0; domainIndex < input.domains; domainIndex++) {
-    const candidate = candidates[domainIndex % candidates.length];
-    if (!candidate) continue;
-    await provisionDomainWithMailboxes(ctx, {
-      domain: candidate.domain,
-      domainIndex,
-      personaSlug,
-      inboxesEach: input.inboxesEach,
-    });
+    for (let domainIndex = 0; domainIndex < input.domains; domainIndex++) {
+      const candidate = candidates[domainIndex % candidates.length];
+      if (!candidate) continue;
+      await provisionDomainWithMailboxes(ctx, {
+        domain: candidate.domain,
+        domainIndex,
+        personaSlug,
+        inboxesEach: input.inboxesEach,
+      });
+    }
+  } catch (err) {
+    if (err instanceof RegistrarUnarmedError) {
+      await alertRegistrarUnarmed(ctx, input.primaryDomain, err, mailer);
+    }
+    throw err;
   }
 
   return { jobId: newId("job") };
