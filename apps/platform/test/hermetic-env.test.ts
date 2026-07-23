@@ -104,7 +104,15 @@ describe("hermetic-env — the ambient .dev.vars does NOT leak into the live tes
   it("every `// spend-arming` env.ts binding reads falsy in the live env (non-vacuous)", () => {
     const spendArming = spendArmingEnvFields(envSource);
     // Guard against the parser silently drifting to empty (vacuous pass).
-    expect(spendArming).toEqual(["STRIPE_SECRET_KEY", "ENGINE_BASE_URL", "ENGINE_AUTH_SECRET", "INBOXKIT_API_KEY", "INBOXKIT_WORKSPACE_ID"]);
+    expect(spendArming).toEqual([
+      "STRIPE_SECRET_KEY",
+      "ENGINE_BASE_URL",
+      "ENGINE_AUTH_SECRET",
+      "INBOXKIT_API_KEY",
+      "INBOXKIT_WORKSPACE_ID",
+      "REGISTRAR_PROVIDER",
+      "CLOUDFLARE_REGISTRAR_API_TOKEN",
+    ]);
     for (const field of spendArming) {
       expect(ambientEnv[field], `env.${field} is truthy in the test env — ambient spend-arming state leaked`).toBeFalsy();
     }

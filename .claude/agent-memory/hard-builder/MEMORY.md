@@ -12,6 +12,7 @@
 
 ## Test-env gotchas (ColdStart apps/platform vitest)
 - [coldstart-vitest-binding-and-d1-isolation-gotchas](coldstart-vitest-binding-and-d1-isolation-gotchas.md) — a wrangler.toml binding IS bound in the vitest env (not undefined; asserting `.toBeUndefined()` throws RPC inspect errors) → test factory branches with fake envs; direct `env.DB` writes are NOT rolled back per-test → `beforeEach` DELETE for state-machine tables; `test/setup.ts` needs each new migration added by explicit `?raw` import.
+- [vitest-pool-workers-ambient-devvars-leak](vitest-pool-workers-ambient-devvars-leak.md) — CLASS: the pool auto-loads `apps/*/.dev.vars` via wrangler and injects EVERY key as a test binding → a dev's ambient real secret (truthy STRIPE_SECRET_KEY) flips a behavior gate under test; fix = CONSTRUCT `miniflare.bindings` from an allowlist, neutralize non-allowlisted ambient keys to `null` (nullish+JSON-valid, not `""`/`undefined`); hermetic-by-default + canary guard.
 
 ## Build techniques
 - [failing-by-construction-env-coverage-guard](failing-by-construction-env-coverage-guard.md) — R3-1: enforce "a new vendor env binding must wire into isRealSpendArmed" with a test that `?raw`-parses env.ts source: tag fields `// spend-arming`, assert each tagged field is referenced in the guard fn AND every env field is categorized (tagged ∪ allowlist == all) so the NEXT binding trips RED. Needs `declare module "*.ts?raw"`.

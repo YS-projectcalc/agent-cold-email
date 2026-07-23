@@ -142,8 +142,14 @@ app.onError((err, c) => {
   // purchase blocked because the registrar isn't armed (or its adapter isn't
   // built yet) is a graceful, retry-later state, never an opaque internal
   // error: a `registrar_unarmed` code lets a caller/agent distinguish "try
-  // again once armed" from a real 500.
-  if (name === "RegistrarUnarmedError") return c.json({ error: err.message, code: "registrar_unarmed" }, 503);
+  // again once armed" from a real 500. Customer body stays GENERIC (N-G5-1):
+  // err.message names internal env vars + arming docs — that detail belongs
+  // in the founder ops alert (registrar-alert.ts), never in a tenant response.
+  if (name === "RegistrarUnarmedError")
+    return c.json(
+      { error: "Domain registration is not yet enabled for this account. No purchase was made. The operator has been notified.", code: "registrar_unarmed" },
+      503,
+    );
   // SPEC.md §19.4 [F5] — a stale dashboard-view rev is a STRUCTURED 409: the
   // agent needs currentRev + currentLayout to rebase its edit, not just an
   // opaque "conflict" string.
