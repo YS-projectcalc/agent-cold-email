@@ -12,6 +12,7 @@ import { pauseAllCampaigns } from "./campaigns.js";
 import { EngineMailboxClient } from "./engine-mailbox-client.js";
 import { engineConfigFromEnv, revokePushedMailboxCredentials } from "./mailbox-credential-push.js";
 import { suspendTenant } from "./ops-summary.js";
+import { releaseMailboxSlots } from "./spend-ceiling.js";
 import { ONE_DAY_MS } from "./warmup.js";
 
 // Annual .com registration wholesale cost (SPEC.md §12: "Porkbun .com
@@ -161,25 +162,36 @@ export async function teardownTenant(
   //    deliv_status='paused' stops the tick's capacity picker from sending
   //    from them immediately (the send-side kill — see engine/tick.ts).
   const mailboxes = ctx.sql
-    .exec<{ id: string; email: string }>(
-      `SELECT id, email FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL`,
+    .exec<{ id: string; email: string; slot_counted: number }>(
+      `SELECT id, email, slot_counted FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL`,
       ctx.tenantId,
     )
     .toArray();
 
+  let slotCountedReleased = 0;
   for (const m of mailboxes) {
     await ctx.adapters.mailbox.release(m.email, `release-mbx:${ctx.tenantId}:${m.id}`);
+    if (m.slot_counted) slotCountedReleased++;
+    // I3 credential lifecycle (adversary i3i4-build-review-2026-07-23 finding
+    // 2): a released vendor slot's pushed OAuth refresh token must stop
+    // resolving on the engine — best-effort, never fails the teardown.
+    // Hardening (i3i4-build-review r2 residual): revoke BEFORE marking
+    // released_at, so a crash between the vendor release and the mark leaves the
+    // row UNmarked → a re-teardown re-attempts release + revoke (both idempotent),
+    // narrowing the window in which a released slot still has live engine creds.
+    await revokePushedMailboxCredentials(ctx, m.email, engineClient);
     ctx.sql.exec(
       `UPDATE mailboxes SET released_at = ?, deliv_status = 'paused' WHERE id = ? AND tenant_id = ?`,
       now,
       m.id,
       ctx.tenantId,
     );
-    // I3 credential lifecycle (adversary i3i4-build-review-2026-07-23 finding
-    // 2): a released vendor slot's pushed OAuth refresh token must stop
-    // resolving on the engine — best-effort, never fails the teardown.
-    await revokePushedMailboxCredentials(ctx, m.email, engineClient);
   }
+  // G4 — decrement the account slot counter (D1) by the count of REAL plan-slot
+  // mailboxes just released. Precise (mailboxes.slot_counted), so it works even
+  // though the tenant is frozen and reads sandbox at teardown; no-op (never
+  // touches D1) when none were slot-counted, e.g. the whole default build.
+  await releaseMailboxSlots(ctx, slotCountedReleased, now);
 
   // 3. Stop all campaigns (reuse the existing pause-all path — CLAUDE.md rule c).
   const campaignsStopped = ctx.sql

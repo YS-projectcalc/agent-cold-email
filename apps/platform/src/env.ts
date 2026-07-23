@@ -74,6 +74,23 @@ declare global {
       // INBOXKIT_*, enforced by spend-armed-env-coverage.test.ts.
       REGISTRAR_PROVIDER?: string; // spend-arming
       CLOUDFLARE_REGISTRAR_API_TOKEN?: string; // spend-arming
+      // GA gates G2/G4 (ga-gates-design-2026-07-22.md §G2/§G4) — the
+      // vendor-spend ceiling + cost table + InboxKit plan-slot capacity. All
+      // founder-tunable knobs with conservative defaults (see
+      // engine/spend-ceiling.ts). DELIBERATELY *NOT* `// spend-arming`
+      // (collision note vs the I3/I4 lane): these do NOT arm real vendor spend
+      // — they BOUND it. Arming spend is INBOXKIT_*/ENGINE_*/REGISTRAR_*
+      // (above); a ceiling with no armed vendor spends $0. Tagging them
+      // spend-arming would make spend-armed-env-coverage.test.ts demand
+      // isRealSpendArmed read them (wrong — a spend CAP is not a spend ENABLER),
+      // so they are categorized in that test's KNOWN_NON_SPEND_ARMING instead.
+      // Values are strings (wrangler `[vars]`); parsed to ints with the
+      // documented defaults when unset/blank.
+      SPEND_CEILING_CENTS?: string;
+      COST_MAILBOX_CENTS?: string;
+      COST_DOMAIN_CENTS?: string;
+      COST_PREWARM_MAILBOX_CENTS?: string;
+      INBOXKIT_PLAN_SLOTS?: string;
       // Self-serve I3 — operator-supplied gmail_api OAuth grants for the MANUAL
       // mint path (the proven 2026-07-19 pilot path), a JSON secret
       // {email:{clientId,clientSecret,refreshToken}}. NOT spend-arming: holding

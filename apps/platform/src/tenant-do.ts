@@ -93,6 +93,7 @@ import type { TenantContext } from "./tenant-context.js";
 import { readActivationState } from "./engine/activation.js";
 import { createVendorAdapters, type VendorAdapterBundle } from "./vendors/factory.js";
 import type { EngineClientConfig } from "./vendors/real/email-port.js";
+import type { InboxKitClientConfig } from "./vendors/real/inboxkit-client.js";
 
 export interface InitTenantInput {
   tenantId: string;
@@ -157,6 +158,8 @@ export class TenantDO extends DurableObject<Env> {
     // D5 dunning-vs-terminate suspension reason (adversarial panel-03 #6).
     this.addColumnIfMissing("tenant_profile", "suspend_reason", "TEXT");
     this.addColumnIfMissing("tenant_profile", "primary_domain", "TEXT NOT NULL DEFAULT ''");
+    // GA gate G3 — provisioning back-pressure marker (see schema.ts).
+    this.addColumnIfMissing("tenant_profile", "provisioning_state", "TEXT NOT NULL DEFAULT 'ok'");
     // B6 deliverability control-loop state on mailboxes (see schema.ts).
     this.addColumnIfMissing("mailboxes", "deliv_status", "TEXT NOT NULL DEFAULT 'healthy'");
     this.addColumnIfMissing("mailboxes", "cap_override", "INTEGER");
@@ -200,6 +203,8 @@ export class TenantDO extends DurableObject<Env> {
     this.addColumnIfMissing("mailboxes", "source", "TEXT NOT NULL DEFAULT 'provisioned'");
     this.addColumnIfMissing("mailboxes", "transport_kind", "TEXT NOT NULL DEFAULT 'smtp'");
     this.addColumnIfMissing("mailboxes", "transport_json", "TEXT");
+    // GA gate G4 — real-plan-slot marker for precise teardown slot accounting (see schema.ts).
+    this.addColumnIfMissing("mailboxes", "slot_counted", "INTEGER NOT NULL DEFAULT 0");
     this.addColumnIfMissing("deliverability_actions", "alerted_at", "INTEGER");
     // Created here, not in TENANT_DO_SCHEMA, so they run only after the columns
     // above are guaranteed to exist (safe for DOs that predate the column). Each
@@ -317,20 +322,43 @@ export class TenantDO extends DurableObject<Env> {
     // anything a caller passes in.
     const { activated } = readActivationState(this.ctx.storage.sql, this.tenantId);
     if (!activated) return this.sandboxAdapters;
-    // Activated: `activated` gates the EmailPort ONLY (factory.ts's own doc
-    // comment — domain/mailbox/billing/metrics have no per-tenant activation
-    // path yet, I3/I4 unbuilt), so every OTHER port stays the SAME cached
-    // sandbox instance (their in-memory state — search/release sets,
-    // idempotency caches — must persist). `createVendorAdapters` stays the
-    // single place that decides email's real-vs-sandbox class; its other
-    // (thrown-away) sandbox ports here cost no I/O.
-    return { ...this.sandboxAdapters, email: createVendorAdapters(this.plan, this.clock, activated, this.engineConfig()).email };
+    // Activated. Build the real bundle with BOTH the engine (EmailPort) AND the
+    // InboxKit (mailbox/domain) credentials. This is the GA wiring that CLOSES
+    // the dark gap the G5 verdict flagged ("NEW out of scope": no call site ever
+    // passed inboxKitConfig, so factory.ts's `useSandbox` was always true and
+    // real mailbox provisioning was unreachable regardless of which secrets were
+    // armed). Now, once INBOXKIT_API_KEY/INBOXKIT_WORKSPACE_ID are armed,
+    // `createVendorAdapters`'s `useSandbox` flips false and the whole bundle goes
+    // REAL — real mailbox provisioning becomes reachable. Every existing gate is
+    // preserved: demo/free is foreclosed above, `activated` (isTenantActivated:
+    // paid + billing active + not frozen + screening clear) still gates, and the
+    // domain port stays the G5 gate-(a) hard-block (RegistrarUnarmedDomainPort)
+    // regardless of InboxKit. Everything downstream (withSpendCeiling, G3) exists
+    // to make this flip SPEND-SAFE.
+    const real = createVendorAdapters(this.plan, this.clock, activated, this.engineConfig(), this.inboxKitConfig());
+    if (real.kind === "real") return real;
+    // InboxKit NOT armed (the common state, and every test): only the EmailPort
+    // may go real; every OTHER port stays the SAME cached sandbox instance (its
+    // in-memory search/release/idempotency state must persist — design §2.2
+    // option-1). Byte-identical to the pre-GA behavior.
+    return { ...this.sandboxAdapters, email: real.email };
   }
 
   private engineConfig(): EngineClientConfig | undefined {
     const baseUrl = this.env.ENGINE_BASE_URL;
     const authSecret = this.env.ENGINE_AUTH_SECRET;
     return baseUrl && authSecret ? { baseUrl, authSecret } : undefined;
+  }
+
+  // InboxKit workspace credentials (ACTIVATION.md Gate 0). Absent in the deployed
+  // build until the founder arms them (wrangler secret put); mirrors
+  // engineConfig() above. Threaded into createVendorAdapters so real mailbox/
+  // domain ports become reachable ONLY once both are set (factory.ts's
+  // `useSandbox`).
+  private inboxKitConfig(): InboxKitClientConfig | undefined {
+    const apiKey = this.env.INBOXKIT_API_KEY;
+    const workspaceId = this.env.INBOXKIT_WORKSPACE_ID;
+    return apiKey && workspaceId ? { apiKey, workspaceId } : undefined;
   }
 
   private requireContext(): TenantContext {

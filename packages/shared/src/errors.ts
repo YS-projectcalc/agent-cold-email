@@ -76,6 +76,31 @@ export class RegistrarUnarmedError extends VendorError {
   }
 }
 
+/**
+ * Thrown by the vendor-spend choke-point (`engine/spend-ceiling.ts`
+ * `withSpendCeiling`) when a money-out reserve is REJECTED — either the
+ * per-calendar-month spend ceiling (`SPEND_CEILING_CENTS`, G2) or the InboxKit
+ * plan-slot capacity (`INBOXKIT_PLAN_SLOTS`, G4) would be exceeded. It is a
+ * GRACEFUL back-pressure signal, NEVER a hard failure: the provisioning entry
+ * points (`runSetupInfrastructure`, the deliverability REPLACE_DOMAIN path)
+ * catch it, leave the tenant in a `capacity_pending` state (surfaced by G3's
+ * `activationState`), and return without a 500 — the founder alert already
+ * fired and a later provision retries once the ceiling/plan is raised.
+ * `retryable: false` for the CURRENT call (retrying without raising the
+ * ceiling can't succeed), but the reserve was released, so a fresh attempt
+ * after the founder acts starts clean. `reason` distinguishes the two causes
+ * for the ops alert / any surface that wants to explain the hold.
+ */
+export class CapacityPendingError extends VendorError {
+  constructor(
+    public readonly reason: "spend_ceiling" | "slot_capacity",
+    message: string,
+  ) {
+    super(message, false);
+    this.name = "CapacityPendingError";
+  }
+}
+
 export class TenantIsolationError extends Error {
   constructor(message: string) {
     super(message);

@@ -1,4 +1,4 @@
-import { isPaidPlanTier, RegistrarUnarmedError, type SetupInfrastructureInput } from "@coldstart/shared";
+import { CapacityPendingError, isPaidPlanTier, RegistrarUnarmedError, type SetupInfrastructureInput } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { TenantContext } from "../tenant-context.js";
@@ -11,6 +11,7 @@ import { maybePushProvisionedMailbox } from "./mailbox-credential-push.js";
 import { computeMailboxWarmupSnapshot } from "./mailbox-state.js";
 import { assertWithinProvisioningCap } from "./quota.js";
 import { alertRegistrarUnarmed } from "./registrar-alert.js";
+import { withSpendCeiling } from "./spend-ceiling.js";
 import { computeWarmupDay, epochDay, warmupDailyCap, warmupStatus } from "./warmup.js";
 
 // Per-mailbox/mo metering fee (SPEC.md §18 ballpark fully-loaded cost) —
@@ -57,12 +58,23 @@ export async function provisionMailboxesForDomain(
     // ProvisionedMailbox WITHOUT a second buy. This is the durable local record
     // that REPLACES the fragile /already exists/i message-substring hack the
     // adapter used to lean on (mailbox-port.ts provision()).
+    // G2 money-out site #1 (design §0 inventory) — the mailbox slot buy. The
+    // spend reserve composes INSIDE withRequestIdempotency (design §G2 collision
+    // note): a replayed provision returns the RECORDED mailbox without re-buying,
+    // so it never re-enters withSpendCeiling and never double-reserves — only a
+    // true first execution reserves. 'mailbox' consumes one InboxKit plan slot
+    // (G4).
     const provisioned = await withRequestIdempotency(ctx, `provision:${provisionIdempotencyKey}`, () =>
-      ctx.adapters.mailbox.provision(opts.domain, localPart, provisionIdempotencyKey),
+      withSpendCeiling(ctx, "mailbox", () =>
+        ctx.adapters.mailbox.provision(opts.domain, localPart, provisionIdempotencyKey),
+      ),
     );
-    const warmup = await ctx.adapters.mailbox.startWarmup(
-      provisioned.email,
-      `warmup:${ctx.tenantId}:${provisioned.email}`,
+    // G2 money-out site #2 — the warmup add-on. Its cost is already priced into
+    // COST_MAILBOX_CENTS at the provision reserve above (spendCostCents's 'warmup'
+    // branch reserves 0), so this wrap is for choke-point completeness (no
+    // money-out vendor call escapes the enumerated inventory), not a second charge.
+    const warmup = await withSpendCeiling(ctx, "warmup", () =>
+      ctx.adapters.mailbox.startWarmup(provisioned.email, `warmup:${ctx.tenantId}:${provisioned.email}`),
     );
 
     const day = computeWarmupDay(warmup.startedAt, now);
@@ -73,8 +85,8 @@ export async function provisionMailboxesForDomain(
       // WITHOUT fetching history, instead of the column's own DEFAULT 0 (an
       // ordinary incremental cursor since the round-2 fix, not a sentinel).
       `INSERT INTO mailboxes
-         (id, tenant_id, domain_id, domain, email, daily_cap, sent_today, sent_today_epoch_day, status, warmup_started_at, created_at, poll_cursor)
-       VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, -1)`,
+         (id, tenant_id, domain_id, domain, email, daily_cap, sent_today, sent_today_epoch_day, status, warmup_started_at, created_at, poll_cursor, slot_counted)
+       VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, -1, ?)`,
       newId("mbx"),
       ctx.tenantId,
       opts.domainId,
@@ -85,6 +97,10 @@ export async function provisionMailboxesForDomain(
       warmupStatus(day),
       warmup.startedAt,
       now,
+      // G4 — record whether this consumed a REAL InboxKit plan slot (the
+      // withSpendCeiling reserve above incremented vendor_slot_state iff the
+      // bundle is real). Read at teardown to decrement the slot counter precisely.
+      ctx.adapters.kind === "real" ? 1 : 0,
     );
     mailboxEmails.push(provisioned.email);
 
@@ -139,7 +155,14 @@ export async function provisionDomainWithMailboxes(
 ): Promise<{ domainId: string; domain: string; mailboxEmails: string[] }> {
   const domainKey = `${opts.domain}#${opts.domainIndex}`;
 
-  const purchased = await ctx.adapters.domain.buy(opts.domain, `buy:${ctx.tenantId}:${domainKey}`);
+  // G2 money-out site #3 (design §0 inventory) — the registrar domain purchase.
+  // setDns below is config-only (not spend), so it stays unwrapped. When the
+  // registrar is unarmed (G5 gate (a)), domain.buy throws RegistrarUnarmedError
+  // INSIDE the wrapper → withSpendCeiling releases the reservation and re-throws,
+  // so an unarmed registrar never leaks a reservation.
+  const purchased = await withSpendCeiling(ctx, "domain", () =>
+    ctx.adapters.domain.buy(opts.domain, `buy:${ctx.tenantId}:${domainKey}`),
+  );
   await ctx.adapters.domain.setDns(opts.domain, `dns:${ctx.tenantId}:${domainKey}`);
 
   const domainId = newId("dom");
@@ -223,6 +246,15 @@ export async function runSetupInfrastructure(
       });
     }
   } catch (err) {
+    if (err instanceof CapacityPendingError) {
+      // G2/G4 graceful back-pressure — NOT a failure. withSpendCeiling already
+      // set the tenant's capacity_pending marker, released the reservation, and
+      // fired the one-shot founder alert. Return the job normally (never a 500):
+      // the account surfaces capacity_pending via G3, and a later provision
+      // retries once the founder raises the ceiling / upgrades the plan. Any
+      // domains/mailboxes provisioned before the gate stay provisioned.
+      return { jobId: newId("job") };
+    }
     if (err instanceof RegistrarUnarmedError) {
       await alertRegistrarUnarmed(ctx, input.primaryDomain, err, mailer);
     }
