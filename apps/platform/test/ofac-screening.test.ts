@@ -171,7 +171,7 @@ describe("G1b — TOCTOU fail-open guard: a stale active_version whose entries j
     // instant this screen's first read already captured it.
     await env.DB.prepare(`DELETE FROM sdn_entries WHERE list_version = ?`).bind(listVersion).run();
 
-    const { tenantId } = await mintTenant("Globex Corp International", "launch");
+    const { tenantId } = await mintTenant("Globex Corp International", "managed");
     const mailer = new SandboxOpsMailer();
     const result = await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout", mailer }));
 
@@ -200,7 +200,7 @@ describe("G1b — TOCTOU fail-open guard: a stale active_version whose entries j
 
   it("a NORMAL screen against a genuinely non-empty list is UNAFFECTED by the guard (no false positive)", async () => {
     await seedSdnList(51_000_000);
-    const { tenantId } = await mintTenant("Globex Corp International", "launch");
+    const { tenantId } = await mintTenant("Globex Corp International", "managed");
     const result = await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout" }));
     expect(result.status).toBe("review"); // a REAL hit, not the sentinel
     expect(result.listVersion).not.toBe(LIST_UNAVAILABLE_VERSION);
