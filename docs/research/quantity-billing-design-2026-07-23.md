@@ -1,35 +1,61 @@
 # Quantity-billing migration — design (2026-07-23)
 
-Status: DESIGN ONLY (no source edits). Adversary attacks this before any build lane opens.
+Status: DESIGN ONLY (no source edits). **AMENDED 2026-07-24** after adversary review
+(`docs/adversarial/quantity-billing-design-review-2026-07-24.md`, verdict SHIP-AFTER-FIXES, 1 BLOCKING)
+and founder rulings below. The blocking B1 (meter definition) is now RULED; N1–N5 folded in. Re-verify
+by the adversary before the build lane dispatches.
 Author: design lane (opus). Grounded in source with `file:line` cites (every cite verified against the tree this session).
 
 Scope: migrate coldrig billing from the stale 3-tier flat model to the founder-ratified continuous
 per-mailbox curve, with durable Stripe Prices, coupon-riding subscriptions, an agency bundle that the
-mechanics must not preclude, and an agent-driven quantity lever that never drifts from provisioning.
+mechanics must not preclude, and a per-mailbox quantity that tracks real provisioned capacity.
+
+## Founder rulings (ledger-bound, 2026-07-24) — settle these; do not relitigate
+
+1. **Billing meter = ACTIVE / PROVISIONED mailbox count** (not the committed/selected count the original
+   draft proposed). *Delegation + criterion:* the founder delegated the committed-vs-provisioned call on
+   the criterion "whatever is cleaner and understandable and user friendly." *Resolution (main-loop
+   ruling on that criterion):* the ACTIVE/PROVISIONED meter — one number, the bill follows reality,
+   deprovision auto-lowers it, and it matches both SPEC §18 ("provisioned mailbox is the billing meter …
+   a fully deprovisioned mailbox no longer counts", `SPEC.md:219-223`) and the public pitch
+   ("$10/**active** mailbox", `SPEC.md:179`, `site/pricing.html:61`). This closes adversary B1 and
+   removes the committed-vs-provisioned divergence the original draft carried.
+2. **Downgrades: NO prorated credit.** A mailbox removal is effective immediately for provisioning
+   (the row is released now) but does **not** refund the current cycle → `proration_behavior: "none"` on
+   every quantity **decrease**. Quantity **increases** prorate normally (`create_prorations`).
+3. **Agency bundle = FOLLOW-ON.** Keep the §6 sketch; it is explicitly deferred (build the per-tenant
+   quantity model first).
 
 ---
 
-## 0. TL;DR — the recommended shape
+## 0. TL;DR — the recommended shape (amended)
 
 - **Stripe mechanic: licensed per-unit quantity on durable Prices — two line items on one subscription:**
-  a flat **platform** item (`qty 1`, $49/mo) + a **mailbox** item (`qty = the tenant's selected mailbox
-  count, floored at 5`, $10/mo each). Not metered usage, not graduated tiers. Invoice reads
+  a flat **platform** item (`qty 1`, $49/mo) + a **mailbox** item (`qty = max(5, the tenant's live
+  PROVISIONED real-mailbox count)`, $10/mo each). Not metered usage, not graduated tiers. Invoice reads
   `Coldrig platform $49.00` + `Mailbox × N $N0.00`. This is the literal §18 formula
   (`SPEC.md:221` — "$49 + ($10 × provisioned mailboxes), minimum 5").
-- **The billing meter is the tenant's SELECTED (committed) mailbox count, not the live provisioned
-  count.** One agent-facing lever — `set_mailbox_plan(N)` — quotes the new price, and on confirm both
-  (a) updates the Stripe mailbox-item quantity (prorated) and (b) opens/closes provisioning headroom.
-  Billing and provisioning move together *through this one intent* and never drift. §18's
-  "no silent capacity addition" rule (`SPEC.md:223`) forbids a pure auto-drive from the provision path.
-- **Durable Prices** created idempotently by a `lookup_key`-keyed bootstrap, replacing the inline
-  `price_data` at `stripe-client.ts:85-99`. Same code path in test and live mode (mode follows the key).
+- **The billing meter is the live PROVISIONED count** — `COUNT(*) FROM mailboxes WHERE tenant_id = ? AND
+  released_at IS NULL` (the query already used at `quota.ts:52-56` and `lifecycle.ts:166`), floored at 5.
+  **Billing FOLLOWS provisioning**, not the reverse: a provision raises the count, a release lowers it,
+  and the Stripe quantity is reconciled to that count. Every mailbox **addition** is gated by a
+  quote-before-add confirm (§18 "no silent capacity addition", `SPEC.md:223`) folded into the existing
+  provisioning intents — there is **no separate committed-count lever**; `set_mailbox_plan` is deleted
+  (see §2).
+- **Downgrade** (release) syncs the lower quantity with `proration_behavior: "none"` (no credit, effective
+  next cycle for billing, immediate for provisioning); **upgrade** (provision) prorates normally.
+- **Durable Prices** created idempotently by a `lookup_key`-keyed bootstrap that is a **required arm-time
+  step before checkout opens** and is race-safe on the lazy path (handles Stripe's duplicate-`lookup_key`
+  error), replacing the inline `price_data` at `stripe-client.ts:85-99`. Same code path test + live.
 - **Collapse `launch`/`growth`/`scale` to one paid plan `managed`** (§18 already retired the tiers —
   `SPEC.md:236`; the site already ships the curve — `site/pricing.html:61-117`; **zero live subscribers**,
   so no data migration). `$299`/`$799` are superseded by the curve ($249/$649), not stranded.
 - **Coupon:** MORDYPILOT (60%-off, single-use) attaches at the **subscription/customer** level with
-  `duration: forever` → every invoice and every future quantity bump inherits the 60% off automatically.
-- **Failure atomicity:** record-before-push + an idempotent **set-to-N** reconcile sweep (mirrors
-  `reapStaleReservations`, `spend-ceiling.ts:329-360`). A Stripe push failure never fails a provision.
+  `duration: forever` → every invoice and every future quantity bump inherits the 60% off automatically;
+  the discount % is **stored locally at checkout** so MRR/quote apply it without a Stripe round-trip.
+- **Failure atomicity:** record-before-push (the mailbox row / `released_at` IS the durable record) + an
+  idempotent **set-to-N** reconcile sweep (mirrors `reapStaleReservations`, `spend-ceiling.ts:329-360`).
+  A Stripe push failure never fails a provision.
 
 ---
 
@@ -102,43 +128,56 @@ promotion-codes gotcha on the ledger. **ACTIVATION.md:10 is stale** — it "sign
 | Graduated tiers on ONE price | ⚠️ works, encodes `$99 min + $10 each` in Stripe tiers | ✅ automatic | ✅ | ❌ single opaque line; the $49-vs-$10 split disappears for a human reading the dashboard | ✅ |
 
 **Recommendation: two licensed line items** — a flat `platform` item (`qty 1`) + a `mailbox` item
-(`qty = selected count, floored at 5`). Why over the elegant single graduated line: the founder reads
+(`qty = max(5, live provisioned count)`). Why over the elegant single graduated line: the founder reads
 raw Stripe invoices, and `$49 platform + Mailbox × N` is exactly the sentence the pricing page tells
 customers (`site/pricing.html:89`). Two items also keep the mailbox line **always present with qty ≥ 5**,
 so there is never a lazy "create the add-on item on the 6th mailbox" branch (the failure mode of the
 "$99-base + $10-per-additional" Model B). The minimum is a one-line clamp
-(`Math.max(5, selected)`), not a Stripe-tier config we can misread.
+(`Math.max(5, provisioned)`), not a Stripe-tier config we can misread.
 
-**Proration rules (recommend):**
-- **Add (raise qty):** `proration_behavior: "create_prorations"` — bill the partial-period cost of the
-  added mailboxes on the next invoice. Honest: they have the capacity now. `set_mailbox_plan` returns the
-  quote first (§18 quote-before-provision).
-- **Remove (lower qty):** `proration_behavior: "none"` — the lower quantity takes effect at the next
-  renewal, **no mid-cycle credit**. This closes a real abuse/asymmetry: a mid-cycle credit on remove lets
-  a tenant thrash (provision 50, drop them an hour later) paying near-zero proration while we already
-  paid InboxKit a full slot buy. "You keep the capacity you paid for until period end" is standard SaaS
-  and removes the vector. (Founder-toggleable to immediate-credit if desired — see Open Q3.)
+**The meter (amended per founder ruling 1): the live PROVISIONED count drives the quantity.**
+`billableMailboxes = max(5, COUNT(*) FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL)` — the
+exact query `quota.ts:52-56` and `lifecycle.ts:166` already run. Billing **follows** provisioning: the
+Stripe mailbox-item quantity is a mirror reconciled to that count, never a separately-committed number.
+The min-5 floor always applies to an active subscription (a tenant that deprovisions everything but stays
+subscribed pays the $99 minimum).
 
-**The agent-driven reality (the crux of Q1):** the customer's coding agent must not silently move price.
-So the meter is the **selected/committed count**, changed only through an explicit, quoted intent:
+**`set_mailbox_plan(N)` is DELETED — decision + justification.** Under a committed meter it was the sole
+lever; under the active meter a committed number that billing ignores is dead weight (CLAUDE.md rule i,
+YAGNI — and it would reintroduce exactly the committed-vs-provisioned divergence adversary B1 killed). §18's
+"no silent capacity addition" (`SPEC.md:223`) is satisfied where the count actually changes — at the
+**provisioning intents** — by folding a quote-before-add confirm into them, not by a separate plan number:
 
 ```
-set_mailbox_plan(N):
-  1. quote = quoteProvisionedMailboxes(N)            # pricing.ts:43 — returns {mailboxes, monthlyCents, …}
-  2. return quote to the agent; require confirm       # §18 no-silent-addition (SPEC.md:223)
-  3. on confirm:
-     a. UPDATE tenant_profile SET mailbox_plan_qty = N        (local source of truth, durable FIRST)
-     b. sync Stripe: set mailbox-item quantity → N (prorate per add/remove rule)   (mirror, reconcilable)
-     c. provisioning headroom is now N; setup_infrastructure / request_managed_mailboxes fill it
-        (release lowers via the same intent, never below what's still provisioned unless deprovisioning)
+Every mailbox-ADD intent (setup_infrastructure, request_managed_mailboxes, a future add_mailboxes):
+  1. proposedCount = currentProvisioned + requestedDelta
+  2. quote = quoteProvisionedMailboxes(proposedCount)   # pricing.ts:43 → {mailboxes, monthlyCents, …}
+  3. return the quote (new count + projected monthly, incl. any stored discount %); require confirm
+  4. on confirm: provision (existing path) → mailbox rows inserted (released_at NULL) → count rises
+  5. syncMailboxQuantity(ctx): set-to-N mirror to Stripe, proration create_prorations (increase)
+
+Every mailbox-REMOVE intent (a symmetrical deprovision/remove_mailboxes intent — NEW; the customer-
+initiated downgrade path, distinct from teardown):
+  1. release the mailbox rows (set released_at = now) — effective immediately for provisioning
+  2. syncMailboxQuantity(ctx): set-to-N mirror to Stripe, proration_behavior "none" (NO credit; ruling 2)
 ```
 
-Provisioning (`provisioning.ts`) fills headroom **under** `mailbox_plan_qty`; it never raises billing on
-its own. `quota.capFor` becomes `min(mailbox_plan_qty, MAX_SELF_SERVE_MAILBOXES)` instead of the tier
-lookup. This is the honest reading of §18 ("tracks reserved underlying capacity") and it makes drift
-structurally impossible: **one number (`mailbox_plan_qty`) is what Stripe mirrors and what provisioning
-is capped by.** (Alternative "live-provisioned-count is the meter" is viable ONLY if every provision is
-itself gated behind a quote+confirm — which collapses back into this design. Present both; recommend this.)
+`quota.capFor` becomes `min(mailbox count already provisioned + request, MAX_SELF_SERVE_MAILBOXES)` — a
+flat 60-mailbox self-serve ceiling, not the retired tier lookup. `syncMailboxQuantity` recomputes the
+settled count and issues one **absolute set-to-N** to the stored mailbox subscription-item id (so a
+burn-replacement's release-then-provision nets to the true final count, and the reconcile sweep smooths any
+intermediate state — §8). It fires **only while `billing_state='active'`** (teardown/freeze never call it —
+§7), which is what keeps a teardown-driven release from pushing `qty=0` into a dunning/canceling
+subscription. The no-drift machinery (record-before-push + set-to-N + active-only reconcile) is unchanged;
+it is now anchored on the real provisioned count instead of a committed number.
+
+**Proration rules (per founder ruling 2):**
+- **Increase (a provision raises the count):** `proration_behavior: "create_prorations"` — bill the
+  partial-period cost of the added mailboxes on the next invoice. The quote is returned and confirmed first.
+- **Decrease (a release lowers the count):** `proration_behavior: "none"` — **no mid-cycle credit**; the
+  release is immediate for provisioning, the lower amount takes effect at the next renewal. This is the
+  founder's ruling, and it also closes the thrash vector (provision 50, drop them in an hour → near-zero
+  proration while we already paid InboxKit a full slot buy).
 
 ---
 
@@ -155,16 +194,31 @@ Create durable Prices keyed by stable `lookup_key`s, mode-agnostic (the secret k
 
 **Bootstrap (`ensureStripePrices(secretKey)`):** `GET /v1/prices?lookup_keys[]=…&active=true`; for any
 missing key, create the Product (find-or-create by a deterministic metadata tag) then the Price with that
-`lookup_key`. Idempotent by construction (the lookup gates the create). Cache the resolved
-`price_id → lookup_key` in a **D1 `stripe_prices` table** (`lookup_key, mode, price_id, created_at`;
-new migration `0013_stripe_prices.sql`, following `migrations/0011_vendor_spend_ledger.sql`) so checkout
-resolves ids without a round trip and drift is auditable. Run it lazily at first checkout AND expose an
-admin arm-time endpoint. Fail closed if it can't complete (no silent fallback to inline price_data — that
-would reintroduce the un-couponable, un-durable shape). Version suffix (`_v1`) lets a future price change
-create `_v2` without mutating historical subscriptions.
+`lookup_key`. Cache the resolved `price_id → lookup_key` in a **D1 `stripe_prices` table**
+(`lookup_key, mode, price_id, created_at`; new migration `0013_stripe_prices.sql`, following
+`migrations/0011_vendor_spend_ledger.sql`) so checkout resolves ids without a round trip and drift is
+auditable. Version suffix (`_v1`) lets a future price change create `_v2` without mutating historical
+subscriptions.
+
+**Race-safety + required arm step (adversary N3 — the lookup-then-create is NOT atomic).** Two concurrent
+first-checkouts can both `GET` nothing and both `POST` the same `lookup_key`; Stripe rejects the second
+(duplicate `lookup_key`, absent `transfer_lookup_key`) and that checkout would 500. Two mitigations,
+**both required**:
+1. **Running `ensureStripePrices` at ARM time (via the admin endpoint) is a REQUIRED step before checkout
+   is opened** — it pre-creates the Prices out of the customer request path, so the common case never
+   races. Add it to `ACTIVATION.md` as a gated step (test mode first, then live), sequenced before the
+   Stripe-key swap flips `isRealSpendArmed`.
+2. **The lazy path handles the duplicate idempotently:** on a duplicate-`lookup_key` create error,
+   **re-fetch by `lookup_key` and use the existing Price** (never surface the error to checkout). So even
+   if two requests race before the arm-time bootstrap ran, both converge to the same Price.
+
+Fail closed if the bootstrap still can't resolve a Price (no silent fallback to inline `price_data` — that
+would reintroduce the un-couponable, un-durable shape).
 
 Checkout then references Prices by id with `line_items[0] = {price: platformId, quantity: 1}`,
-`line_items[1] = {price: mailboxId, quantity: max(5, selected)}` — replacing `stripe-client.ts:85-99`.
+`line_items[1] = {price: mailboxId, quantity: max(5, provisioned-at-checkout)}` — replacing
+`stripe-client.ts:85-99`. (At the checkout moment a brand-new tenant has 0 provisioned → quantity floors
+at 5 = the $99 minimum; the count then tracks real provisioning as setup runs — §2.)
 
 ---
 
@@ -181,12 +235,19 @@ $99/$149/$249/$649 with a live `$49 + $10×N` calculator (`site/pricing.html:61-
 - **`TenantPlan` → `demo | free | managed`** (one paid literal). `isPaidPlanTier` → `isPaidPlan`
   (true for `managed`). Preset "sizes" (Start 5 / Common 10 / Growing 20 / Scale 60) are pricing-page
   affordances that all POST the same `{mailboxes: N}` — they are not distinct SKUs.
-- **`quota.capFor`** returns `min(mailbox_plan_qty, MAX_SELF_SERVE_MAILBOXES)` mailboxes and
+- **`quota.capFor`** returns a flat `MAX_SELF_SERVE_MAILBOXES` (60) mailbox ceiling and
   `ceil(mailboxes/3)` domains (bundled, `SPEC.md:225`), replacing `PLAN_QUOTAS[plan]` (`quota.ts:24-30`).
-- **Blast radius of the literal change (7 non-test files, all cited):** `isPaidPlanTier` consumers —
+  61+ mailboxes routes to a custom quote (`SPEC.md:234`), not self-serve. There is no per-tenant committed
+  number — the cap is the flat self-serve ceiling and the meter is the live provisioned count (§2).
+- **Blast radius of the literal change (all cited):** `isPaidPlanTier` consumers —
   `tenant-do.ts`, `provisioning.ts:113`, `ops-summary.ts:126`, `engine/activation.ts`, `quota.ts:25`,
-  `billing.ts` (screening guard `provisioning.ts:236`), `pricing.ts:56`. `PLAN_QUOTAS` consumers —
-  `admin/support-kb.ts`, `ops-summary.ts:126`, `quota.ts`, `billing.ts`, and the three shared files.
+  `billing.ts` (screening guard `provisioning.ts:236`), `pricing.ts:56`. `PLAN_QUOTAS` code consumers —
+  `ops-summary.ts:126`, `quota.ts`, `billing.ts`, and the three shared files. ⚠️ `admin/support-kb.ts` is
+  **NOT** a PLAN_QUOTAS code consumer (adversary N2) — its only `PLAN_QUOTAS` mention is a comment
+  (`support-kb.ts:29`) noting it deliberately does NOT import it; `draftBillingAnswer` (`:32-36`) is
+  **hardcoded customer-facing prose** with the stale `$99/$299/$799` ladder + a `$13/mailbox` rate that
+  contradicts the $10 curve. It will NOT be touched by "update PLAN_QUOTAS consumers" — it must be
+  rewritten by hand from the single pricing source (see §11).
   Tier string literal also in `stripe-client.ts:44` (PROMO_ELIGIBLE_PLAN). (NB: `packages/cli/src/commands/campaign.ts:15`'s `"launch"`/`"scale"` are the `campaign launch` **subcommand**, NOT pricing tiers — not a touchpoint.)
   Because there are zero rows, no DB `plan`-value backfill is needed; a fresh signup mints `demo` and
   checkout flips it to `managed`.
@@ -208,7 +269,7 @@ fixes the Price ids used. Coupon %-off rides identically. No new mechanic — an
 
 ---
 
-## 6. Q5 — Agency bundle (design sketch; build may defer; mechanics must not preclude it)
+## 6. Q5 — Agency bundle (DEFERRED — founder ruling 3: FOLLOW-ON; sketch only; mechanics must not preclude it)
 
 **The problem, with math.** At 50 mailboxes / 8 clients, per-tenant pricing multiplies the platform fee:
 8 × $49 + 50 × $10 = **$392 + $500 = $892** (the "Instantly kill"). The agency winner lands ~$605–631.
@@ -227,9 +288,10 @@ the $49 platform and the ~$0-marginal-COGS workspace fee are near-pure margin �
 real client count.
 
 **Stripe shape:** identical primitives — one agency subscription with **three** licensed items:
-`platform` (qty 1), `workspace` (qty = #workspaces), `mailbox` (qty = pooled count). The quantity lever
-(`set_mailbox_plan` / a `set_workspaces`) is the same `set-to-N` call on another item. **The core
-mechanic does not preclude this** — that is the design guarantee being asserted here.
+`platform` (qty 1), `workspace` (qty = #workspaces, driven by workspace create/delete), `mailbox`
+(qty = pooled provisioned count, driven by `syncMailboxQuantity` over the pool). Each is the same
+`set-to-N` call on its item. **The core mechanic does not preclude this** — that is the design guarantee
+being asserted here.
 
 **What it DOES require (why build may defer):** a billing-account → N-workspace data model. Today the
 platform is one-tenant-per-DO with per-tenant billing; an agency needs one owner subscription spanning
@@ -243,28 +305,36 @@ Stripe items.
 ## 7. Q6 — Billing-state-machine integration (freeze / dunning / teardown / G3)
 
 **The trap the brief names:** a frozen tenant's mailboxes get released → provisioned count → 0 → does
-that push `qty=0` to Stripe and fight dunning recovery? **Resolution: quantity sync is DECOUPLED from
-teardown/freeze. It fires ONLY from `set_mailbox_plan` while `billing_state='active'`.**
+that push `qty=0` to Stripe and fight dunning recovery? **Resolution: `syncMailboxQuantity` is DECOUPLED
+from teardown/freeze. It fires ONLY from the customer-initiated provision/release intents while
+`billing_state='active'`; teardown and the reconcile sweep both skip non-active tenants.**
 
-- **Dunning (`past_due`):** sends pause, but `mailbox_plan_qty` and the Stripe quantity are **untouched**
-  — the customer still owes for the committed capacity; recovery (`billing.ts:307`) restores sends with
-  no quantity change. Teardown does not run on `past_due`.
+- **Dunning (`past_due`):** sends pause, but the Stripe quantity is **untouched** — the customer still
+  owes for the mailboxes they have; recovery (`billing.ts:307`) restores sends with no quantity change.
+  Teardown does not run on `past_due`, so no release lowers the count. `syncMailboxQuantity` is a no-op
+  (not active).
 - **Freeze (`disputed`/`canceling`/`canceled`) + teardown:** teardown releases mailboxes for **vendor
   cost cleanup + G4 slot decrement** (`lifecycle.ts:165-194`, `releaseMailboxSlots`) — it must **not**
-  touch Stripe quantity. On voluntary cancel we cancel the *subscription* at Stripe (stops all billing);
-  on an involuntary freeze the subscription is already `past_due`/disputed. Lowering an item quantity on
-  a subscription that's being canceled is meaningless and risks a spurious proration credit — so skip it.
-- **Guard:** `set_mailbox_plan` calls `assertNotLifecycleFrozen(ctx, "set_mailbox_plan")`
-  (`billing-state.ts:53-60`) — a frozen tenant cannot change its plan (it must re-subscribe via
-  `/checkout` first, same as it already cannot provision). This is what stops teardown-driven release
-  from ever reaching the Stripe quantity path.
-- **G3 activationState / capacity_pending:** unchanged. If `set_mailbox_plan` raises headroom but the
-  subsequent provision hits the G2/G4 ceiling, the tenant goes `capacity_pending` (`spend-ceiling.ts`) —
-  the customer is *billed for the plan they bought* while provisioning catches up once the founder raises
-  the ceiling. That is the intended "reserved capacity" semantics (§18), and it is surfaced honestly by
-  G3 (`ops-summary.ts` account() `activationState`). Flag for founder (Open Q2): billing the committed
-  count while `capacity_pending` means a tenant can pay before all mailboxes are live — acceptable under
-  "reserved capacity," but name it in the checkout/quote copy.
+  call `syncMailboxQuantity`. On voluntary cancel we cancel the *subscription* at Stripe (stops all
+  billing); on an involuntary freeze the subscription is already `past_due`/disputed. Lowering an item
+  quantity on a subscription that's being canceled is meaningless and risks a spurious proration credit —
+  so skip it. Because `syncMailboxQuantity` guards on `billing_state='active'`, a teardown-driven release
+  can never reach the Stripe quantity path.
+- **Guard:** every customer-initiated add/remove intent calls `assertNotLifecycleFrozen(ctx, …)`
+  (`billing-state.ts:53-60`) — a frozen tenant cannot provision or deprovision (it must re-subscribe via
+  `/checkout` first). `syncMailboxQuantity` itself also re-reads `billing_state` and no-ops unless active,
+  as defense-in-depth.
+- **G3 activationState / capacity_pending (adversary N1 — now DISSOLVES under the active meter):** if a
+  provision hits the G2 spend ceiling or the G4 slot cap, the mailbox **never provisions** — it never gets
+  a row with `released_at IS NULL`, so it **never enters the billed count**. The tenant goes
+  `capacity_pending` (`spend-ceiling.ts`) and is **NOT billed for the held capacity** — the bill only ever
+  reflects mailboxes that actually came up. This is the whole payoff of the active meter: no customer is
+  ever charged for capacity the platform structurally cannot deliver. (Under the rejected committed meter,
+  the aggregate of tenants' committed counts could exceed the account-wide `INBOXKIT_PLAN_SLOTS=10`
+  (`spend-ceiling.ts`) and a tenant could pay for undeliverable slots — that oversell risk is gone.)
+  **Residual (one line):** aggregate PROVISIONED demand across all tenants can still hit the account slot
+  cap, so a new provision attempt is held `capacity_pending` until the founder raises the plan —
+  **unbilled and honest** (surfaced via G3 `activationState`, `ops-summary.ts` account()).
 
 ---
 
@@ -274,22 +344,27 @@ The codebase already uses record-before-push + reconcile for credential pushes
 (`maybePushProvisionedMailbox`, swallow-and-retry) and for spend reservations
 (`reapStaleReservations`, `spend-ceiling.ts:329-360`). Apply the same:
 
-1. **Local first, always.** `set_mailbox_plan` writes `mailbox_plan_qty` (durable, DO SQLite) **before**
-   any Stripe call. `mailbox_plan_qty` is the source of truth for both billing intent and provisioning cap.
-2. **Push is a mirror, and idempotent by SET-not-INCREMENT.** Sync sets the Stripe item quantity **to N**
-   (absolute), never `+1`. A missed/duplicated push self-heals: the next sync sets the same N. Store
-   `mailbox_qty_synced` (last value Stripe confirmed) alongside `mailbox_plan_qty`; `synced != plan`
-   marks drift.
+1. **The durable record IS the mailbox rows.** The source of truth for "how many mailboxes this tenant
+   has" is `COUNT(*) FROM mailboxes WHERE released_at IS NULL` — written by the provision path
+   (`provisioning.ts:88-105`, row insert) and the release path (`released_at = now`) **before** any Stripe
+   call. There is no separate committed number to keep consistent with reality; reality is the record.
+2. **The desired Stripe quantity is DERIVED, and the push is idempotent by SET-not-INCREMENT.**
+   `desired = max(5, provisionedCount)`. `syncMailboxQuantity` sets the Stripe item quantity **to
+   `desired`** (absolute), never `+1`. A missed/duplicated push self-heals: the next sync recomputes the
+   same `desired` and sets it. Store `mailbox_qty_synced` (last value Stripe confirmed) on the tenant;
+   `synced != max(5, provisionedCount)` marks drift.
 3. **Never fail the customer action on a Stripe hiccup.** If provisioning already spent real vendor money
    (`provisioning.ts:68-105` — the slot buy committed), a failed Stripe quantity push must not roll it
-   back. Swallow, leave `synced != plan`, let the sweep retry — exactly `maybePushProvisionedMailbox`'s
+   back. Swallow, leave `synced` stale, let the sweep retry — exactly `maybePushProvisionedMailbox`'s
    contract (`provisioning.ts:138`).
 4. **Ordering makes the reverse impossible.** Provision path: vendor buy → mailbox row insert →
-   (later) reconcile quantity. "Provision failed" ⇒ no row, no headroom consumed, nothing to unwind. We
-   never push a higher quantity *before* the capacity is durably recorded.
-5. **Reconcile sweep** (new, scheduled alongside `reapStaleReservations`): for each active paid tenant
-   where `mailbox_qty_synced != mailbox_plan_qty` and `billing_state='active'`, re-issue the set-to-N.
-   Bounded, idempotent, fail-closed (drift over-restricts nothing — it just re-pushes).
+   (later) `syncMailboxQuantity`. "Provision failed" ⇒ no row, count unchanged, nothing to unwind. We
+   never push a higher quantity *before* the capacity is durably recorded — the count only rises after the
+   row exists.
+5. **Reconcile sweep** (new, scheduled alongside `reapStaleReservations`): for each **active** paid tenant
+   where `mailbox_qty_synced != max(5, provisionedCount)`, re-issue the set-to-N (increase prorates,
+   decrease `proration_behavior: "none"`). Bounded, idempotent, fail-closed, active-only (a frozen/canceled
+   tenant is skipped, so the sweep never pushes into a dunning subscription — §7).
 
 ---
 
@@ -299,8 +374,10 @@ The codebase already uses record-before-push + reconcile for credential pushes
 - `types.ts:7` — `TenantPlan` → `demo | free | managed`.
 - `pricing.ts:9-23` — retire `PaidPlanTier`/`PLAN_QUOTAS`; keep the curve constants (`:29-34`) +
   `quoteProvisionedMailboxes` (`:43-54`) as the authority; `isPaidPlanTier` → `isPaidPlan` (`:56-58`).
-- `intents.ts:64-67` — `CheckoutInput` → `{ mailboxes: int().min(5).max(60), interval: enum(["month","year"]).default("month") }`;
-  add `SetMailboxPlanInput = { mailboxes, confirm? }`.
+- `intents.ts:64-67` — `CheckoutInput` → `{ mailboxes: int().min(5).max(60), interval: enum(["month","year"]).default("month") }`.
+  No `SetMailboxPlanInput` (deleted — §2). Add a quote-before-add `confirm`/`quoteOnly` field to the
+  add-mailbox intents (`SetupInfrastructureInput`, `RequestManagedByoMailboxesInput`) and a new
+  `RemoveMailboxesInput` for the customer-initiated downgrade path.
 
 **Platform billing:**
 - `billing/stripe-client.ts` — add `ensureStripePrices()`, `setSubscriptionItemQuantity()`,
@@ -308,52 +385,79 @@ The codebase already uses record-before-push + reconcile for credential pushes
   Price line items + quantities; adjust `PROMO_ELIGIBLE_PLAN` gate (`:44`) to the single `managed` plan;
   **delete** `reportUsageRecord` (`:137-158`, deprecated metered path).
 - `engine/billing.ts` — `checkout.session.completed` (`:253-289`): capture `stripe_subscription_id` +
-  resolve/store the two subscription-item ids + set `mailbox_plan_qty`/`mailbox_qty_synced` from the
-  selected count; **delete** `reportUsageToStripeIfConfigured` (`:409-427`) and its call site; add the
-  quantity-sync helper + the reconcile sweep entry.
+  resolve/store the two subscription-item ids + **store the discount %** off the event's `discount`/
+  `total_details` object (N5) + set `mailbox_qty_synced` from the quantity actually sent at checkout
+  (`max(5, provisioned-at-checkout)`); **delete** `reportUsageToStripeIfConfigured` (`:409-427`) and its
+  call site; add `syncMailboxQuantity(ctx)` (the derived set-to-N helper) + the reconcile sweep entry.
 - `engine/provisioning.ts:113-130` — remove the per-mailbox Stripe usage report; decide whether to keep
   the local `recordUsage` ledger 'usage' write for internal COGS (recommend keep, rename intent) or drop.
-  Cap the provision loop by `mailbox_plan_qty` (via `quota.capFor`).
-- `engine/quota.ts:24-30, 49-57` — `capFor` from `mailbox_plan_qty` + `MAX_SELF_SERVE_MAILBOXES`, not
-  `PLAN_QUOTAS`.
-- `engine/ops-summary.ts:125-126` — `mrrCents` from `PLATFORM_FEE_CENTS + MAILBOX_PRICE_CENTS × mailbox_plan_qty`
-  (× coupon factor if present), not `PLAN_QUOTAS[plan]`.
-- **New intent** `set_mailbox_plan` — route + TenantDO method + MCP tool; guards
-  `assertNotLifecycleFrozen`; returns the quote before mutating.
+  After a provisioning batch completes (and while active), call `syncMailboxQuantity(ctx)`. Cap the
+  provision loop by `quota.capFor` (flat 60), not a committed number.
+- `engine/quota.ts:24-30, 49-57` — `capFor` returns a flat `MAX_SELF_SERVE_MAILBOXES` (60), not
+  `PLAN_QUOTAS[plan]`. The existing `released_at IS NULL` count (`:52-56`) is reused verbatim as the
+  billable meter.
+- `engine/ops-summary.ts:125-126` — `mrrCents` from `PLATFORM_FEE_CENTS + MAILBOX_PRICE_CENTS ×
+  max(5, provisionedCount)` × `(1 − storedDiscountPct)`, not `PLAN_QUOTAS[plan]`.
+- **New/changed intents (§2):** fold a quote-before-add confirm into `setup_infrastructure`
+  (`engine/provisioning.ts:198`) and `request_managed_byo_mailboxes` (`engine/byo-intake.ts`); add a new
+  `remove_mailboxes` deprovision intent (route + TenantDO method + MCP tool) that releases rows
+  (`released_at`) then `syncMailboxQuantity`. All guard `assertNotLifecycleFrozen`. `set_mailbox_plan` is
+  NOT built.
+- `engine/lifecycle.ts` — teardown must **not** call `syncMailboxQuantity` (§7); leave the existing
+  `releaseMailboxSlots` (`:194`) untouched.
 - `vendors/real/billing-port.ts` + `vendors/sandbox/billing-port.ts` — add `setSubscriptionQuantity`
   (+ `ensurePrices`) so the sandbox path is exercised in tests without a live Stripe call; real stays a
   coded stub until arm (`NotActivatedError`).
 
 **Data model:**
 - `tenant_profile` new columns via `ensureColumnMigrations`/`addColumnIfMissing`
-  (`tenant-do.ts:154, 296`): `mailbox_plan_qty INTEGER NOT NULL DEFAULT 0`,
-  `mailbox_qty_synced INTEGER NOT NULL DEFAULT 0`, `stripe_platform_item_id TEXT`,
-  `stripe_mailbox_item_id TEXT`, `billing_interval TEXT NOT NULL DEFAULT 'month'`. All default to values
-  that keep existing (demo) rows byte-identical.
+  (`tenant-do.ts:154, 296`): `mailbox_qty_synced INTEGER NOT NULL DEFAULT 0` (drift detection only —
+  NOT a committed meter), `stripe_platform_item_id TEXT`, `stripe_mailbox_item_id TEXT`,
+  `billing_interval TEXT NOT NULL DEFAULT 'month'`, `checkout_discount_pct INTEGER NOT NULL DEFAULT 0`
+  (N5 — the % off captured at checkout, for MRR/quote without a Stripe round-trip). No `mailbox_plan_qty`
+  (the meter is the live `released_at IS NULL` count, not a stored number). All defaults keep existing
+  (demo) rows byte-identical.
 - New D1 migration `migrations/0013_stripe_prices.sql` — `stripe_prices(lookup_key, mode, price_id, created_at)`.
 
 **Claim surfaces (coordinated batch — see §11).**
 
 ---
 
-## 10. Test strategy (Stripe fixtures — NO live calls in tests)
+## 10. Test strategy — two tiers: hermetic unit/fixtures + a REQUIRED Stripe test-mode gate
 
-- **Sandbox BillingPort drives the mechanic in tests.** `setSubscriptionQuantity`/`ensurePrices` get
-  sandbox implementations that record intents idempotently (mirroring `SandboxBillingPort.recordUsage`,
-  `vendors/sandbox/billing-port.ts`), so quantity math, proration selection, and reconcile logic are
-  unit-tested with zero network.
-- **Webhook fixtures** = static JSON event objects fed to `applyStripeWebhookEvent` (the existing
-  `test/webhook-subscriptions.test.ts` pattern) covering: `checkout.session.completed` capturing item ids
-  + initial quantity; a subscription with a 60%-off discount object present; a mid-cycle `subscription.updated`.
+**Tier 1 — hermetic (no network, the default suite):**
+- **Sandbox BillingPort drives the mechanic.** `setSubscriptionQuantity`/`ensurePrices` get sandbox
+  implementations that record intents idempotently (mirroring `SandboxBillingPort.recordUsage`,
+  `vendors/sandbox/billing-port.ts`), so quantity math, proration *selection* (which behavior we pass),
+  and reconcile logic are unit-tested with zero network.
+- **Webhook fixtures** = static JSON events fed to `applyStripeWebhookEvent` (`test/webhook-subscriptions.test.ts`
+  pattern): `checkout.session.completed` capturing item ids + initial quantity + the discount %; a
+  subscription carrying a `percent_off` discount; a mid-cycle `subscription.updated`.
 - **Behavior-asserting tests that FAIL on old code** (CLAUDE.md rule e): `quoteProvisionedMailboxes(10)`
-  → 14900; checkout builds two line items with `qty [1, max(5,N)]`; `set_mailbox_plan` returns the quote
-  before mutating and refuses when frozen; reconcile re-pushes only on `synced != plan`; teardown does NOT
-  call the quantity sync; MRR = curve, not tier table.
-- **Coupon-ride test:** a subscription carrying a `percent_off` discount, then a quantity bump → assert the
-  local projected charge applies the 60% to the new total (the code path that computes `mrrCents`/quote
-  under an active discount).
-- **Guard tests:** a coverage test that no checkout path emits inline `price_data` (must use a resolved
-  durable Price id); assert `reportUsageRecord`/`reportUsageToStripeIfConfigured` are gone (grep-guard).
+  → 14900; checkout builds two line items with `qty [1, max(5,provisioned)]`; a provision raises the count
+  and calls `syncMailboxQuantity`; a `remove_mailboxes` releases rows and syncs with `proration_behavior
+  "none"`; the reconcile re-pushes only when `synced != max(5, provisionedCount)`; teardown does NOT call
+  the sync; add-intents return a quote and refuse when frozen; `mrrCents` = curve × (1 − discount), not
+  tier table.
+- **Guard tests:** no checkout path emits inline `price_data` (must use a resolved durable Price id);
+  `reportUsageRecord`/`reportUsageToStripeIfConfigured` are gone (grep-guard).
+
+**Tier 2 — REQUIRED Stripe TEST-MODE verification at build (adversary N4).** Stripe semantics that a
+self-authored sandbox cannot prove — and that are the hardest-to-reverse money behaviors — MUST be
+verified against **real Stripe test mode** (`sk_test_` keys, no live charge) before the lane closes, not
+deferred to arm. Exact scenarios to run and assert against real Stripe responses:
+1. **Coupon-ride to a FUTURE bump:** create a subscription with a `percent_off: 60, duration: forever`
+   coupon; bump the mailbox item quantity mid-cycle; **assert the resulting proration invoice line is
+   discounted 60%** (the coupon rides to new charges, not just the first invoice).
+2. **Increase prorates:** raise quantity mid-cycle → assert a positive prorated line for the added
+   mailboxes on the upcoming invoice.
+3. **Decrease does NOT credit:** lower quantity with `proration_behavior: "none"` → assert **no credit
+   line / no negative proration** is created and the new amount takes effect next renewal (founder ruling 2).
+4. **`lookup_key` uniqueness / duplicate handling:** run `ensureStripePrices` twice concurrently against
+   test mode → assert it converges (no un-handled duplicate-`lookup_key` 400 reaches a checkout) — the N3
+   race path.
+This is a build-time gate captured as an artifact (per the ROADMAP "no artifact = the review didn't
+happen" rule), separate from the hermetic suite; it needs test keys, so it runs where those are available.
 
 ---
 
@@ -364,41 +468,65 @@ The codebase already uses record-before-push + reconcile for credential pushes
 - `site/openapi.yaml:48-49` — `/signup` + checkout description says "no live paid/Stripe checkout path
   yet"; update the `/checkout` request schema from a plan enum to `{mailboxes, interval}` and the
   operation copy. Check `:893-901` (BYO managed-mailbox pricing note).
-- **MCP** (`apps/platform/src/mcp/tools.ts`, `schemas.ts`) — add the `set_mailbox_plan` tool; the
-  `account` tool description (`tools.ts:163`) should reflect quantity billing; the
-  `request_managed_mailboxes` count is capped by `mailbox_plan_qty` headroom, not a tier.
-- `ACTIVATION.md:10` — reconcile the stale $99/$299/$799 "signed off" line to the §18 curve; the Stripe
-  live-KYC (`:21`) + webhook-secret (`:23`) steps stay; add "run `ensureStripePrices` in test then live."
+- **`apps/platform/src/admin/support-kb.ts:32-36` (adversary N2) — customer-facing, MUST rewrite.**
+  `draftBillingAnswer` is hardcoded prose quoting the retired `$99/$299/$799` ladder + a `$13/mailbox`
+  rate that contradicts the $10 curve; it drafts replies to inbound billing-support emails
+  (`support-inbound.ts` / `routes/admin-support.ts`). Rewrite the prose to the §18 curve ($49 platform +
+  $10/mailbox, min 5/$99; $249 at 20, $649 at 60; 61+ = custom quote), dropping `$13`. Not covered by
+  "update PLAN_QUOTAS consumers" (§4) — it deliberately does not import the table.
+- **MCP** (`apps/platform/src/mcp/tools.ts`, `schemas.ts`) — add a `remove_mailboxes` tool; fold the
+  quote-before-add confirm into `setup_infrastructure`/`request_managed_mailboxes`; the `account` tool
+  description (`tools.ts:163`) should reflect per-provisioned-mailbox quantity billing; the mailbox count
+  is capped by the flat 60 self-serve ceiling, not a tier. No `set_mailbox_plan` tool.
+- `ACTIVATION.md:10` — reconcile the stale $99/$299/$799 "signed off" line (2026-07-12) to the §18 curve;
+  the Stripe live-KYC (`:21`) + webhook-secret (`:23`) steps stay; **add a REQUIRED gated step: run
+  `ensureStripePrices` in test mode, then live, BEFORE opening checkout** (N3 — sequenced before the key
+  swap flips `isRealSpendArmed`).
 - `SPEC.md:236` — flip "core billing migration pending" to done once shipped; the tier table in §18 stays
-  as the reference curve.
+  as the reference curve. (No §18 meter reconciliation needed — the founder ruled the meter as
+  provisioned/active, which is what §18 already says.)
+- Out-of-scope, flag-while-in-file (adversary NEW): `support-kb.ts:45` says "~12 tools" — a stale count vs
+  the ~24-tool claim elsewhere; unrelated to billing, note for a separate sweep.
 
 ---
 
-## 12. Open founder questions (only genuinely his — ≤3)
+## 12. Founder questions — ALL RULED 2026-07-24 (nothing outstanding blocks the build)
 
-1. **Remove-proration policy:** on downgrade, **no mid-cycle credit** (recommended — takes effect next
-   renewal; closes the thrash-refund vector) vs immediate prorated credit? Default to no-credit unless he
-   says otherwise.
-2. **Bill-on-commit while `capacity_pending`:** the tenant is billed for the selected count as soon as
-   checkout completes, even if provisioning is still filling headroom or held at a spend/slot ceiling.
-   That is the "reserved capacity" reading of §18 — confirm, and confirm the quote/checkout copy says so.
-3. **Agency ownership model:** ship per-tenant quantity now and scope the agency workspace-account model
-   as a follow-on (recommended), or is the agency bundle in-scope for this same lane? (Mechanics are ready
-   either way — §6.)
+The three questions the original draft raised are resolved by the rulings at the top of this doc:
+1. **Meter (was the blocking B1):** RULED **active/provisioned** — the bill follows real provisioned
+   mailboxes; deprovision auto-lowers it; no committed-vs-provisioned divergence. (§2, §7, §8 reworked.)
+2. **Remove-proration:** RULED **no mid-cycle credit** — `proration_behavior: "none"` on decreases. (§2.)
+3. **Agency bundle:** RULED **follow-on** — sketch kept, build deferred. (§6.)
+
+No remaining founder question gates this lane. One operational item to *inform* (not decide): the N1
+residual — aggregate provisioned demand across all tenants can hit the account-wide `INBOXKIT_PLAN_SLOTS`
+cap, holding a new provision at `capacity_pending` (unbilled) until the founder raises the InboxKit plan.
+This is the existing G2/G4 back-pressure behavior, now purely a provisioning/ops signal (no billing
+consequence under the active meter), surfaced via the founder capacity alert + G3.
 
 ---
 
-## 13. Pre-brief for the adversary (known soft spots to attack)
+## 13. Pre-brief for the adversary re-verify (what the amendment changed)
 
-- The **selected-count-is-the-meter** decision vs the brief's "update from the provision/release path"
-  framing — is §8's decoupling airtight against every add/remove/teardown/freeze/re-subscribe ordering?
-- **Coupon ride** under multiple line items + a mid-cycle quantity bump — verify Stripe applies a
-  subscription-level `percent_off` to the *new* invoice total, not just the first invoice, and that
-  `payment_method_collection: "if_required"` still collects a card when 60%-off leaves a >$0 balance.
-- **Reconcile sweep** correctness: can a `set-to-N` race a concurrent webhook or a teardown and land a
-  stale N? (The `synced != plan` + active-only guard is the claimed defense.)
-- **Deprecation risk:** confirm licensed-quantity subscription items + `lookup_key` are current Stripe
-  API under the pinned `2024-06-20` (`stripe-client.ts:12`), and that removing the usage-records path
-  strands nothing.
-- **MRR/coupon reporting** now has to fold the discount into `mrrCents` — does anything downstream assume
-  `PLAN_QUOTAS[plan].priceCents`?
+The blocking B1 is closed by the founder ruling (active/provisioned meter); N1–N5 are folded in. Re-attack
+the REWORK, not the settled parts:
+- **Active-meter timing edges:** is "billing follows provisioning" airtight across every ordering —
+  provision batch mid-way, burn-replacement (release-then-provision within `REPLACE_DOMAIN`), a provision
+  that partially fails after some rows landed, re-subscribe after cancel, and the min-5 floor when
+  provisioned drops to 0 on an active sub? `syncMailboxQuantity` fires on the settled count + the
+  active-only set-to-N reconcile is the claimed defense (§8) — try to make Stripe qty diverge from
+  `max(5, released_at IS NULL count)`.
+- **Quote-before-add sufficiency:** with `set_mailbox_plan` deleted, does folding the §18 quote+confirm
+  into `setup_infrastructure`/`request_managed_mailboxes` + the new `remove_mailboxes` cover **every**
+  path that changes the provisioned count (incl. `REPLACE_DOMAIN` auto-replacement, which is loop-driven,
+  not customer-initiated — does it need a quote? argue it's cost-neutral)?
+- **Coupon ride + proration** are UNVERIFIABLE until the Tier-2 test-mode gate (§10 N4) runs — confirm the
+  four scenarios are the right coverage and that `payment_method_collection: "if_required"` still collects
+  a card at 60%-off (>$0).
+- **N3 race path:** is "arm-time pre-create (required) + duplicate-`lookup_key` re-fetch on the lazy path"
+  actually race-free, including the find-or-create **Product** step, not just the Price?
+- **Deprecation risk:** licensed-quantity items + `lookup_key` current under pinned `2024-06-20`
+  (`stripe-client.ts:12`); removing the usage-records path strands nothing.
+- **MRR/coupon:** `mrrCents` now folds `checkout_discount_pct` — does anything downstream still assume
+  `PLAN_QUOTAS[plan].priceCents`, and is the stored-% honest when a coupon is `repeating` (expires) vs
+  `forever`?
