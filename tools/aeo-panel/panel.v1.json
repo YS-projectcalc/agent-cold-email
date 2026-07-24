@@ -11,7 +11,7 @@
       "engine": "string - e.g. 'chatgpt-web', 'claude-web', 'perplexity', 'google-sge', 'copilot'",
       "date": "string - ISO date (YYYY-MM-DD) the measurement was taken",
       "status": "string - 'ok' or 'unavailable' (search errored/timed out — all fields below are null when unavailable)",
-      "mentioned": "bool|null - ColdStart / agent-cold-email mentioned anywhere in the response",
+      "mentioned": "bool|null - Coldrig / ColdStart (retired name, still counts) / agent-cold-email mentioned anywhere in the response",
       "cited": "bool|null - our URL appears as a source/citation",
       "clickable": "bool|null - the citation is a working clickable link, not just a plain-text mention",
       "position": "int|null - ordinal rank among cited sources, if the engine exposes ranking",
