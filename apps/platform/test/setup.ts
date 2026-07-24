@@ -13,7 +13,7 @@ import migration8Sql from "../migrations/0008_watchtower.sql?raw";
 import migration9Sql from "../migrations/0009_login_links.sql?raw";
 import migration11Sql from "../migrations/0011_vendor_spend_ledger.sql?raw";
 import migration12Sql from "../migrations/0012_sdn_screening.sql?raw";
-import migration13Sql from "../migrations/0013_stripe_prices.sql?raw";
+import migration15Sql from "../migrations/0015_stripe_prices.sql?raw";
 
 function statementsOf(sql: string): string[] {
   return sql
@@ -37,7 +37,7 @@ for (const statement of [
   ...statementsOf(migration9Sql),
   ...statementsOf(migration11Sql),
   ...statementsOf(migration12Sql),
-  ...statementsOf(migration13Sql),
+  ...statementsOf(migration15Sql),
 ]) {
   await env.DB.prepare(statement).run();
 }
