@@ -2,7 +2,9 @@
 
 ## What this is
 
-A versioned instrument for measuring whether AI answer engines (ChatGPT, Claude, Perplexity, Google AI Overviews, Copilot, etc.) mention, cite, or link to ColdStart when a user or agent searches for cold-email infrastructure.
+A versioned instrument for measuring whether AI answer engines (ChatGPT, Claude, Perplexity, Google AI Overviews, Copilot, etc.) mention, cite, or link to Coldrig (formerly ColdStart) when a user or agent searches for cold-email infrastructure.
+
+**Brand terms tracked:** `mentioned` counts a hit on either **Coldrig** (current name) or **ColdStart** (retired name — pre-rebrand runs, and any lingering post-rebrand indexed content, still count). This is a single field, not a per-term series — adding Coldrig broadens what counts as a hit going forward without changing the field shape or resetting `TREND.md`'s trend line. Historical rows recorded under the ColdStart-only definition are not restated.
 
 The panel is the same 46 verbatim queries every time it runs — `panel.v1.json`. Those queries were extracted, unmodified, from the frozen agent search-behavior research: `docs/research/agent-search-queries-2026-07-12.md` (8 fresh-context Claude probes, real web searches, 6+5+7+6+6+5+5+6 = 46 issued queries; see `ROADMAP.md`'s 2026-07-12 "later" entry for the count-correction pointer — the frozen doc's own body says "44" in one summary line, which undercounts; 46 is the verified total and is what this panel uses).
 
@@ -18,7 +20,7 @@ Verified 2026-07-12: zero brand-term leaks across all 46 `query` field values in
 
 1. Open a **fresh agent/search context per query** — no shared conversation history, no prior turns that could bias results toward us. Use the same engine surface consistently within a cycle (e.g. "Claude web search," "ChatGPT web," "Perplexity") and record which one in the `engine` field.
 2. For each of the 46 queries in `panel.v1.json`, run it exactly as written (verbatim — do not paraphrase) and record one measurement per the `measurement_contract.record_shape` in that file:
-   - `mentioned` — is ColdStart/agent-cold-email named anywhere in the response, even without a link.
+   - `mentioned` — is Coldrig/ColdStart/agent-cold-email named anywhere in the response, even without a link.
    - `cited` — does our URL appear as an actual source/citation (not just a mention).
    - `clickable` — is that citation a working, clickable link (some engines render citations as plain text).
    - `position` — ordinal rank among cited sources, if the engine exposes one; else `null`.

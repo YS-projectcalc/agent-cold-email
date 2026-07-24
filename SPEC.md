@@ -1,4 +1,4 @@
-# ColdStart — SPEC
+# Coldrig (working name ColdStart) — SPEC
 
 > Working name (placeholder). Canonical spec; single source of truth. Date: 2026-06-25.
 > Status: design locked through architecture; build program started 2026-07-09 (see ROADMAP.md).
@@ -57,7 +57,7 @@ The **facade is the abstraction that lets us climb L1→L2 invisibly** (same age
 
 ```
 customer's Claude Code / Codex
-        │  (one MCP line + token, or `npx coldstart ...`)
+        │  (one MCP line + token, or `npx agent-cold-email ...`)
         ▼
 [ Surface ]  curated ~8–12 tool MCP  +  CLI twin  +  discovery skill
         ▼

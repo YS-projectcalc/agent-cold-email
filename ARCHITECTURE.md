@@ -1,4 +1,4 @@
-# ColdStart — ARCHITECTURE
+# Coldrig (working name ColdStart) — ARCHITECTURE
 
 > **Status: SETTLED** (amended by adversarial panel #1, 2026-07-09). `ARCHITECTURE.md` is the living architecture record; `SPEC.md` is the canonical *design* record (§4 holds the facade-spine diagram — referenced, not duplicated). Panel amendments traced in `docs/adversarial/panel-01/SYNTHESIS.md`.
 

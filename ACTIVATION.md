@@ -1,4 +1,4 @@
-# ColdStart — ACTIVATION (owner-hands checklist)
+# Coldrig (working name ColdStart) — ACTIVATION (owner-hands checklist)
 
 > The single list of steps that need Yaakov's identity, card, or a human decision — the only things NOT done autonomously. Everything else ships in test mode. Work top-to-bottom to go live. Each item says WHY it can't be automated and WHAT's already wired waiting for it.
 > Status maintained through the build; grouped by go-live phase. Nothing here is a blocker to the test-mode product being complete.
