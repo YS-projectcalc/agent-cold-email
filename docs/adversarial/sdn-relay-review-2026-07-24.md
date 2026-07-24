@@ -136,3 +136,66 @@ within budget. Worth hardening platform-wide, not here.
 - **Runbook token hygiene.** `/root/sdn-relay.env` is written via a heredoc (default umask → typically 0644);
   `chmod 600` it. `curl -H "Authorization: Bearer $TOKEN"` is visible in `ps` while running; `openssl`/`echo`
   put the secret in shell history. All low-risk on a single-root droplet, worth tightening.
+
+---
+
+## Throttle delta — commit `7084081` (stacked on `966793b`)
+
+**Delta scope:** the alert-storm fix only — `reconcileSdnAlert()` state machine + singleton `sdn_alert_state`
+(migration 0013, mirrors `watchtower_state`), both refresh and ingest funneling through one shared streak, at
+most one email per 6h + one recovery email. The delta itself is CLEAN (no findings). Note: the worktree HEAD
+advanced from `966793b` to `7084081` DURING my core review, so my core-review reads of `sdn-alert.ts` /
+`sdn-refresh.ts` / `sdn-ingest.ts` were already the post-throttle versions — the core "alert throttle held"
+conclusions apply to the final merged artifact. Re-ran the SDN alert/refresh/ingest + `watchtower` test files
+together: **4 files / 28 tests pass**, no singleton-state cross-contamination.
+
+### Delta attacks that held
+
+- **Edge transitions (state machine).** `failure → success → failure` same day: the success resets
+  `failure_streak → 0` and `last_alert_ts → null`, so the second failure hits the `failure_streak === 0` branch
+  and re-alerts IMMEDIATELY — it does NOT eat the first streak's cooldown (tested,
+  `ofac-sdn-alert.test.ts:100`). `success` with no prior streak → `"healthy"`, no email (tested). Cooldown
+  boundary is exact: `T0+COOLDOWN-1 → suppressed`, `T0+COOLDOWN → realerted` (tested `:66`). The RED-proof (20
+  failing attempts within cooldown → 1 email, `failure_streak = 21`) reproduces the founder's 160-storm shape
+  and fails on the old unthrottled `alertSdnListFailure`. Held.
+- **Shared-state semantics.** The single `sdn_alert_state` row answers "is the SDN list loading (via EITHER
+  path)?" A recovery via the direct refresh while the relay push is broken is CORRECT, not masking: if the
+  refresh loaded a fresh list, screening HAS a fresh list, so there is no incident to alert on. Conversely a
+  successful ingest sets `fetched_at`, so the once-daily guard skips the direct refresh for 24h — no
+  cross-path thrash. Held.
+- **Migration 0013 composition.** `setup.ts` gained BOTH the `import migration13Sql` AND the
+  `...statementsOf(migration13Sql)` entry in the applied union (verified in the diff); 0013 is an independent
+  singleton table (no FK deps), applied after 0012. The full suite (787) and the 4-file co-run pass. Held.
+- **Concurrency on the state row.** `reconcileSdnAlert` is a read-modify-write (read state → decide → UPSERT)
+  with no transaction/CAS, so two concurrent failing attempts could send 2 emails or miscount the streak by
+  one. Blast radius is a rare duplicate email — it never touches the list or screening — and it MIRRORS
+  `admin/watchtower.ts`'s already-accepted non-atomic pattern. Held (accepted residual, consistent with the
+  mirror).
+
+### Delta operational note (must reach the founder)
+
+- **Subject lines changed.** Old: `[coldrig] SDN list refresh failed …` / `SDN relay ingest failed (malformed)
+  …`. New: `[coldrig] SDN list load failing — kept prior good list` / `… (still) …` / `SDN list load
+  RECOVERED`. No code/test consumer references the old subjects (grep: the only "SDN list refresh failed"
+  match is a `console.error` LOG line, not an email subject or filter). But the founder was told to Gmail-filter
+  on "SDN list refresh failed" — that filter will STOP matching. Tell them to refilter on **"SDN list load"**
+  (catches both the failing and RECOVERED subjects).
+
+---
+
+## COMBINED VERDICT (966793b + 7084081): SHIP-AFTER-FIXES
+
+The throttle delta is clean and the relay/ingest code is sound; **merge + deploy DARK is safe as-is** (with
+`SDN_INGEST_TOKEN` unset there are no ingests → no swaps → screening stays fail-closed, so nothing new is
+reachable). But this branch's SHIP is defined to also **ARM the ingest**, and arming makes the daily swap live —
+which exposes **finding 1 (the screening read-path TOCTOU fail-open)** as a *sticky* compliance fail-open: the
+gap between `screening.ts:72` (version read) and `:125` (entries read) spans a profile query AND an async
+contact-email lookup (a wider window than two adjacent awaits), and a false `clear` is tagged with the real
+`listVersion`, so the recovery sweep (which only re-screens the `LIST_UNAVAILABLE_VERSION` sentinel) never
+re-evaluates it — a sanctioned tenant cleared during the race stays cleared.
+
+**Required before the ARM step (one line, in `screening.ts` — a file this branch does not currently touch):**
+treat an empty (or below-`MIN_SDN_ENTRIES`) entry set for a NON-null active version as fail-CLOSED to `review`,
+exactly like the null-version guard at `:107` (a real active list is always ≥5000, so empty is always an
+anomaly). Land that, then arm. **Recommended, not blocking:** the monotonicity/staleness guard + the overstated
+floor comment (finding 2), and the founder Gmail-filter update above.
