@@ -164,12 +164,21 @@ initiated downgrade path, distinct from teardown):
 
 `quota.capFor` becomes `min(mailbox count already provisioned + request, MAX_SELF_SERVE_MAILBOXES)` — a
 flat 60-mailbox self-serve ceiling, not the retired tier lookup. `syncMailboxQuantity` recomputes the
-settled count and issues one **absolute set-to-N** to the stored mailbox subscription-item id (so a
-burn-replacement's release-then-provision nets to the true final count, and the reconcile sweep smooths any
-intermediate state — §8). It fires **only while `billing_state='active'`** (teardown/freeze never call it —
-§7), which is what keeps a teardown-driven release from pushing `qty=0` into a dunning/canceling
-subscription. The no-drift machinery (record-before-push + set-to-N + active-only reconcile) is unchanged;
-it is now anchored on the real provisioned count instead of a committed number.
+settled count and issues one **absolute set-to-N** to the stored mailbox subscription-item id. It fires
+**only while `billing_state='active'`** (teardown/freeze never call it — §7), which is what keeps a
+teardown-driven release from pushing `qty=0` into a dunning/canceling subscription. The no-drift machinery
+(record-before-push + set-to-N + active-only reconcile) is unchanged; it is now anchored on the real
+provisioned count instead of a committed number.
+
+**⚠️ Burn-replacement must be made bill-neutral — it is NOT today (adversary B2-rework; see §7.1).** The
+original amendment claimed `REPLACE_DOMAIN`'s "release-then-provision nets to zero," but that is
+**factually wrong against the code**: `applyReplaceDomain` (`deliverability-actions.ts:113-124`) only
+**pauses** the burned domain's mailboxes (`pauseDomainMailboxes`, `:76` — sets `deliv_status='paused'`,
+NOT `released_at`) and then provisions N replacements. `released_at` is set in exactly ONE place — full
+teardown (`lifecycle.ts:184`). So the burned mailboxes keep `released_at IS NULL`, keep counting, and the
+autonomous reconcile pushes **set-to-2N** — a silent doubling. The design now **mandates** a release
+increment (§7.1) that makes the retire leg genuinely release the burned mailboxes, so the swap nets to
+zero. The autonomous reconcile is only safe **because** that increment is required.
 
 **Proration rules (per founder ruling 2):**
 - **Increase (a provision raises the count):** `proration_behavior: "create_prorations"` — bill the
@@ -336,6 +345,49 @@ from teardown/freeze. It fires ONLY from the customer-initiated provision/releas
   cap, so a new provision attempt is held `capacity_pending` until the founder raises the plan —
   **unbilled and honest** (surfaced via G3 `activationState`, `ops-summary.ts` account()).
 
+### 7.1 REQUIRED build increment — release burned mailboxes on `REPLACE_DOMAIN` (adversary B2-rework)
+
+**The root pattern (name it — adversary's framing).** Deleting the committed number (`set_mailbox_plan`)
+removed the **pre-authorized-headroom invariant** that used to consent unattended provisioning: under the
+committed model the customer had agreed to pay up to N, so a background provision under N was pre-consented.
+Under the active meter there is no such pre-authorization, so the governing rule becomes:
+
+> **Bill-invariance for unattended paths:** any action that runs on the cron / tick without a customer in
+> the loop MUST be bill-**neutral or bill-lowering**. An autonomous action may never RAISE the billed
+> count. (There is no autonomous bill-raising path today once burn-replacement is made neutral; any FUTURE
+> one needs its own explicit-consent design — flag it then, none exists now.)
+
+`REPLACE_DOMAIN` is the one existing autonomous path that adds mailboxes, so it must net to zero on the
+meter. Today it does not (§2 ⚠️). **The build must release the burned domain's mailboxes as part of the
+retire leg**, reusing the existing teardown release path (CLAUDE.md rule c — do NOT reimplement):
+
+- **Touchpoint:** `applyReplaceDomain` (`deliverability-actions.ts:113-124`). Immediately after the
+  unconditional retire (`status='burning'` + `pauseDomainMailboxes`, `:120-124`) and **before** the
+  replacement-vs-withhold decision, RELEASE the burned domain's mailboxes: vendor `mailbox.release` +
+  revoke pushed credentials + stamp `released_at` + decrement the G4 slot counter by the `slot_counted`
+  count. Placing it on the unconditional retire leg makes **all three** sub-paths bill-neutral-or-lowering:
+  replacement succeeds → release N then provision N = **net 0**; replacement withheld (cap hit, `:125-137`)
+  or its vendor call throws (caught, `:167+`) → release N, no provision = **−N** (honest, `proration_behavior
+  "none"`, no credit). Never +N.
+- **Reuse, don't reimplement:** extract the teardown release loop (`lifecycle.ts:160-194`) into a shared
+  `releaseMailboxes(ctx, { domainId? })` helper — `domainId` given ⇒ `AND domain_id = ?` (REPLACE_DOMAIN);
+  omitted ⇒ all tenant mailboxes (teardown). Both call it. **Preserve the revoke-BEFORE-mark ordering**
+  (`lifecycle.ts:180-186`: `revokePushedMailboxCredentials` then `UPDATE released_at`) so a crash between
+  the vendor release and the mark leaves the row unmarked and a retry re-attempts both idempotently.
+- **Sync placement:** `applyReplaceDomain` calls `syncMailboxQuantity(ctx)` after the retire+release+
+  replacement-attempt settles (covering success, withheld, and caught-failure branches), so the meter
+  reflects reality in every branch; the active-only reconcile sweep (§8.5) is the backstop.
+- **G4 slot un-leak:** releasing the burned mailboxes decrements `vendor_slot_state.slots_used`
+  (`releaseMailboxSlots`, `spend-ceiling.ts:371-376`) — fixing the vendor-slot leak the current
+  pause-only path also causes, independently of billing.
+
+**NOT in class (do not over-apply the release):** `HARD_PAUSE_DOMAIN` (`applyHardPauseDomain`,
+`deliverability-actions.ts:214-229`, `status='paused_primary'`) and the soft cap-halving throttle
+(`:232+`) **pause without retiring or replacing** — they add no mailboxes and the paused mailboxes are
+still retained capacity we pay the vendor for, which §18 explicitly counts ("temporarily health-paused …
+counts", `SPEC.md:223`). They must keep counting; releasing them would wrongly stop billing recoverable
+capacity. The release-on-burn rule is scoped to the **retire-and-replace** path only.
+
 ---
 
 ## 8. Q7 — Failure atomicity (record-before-push + reconcile; the house pattern)
@@ -404,7 +456,14 @@ The codebase already uses record-before-push + reconcile for credential pushes
   (`released_at`) then `syncMailboxQuantity`. All guard `assertNotLifecycleFrozen`. `set_mailbox_plan` is
   NOT built.
 - `engine/lifecycle.ts` — teardown must **not** call `syncMailboxQuantity` (§7); leave the existing
-  `releaseMailboxSlots` (`:194`) untouched.
+  `releaseMailboxSlots` (`:194`) untouched. **Extract** the release loop (`:160-194`) into a shared
+  `releaseMailboxes(ctx, { domainId? })` (revoke-before-mark ordering preserved), reused by teardown and
+  by REPLACE_DOMAIN (§7.1).
+- **`engine/deliverability-actions.ts:113-124` (REQUIRED, adversary B2-rework — §7.1):** on the
+  `REPLACE_DOMAIN` retire leg, call `releaseMailboxes(ctx, { domainId: action.domainId })` (vendor release
+  + revoke + `released_at` + G4 decrement) so the burned mailboxes stop counting; then `syncMailboxQuantity`
+  after the replacement settles. Without this the autonomous reconcile double-bills (set-to-2N). Do NOT
+  touch `HARD_PAUSE_DOMAIN` (`:214`) or the throttle (`:232`) — pause-only, §18-counts.
 - `vendors/real/billing-port.ts` + `vendors/sandbox/billing-port.ts` — add `setSubscriptionQuantity`
   (+ `ensurePrices`) so the sandbox path is exercised in tests without a live Stripe call; real stays a
   coded stub until arm (`NotActivatedError`).
@@ -456,6 +515,10 @@ deferred to arm. Exact scenarios to run and assert against real Stripe responses
 4. **`lookup_key` uniqueness / duplicate handling:** run `ensureStripePrices` twice concurrently against
    test mode → assert it converges (no un-handled duplicate-`lookup_key` 400 reaches a checkout) — the N3
    race path.
+5. **60%-off still collects a card (adversary N-r1):** create a checkout with the 60%-off coupon and
+   `payment_method_collection: "if_required"` → assert a card **is** collected (invoice total > $0 after
+   60% off) and the **first invoice succeeds**. A discounted-but->$0 subscription created without a card
+   fails on its first renewal — this is the arm-blocking failure the sandbox cannot catch.
 This is a build-time gate captured as an artifact (per the ROADMAP "no artifact = the review didn't
 happen" rule), separate from the hermetic suite; it needs test keys, so it runs where those are available.
 
@@ -498,11 +561,16 @@ The three questions the original draft raised are resolved by the rulings at the
 2. **Remove-proration:** RULED **no mid-cycle credit** — `proration_behavior: "none"` on decreases. (§2.)
 3. **Agency bundle:** RULED **follow-on** — sketch kept, build deferred. (§6.)
 
-No remaining founder question gates this lane. One operational item to *inform* (not decide): the N1
-residual — aggregate provisioned demand across all tenants can hit the account-wide `INBOXKIT_PLAN_SLOTS`
-cap, holding a new provision at `capacity_pending` (unbilled) until the founder raises the InboxKit plan.
-This is the existing G2/G4 back-pressure behavior, now purely a provisioning/ops signal (no billing
-consequence under the active meter), surfaced via the founder capacity alert + G3.
+No remaining founder question gates this lane. Two operational items to *inform* (not decide):
+- **N1 residual:** aggregate provisioned demand across all tenants can hit the account-wide
+  `INBOXKIT_PLAN_SLOTS` cap, holding a new provision at `capacity_pending` (unbilled) until the founder
+  raises the InboxKit plan. Existing G2/G4 back-pressure, now purely a provisioning/ops signal (no billing
+  consequence under the active meter), surfaced via the founder capacity alert + G3.
+- **N-r2 copy note (dispute-won recovery):** a `disputed` tenant is torn down (mailboxes released, §7); a
+  later won dispute (`billing.ts` `charge.dispute.closed`) flips `billing_state='active'` on the same
+  subscription → the active-only reconcile pushes `set-to-max(5,0)=5` → the tenant pays the **$99 floor
+  with 0 live mailboxes** until it re-provisions. This is honest and §18-consistent (an active subscription
+  pays the min-5 floor), but the recovery/support copy should say it plainly so it isn't a surprise.
 
 ---
 
@@ -516,10 +584,15 @@ the REWORK, not the settled parts:
   provisioned drops to 0 on an active sub? `syncMailboxQuantity` fires on the settled count + the
   active-only set-to-N reconcile is the claimed defense (§8) — try to make Stripe qty diverge from
   `max(5, released_at IS NULL count)`.
-- **Quote-before-add sufficiency:** with `set_mailbox_plan` deleted, does folding the §18 quote+confirm
-  into `setup_infrastructure`/`request_managed_mailboxes` + the new `remove_mailboxes` cover **every**
-  path that changes the provisioned count (incl. `REPLACE_DOMAIN` auto-replacement, which is loop-driven,
-  not customer-initiated — does it need a quote? argue it's cost-neutral)?
+- **Bill-invariance of unattended paths (§7.1):** `REPLACE_DOMAIN` is now made bill-neutral by the
+  mandated burned-mailbox release (release N on retire, provision N → net 0; withheld/failed → −N, never
+  +N). Attack that: is the release genuinely on the unconditional retire leg (so the cap-hit and
+  vendor-throw branches are also ≤0)? Does the extracted `releaseMailboxes` preserve revoke-before-mark?
+  Is there ANY other autonomous (cron/tick) path that can RAISE the billed count without a customer in the
+  loop (the invariant forbids it)?
+- **Quote-before-add sufficiency (customer-initiated paths):** does folding the §18 quote+confirm into
+  `setup_infrastructure`/`request_managed_mailboxes` + the new `remove_mailboxes` cover **every**
+  customer-initiated path that changes the count?
 - **Coupon ride + proration** are UNVERIFIABLE until the Tier-2 test-mode gate (§10 N4) runs — confirm the
   four scenarios are the right coverage and that `payment_method_collection: "if_required"` still collects
   a card at 60%-off (>$0).
