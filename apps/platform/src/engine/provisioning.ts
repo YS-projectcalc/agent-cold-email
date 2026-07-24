@@ -2,7 +2,7 @@ import { CapacityPendingError, isPaidPlan, RegistrarUnarmedError, type SetupInfr
 import { newId } from "../schema.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { TenantContext } from "../tenant-context.js";
-import { projectMailboxQuote, syncMailboxQuantity, type MailboxQuote } from "./billing.js";
+import { buildMailboxBilling, syncMailboxQuantity, type MailboxBilling } from "./billing.js";
 import { assertNotLifecycleFrozen } from "./billing-state.js";
 import { assertBrandOwnership } from "./brand-guard.js";
 import { gatherMailboxHealth } from "./deliverability.js";
@@ -207,7 +207,7 @@ export async function runSetupInfrastructure(
   // runDeliverabilitySweep, so a test can assert the gate (a) alert content
   // with a SandboxOpsMailer without any production call site needing to change.
   mailer: OpsMailer = createOpsMailer(ctx.env),
-): Promise<{ jobId: string } | { quoteOnly: true; quote: MailboxQuote }> {
+): Promise<{ jobId: string; billing: MailboxBilling } | { quoteOnly: true; billing: MailboxBilling }> {
   // Lifecycle freeze — BEFORE any spend. A suspended/disputed/canceled tenant
   // must not provision fresh infra (real registrar/mailbox spend at activation
   // on an account we deliberately froze — adversarial panel-03 finding #5).
@@ -220,15 +220,16 @@ export async function runSetupInfrastructure(
   // Plan quota / provisioning-cap guard (B1 brief) — BEFORE any spend.
   assertWithinProvisioningCap(ctx, { domains: input.domains, mailboxes: input.domains * input.inboxesEach });
 
-  // Quote-before-add (SPEC §18 "no silent capacity addition", design §2): a
-  // preview returns the proposed new count + projected monthly WITHOUT
-  // provisioning or mutating the profile — the request is fully validated above
-  // so the quote reflects a genuinely-acceptable request.
+  // The live provisioned mailbox count (the billing meter) — read for the
+  // in-response billing projection (SPEC §18 "no silent capacity addition").
+  const liveProvisioned = (): number =>
+    ctx.sql.exec<{ n: number }>(`SELECT COUNT(*) as n FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL`, ctx.tenantId).one().n;
+
+  // Quote-before-add PREVIEW (design §2): return the PROJECTED new count +
+  // monthly WITHOUT provisioning or mutating the profile — the request is fully
+  // validated above so the projection reflects a genuinely-acceptable request.
   if (input.quoteOnly) {
-    const currentProvisioned = ctx.sql
-      .exec<{ n: number }>(`SELECT COUNT(*) as n FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL`, ctx.tenantId)
-      .one().n;
-    return { quoteOnly: true, quote: projectMailboxQuote(ctx, currentProvisioned + input.domains * input.inboxesEach) };
+    return { quoteOnly: true, billing: buildMailboxBilling(ctx, liveProvisioned() + input.domains * input.inboxesEach) };
   }
 
   ctx.sql.exec(
@@ -282,9 +283,10 @@ export async function runSetupInfrastructure(
       // retries once the founder raises the ceiling / upgrades the plan. Any
       // domains/mailboxes provisioned before the gate stay provisioned.
       // Sync the meter to the rows that actually landed (design §7 N1 — a
-      // partially-failed batch bills only what came up, floored at 5).
+      // partially-failed batch bills only what came up, floored at 5). The
+      // billing projection reflects REALITY (what landed), not the ask.
       await syncMailboxQuantity(ctx);
-      return { jobId: newId("job") };
+      return { jobId: newId("job"), billing: buildMailboxBilling(ctx, liveProvisioned()) };
     }
     if (err instanceof RegistrarUnarmedError) {
       await alertRegistrarUnarmed(ctx, input.primaryDomain, err, mailer);
@@ -296,7 +298,9 @@ export async function runSetupInfrastructure(
   // (design §2/§9 — a provision raises the count, increases prorate). No-op
   // unless active with a real Stripe subscription (syncMailboxQuantity guards).
   await syncMailboxQuantity(ctx);
-  return { jobId: newId("job") };
+  // SPEC §18 — return the new count + projected monthly on the add (no silent
+  // capacity addition); computed from the REAL post-provision count.
+  return { jobId: newId("job"), billing: buildMailboxBilling(ctx, liveProvisioned()) };
 }
 
 export interface MailboxHealthReport {

@@ -71,7 +71,7 @@ describe("removeMailboxes — customer-initiated downgrade (design §2)", () => 
     );
 
     expect(result.releasedCount).toBe(3);
-    expect(result.quote.mailboxes).toBe(5); // 8 - 3 = 5 live
+    expect(result.billing.provisionedAfter).toBe(5); // 8 - 3 = 5 live
     // The lower Stripe quantity went out with NO credit (founder ruling 2).
     const setReq = CAPTURE.find((c) => c.url.endsWith("/subscription_items/si_mbx"));
     expect(setReq).toBeDefined();
@@ -93,8 +93,8 @@ describe("removeMailboxes — customer-initiated downgrade (design §2)", () => 
       }),
     );
     expect(result.releasedCount).toBe(6);
-    expect(result.quote.mailboxes).toBe(5); // floored
-    expect(result.quote.monthlyCents).toBe(9_900); // $99 floor
+    expect(result.billing.provisionedAfter).toBe(0); // reality: all 6 released
+    expect(result.billing.projectedMonthlyCents).toBe(9_900); // billed at the $99 5-minimum floor
   });
 });
 
@@ -117,25 +117,29 @@ describe("quote-before-add — setup_infrastructure quoteOnly preview (SPEC §18
   it("returns the projected new count + monthly WITHOUT provisioning anything", async () => {
     const { token } = await mintTenant("Quote Preview Co", "managed");
 
-    const res = await api<{ quoteOnly: boolean; quote: { mailboxes: number; monthlyCents: number } }>("/setup-infrastructure", {
-      method: "POST",
-      token,
-      body: JSON.stringify({
-        brand: "Quote Preview Co",
-        primaryDomain: "quotepreview.com",
-        domains: 2,
-        inboxesEach: 5, // proposes 10 mailboxes
-        persona: "Sender",
-        physicalAddress: "1 St",
-        senderIdentity: "Sender <s@quotepreview.com>",
-        quoteOnly: true,
-      }),
-    });
+    const res = await api<{ quoteOnly: boolean; billing: { provisionedAfter: number; projectedMonthlyCents: number; formula: string } }>(
+      "/setup-infrastructure",
+      {
+        method: "POST",
+        token,
+        body: JSON.stringify({
+          brand: "Quote Preview Co",
+          primaryDomain: "quotepreview.com",
+          domains: 2,
+          inboxesEach: 5, // proposes 10 mailboxes
+          persona: "Sender",
+          physicalAddress: "1 St",
+          senderIdentity: "Sender <s@quotepreview.com>",
+          quoteOnly: true,
+        }),
+      },
+    );
 
     expect(res.status).toBe(200); // preview, not 202 (nothing provisioned)
     expect(res.body.quoteOnly).toBe(true);
-    expect(res.body.quote.mailboxes).toBe(10);
-    expect(res.body.quote.monthlyCents).toBe(4_900 + 10 * 1_000); // $149
+    expect(res.body.billing.provisionedAfter).toBe(10); // projected: 0 current + 10 proposed
+    expect(res.body.billing.projectedMonthlyCents).toBe(4_900 + 10 * 1_000); // $149
+    expect(res.body.billing.formula).toContain("$49");
 
     // Nothing was actually provisioned.
     const status = await api<{ mailboxes: number }>("/infrastructure-status", { token });

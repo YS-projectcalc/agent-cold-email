@@ -13,7 +13,6 @@ import {
   MINIMUM_BILLABLE_MAILBOXES,
   monthlyRevenueCents,
   NotFoundError,
-  quoteProvisionedMailboxes,
   ValidationError,
   type CheckoutInput,
   type RemoveMailboxesInput,
@@ -608,40 +607,44 @@ async function captureSubscriptionState(ctx: TenantContext, secretKey: string, s
   );
 }
 
-export interface MailboxQuote {
-  /** Proposed billable mailbox count = clamp(5..60, proposed). */
-  mailboxes: number;
-  /** Projected monthly price AFTER any stored checkout discount, integer cents. */
-  monthlyCents: number;
-  /** Bundled domains at ceil(mailboxes/3). */
-  estimatedDomains: number;
-  /** The discount % folded into monthlyCents (0 when none). */
-  discountPct: number;
+export interface MailboxBilling {
+  /**
+   * The mailbox count this projection is for — REALITY, not the ask (SPEC §18
+   * "the proposed new count"). On an actual add/remove it is the live provisioned
+   * count AFTER the operation (so a capacity_pending partial reflects only what
+   * landed); on a quoteOnly preview it is the projected count (current + delta).
+   */
+  provisionedAfter: number;
+  /** Projected monthly price for that count on the curve, folding any stored
+   *  checkout discount, integer cents. Floors at the 5-mailbox / $99 minimum. */
+  projectedMonthlyCents: number;
+  /** Human-readable pricing formula (SPEC §18) so no add is a silent bill surprise. */
+  formula: string;
 }
 
 /**
- * The projected bill for a proposed provisioned-mailbox count (SPEC §18 quote,
- * design §2): the clamped billable count + the curve monthly folding any
- * discount captured at checkout, so the agent can preview the impact before
- * adding/removing capacity. Read-only.
+ * The billing projection returned on EVERY mailbox add/remove response (SPEC
+ * §18 "no silent capacity addition" — the response must carry the proposed new
+ * count + projected monthly price). `provisionedAfter` is passed by the caller:
+ * the REAL post-operation count on an actual add/remove, or the projected count
+ * on a quoteOnly preview. The monthly folds the discount captured at checkout
+ * and floors at 5. Read-only.
  */
-export function projectMailboxQuote(ctx: TenantContext, proposedProvisioned: number): MailboxQuote {
-  const q = quoteProvisionedMailboxes(proposedProvisioned);
+export function buildMailboxBilling(ctx: TenantContext, provisionedAfter: number): MailboxBilling {
   const discountPct = ctx.sql
     .exec<{ d: number }>(`SELECT checkout_discount_pct as d FROM tenant_profile WHERE id = ?`, ctx.tenantId)
     .one().d;
   return {
-    mailboxes: q.mailboxes,
-    monthlyCents: monthlyRevenueCents(q.mailboxes, discountPct),
-    estimatedDomains: q.estimatedDomains,
-    discountPct,
+    provisionedAfter,
+    projectedMonthlyCents: monthlyRevenueCents(provisionedAfter, discountPct),
+    formula: "$49 platform + $10/mailbox, 5 minimum",
   };
 }
 
 export interface RemoveMailboxesResult {
   releasedCount: number;
-  /** The projected bill after the release (the lower quantity, floored at $99). */
-  quote: MailboxQuote;
+  /** The projected bill after the release (the lower count, floored at $99). */
+  billing: MailboxBilling;
 }
 
 /**
@@ -659,5 +662,5 @@ export async function removeMailboxes(ctx: TenantContext, input: RemoveMailboxes
   const { releasedCount } = await releaseMailboxes(ctx, { limit: input.count });
   // Decrease: syncMailboxQuantity picks proration_behavior 'none' (desired < synced).
   await syncMailboxQuantity(ctx);
-  return { releasedCount, quote: projectMailboxQuote(ctx, provisionedMailboxCount(ctx)) };
+  return { releasedCount, billing: buildMailboxBilling(ctx, provisionedMailboxCount(ctx)) };
 }
