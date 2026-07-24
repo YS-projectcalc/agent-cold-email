@@ -20,9 +20,9 @@
     "description": "One token per tenant, obtained via POST https://agent-cold-email-api.yaakovscher.workers.dev/signup (no auth required for signup itself). Pass as Authorization: Bearer <token>."
   },
   "status": "live",
-  "statusNote": "Live in production: the hosted API, MCP endpoint, npm CLI, isolated sandbox, and real sending (Gmail API, HTTPS/443) are all live. New accounts activate real sending through a short concierge step while self-serve activation and live billing finish rolling out. Demo/sandbox tenants remain structurally unable to reach vendor adapters and incur no real spend.",
+  "statusNote": "Live in production: the hosted API, MCP endpoint, npm CLI, isolated sandbox, real sending (Gmail API, HTTPS/443), and live billing (Stripe, self-serve checkout, real cards) are all live. New accounts still activate real sending through a short concierge step. Demo/sandbox tenants remain structurally unable to reach vendor adapters and incur no real spend.",
   "pricing": {
-    "model": "Starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox (a $49 platform fee + $10/mailbox, 5-mailbox minimum; ladder runs 5-60 mailboxes). No send quota — sends are not the billing meter. Self-serve live billing is rolling out; paid activation today runs through a short concierge step.",
+    "model": "Starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox (a $49 platform fee + $10/mailbox, 5-mailbox minimum; ladder runs 5-60 mailboxes). No send quota — sends are not the billing meter. Self-serve live billing (Stripe, real cards) is live; new accounts still activate real sending through a short concierge step.",
     "freeTier": "Free sandboxed demo, no signup, no card, no waitlist: POST /signup or `npx agent-cold-email demo`.",
     "url": "https://coldrig.dev/pricing"
   },
