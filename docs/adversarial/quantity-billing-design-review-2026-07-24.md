@@ -55,3 +55,40 @@ Every Stripe-behavior claim is unverified until a real (test-mode) call: coupon-
 
 - `ACTIVATION.md:10` still "signs off" $99/$299/$799 (design §1 notes it as stale); fold into the same claim-surface batch as N2 so no signed-off surface contradicts the curve.
 - `support-kb.ts`'s "~12 tools" (line ~45) is a separate stale count from the 24-tool claim elsewhere — unrelated to billing, flagging while in the file.
+
+---
+
+## Round 2 — rework verify (2026-07-24)
+
+**Target:** the amended design (`docs/research/quantity-billing-design-2026-07-23.md` @ `fbd4285`), reworked to the founder-ruled ACTIVE/PROVISIONED meter (`set_mailbox_plan`/`mailbox_plan_qty` deleted; `remove_mailbox` intent added; N2–N5 folded). Focused re-attack of the rework.
+
+### VERDICT: SHIP-AFTER-FIXES — 1 BLOCKING (new, introduced by the active-meter rework)
+
+B1 is genuinely closed (the meter is now provisioned, language clean) and N1 dissolves as claimed. But the active meter + the active-only reconcile sweep, combined with the EXISTING `REPLACE_DOMAIN` behavior, silently doubles a customer's bill on a routine deliverability event — and the design asserts that path is "cost-neutral" on a factually wrong reading of the code.
+
+### BLOCKING
+
+**B2-rework · lens 1 (spec-vs-code) + lens 6 · Autonomous burn-replacement silently doubles the billed count; the design's "cost-neutral" claim is contradicted by the code.**
+
+- **The claim.** §2 (line 168) / §13 (line 522): a burn-replacement's "release-then-provision nets to the true final count" and `REPLACE_DOMAIN` auto-replacement is "cost-neutral," so it needs no quote.
+- **The code.** `applyReplaceDomain` (`deliverability-actions.ts:120-124,~173`) retires the burning domain (`status='burning'`) and `pauseDomainMailboxes` sets `deliv_status='paused'` — it does **NOT** set `released_at` and does **NOT** release the mailboxes at the vendor. `released_at` is set in exactly ONE place: full tenant teardown (`lifecycle.ts:184`). No burned-domain cleanup sweep releases them later (grep: only `status='burning'` reads/reporting exist). So the burned mailboxes keep `released_at IS NULL`.
+- **The consequence.** The billing meter is `COUNT(*) WHERE released_at IS NULL` (§8.1). After `REPLACE_DOMAIN`: N burned-but-paused mailboxes (still counted) + N replacements (counted) = **2N**. The active-only reconcile sweep (§8.5) then computes `desired = max(5, 2N)` and pushes **set-to-2N** to Stripe — autonomously, on the cron, with **no quote and no confirm**. That is a silent capacity addition (violates SPEC §18 `SPEC.md:223` "no silent capacity addition"), it bills the customer for dead burned mailboxes, and it also leaks the burned InboxKit vendor slots (G4). Burn-replacement is a routine event (it is why `REPLACE_DOMAIN` exists), so this is the exact surprise-2x-invoice scenario the founder would be furious about.
+- **Fix (design amendment, before build):** `REPLACE_DOMAIN` (and any burn/retire path) must RELEASE the burned domain's mailboxes — set `released_at`, call `mailbox.release` at the vendor, and decrement the G4 slot counter — so the replacement truly nets to zero (release N, provision N → count unchanged → no silent addition, no double-bill, no slot leak). The design must specify this build task and correct the "cost-neutral" assertion; as written, a builder trusting "it nets" ships the double-bill.
+
+### NON-BLOCKING
+
+**N-r1 · The required test-mode gate (§10) omits the 60%-off card-collection assertion.** The four scenarios (coupon-ride, increase-prorates, decrease-no-credit, `lookup_key` duplicate) are well-chosen, but the design flags in §13 (line 524) that `payment_method_collection: "if_required"` must still collect a card at 60%-off (>$0) and does NOT make it one of the required assertions. A discounted-but->$0 subscription created without a card fails on the first invoice — add it as scenario 5.
+
+**N-r2 (minor) · Dispute-won recovery bills the floor with 0 live mailboxes.** A `disputed` tenant is torn down (mailboxes released, §7); a later won dispute (`billing.ts` `charge.dispute.closed`) sets `billing_state='active'` on the same subscription → the reconcile sweep pushes `set-to-max(5,0)=5` → the tenant pays the $99 floor with 0 live mailboxes until it re-provisions. §18-consistent (an active sub pays the min-5 floor), but worth a copy note.
+
+### Attacks that failed
+
+- **B1 residual language sweep — clean.** Every "committed" mention in the amended doc is contrastive (naming the rejected model); the meter is uniformly provisioned/active; `set_mailbox_plan`/`mailbox_plan_qty` are deleted; the mirror is "reconciled to that count, never a separately-committed number" (line 141). No residual committed behavior.
+- **N1 dissolution — verified.** A provision that hits the G2 ceiling / G4 slot cap never runs `fn()` (the `withSpendCeiling` reserve rejects first, provisioning-core review) → no mailbox row → `released_at IS NULL` count unchanged → never billed. A partially-failed batch bills only the rows that landed (floored at 5). The active meter genuinely removes the committed-model oversell-billing.
+- **Dunning recovery (past_due) — clean.** Teardown does not run on `past_due` (§7), so no release lowers the count during dunning; recovery restores sends with the count unchanged and the reconcile sweep no-ops (`synced == max(5,count)`). No phantom billing.
+- **No-drift machinery — sound.** `desired = max(5, provisionedCount)` set-to-N (absolute) + record-before-push + active-only reconcile; a lost confirmation self-heals; re-subscribe overwrites the item ids at `checkout.session.completed`; canceled/`past_due` are skipped. Stripe qty cannot silently diverge from `max(5, released_at IS NULL count)` — EXCEPT that the count itself is wrong after `REPLACE_DOMAIN` (B2-rework).
+- **Test-mode gate now in-lane (my r1 N4 addressed).** §10 makes the Stripe test-mode verification a REQUIRED gate before the lane closes, not deferred to arm — the right posture for the coupon/proration crux.
+
+### UNVERIFIABLE
+
+The Stripe-behavior claims (coupon-ride, proration direction, `lookup_key` uniqueness, licensed set-to-N under a discount) remain unverified until the §10 Tier-2 test-mode gate actually runs — now required in-lane, which is the correct resolution of r1 N4.
