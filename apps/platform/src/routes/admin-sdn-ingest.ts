@@ -27,6 +27,7 @@ const STATUS_BY_REASON: Record<SdnIngestOutcome["reason"], 200 | 400 | 422 | 500
   ingested: 200,
   malformed: 400, // structurally broken CSV (wrong column count / zero rows)
   "below-floor": 422, // syntactically valid CSV, semantically too few entries
+  stale: 422, // syntactically valid CSV, but a replay/regression vs the active list (monotonicity guard)
   "write-failed": 500, // our own D1 write failed — not the caller's fault
 };
 

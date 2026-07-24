@@ -67,6 +67,17 @@ describe("POST /admin/sdn/ingest — G1a droplet-relay ingest endpoint", () => {
       expect(res.status).toBe(401);
     });
 
+    // Adversary "method over-grant" note (docs/adversarial/
+    // sdn-relay-review-2026-07-24.md) — the carve-out is pinned to POST, so
+    // the SDN token is rejected at the AUTH layer for any other verb on this
+    // SAME path, not merely 404'd by route absence (Hono's `.use()` matches
+    // by path only, not method, so without the pin this would have passed
+    // the carve-out and only failed later for lack of a GET handler).
+    it("the SDN_INGEST_TOKEN is rejected (401) for a non-POST method on this SAME path — the carve-out is pinned to POST", async () => {
+      const res = await api("/admin/sdn/ingest", { method: "GET", headers: { authorization: `Bearer ${TEST_SDN_INGEST_TOKEN}` } });
+      expect(res.status).toBe(401);
+    });
+
     it("the regular ADMIN_TOKEN still gates every OTHER /admin/* route exactly as before (no regression)", async () => {
       const res = await adminApi("/admin/screening/reviews");
       expect(res.status).toBe(200);

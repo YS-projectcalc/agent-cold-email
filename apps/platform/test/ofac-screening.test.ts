@@ -150,6 +150,64 @@ describe("G1b — N-OF-1 fail-closed when NO SDN list is loaded yet", () => {
   });
 });
 
+// Adversary finding 1 (docs/adversarial/sdn-relay-review-2026-07-24.md) — a
+// TOCTOU fail-open in `screenTenant`: it reads `active_version` and then, in
+// a SEPARATE await, that version's entries. A concurrent swapInSdnList can
+// flip the pointer to a NEW version and delete the OLD version's rows in
+// between — this simulates EXACTLY that stale-read state directly (pointer
+// still says V1, V1's own rows are gone) without needing real concurrency.
+describe("G1b — TOCTOU fail-open guard: a stale active_version whose entries just got swept fails CLOSED, never 'clear'", () => {
+  beforeEach(async () => {
+    await env.DB.prepare(`DELETE FROM sdn_entries`).run();
+    await env.DB.prepare(`DELETE FROM sdn_list_meta`).run();
+    await env.DB.prepare(`DELETE FROM screening_reviews`).run();
+  });
+
+  it("a non-null active_version whose entries read back EMPTY holds 'review' (sentinel), not a false 'clear'", async () => {
+    const listVersion = await seedSdnList(50_000_000); // WOULD match "Globex Corp" if the rows were still there
+    // Simulate the race: a concurrent swap's post-flip cleanup
+    // (`DELETE FROM sdn_entries WHERE list_version != <new>`) ran and removed
+    // V1's rows, but `sdn_list_meta.active_version` still points to V1 at the
+    // instant this screen's first read already captured it.
+    await env.DB.prepare(`DELETE FROM sdn_entries WHERE list_version = ?`).bind(listVersion).run();
+
+    const { tenantId } = await mintTenant("Globex Corp International", "launch");
+    const mailer = new SandboxOpsMailer();
+    const result = await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout", mailer }));
+
+    // The bug this closes: WITHOUT the fix, matchAgainstSdn([...], []) finds
+    // no matches and this would be {status: 'clear', listVersion, matches: []}
+    // — a sanctioned-name tenant cleared purely by racing a list swap.
+    expect(result).toEqual({ status: "review", listVersion: LIST_UNAVAILABLE_VERSION, matches: [] });
+
+    const row = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
+      state.storage.sql.exec<{ screening_status: string; screening_list_version: string | null }>(
+        `SELECT screening_status, screening_list_version FROM tenant_profile WHERE id = ?`,
+        tenantId,
+      ).one(),
+    );
+    expect(row).toMatchObject({ screening_status: "review", screening_list_version: LIST_UNAVAILABLE_VERSION });
+
+    const review = await getScreeningReview(env, tenantId);
+    expect(review).toMatchObject({ status: "pending", listVersion: LIST_UNAVAILABLE_VERSION });
+    expect(review?.matchedTerms).toMatchObject([
+      { reason: "sdn_list_unavailable", note: expect.stringContaining("zero entries") },
+    ]);
+
+    expect(mailer.sent).toHaveLength(1);
+    expect(mailer.sent[0]?.subject).toContain("no SDN list loaded yet");
+  });
+
+  it("a NORMAL screen against a genuinely non-empty list is UNAFFECTED by the guard (no false positive)", async () => {
+    await seedSdnList(51_000_000);
+    const { tenantId } = await mintTenant("Globex Corp International", "launch");
+    const result = await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout" }));
+    expect(result.status).toBe("review"); // a REAL hit, not the sentinel
+    expect(result.listVersion).not.toBe(LIST_UNAVAILABLE_VERSION);
+    expect(result.matches).toHaveLength(1);
+  });
+});
+
 // N-OF-1 self-heal path: rescreenListUnavailableReviews (ofac/screening-recovery.ts).
 describe("G1b — SDN list-unavailable recovery sweep", () => {
   beforeEach(async () => {

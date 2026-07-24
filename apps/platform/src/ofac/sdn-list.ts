@@ -30,6 +30,12 @@ export interface SdnListMeta {
   publishedDate: string | null;
   fetchedAt: number | null;
   entryCount: number;
+  /** Adversary finding 2 (docs/adversarial/sdn-relay-review-2026-07-24.md) —
+   * a content hash of the raw feed text, written ONLY by the droplet-relay
+   * ingest (sdn-ingest.ts's monotonicity guard). The direct-fetch refresh
+   * (sdn-refresh.ts) leaves this `null` (no attacker-controlled-replay threat
+   * model on that path). */
+  contentHash: string | null;
 }
 
 export interface SdnEntryRow {
@@ -45,11 +51,12 @@ interface SdnListMetaD1Row {
   published_date: string | null;
   fetched_at: number | null;
   entry_count: number;
+  content_hash: string | null;
 }
 
 export async function getSdnListMeta(env: Env): Promise<SdnListMeta | null> {
   const row = await env.DB.prepare(
-    `SELECT active_version, published_date, fetched_at, entry_count FROM sdn_list_meta WHERE id = 1`,
+    `SELECT active_version, published_date, fetched_at, entry_count, content_hash FROM sdn_list_meta WHERE id = 1`,
   ).first<SdnListMetaD1Row>();
   if (!row) return null;
   return {
@@ -57,6 +64,7 @@ export async function getSdnListMeta(env: Env): Promise<SdnListMeta | null> {
     publishedDate: row.published_date,
     fetchedAt: row.fetched_at,
     entryCount: row.entry_count,
+    contentHash: row.content_hash,
   };
 }
 
@@ -108,7 +116,7 @@ export async function getActiveSdnEntries(env: Env, listVersion: string): Promis
  */
 export async function swapInSdnList(
   env: Env,
-  params: { listVersion: string; entries: ParsedSdnEntry[]; publishedDate: string; fetchedAt: number },
+  params: { listVersion: string; entries: ParsedSdnEntry[]; publishedDate: string; fetchedAt: number; contentHash?: string },
 ): Promise<void> {
   try {
     const statements: D1PreparedStatement[] = [];
@@ -141,15 +149,16 @@ export async function swapInSdnList(
 
   // Atomic flip — single UPDATE/UPSERT, the shadow-swap moment.
   await env.DB.prepare(
-    `INSERT INTO sdn_list_meta (id, active_version, published_date, fetched_at, entry_count)
-     VALUES (1, ?, ?, ?, ?)
+    `INSERT INTO sdn_list_meta (id, active_version, published_date, fetched_at, entry_count, content_hash)
+     VALUES (1, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        active_version = excluded.active_version,
        published_date = excluded.published_date,
        fetched_at = excluded.fetched_at,
-       entry_count = excluded.entry_count`,
+       entry_count = excluded.entry_count,
+       content_hash = excluded.content_hash`,
   )
-    .bind(params.listVersion, params.publishedDate, params.fetchedAt, params.entries.length)
+    .bind(params.listVersion, params.publishedDate, params.fetchedAt, params.entries.length, params.contentHash ?? null)
     .run();
 
   // Cleanup old versions AFTER the swap — non-load-bearing (see doc comment).

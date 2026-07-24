@@ -30,9 +30,14 @@ raw CSV to the Worker's `POST /admin/sdn/ingest`.
   cross-tenant admin power; see `require-admin-auth.ts`'s carve-out). Feeds the
   SAME `parseSdnCsv` -> `swapInSdnList` path the direct Worker fetch uses
   (`apps/platform/src/ofac/sdn-refresh.ts`), plus an additional
-  `MIN_SDN_ENTRIES` floor guard (`apps/platform/src/ofac/sdn-ingest.ts`) — a
-  stolen `SDN_INGEST_TOKEN` can at most submit a full, real-looking SDN list;
-  it cannot neuter screening by pushing a tiny "clean" one.
+  `MIN_SDN_ENTRIES` floor guard PLUS a monotonicity guard
+  (`apps/platform/src/ofac/sdn-ingest.ts`) — a stolen `SDN_INGEST_TOKEN` can
+  at most submit a full, real-looking SDN list; it cannot neuter screening by
+  pushing a tiny "clean" one, and a naive replay of an old genuine list is
+  rejected too. It CANNOT be fully closed against a large, plausibly-sized
+  list with specific names surgically removed — Treasury does not sign the
+  feed, so token secrecy is the real control for that residual, not this
+  code (see `docs/research/ofac-v1-honesty-statement-2026-07-23.md`).
 - The direct Worker fetch (`maybeRefreshSdnList`) stays the PRIMARY attempt on
   every 5-minute ops-sweep cron tick and self-heals automatically if Treasury
   ever unblocks Cloudflare egress. This relay is the arriving path, not a

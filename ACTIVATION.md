@@ -93,13 +93,15 @@
 - [ ] **OFAC screening provider** key (if using a paid list) — **CORRECTED 2026-07-21: the screening hook is NOT built** (design-lane audit found zero sanctions/screening code in apps/platform/src; the only screening is the brand-denylist BYO abuse gate; ROADMAP.md's D4 net-new framing was right, this line was wrong). OFAC = net-new build (self-serve design increment I5, docs/research/self-serve-activation-design-2026-07-21.md), required before PUBLIC self-serve GA; pilot-with-stub acceptance = pending founder ruling.
 - [ ] **SDN list droplet-relay (G1a)** — the screening list refresh needs this because the direct Worker fetch is structurally blocked: Treasury's TLS front-end 525s every Cloudflare-Worker-origin fetch to `sanctionslistservice.ofac.treas.gov` (proven live 2026-07-23/24 by two persistent cron alerts, both the legacy and direct URLs — a plain curl from a Mac/droplet gets the file fine). Until this is armed, the platform correctly fail-closes every checkout to `'review'` whenever no SDN list has ever loaded, which means founder friction on every real checkout unless a list arrives some other way. Built + tested (fixtures only): `apps/platform/src/routes/admin-sdn-ingest.ts` (`POST /admin/sdn/ingest`), `apps/platform/src/ofac/sdn-ingest.ts`, `tools/sdn-relay/push-sdn.sh` (see `tools/sdn-relay/README.md`). Owner-hands runbook (reuses the go-engine-host droplet above, or an equivalent reachable-to-Treasury host — ~10 min):
   1. **Generate + set the secret:** `SECRET=$(openssl rand -hex 24)` then (from `apps/platform`) `echo "$SECRET" | wrangler secret put SDN_INGEST_TOKEN`. A NEW dedicated secret — deliberately never `ADMIN_TOKEN`: the droplet must never hold cross-tenant admin power (see `require-admin-auth.ts`'s carve-out).
-  2. **Write the droplet-local env file** (`/root/sdn-relay.env`, NOT in this repo — CLAUDE.md rule g):
+  2. **Write the droplet-local env file** (`/root/sdn-relay.env`, NOT in this repo — CLAUDE.md rule g). Note both commands reference `$SECRET` by variable, never the literal hex value, so the secret itself never lands in shell history:
      ```
      ssh root@$IP "cat > /root/sdn-relay.env" <<EOF
      SDN_INGEST_TOKEN=$SECRET
      INGEST_URL=https://<worker-host>/admin/sdn/ingest
      EOF
+     ssh root@$IP chmod 600 /root/sdn-relay.env
      ```
+     (adversary runbook note, `docs/adversarial/sdn-relay-review-2026-07-24.md` — a heredoc-written file inherits the shell's default umask, typically `0644`; `push-sdn.sh` also warns non-fatally on next run if this slips.)
   3. **Ship the script:** `scp tools/sdn-relay/push-sdn.sh root@$IP:/root/push-sdn.sh && ssh root@$IP chmod +x /root/push-sdn.sh`.
   4. **Install the cron** (UTC): `ssh root@$IP 'echo "17 6 * * * /root/push-sdn.sh >> /var/log/sdn-relay.log 2>&1" | crontab -'`.
   5. **First manual run verifies end-to-end:** `ssh root@$IP /root/push-sdn.sh` — expect `push-sdn.sh: OK — relayed N lines, ingest returned 200`, then confirm via `curl -H "Authorization: Bearer $ADMIN_TOKEN" https://<worker-host>/admin/screening/reviews` (or a direct D1 query) that `sdn_list_meta.active_version` now starts with `sdn-relay-`.

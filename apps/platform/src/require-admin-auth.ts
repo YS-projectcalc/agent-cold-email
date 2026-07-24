@@ -32,7 +32,15 @@ export async function requireAdminAuth(c: Context<{ Bindings: Env }>, next: Next
   // matches every path under this prefix regardless of which route file
   // registers it, so this carve-out lives in the ONE shared gate rather than
   // a second competing middleware.
-  if (c.req.path === "/admin/sdn/ingest") {
+  //
+  // PINNED to POST (adversary "method over-grant" note, docs/adversarial/
+  // sdn-relay-review-2026-07-24.md): only a POST handler exists on this path
+  // today, so this method check changes nothing observable yet — but it means
+  // the SDN token's grant can never silently widen if a future GET/PUT
+  // handler is ever added here; Hono's `.use()` middleware matches by PATH
+  // only, not method, so without this the carve-out would otherwise apply to
+  // ANY verb on this path.
+  if (c.req.path === "/admin/sdn/ingest" && c.req.method === "POST") {
     const ingestConfigured = c.env.SDN_INGEST_TOKEN;
     if (ingestConfigured && presented && timingSafeEqual(ingestConfigured, presented)) {
       return next();

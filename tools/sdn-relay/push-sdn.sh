@@ -45,8 +45,27 @@ if [ -z "${INGEST_URL:-}" ]; then
   exit 1
 fi
 
+# Token-hygiene warning (adversary runbook note, docs/adversarial/
+# sdn-relay-review-2026-07-24.md) — non-fatal: flags loose permissions on the
+# env file holding the secret without blocking the push over it.
+ENV_PERMS=$(stat -c '%a' "$ENV_FILE" 2>/dev/null || stat -f '%Lp' "$ENV_FILE" 2>/dev/null || echo "?")
+if [ "$ENV_PERMS" != "600" ]; then
+  echo "push-sdn.sh: WARNING — $ENV_FILE permissions are $ENV_PERMS, expected 600 (run: chmod 600 $ENV_FILE)" >&2
+fi
+
 TMPFILE=$(mktemp)
-trap 'rm -f "$TMPFILE"' EXIT
+# The curl CONFIG file (not -H on argv) is how the bearer token stays out of
+# `ps` output while curl runs — a `-H "Authorization: Bearer $TOKEN"` on the
+# command line is visible to any other process on the box for the duration of
+# the call (adversary runbook note). The config file is created 600 and
+# removed in the SAME trap as the fetched CSV tempfile.
+CURL_CFG=$(mktemp)
+chmod 600 "$CURL_CFG"
+trap 'rm -f "$TMPFILE" "$CURL_CFG"' EXIT
+{
+  echo "header = \"Content-Type: text/csv\""
+  echo "header = \"Authorization: Bearer $SDN_INGEST_TOKEN\""
+} > "$CURL_CFG"
 
 if ! curl -sf -m 120 -o "$TMPFILE" "$SDN_URL"; then
   echo "push-sdn.sh: FAILED — curl fetch of $SDN_URL did not return 200" >&2
@@ -59,8 +78,7 @@ if [ ! -s "$TMPFILE" ]; then
 fi
 
 RESPONSE=$(curl -s -o /dev/null -w '%{http_code}' -m 60 -X POST "$INGEST_URL" \
-  -H "Content-Type: text/csv" \
-  -H "Authorization: Bearer $SDN_INGEST_TOKEN" \
+  -K "$CURL_CFG" \
   --data-binary "@$TMPFILE")
 
 if [ "$RESPONSE" != "200" ]; then
