@@ -199,3 +199,51 @@ treat an empty (or below-`MIN_SDN_ENTRIES`) entry set for a NON-null active vers
 exactly like the null-version guard at `:107` (a real active list is always ≥5000, so empty is always an
 anomaly). Land that, then arm. **Recommended, not blocking:** the monotonicity/staleness guard + the overstated
 floor comment (finding 2), and the founder Gmail-filter update above.
+
+---
+
+## Pre-arm fix ack — commit `1da4307` (stacked on `7084081`)
+
+### FINAL BRANCH VERDICT (966793b + 7084081 + 1da4307): SHIP
+
+All three verification items check out; the ARM condition is SATISFIED. Suite RUN in-worktree: **793 passed /
+111 files, exit 0** (matches the +6 claim). Both migrations 0013 AND 0014 are in `setup.ts`'s applied union
+(verified in the diff).
+
+1. **TOCTOU guard — CLOSED, and the `=== 0` choice is CORRECT (better than my `< 5000` phrasing).** The guard
+   fail-closes an empty entry set for a non-null version through the SHARED `failClosedListUnavailable` helper →
+   `LIST_UNAVAILABLE_VERSION` sentinel → the recovery sweep re-screens it, which closes the STICKY consequence I
+   raised (a false `clear` tagged with the real version would never be re-evaluated; the sentinel is). I
+   re-derived the builder's "exactly zero, never partial" claim and it holds: a version only becomes active
+   AFTER its full `.batch()` insert resolves (a partially-inserted version never gets the pointer flip), and the
+   cleanup is a SINGLE atomic `DELETE … WHERE list_version != <active>` per swap — no code path partially
+   mutates a live version's rows, so a raced stale pointer yields EXACTLY zero, never a non-empty-partial count.
+   `=== 0` is therefore both sufficient and precise, and `< 5000` would have wrongly fail-closed the 56
+   pre-existing small-fixture matcher tests. RED-proven: the new test simulates the exact race state (pointer=V1,
+   V1 rows swept) and asserts `review`/sentinel, not `clear`; a companion test proves a genuinely non-empty list
+   is unaffected.
+
+2. **Monotonicity guard — honest and RED-proven; one NON-BLOCKING doc/recovery gap on the 10% heuristic.**
+   Content-hash rejects byte-identical replay; a >10% single-step entry-count regression rejects as `stale`;
+   a different-content same-size update is accepted (all three RED-proven). The corrected comments + the new
+   honesty-statement trust-model section candidly state that targeted removal is fundamentally unclosable
+   without a signed feed and that token secrecy is the PRIMARY control — this fully resolves finding 2's
+   "overstated comment"/"undocumented residual." The 10% false-positive on a legitimate large OFAC delisting is
+   low-probability (a >10% single-day drop is historically unprecedented at ~17k entries) and SAFE-direction
+   (reject → keep the over-inclusive list → over-block for `review`, never a compliance MISS). **The one gap
+   (NON-BLOCKING):** the recovery path for that rare case. The builder's stated "manual re-ingest after review"
+   does NOT actually un-stick it — the guard compares each candidate against the still-active larger count, so
+   re-POSTing the same smaller list is rejected on every retry, indefinitely. The real un-stick is resetting the
+   `sdn_list_meta` baseline (e.g. clearing the row so `activeVersion` is null → the guard is skipped), which is
+   undocumented, and the `stale … likely a stale/incomplete feed` alert framing would steer an operator AWAY
+   from recognizing a legitimate delisting. Recommend: document the baseline-reset recovery + soften the
+   entry-count-regression alert to name the "legitimate large delisting → reset baseline" case. Not a blocker
+   (safe direction, rare).
+
+3. **Hardening — done.** Carve-out pinned to POST (`c.req.method === "POST"`, RED-proven); `push-sdn.sh` moves
+   the bearer token off argv into a `chmod 600` curl `-K` config file removed in the same trap (out of `ps`) and
+   warns non-fatally if `/root/sdn-relay.env` isn't `600`; the runbook adds the `chmod 600` step and keeps the
+   secret in `$SECRET` (never the literal) so it stays out of shell history.
+
+**Remaining operational item (unchanged, must reach the founder):** the alert subject lines changed, so a Gmail
+filter on "SDN list refresh failed" stops matching — refilter on "SDN list load".
