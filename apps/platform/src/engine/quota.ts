@@ -2,7 +2,7 @@
 // `capFor` is the single source of truth `setup_infrastructure` (quota
 // rejection) AND `account()` (reported quota) both read.
 
-import { isPaidPlanTier, PLAN_QUOTAS, ValidationError } from "@coldstart/shared";
+import { isPaidPlan, MAILBOXES_PER_DOMAIN, MAX_SELF_SERVE_MAILBOXES, ValidationError } from "@coldstart/shared";
 import type { TenantPlan } from "@coldstart/shared";
 import type { TenantContext } from "../tenant-context.js";
 
@@ -20,11 +20,18 @@ export interface ProvisioningCap {
 // quota math below (which governs actual purchased capacity).
 const SANDBOX_PROVISIONING_CAP: ProvisioningCap = { domains: 5, mailboxes: 15 };
 
-/** The cap governing `setup_infrastructure` for a tenant's current plan. */
+/**
+ * The cap governing `setup_infrastructure` for a tenant's current plan. After
+ * the tier collapse (design §4) there is no per-tier cap: the single paid
+ * `managed` plan gets the flat self-serve ceiling — 60 mailboxes with domains
+ * bundled at ceil(60/3) = 20 (SPEC §18/§20). 61+ mailboxes route to a custom
+ * quote (SPEC §18), never self-serve. The billed quantity is the LIVE
+ * provisioned count (design §2), not this cap — the cap is only the runaway
+ * guard on how much a single tenant can provision.
+ */
 export function capFor(plan: TenantPlan): ProvisioningCap {
-  if (isPaidPlanTier(plan)) {
-    const quota = PLAN_QUOTAS[plan];
-    return { domains: quota.domains, mailboxes: quota.mailboxes };
+  if (isPaidPlan(plan)) {
+    return { domains: Math.ceil(MAX_SELF_SERVE_MAILBOXES / MAILBOXES_PER_DOMAIN), mailboxes: MAX_SELF_SERVE_MAILBOXES };
   }
   return SANDBOX_PROVISIONING_CAP;
 }

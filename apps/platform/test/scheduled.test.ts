@@ -19,7 +19,7 @@ afterEach(() => vi.restoreAllMocks());
 // armed at activation.
 describe("scheduled() — the Cron Trigger entry point", () => {
   it("runs the dunning sweep for every past_due tenant without throwing", async () => {
-    const { tenantId } = await mintTenant("Cron Co", "launch");
+    const { tenantId } = await mintTenant("Cron Co", "managed");
     await failPayment(tenantId);
 
     vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(sdnValidCsv, { status: 200 }));

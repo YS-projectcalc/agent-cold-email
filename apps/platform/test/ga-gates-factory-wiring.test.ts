@@ -44,8 +44,8 @@ describe("createVendorAdapters wiring — INBOXKIT_* arming makes real mailbox p
       INBOXKIT_API_KEY: "k",
       INBOXKIT_WORKSPACE_ID: "w",
     });
-    const { tenantId } = await mintTenant("Wiring Real Co", "launch");
-    await activatePaidPlan(tenantId, "launch");
+    const { tenantId } = await mintTenant("Wiring Real Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
 
     await runInDurableObject(tenantStub(tenantId), (instance) => {
       const bundle = (instance as unknown as TenantDOWithBuildAdapters).buildAdapters();
@@ -66,8 +66,8 @@ describe("createVendorAdapters wiring — INBOXKIT_* arming makes real mailbox p
       INBOXKIT_API_KEY: undefined,
       INBOXKIT_WORKSPACE_ID: undefined,
     });
-    const { tenantId } = await mintTenant("Wiring Email-Only Co", "launch");
-    await activatePaidPlan(tenantId, "launch");
+    const { tenantId } = await mintTenant("Wiring Email-Only Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
 
     await runInDurableObject(tenantStub(tenantId), (instance) => {
       const bundle = (instance as unknown as TenantDOWithBuildAdapters).buildAdapters();

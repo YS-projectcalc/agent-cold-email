@@ -213,6 +213,14 @@ export class TenantDO extends DurableObject<Env> {
     this.addColumnIfMissing("tenant_profile", "screening_status", "TEXT NOT NULL DEFAULT 'clear'");
     this.addColumnIfMissing("tenant_profile", "screening_list_version", "TEXT");
     this.addColumnIfMissing("tenant_profile", "screened_at", "INTEGER");
+    // Quantity-billing migration (design §9) — Stripe subscription-item ids +
+    // drift-detection quantity + interval + captured discount (see schema.ts).
+    // All defaults keep existing (demo) rows byte-identical.
+    this.addColumnIfMissing("tenant_profile", "stripe_platform_item_id", "TEXT");
+    this.addColumnIfMissing("tenant_profile", "stripe_mailbox_item_id", "TEXT");
+    this.addColumnIfMissing("tenant_profile", "mailbox_qty_synced", "INTEGER NOT NULL DEFAULT 0");
+    this.addColumnIfMissing("tenant_profile", "billing_interval", "TEXT NOT NULL DEFAULT 'month'");
+    this.addColumnIfMissing("tenant_profile", "checkout_discount_pct", "INTEGER NOT NULL DEFAULT 0");
     // Created here, not in TENANT_DO_SCHEMA, so they run only after the columns
     // above are guaranteed to exist (safe for DOs that predate the column). Each
     // collapses any pre-existing rows that would violate the unique key BEFORE

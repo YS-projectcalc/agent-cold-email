@@ -2,9 +2,11 @@
 // list: these shapes are stored in D1 (control-plane index) and mirrored /
 // owned per-tenant inside TenantDO SQLite (the runtime source of truth).
 
-// "paid" was the pre-B1 placeholder; the concrete paid tiers are named
-// (SPEC.md §18) so quota/checkout logic can index PLAN_QUOTAS directly.
-export type TenantPlan = "demo" | "free" | "launch" | "growth" | "scale";
+// The quantity-billing migration (design §4) collapsed the retired 3-tier model
+// (launch/growth/scale) to ONE paid plan, `managed`, billed on the SPEC §18
+// per-mailbox curve ($49 platform + $10 × provisioned mailboxes, min 5). `demo`
+// and `free` remain the sandbox-only, 0-real-spend plans (ARCHITECTURE.md #8).
+export type TenantPlan = "demo" | "free" | "managed";
 export type TenantStatus = "active" | "suspended" | "closed";
 
 export interface TenantProfile {

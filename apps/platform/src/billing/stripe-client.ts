@@ -43,9 +43,12 @@ function stripeHeaders(secretKey: string): Record<string, string> {
 
 export interface CreateCheckoutSessionParams {
   tenantId: string;
-  plan: string;
-  priceCents: number;
-  label: string;
+  /** Durable Price id for the flat $49 platform item (qty 1). */
+  platformPriceId: string;
+  /** Durable Price id for the $10 mailbox item. */
+  mailboxPriceId: string;
+  /** Initial mailbox quantity = max(5, provisioned-at-checkout) — floors at the $99 minimum. */
+  mailboxQuantity: number;
   successUrl: string;
   cancelUrl: string;
 }
@@ -55,41 +58,31 @@ export interface StripeCheckoutSessionResult {
   url: string;
 }
 
-// I2 (self-serve activation design §2.5) — promo-eligible plan. Restricted to
-// `launch` in CODE (F2, adversarial 2026-07-21, BLOCKING): the founder's
-// 100%-off pilot coupon is for the flat-$99 launch tier only, so
-// `allow_promotion_codes`/`payment_method_collection` are only set on a
-// launch-plan session — a growth/scale checkout keeps requiring a card, same
-// as before this change, regardless of what coupon someone might try to
-// apply. This is defense-in-depth on OUR side; the actual redemption cap
-// lives at Stripe (see the REQUIRED COUPON CONSTRAINTS note below).
-const PROMO_ELIGIBLE_PLAN = "launch";
-
 /**
- * Creates a real Stripe TEST-mode Checkout Session (subscription mode, one
- * inline price per SPEC.md §18 — no pre-created Stripe Price object needed,
- * so this works the moment a test secret key is wired without any extra
- * Stripe-dashboard setup step). `client_reference_id` + metadata carry the
- * tenantId so the webhook handler can route back to the right TenantDO
- * without a separate customer->tenant index; `subscription_data.metadata`
- * copies the same onto the subscription so later subscription-level events
- * (customer.subscription.updated/deleted) carry it too.
+ * Creates a real Stripe TEST-mode Checkout Session (subscription mode) on the
+ * per-mailbox curve (design §2/§3): two DURABLE Price line items — a flat
+ * platform item (qty 1) + a mailbox item (qty = max(5, provisioned)). The
+ * durable Prices (created by `ensureStripePrices`) carry their own Product name
+ * ("Coldrig Platform"/"Coldrig Mailbox"), so checkout no longer emits inline
+ * `price_data` — a subscription-level coupon rides every line + every future
+ * quantity bump, and the Price is reusable/auditable. `client_reference_id` +
+ * metadata carry the tenantId so the webhook routes back to the right TenantDO;
+ * `subscription_data.metadata` copies it onto the subscription for later
+ * subscription-level events.
  *
- * REQUIRED COUPON CONSTRAINTS (founder-created in the Stripe dashboard —
- * F2, adversarial 2026-07-21, BLOCKING; cite this comment in the arming
- * runbook): the pilot's 100%-off promotion code MUST be minted with
- * `max_redemptions: 1` (or restricted to the pilot customer), MUST be
- * restricted to the `launch` price (this session only enables promo entry
- * for `launch` — see `PROMO_ELIGIBLE_PLAN` above), and MUST be `duration:
- * "forever"` (or a `repeating` duration covering the whole pilot term) — a
- * duration-limited coupon that later expires leaves the renewal invoice
- * charging a subscription with NO payment method on file (this is expected;
- * see engine/billing.ts's `invoice.payment_failed` handling, which is what
- * catches it and drives billing_state -> 'past_due' -> the I1 activation
- * gate off). Without `max_redemptions`/plan restriction, ANY self-serve
- * signup that discovers the code could activate real vendor spend for $0
- * (adversarial finding F2) — this is a Stripe-dashboard-only control; no
- * code here can enforce it, hence this comment.
+ * REQUIRED COUPON CONSTRAINTS (founder-created in the Stripe dashboard — F2,
+ * adversarial 2026-07-21; cite this comment in the arming runbook): the pilot
+ * promotion code (MORDYPILOT, design §0) MUST be minted with `max_redemptions:
+ * 1` (or restricted to the pilot customer) and `duration: "forever"` (or a
+ * `repeating` duration covering the whole pilot term) — a duration-limited
+ * coupon that later expires leaves the renewal invoice charging a subscription
+ * whose card was never collected at a $0-after-discount checkout (see
+ * engine/billing.ts's `invoice.payment_failed` -> 'past_due'). There is now ONE
+ * paid plan (`managed`), so `allow_promotion_codes` is enabled for every
+ * checkout; the actual redemption cap lives at Stripe. `payment_method_collection:
+ * "if_required"` still collects a card whenever the discounted invoice is > $0
+ * (e.g. a 60%-off checkout — design §10 scenario 5), so a real renewal has a
+ * card on file; only a 100%-off ($0) checkout completes without one.
  */
 export async function createStripeCheckoutSession(
   secretKey: string,
@@ -101,31 +94,15 @@ export async function createStripeCheckoutSession(
   body.set("success_url", params.successUrl);
   body.set("cancel_url", params.cancelUrl);
   body.set("metadata[tenantId]", params.tenantId);
-  body.set("metadata[plan]", params.plan);
+  body.set("metadata[plan]", "managed");
   body.set("subscription_data[metadata][tenantId]", params.tenantId);
-  body.set("subscription_data[metadata][plan]", params.plan);
+  body.set("subscription_data[metadata][plan]", "managed");
+  body.set("line_items[0][price]", params.platformPriceId);
   body.set("line_items[0][quantity]", "1");
-  body.set("line_items[0][price_data][currency]", "usd");
-  body.set("line_items[0][price_data][unit_amount]", String(params.priceCents));
-  body.set("line_items[0][price_data][recurring][interval]", "month");
-  // The customer-visible brand is Coldrig (2026-07-22 founder ORDER,
-  // ROADMAP.md; the prior internal working name is retired and must never
-  // render here again — see the brand-copy guard test in
-  // stripe-client-checkout.test.ts, which scans this file's raw source for
-  // that retired name so this comment deliberately does not spell it out).
-  // The "(test mode)" suffix is DERIVED from the secret key already threaded
-  // into this function — never hardcoded — so a real sk_live_ key
-  // (post-activation) never shows a test-mode label to a paying customer.
-  const isTestModeKey = secretKey.startsWith("sk_test_");
-  const productName = isTestModeKey ? `Coldrig ${params.label} (test mode)` : `Coldrig ${params.label}`;
-  body.set("line_items[0][price_data][product_data][name]", productName);
-  if (params.plan === PROMO_ELIGIBLE_PLAN) {
-    // §2.5: enables the code-entry box + lets a 100%-off code complete with
-    // NO card (payment_method_collection "if_required" only asks for a
-    // payment method when the invoice total is actually > 0).
-    body.set("allow_promotion_codes", "true");
-    body.set("payment_method_collection", "if_required");
-  }
+  body.set("line_items[1][price]", params.mailboxPriceId);
+  body.set("line_items[1][quantity]", String(params.mailboxQuantity));
+  body.set("allow_promotion_codes", "true");
+  body.set("payment_method_collection", "if_required");
 
   const res = await fetch(`${STRIPE_API_BASE}/checkout/sessions`, {
     method: "POST",

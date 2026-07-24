@@ -11,7 +11,7 @@ interface DunningSweepResponse {
 // dunning action; idempotent within a cycle; a current tenant produces none."
 describe("POST /admin/ops/dunning-sweep — D2 dunning / failed-payment sweep", () => {
   it("a past_due tenant produces a dunning action ('retry' on its first failure)", async () => {
-    const { tenantId } = await mintTenant("Dunning Sweep Co", "launch");
+    const { tenantId } = await mintTenant("Dunning Sweep Co", "managed");
     await failPayment(tenantId); // billing_state -> past_due, 1 recorded failure
 
     const sweep = await adminApi<DunningSweepResponse>("/admin/ops/dunning-sweep", { method: "POST" });
@@ -24,7 +24,7 @@ describe("POST /admin/ops/dunning-sweep — D2 dunning / failed-payment sweep", 
   });
 
   it("is idempotent within a cycle — a second sweep with no new failure applies nothing new", async () => {
-    const { tenantId } = await mintTenant("Dunning Idempotent Co", "launch");
+    const { tenantId } = await mintTenant("Dunning Idempotent Co", "managed");
     await failPayment(tenantId);
 
     const first = await adminApi<DunningSweepResponse>("/admin/ops/dunning-sweep", { method: "POST" });
@@ -41,7 +41,7 @@ describe("POST /admin/ops/dunning-sweep — D2 dunning / failed-payment sweep", 
   });
 
   it("escalates after repeated failures and suspends after the grace threshold", async () => {
-    const { tenantId } = await mintTenant("Dunning Escalate Co", "growth");
+    const { tenantId } = await mintTenant("Dunning Escalate Co", "managed");
     await failPayment(tenantId); // cycle 1 -> retry
     await failPayment(tenantId); // cycle 2 -> escalate
     await failPayment(tenantId);

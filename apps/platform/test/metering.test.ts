@@ -12,7 +12,7 @@ interface AccountResponse {
 // and no per-send fee).
 describe("metering aggregates per-mailbox/mo fees for a paid tenant", () => {
   it("adds a mailbox provisioning fee at setup time, and a tick adds no further usage", async () => {
-    const { tenantId, token } = await mintTenant("Metering Co", "launch");
+    const { tenantId, token } = await mintTenant("Metering Co", "managed");
 
     const setup = await api("/setup-infrastructure", {
       method: "POST",
@@ -61,7 +61,7 @@ describe("metering aggregates per-mailbox/mo fees for a paid tenant", () => {
     // retry with IDENTICAL params (e.g. a dropped response, retried
     // request) reproduces the same key, exercising the same
     // `source_send_id`-anchored idempotency as tick.ts's send path.
-    const { token } = await mintTenant("Idempotent Metering Co", "growth");
+    const { token } = await mintTenant("Idempotent Metering Co", "managed");
     const setupOnce = async () =>
       api("/setup-infrastructure", {
         method: "POST",

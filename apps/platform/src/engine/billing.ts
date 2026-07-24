@@ -7,8 +7,15 @@
 // Stripe is the source of truth once activated (ARCHITECTURE.md #3); these
 // functions mirror that state onto tenant_profile.
 
-import { isPaidPlanTier, NotFoundError, PLAN_QUOTAS, ValidationError, type CheckoutInput, type TenantPlan } from "@coldstart/shared";
-import { createStripeCheckoutSession, reportUsageRecord } from "../billing/stripe-client.js";
+import { isPaidPlan, MINIMUM_BILLABLE_MAILBOXES, NotFoundError, ValidationError, type CheckoutInput, type TenantPlan } from "@coldstart/shared";
+import {
+  createStripeCheckoutSession,
+  ensureStripePrices,
+  reportUsageRecord,
+  STRIPE_PRICES,
+  stripeMode,
+  type StripePriceMap,
+} from "../billing/stripe-client.js";
 import type { StripeEventInput } from "../billing/stripe-webhook.js";
 import type { Env } from "../env.js";
 import { newId } from "../schema.js";
@@ -55,32 +62,96 @@ export interface CheckoutResult {
   sessionId: string;
 }
 
+// The single paid plan every checkout subscribes to (design §4 — the tiers
+// collapsed to one `managed` plan billed on the per-mailbox curve).
+const MANAGED_PLAN: TenantPlan = "managed";
+
+/**
+ * The mailbox quantity to send at checkout = max(5, provisioned-at-checkout)
+ * (design §3). A brand-new tenant has 0 provisioned → floors at 5 (= the $99
+ * minimum); the count then TRACKS real provisioning as setup runs (§2). The
+ * customer's requested `input.mailboxes` bounds the intended size at the
+ * boundary (5..60 self-serve; 61+ is a custom quote) and seeds the quote, but
+ * the billed quantity mirrors provisioning, never an unprovisioned commitment.
+ */
+function checkoutMailboxQuantity(ctx: TenantContext): number {
+  const provisioned = ctx.sql
+    .exec<{ n: number }>(`SELECT COUNT(*) as n FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL`, ctx.tenantId)
+    .one().n;
+  return Math.max(MINIMUM_BILLABLE_MAILBOXES, provisioned);
+}
+
+/**
+ * Resolves the two durable Price ids for a billing interval, reading the D1
+ * `stripe_prices` cache first and only calling `ensureStripePrices` (a Stripe
+ * round trip) on a cache miss — then caching all four ids for the mode (design
+ * §3). The arm-time bootstrap pre-warms this cache so the common checkout path
+ * never races; the lazy miss here is the backstop, race-safe via
+ * ensureStripePrices' duplicate-lookup_key re-fetch.
+ */
+async function resolveCheckoutPriceIds(
+  ctx: TenantContext,
+  secretKey: string,
+  interval: "month" | "year",
+): Promise<{ platformPriceId: string; mailboxPriceId: string }> {
+  const mode = stripeMode(secretKey);
+  const platformKey = interval === "year" ? STRIPE_PRICES.platform_yearly.lookupKey : STRIPE_PRICES.platform_monthly.lookupKey;
+  const mailboxKey = interval === "year" ? STRIPE_PRICES.mailbox_yearly.lookupKey : STRIPE_PRICES.mailbox_monthly.lookupKey;
+
+  const cached = await ctx.env.DB.prepare(
+    `SELECT lookup_key, price_id FROM stripe_prices WHERE mode = ? AND lookup_key IN (?, ?)`,
+  )
+    .bind(mode, platformKey, mailboxKey)
+    .all<{ lookup_key: string; price_id: string }>();
+  const byKey = new Map(cached.results.map((r) => [r.lookup_key, r.price_id]));
+  if (byKey.has(platformKey) && byKey.has(mailboxKey)) {
+    return { platformPriceId: byKey.get(platformKey)!, mailboxPriceId: byKey.get(mailboxKey)! };
+  }
+
+  const map = await ensureStripePrices(secretKey);
+  await cacheStripePrices(ctx, mode, map);
+  return {
+    platformPriceId: interval === "year" ? map.platform_yearly : map.platform_monthly,
+    mailboxPriceId: interval === "year" ? map.mailbox_yearly : map.mailbox_monthly,
+  };
+}
+
+/** Persists the resolved `lookup_key -> price_id` map for a mode into the D1 cache (idempotent upsert). */
+async function cacheStripePrices(ctx: TenantContext, mode: string, map: StripePriceMap): Promise<void> {
+  const now = ctx.clock.now();
+  const stmt = ctx.env.DB.prepare(
+    `INSERT INTO stripe_prices (lookup_key, mode, price_id, created_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT (lookup_key, mode) DO UPDATE SET price_id = excluded.price_id`,
+  );
+  const slugs = Object.keys(STRIPE_PRICES) as (keyof StripePriceMap)[];
+  await ctx.env.DB.batch(slugs.map((slug) => stmt.bind(STRIPE_PRICES[slug].lookupKey, mode, map[slug], now)));
+}
+
 export async function startCheckout(ctx: TenantContext, input: CheckoutInput, origin: string): Promise<CheckoutResult> {
-  const quota = PLAN_QUOTAS[input.plan];
   const stripeKey = ctx.env.STRIPE_SECRET_KEY;
 
   if (stripeKey) {
+    const { platformPriceId, mailboxPriceId } = await resolveCheckoutPriceIds(ctx, stripeKey, input.interval);
     const session = await createStripeCheckoutSession(stripeKey, {
       tenantId: ctx.tenantId,
-      plan: input.plan,
-      priceCents: quota.priceCents,
-      label: quota.label,
+      platformPriceId,
+      mailboxPriceId,
+      mailboxQuantity: checkoutMailboxQuantity(ctx),
       successUrl: `${origin}/checkout/success?tenant=${ctx.tenantId}`,
       cancelUrl: `${origin}/checkout/cancel?tenant=${ctx.tenantId}`,
     });
     return { mode: "stripe", url: session.url, sessionId: session.id };
   }
 
-  // Reuse an existing PENDING session for the same plan instead of inserting a
-  // new row on every call — otherwise a tenant looping POST /checkout grows its
-  // own DO SQLite storage unboundedly (adversarial panel-03 finding #10, same
-  // self-amplifier class /demo/run was hardened against). Bounds pending
-  // sessions to at most one per (tenant, plan).
+  // Reuse an existing PENDING session instead of inserting a new row on every
+  // call — otherwise a tenant looping POST /checkout grows its own DO SQLite
+  // storage unboundedly (adversarial panel-03 finding #10). Bounds pending
+  // sessions to at most one per tenant (there is now one paid plan, `managed`).
   const existing = ctx.sql
     .exec<{ id: string }>(
       `SELECT id FROM checkout_sessions WHERE tenant_id = ? AND plan = ? AND status = 'pending' ORDER BY created_at ASC LIMIT 1`,
       ctx.tenantId,
-      input.plan,
+      MANAGED_PLAN,
     )
     .toArray()[0];
   const sessionId = existing?.id ?? newId("cs");
@@ -90,7 +161,7 @@ export async function startCheckout(ctx: TenantContext, input: CheckoutInput, or
       `INSERT INTO checkout_sessions (id, tenant_id, plan, status, created_at) VALUES (?, ?, ?, 'pending', ?)`,
       sessionId,
       ctx.tenantId,
-      input.plan,
+      MANAGED_PLAN,
       now,
     );
   }
@@ -182,7 +253,7 @@ function readStripeMetadataPlan(obj: Record<string, unknown>): TenantPlan | null
   const metadata = obj.metadata;
   if (!metadata || typeof metadata !== "object") return null;
   const plan = (metadata as Record<string, unknown>).plan;
-  return typeof plan === "string" && isPaidPlanTier(plan) ? plan : null;
+  return typeof plan === "string" && isPaidPlan(plan) ? plan : null;
 }
 
 /**

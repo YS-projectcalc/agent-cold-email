@@ -63,6 +63,26 @@ CREATE TABLE IF NOT EXISTS tenant_profile (
   -- (src/ofac/screening.ts).
   screening_list_version TEXT,
   screened_at INTEGER,
+  -- Quantity-billing migration (design §9). The Stripe subscription-item ids
+  -- resolved + stored at checkout.session.completed (getSubscription round trip),
+  -- so syncMailboxQuantity can set-to-N the mailbox item's quantity without
+  -- re-resolving. NULL until a REAL Stripe checkout completes (a simulated /
+  -- test-mode-unarmed tenant has no Stripe subscription, so the quantity
+  -- mechanic no-ops for it -- engine/billing.ts syncMailboxQuantity).
+  stripe_platform_item_id TEXT,
+  stripe_mailbox_item_id TEXT,
+  -- Last mailbox quantity Stripe confirmed (design §8.2) -- DRIFT DETECTION ONLY,
+  -- NOT a committed meter: the meter is the live released_at-IS-NULL count.
+  -- mailbox_qty_synced != max(5, provisioned) marks drift the reconcile sweep
+  -- re-pushes. DEFAULT 0 keeps existing rows byte-identical.
+  mailbox_qty_synced INTEGER NOT NULL DEFAULT 0,
+  -- The billing interval chosen at checkout ('month' | 'year'), fixing which
+  -- durable Prices the subscription uses.
+  billing_interval TEXT NOT NULL DEFAULT 'month',
+  -- The percent-off discount captured from the checkout.session.completed event
+  -- (design §9/N5), so mrrCents/quote apply it without a Stripe round trip.
+  -- 0 when no coupon. Integer percent (e.g. 60 for MORDYPILOT's 60% off).
+  checkout_discount_pct INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   clock_base INTEGER NOT NULL,
   clock_offset INTEGER NOT NULL DEFAULT 0,

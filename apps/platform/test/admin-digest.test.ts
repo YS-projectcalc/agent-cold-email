@@ -16,28 +16,30 @@ interface OpsDigestResponse {
 // aggregate numbers are exact, not just >= assertions.
 describe("GET /admin/ops/digest — D6 owner business-health rollup", () => {
   it("aggregates MRR, plan counts, and past_due count across multiple tenants", async () => {
-    const launch = await mintTenant("Digest Launch Co", "launch");
-    await activatePaidPlan(launch.tenantId, "launch"); // -> billing_state active, mrr 9900
+    const a = await mintTenant("Digest A Co", "managed");
+    await activatePaidPlan(a.tenantId, "managed"); // -> billing_state active, 0 provisioned -> mrr floor $99
 
-    const growth = await mintTenant("Digest Growth Co", "growth");
-    await activatePaidPlan(growth.tenantId, "growth"); // -> billing_state active, mrr 29900
+    const b = await mintTenant("Digest B Co", "managed");
+    await activatePaidPlan(b.tenantId, "managed"); // -> billing_state active, 0 provisioned -> mrr floor $99
 
     await mintTenant("Digest Demo Co", "demo"); // never paid -> 0 mrr
 
-    const pastDue = await mintTenant("Digest PastDue Co", "launch");
+    const pastDue = await mintTenant("Digest PastDue Co", "managed");
     await failPayment(pastDue.tenantId); // billing_state -> past_due, NOT active -> excluded from mrr
 
     const digest = await adminApi<OpsDigestResponse>("/admin/ops/digest");
     expect(digest.status).toBe(200);
 
     expect(digest.body.tenants.total).toBe(4);
-    expect(digest.body.tenants.activeByPlan.launch).toBe(2); // both launch tenants are still tenant_profile.status='active'
-    expect(digest.body.tenants.activeByPlan.growth).toBe(1);
+    // The tiers collapsed to one paid plan (design §4): all three paid tenants
+    // are status='active' (past_due is a billing_state, not a status).
+    expect(digest.body.tenants.activeByPlan.managed).toBe(3);
     expect(digest.body.tenants.activeByPlan.demo).toBe(1);
 
-    // Only the two ACTUALLY-paid-and-billing-active tenants count toward MRR
-    // — the past_due launch tenant must NOT be double-counted here.
-    expect(digest.body.mrrCents).toBe(9_900 + 29_900);
+    // Only the two ACTUALLY-paid-and-billing-active tenants count toward MRR —
+    // the past_due tenant is excluded. Each provisioned 0 mailboxes, so MRR is
+    // the $99 curve floor ($49 platform + $10 x min-5 mailboxes) per tenant.
+    expect(digest.body.mrrCents).toBe(9_900 + 9_900);
 
     expect(digest.body.pastDueCount).toBe(1);
     expect(digest.body.watchdogAlerts.some((a) => a.includes("past_due"))).toBe(true);

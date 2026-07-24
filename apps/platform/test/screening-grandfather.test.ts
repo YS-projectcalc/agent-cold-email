@@ -17,8 +17,8 @@ interface TenantDOWithGrandfather {
 
 describe("tenant-do.ts grandfatherActiveScreening — never strands an already-active tenant", () => {
   it("a tenant that is ALREADY billing_state='active' with screening_list_version NULL gets stamped 'clear' + the grandfather sentinel version", async () => {
-    const { tenantId } = await mintTenant("Grandfather Pilot Co", "launch");
-    await activatePaidPlan(tenantId, "launch"); // billing_state -> 'active' (also screens it for real via G1b's checkout hook)
+    const { tenantId } = await mintTenant("Grandfather Pilot Co", "managed");
+    await activatePaidPlan(tenantId, "managed"); // billing_state -> 'active' (also screens it for real via G1b's checkout hook)
 
     // Simulate "this row predates G1's screen-at-checkout wiring": clear the
     // columns back to the pre-screen state a genuinely-old row would have had.
@@ -55,7 +55,7 @@ describe("tenant-do.ts grandfatherActiveScreening — never strands an already-a
   });
 
   it("is a no-op (never re-stamps) once screening_list_version is ALREADY set — either by a real screen or a prior grandfather stamp", async () => {
-    const { tenantId } = await mintTenant("Grandfather Already Screened Co", "launch");
+    const { tenantId } = await mintTenant("Grandfather Already Screened Co", "managed");
     await runInDurableObject(tenantStub(tenantId), async (_i, state) => {
       state.storage.sql.exec(
         `UPDATE tenant_profile SET billing_state = 'active', screening_list_version = 'sdn-real-version-123' WHERE id = ?`,

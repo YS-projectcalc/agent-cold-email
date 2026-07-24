@@ -31,8 +31,8 @@ async function statusOf(tenantId: string): Promise<{ status: string; billing_sta
 // releasing the NEW infra = vendor-spend leak). Both FAIL on the old code.
 describe("cancel -> re-subscribe -> re-provision (finding #4)", () => {
   it("re-provisioning within cap SUCCEEDS after a cancel (released resources don't count)", async () => {
-    const { tenantId, token } = await mintTenant("Requota Co", "launch");
-    await activatePaidPlan(tenantId, "launch");
+    const { tenantId, token } = await mintTenant("Requota Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
 
     // Provision to the Launch cap (2 domains, 4 mailboxes <= 5).
     const first = await api("/setup-infrastructure", {
@@ -46,7 +46,7 @@ describe("cancel -> re-subscribe -> re-provision (finding #4)", () => {
     await api("/cancel", { method: "POST", token, body: JSON.stringify({ immediate: true }) });
 
     // Re-subscribe (a real re-checkout) -> reactivates + clears the teardown.
-    await activatePaidPlan(tenantId, "launch");
+    await activatePaidPlan(tenantId, "managed");
     expect((await statusOf(tenantId)).billing_state).toBe("active");
 
     // Re-provision within cap -> ALLOWED (the released domains no longer count).
@@ -72,8 +72,8 @@ describe("cancel -> re-subscribe -> re-provision (finding #4)", () => {
   });
 
   it("a SECOND cancel re-runs teardown on the NEW infra + books its liability", async () => {
-    const { tenantId, token } = await mintTenant("Reteardown Co", "launch");
-    await activatePaidPlan(tenantId, "launch");
+    const { tenantId, token } = await mintTenant("Reteardown Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
     await api("/setup-infrastructure", { method: "POST", token, body: setupBody("Reteardown Co", "reteardown.com", 2, 1) });
 
     // First cancel -> 2 domains released, 2 liability rows.
@@ -85,7 +85,7 @@ describe("cancel -> re-subscribe -> re-provision (finding #4)", () => {
     expect(cancel1.body.teardown.domainsReleased).toBe(2);
 
     // Re-subscribe + re-provision NEW infra.
-    await activatePaidPlan(tenantId, "launch");
+    await activatePaidPlan(tenantId, "managed");
     await api("/setup-infrastructure", { method: "POST", token, body: setupBody("Reteardown Co", "reteardown.com", 2, 1) });
 
     // SECOND cancel -> must re-run teardown on the NEW infra (old code returned
@@ -118,8 +118,8 @@ describe("cancel -> re-subscribe -> re-provision (finding #4)", () => {
 // event now un-suspends a DUNNING suspension (never a TERMINATE).
 describe("dunning suspension is reversible; terminate is not (finding #6)", () => {
   it("dunning-suspend -> subscription.updated(active) -> status active, tick resumes", async () => {
-    const { tenantId, token } = await mintTenant("Recover Co", "launch");
-    await activatePaidPlan(tenantId, "launch");
+    const { tenantId, token } = await mintTenant("Recover Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
     // Live infra + a due send.
     await api("/setup-infrastructure", { method: "POST", token, body: setupBody("Recover Co", "recover.com", 1, 2) });
     await api("/campaigns", {
@@ -158,8 +158,8 @@ describe("dunning suspension is reversible; terminate is not (finding #6)", () =
   });
 
   it("an abuse TERMINATE is NEVER un-suspended by a billing event", async () => {
-    const { tenantId } = await mintTenant("NoResurrect Co", "launch");
-    await activatePaidPlan(tenantId, "launch");
+    const { tenantId } = await mintTenant("NoResurrect Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
 
     // Terminate (abuse offboarding) -> status suspended, reason terminate, token locked.
     const term = await adminApi(`/admin/tenants/${tenantId}/terminate`, {

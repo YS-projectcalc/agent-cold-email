@@ -1,4 +1,4 @@
-import { CapacityPendingError, isPaidPlanTier, RegistrarUnarmedError, type SetupInfrastructureInput } from "@coldstart/shared";
+import { CapacityPendingError, isPaidPlan, RegistrarUnarmedError, type SetupInfrastructureInput } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { TenantContext } from "../tenant-context.js";
@@ -110,7 +110,7 @@ export async function provisionMailboxesForDomain(
     // as the ledger's source_send_id (a generic idempotency anchor, not
     // send-specific — see schema.ts), so a retried/duplicated provisioning
     // call can never double-charge this mailbox.
-    if (isPaidPlanTier(ctx.plan)) {
+    if (isPaidPlan(ctx.plan)) {
       await ctx.adapters.billing.recordUsage(
         ctx.tenantId,
         "mailbox provisioned (mo)",
@@ -230,10 +230,10 @@ export async function runSetupInfrastructure(
   // — a tenant could screen-clean at checkout, then set a sanctioned brand at
   // setup_infrastructure and evade G1 entirely. Scoped to paid tiers only:
   // demo/free can never activate regardless of screening_status
-  // (isTenantActivated requires isPaidPlanTier), so screening an
+  // (isTenantActivated requires isPaidPlan), so screening an
   // exploration-only sandbox tenant here would just be wasted D1 reads on the
   // common demo path.
-  if (isPaidPlanTier(ctx.plan)) {
+  if (isPaidPlan(ctx.plan)) {
     await screenTenant(ctx, { trigger: "brand_change" });
   }
 

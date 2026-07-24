@@ -139,7 +139,7 @@ describe("admin screening surface (G1b)", () => {
   });
 
   it("clear/reject on a tenant with NO review row on file still applies to tenant_profile honestly (reviewResolved:false)", async () => {
-    const { tenantId } = await mintTenant("Never Reviewed Co", "launch");
+    const { tenantId } = await mintTenant("Never Reviewed Co", "managed");
     const res = await adminApi<{ cleared: boolean; reviewResolved: boolean }>(`/admin/tenants/${tenantId}/screening`, {
       method: "POST",
       body: JSON.stringify({ decision: "clear" }),

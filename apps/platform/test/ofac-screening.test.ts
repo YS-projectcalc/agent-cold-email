@@ -33,7 +33,7 @@ describe("screenTenant — G1b real screening (unit level, direct call)", () => 
 
   it("no-hit brand -> status 'clear', list_version recorded, no review row, no alert", async () => {
     const listVersion = await seedSdnList(10_000_000);
-    const { tenantId } = await mintTenant("Sunrise Bakery Co", "launch");
+    const { tenantId } = await mintTenant("Sunrise Bakery Co", "managed");
     const mailer = new SandboxOpsMailer();
 
     const result = await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout", mailer }));
@@ -53,7 +53,7 @@ describe("screenTenant — G1b real screening (unit level, direct call)", () => 
 
   it("hit brand -> status 'review', review row with match context, ops alert fired — NEVER auto-rejects", async () => {
     await seedSdnList(11_000_000);
-    const { tenantId } = await mintTenant("Globex Corp International", "launch");
+    const { tenantId } = await mintTenant("Globex Corp International", "managed");
     const mailer = new SandboxOpsMailer();
 
     const result = await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout", mailer }));
@@ -81,7 +81,7 @@ describe("screenTenant — G1b real screening (unit level, direct call)", () => 
 
   it("re-screening a PREVIOUSLY-REVIEWED tenant that is now clean REOPENS-then-clears — the review row status flips but stays queryable", async () => {
     await seedSdnList(12_000_000);
-    const { tenantId } = await mintTenant("Acme", "launch"); // exact hit
+    const { tenantId } = await mintTenant("Acme", "managed"); // exact hit
     await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout" }));
     expect((await getScreeningReview(env, tenantId))?.status).toBe("pending");
   });
@@ -100,7 +100,7 @@ describe("G1b — N-OF-1 fail-closed when NO SDN list is loaded yet", () => {
 
   it("no SDN list built yet -> status 'review' (NOT 'clear'), sentinel list_version, review row, ops alert fired — activation BLOCKED", async () => {
     // No seedSdnList call — fresh env, pre-first-refresh.
-    const { tenantId } = await mintTenant("Whatever Co", "launch");
+    const { tenantId } = await mintTenant("Whatever Co", "managed");
     const mailer = new SandboxOpsMailer();
 
     const result = await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout", mailer }));
@@ -134,7 +134,7 @@ describe("G1b — N-OF-1 fail-closed when NO SDN list is loaded yet", () => {
   });
 
   it("the admin clear path still works on a list-unavailable hold (same surface as a real hit)", async () => {
-    const { tenantId } = await mintTenant("List Unavailable Admin Co", "launch");
+    const { tenantId } = await mintTenant("List Unavailable Admin Co", "managed");
     await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout" }));
     expect((await getScreeningReview(env, tenantId))?.status).toBe("pending");
 
@@ -159,7 +159,7 @@ describe("G1b — SDN list-unavailable recovery sweep", () => {
   });
 
   it("no-ops (attempted:0) while the list is STILL unavailable — never spins on nothing to recover", async () => {
-    const { tenantId } = await mintTenant("Still Stuck Co", "launch");
+    const { tenantId } = await mintTenant("Still Stuck Co", "managed");
     await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout" }));
 
     const outcome = await rescreenListUnavailableReviews(env);
@@ -168,7 +168,7 @@ describe("G1b — SDN list-unavailable recovery sweep", () => {
   });
 
   it("once a list loads, a genuinely CLEAN tenant self-heals: 'clear', real list_version, review row auto-resolved — no manual admin needed", async () => {
-    const { tenantId } = await mintTenant("Sunrise Bakery Recovery Co", "launch");
+    const { tenantId } = await mintTenant("Sunrise Bakery Recovery Co", "managed");
     await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout" }));
     expect((await getScreeningReview(env, tenantId))?.status).toBe("pending");
 
@@ -190,7 +190,7 @@ describe("G1b — SDN list-unavailable recovery sweep", () => {
   });
 
   it("once a list loads, a tenant that turns out to be a REAL match upgrades to a real, list-versioned review (never silently drops the hold)", async () => {
-    const { tenantId } = await mintTenant("Globex Corp International", "launch");
+    const { tenantId } = await mintTenant("Globex Corp International", "managed");
     await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout" }));
 
     const listVersion = await seedSdnList(31_000_000); // this fixture's list DOES contain a match for this brand
@@ -213,7 +213,7 @@ describe("G1b — SDN list-unavailable recovery sweep", () => {
   });
 
   it("is a no-op for a tenant whose hold was already resolved by a manual admin clear (fresh-read guard on the DO RPC)", async () => {
-    const { tenantId } = await mintTenant("Already Admin Cleared Co", "launch");
+    const { tenantId } = await mintTenant("Already Admin Cleared Co", "managed");
     await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout" }));
     await adminApi(`/admin/tenants/${tenantId}/screening`, { method: "POST", body: JSON.stringify({ decision: "clear" }) });
 
@@ -235,7 +235,7 @@ describe("G1b — SDN list-unavailable recovery sweep", () => {
   // wall-clock race (the standard way to test this class without literal
   // thread interleaving in a single-threaded test harness).
   it("RACE GUARD: an admin 'clear' that lands before the recovery RPC fires is NEVER overridden, even by a genuine matching list (adversary-named worst case: admin-clear + recovery-hit)", async () => {
-    const { tenantId } = await mintTenant("Globex Corp International", "launch"); // WILL match once a real list loads
+    const { tenantId } = await mintTenant("Globex Corp International", "managed"); // WILL match once a real list loads
     await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout" })); // held list-unavailable
 
     const clearRes = await adminApi(`/admin/tenants/${tenantId}/screening`, {
@@ -265,7 +265,7 @@ describe("G1b — SDN list-unavailable recovery sweep", () => {
   });
 
   it("RACE GUARD: an admin 'reject' that lands before the recovery RPC fires is NEVER overwritten to 'cleared'/'system-recovery' (adversary-named worst case: admin-reject + recovery-clean)", async () => {
-    const { tenantId, token } = await mintTenant("Sunrise Bakery Reject Race Co", "launch"); // benign -> a re-screen would find 'clear'
+    const { tenantId, token } = await mintTenant("Sunrise Bakery Reject Race Co", "managed"); // benign -> a re-screen would find 'clear'
     await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout" })); // held list-unavailable
 
     const rejectRes = await adminApi(`/admin/tenants/${tenantId}/screening`, {
@@ -313,7 +313,7 @@ describe("G1b — brand-change re-screen at setup_infrastructure (NB-1)", () => 
     await seedSdnList(13_000_000);
     // Signup + checkout brand is benign — screens clean.
     const { tenantId, token } = await signup("Sunrise Bakery Co", "founder@sunrisebakery.test");
-    await activatePaidPlan(tenantId, "launch");
+    await activatePaidPlan(tenantId, "managed");
     const afterCheckout = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
       state.storage.sql.exec<{ screening_status: string }>(`SELECT screening_status FROM tenant_profile WHERE id = ?`, tenantId).one(),
     );
@@ -411,7 +411,7 @@ describe("G1b — both checkout write sites screen", () => {
   it("the real Stripe checkout.session.completed webhook path screens (activatePaidPlan helper)", async () => {
     await seedSdnList(16_000_000);
     const { tenantId } = await signup("Globex Corp International", "founder@globexwebhook.test");
-    await activatePaidPlan(tenantId, "launch");
+    await activatePaidPlan(tenantId, "managed");
 
     const row = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
       state.storage.sql.exec<{ screening_status: string }>(`SELECT screening_status FROM tenant_profile WHERE id = ?`, tenantId).one(),

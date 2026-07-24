@@ -35,7 +35,7 @@ describe("realSendPathLive — BOTH engine AND InboxKit armed (adversary B2 corr
 });
 
 describe("deriveActivationState — pure derivation (design §G3)", () => {
-  const paidActive = { plan: "launch" as const, status: "active", billingState: "active", screening: "clear" as const };
+  const paidActive = { plan: "managed" as const, status: "active", billingState: "active", screening: "clear" as const };
 
   it("demo/free → sandbox (expected, honest)", () => {
     expect(deriveActivationState({ ...paidActive, plan: "demo", realSendPathLive: true, capacityPending: false })).toBe("sandbox");
@@ -68,15 +68,15 @@ describe("deriveActivationState — pure derivation (design §G3)", () => {
 
   it("billing freeze is checked BEFORE screening (a disputed+in-review tenant shows the dispute, not 'account review')", () => {
     expect(
-      deriveActivationState({ plan: "launch", status: "active", billingState: "disputed", screening: "review", realSendPathLive: true, capacityPending: false }),
+      deriveActivationState({ plan: "managed", status: "active", billingState: "disputed", screening: "review", realSendPathLive: true, capacityPending: false }),
     ).toBe("suspended");
     expect(
-      deriveActivationState({ plan: "launch", status: "active", billingState: "canceled", screening: "review", realSendPathLive: true, capacityPending: false }),
+      deriveActivationState({ plan: "managed", status: "active", billingState: "canceled", screening: "review", realSendPathLive: true, capacityPending: false }),
     ).toBe("canceled");
   });
 
   it("past_due (not isLifecycleFrozen) surfaces as suspended, not active", () => {
-    expect(deriveActivationState({ plan: "launch", status: "active", billingState: "past_due", screening: "clear", realSendPathLive: true, capacityPending: false })).toBe("suspended");
+    expect(deriveActivationState({ plan: "managed", status: "active", billingState: "past_due", screening: "clear", realSendPathLive: true, capacityPending: false })).toBe("suspended");
   });
 });
 
@@ -104,8 +104,8 @@ describe("account().activationState — end-to-end honest state through the real
 
   it("paid+active, NOTHING armed → pending_provisioning (silent-sandbox confident-wrong closed)", async () => {
     setEnv({ ENGINE_BASE_URL: undefined, ENGINE_AUTH_SECRET: undefined, INBOXKIT_API_KEY: undefined, INBOXKIT_WORKSPACE_ID: undefined });
-    const { tenantId } = await mintTenant("G3 Pending Co", "launch");
-    await activatePaidPlan(tenantId, "launch");
+    const { tenantId } = await mintTenant("G3 Pending Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
     const account = await accountOf(tenantId);
     expect(account.billingState).toBe("active");
     expect(account.activationState).toBe("pending_provisioning");
@@ -113,16 +113,16 @@ describe("account().activationState — end-to-end honest state through the real
 
   it("paid+active, ENGINE armed but INBOXKIT unbound → STILL pending_provisioning (adversary B2)", async () => {
     setEnv({ ENGINE_BASE_URL: "https://engine.example.internal", ENGINE_AUTH_SECRET: "s", INBOXKIT_API_KEY: undefined, INBOXKIT_WORKSPACE_ID: undefined });
-    const { tenantId } = await mintTenant("G3 Engine-Only Co", "launch");
-    await activatePaidPlan(tenantId, "launch");
+    const { tenantId } = await mintTenant("G3 Engine-Only Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
     const account = await accountOf(tenantId);
     expect(account.activationState).toBe("pending_provisioning");
   });
 
   it("paid+active, BOTH engine AND InboxKit armed → active", async () => {
     setEnv({ ENGINE_BASE_URL: "https://engine.example.internal", ENGINE_AUTH_SECRET: "s", INBOXKIT_API_KEY: "k", INBOXKIT_WORKSPACE_ID: "w" });
-    const { tenantId } = await mintTenant("G3 Fully Armed Co", "launch");
-    await activatePaidPlan(tenantId, "launch");
+    const { tenantId } = await mintTenant("G3 Fully Armed Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
     const account = await accountOf(tenantId);
     expect(account.activationState).toBe("active");
   });

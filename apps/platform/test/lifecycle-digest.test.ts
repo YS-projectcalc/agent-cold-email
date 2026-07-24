@@ -30,14 +30,14 @@ describe("GET /admin/ops/digest — D5 lifecycle wiring", () => {
   it("aggregates canceled / terminated / disputed counts + total annual-domain liability", async () => {
     // 1 canceled (voluntary IMMEDIATE, so teardown runs now and books
     // liability — an end-of-period cancel DEFERS teardown, finding #7).
-    const canceled = await mintTenant("Digest Canceled Co", "launch");
-    await activatePaidPlan(canceled.tenantId, "launch");
+    const canceled = await mintTenant("Digest Canceled Co", "managed");
+    await activatePaidPlan(canceled.tenantId, "managed");
     await provisionTwoDomains(canceled.token, "DigestCanceled");
     await api("/cancel", { method: "POST", token: canceled.token, body: JSON.stringify({ immediate: true }) });
 
     // 1 terminated (abuse), with 2 domains -> books liability + enforcement row.
-    const terminated = await mintTenant("Digest Terminated Co", "launch");
-    await activatePaidPlan(terminated.tenantId, "launch");
+    const terminated = await mintTenant("Digest Terminated Co", "managed");
+    await activatePaidPlan(terminated.tenantId, "managed");
     await provisionTwoDomains(terminated.token, "DigestTerminated");
     await adminApi(`/admin/tenants/${terminated.tenantId}/terminate`, {
       method: "POST",
@@ -45,8 +45,8 @@ describe("GET /admin/ops/digest — D5 lifecycle wiring", () => {
     });
 
     // 1 disputed (chargeback).
-    const disputed = await mintTenant("Digest Disputed Co", "launch");
-    await activatePaidPlan(disputed.tenantId, "launch");
+    const disputed = await mintTenant("Digest Disputed Co", "managed");
+    await activatePaidPlan(disputed.tenantId, "managed");
     await postWebhook({
       id: `evt_${crypto.randomUUID()}`,
       type: "charge.dispute.created",
