@@ -102,3 +102,41 @@ The Stripe-behavior claims (coupon-ride, proration direction, `lookup_key` uniqu
 3. **"No other autonomous bill-raising path today" — verified.** `mailbox.provision` is centralized in `provisioning.ts` (spend-ceiling coverage test), and its two wrappers have exactly three callers: `runSetupInfrastructure` (customer intent, quote+confirm), `requestManagedByoMailboxes` (customer — MCP tool `tools.ts:281` + route `byo-domains.ts:36`, quote+confirm), and `REPLACE_DOMAIN` (the sole autonomous path, now §7.1-neutral). `HARD_PAUSE_DOMAIN`/throttle are correctly carved out (pause-only, add no mailboxes; paused-retained capacity §18 explicitly counts). Nothing in `scheduled.ts`/`tick.ts` provisions except the deliverability sweep's `REPLACE_DOMAIN`. The governing rule ("unattended paths must be bill-neutral or bill-lowering, never bill-raising without explicit consent") holds and is now documented.
 
 N-r1 folded (test scenario 5: 60%-off still collects a card + first invoice succeeds); N-r2 carried as a copy note. Every blocking finding across both rounds is now resolved — the design is safe to build.
+
+---
+
+## Build review (2026-07-24)
+
+**Target:** the quantity-billing BUILD, branch `worktree-quantity-billing-20260724` @ `3063181` (8 commits, base `5b1edf7`). **Read-only git; ran the battery + independently re-ran the Stripe TEST-MODE gate.**
+
+### VERDICT: SHIP-AFTER-FIXES — 1 BLOCKING (deviation 4, a small §18-letter fix; the rest is thoroughly verified, including an independent real-Stripe re-run).
+
+The build is strong: 5 of 6 deviations hold, the §7.1 fix I required has a genuine RED-proof, the metered-400 path is fully deleted, MRR is curve-based, and I re-ran the Tier-2 Stripe test-mode gate myself — 5/5, confirming the coupon-ride/proration/card-collection money-crux against real Stripe. The one blocker is that the default mailbox-ADD path returns no price, leaving §18's "no silent capacity addition" enforced on removes but not adds.
+
+### BLOCKING
+
+**D4-build · lens 1 (spec-vs-code) + lens 6 · The default add path is a silent capacity addition; §18 is enforced on REMOVE but not ADD.** `SetupInfrastructureInput.quoteOnly` defaults `false` and is "backward-compatible" (`intents.ts:25`); on `quoteOnly:false` the intent provisions and returns only `{ jobId }` (`provisioning.ts:210`) — it does **not** return the proposed new count + projected monthly price. SPEC §18 (`SPEC.md:223`) requires: *"Before any mailbox addition, both the agent response and billing UI must return the proposed new count and projected monthly price; no silent capacity addition."* The build enforces explicit consent on the REMOVE path (`RemoveMailboxesInput.acknowledged: z.literal(true)`, never defaulted) but NOT on the ADD path — backwards from §18, whose rule is specifically about *additions*. **Mitigations (substantial):** the MCP tool description discloses the exact formula ($10/mailbox + $49, min 5) and instructs `quoteOnly:true` first, and the agent chose the count — so §18's SPIRIT (no bill surprise; the agent has the formula + count) is met even on the default path; only the LETTER (the response returns the price) is unmet. **Resolvable by EITHER:** returning the quote (new count + projected monthly) in every provision response / requiring an explicit confirm on add (symmetric with remove) — OR a founder ruling that formula-disclosure + quote-first-instruction satisfies §18 (a ratification, like the committed-vs-active call). Build should not self-certify §18-add compliance without one of these.
+
+### Deviations judged — 5 of 6 HELD
+
+1. **Direct `stripe-client` sync (not per-tenant BillingPort) — HELD.** `syncMailboxQuantity` (`billing.ts:527`) reads `stripe_mailbox_item_id` from the tenant's OWN `tenant_profile WHERE id = ctx.tenantId` — per-tenant isolated (no cross-tenant item-id confusion). Fail-safe: the Stripe call is in a try/catch that swallows and NEVER throws (`:562-565`), leaves `mailbox_qty_synced` stale for the reconcile — a Stripe outage can never fail the provision. Active-guarded (`:537`).
+2. **`ensureStripePrices` off the port — HELD.** Account-level bootstrap, no per-tenant isolation concern; YAGNI is fair.
+3. **Reconcile in `deliverabilitySweep` not a D1 sweep — HELD.** It's in the `deliverabilitySweep` DO RPC (`tenant-do.ts:720`), which the cron (`runDeliverabilitySweepAllTenants`) invokes for EVERY tenant → runs for all active paid tenants incl. zero-deliverability-activity ones; active-only + set-to-N + no-op-on-no-drift, so it's a cheap heal-any-drift backstop, not just a REPLACE_DOMAIN trigger.
+4. *(BLOCKING — above.)*
+5. **`site/pricing.html` no-edit — HELD.** No `$299`/`$799`/Growth; the only tier-ish label is "Scale / 60 / $649" — a curve size-preset, not the retired SKU.
+6. **`recordUsage` local ledger kept — HELD.** Per-mailbox-MONTH internal COGS (`provisioning.ts:119`), explicitly labeled "NOT the customer's bill," surfaced as `account().usageCents`; the account tool description states the real per-mailbox flat billing. No per-send/metered-sends implication.
+
+### Standard lanes — all clean
+
+- **Battery (ran myself):** platform **780/780 (112 files)**; CLI `typecheck` + `build` clean (tier collapse didn't break it); `wrangler` dry-run clean; workspace typecheck clean.
+- **Tier-2 Stripe test-mode gate — independently RE-RAN, 5/5:** (a) coupon %-off rides the future quantity bump (recurring 8000, discount 4800 = 60%; proration line discounted) · (b) increase prorates (+3200) · (c) decrease creates zero credit lines · (d) concurrent `ensureStripePrices` converge to one Price/`lookup_key` · (e) 60%-off checkout collects a card + first invoice paid (3960). This verifies the money-crux against real Stripe — closing r1 N4 and r2 N-r1 live.
+- **§7.1 RED-proof — genuine:** `burn-replace-billing.test.ts` asserts the reconcile pushes set-to-N (6) not 2N (12); reverting `releaseMailboxes` fails it at 2N (my exact B2 scenario); withheld-branch pushes the floor (5), never +N.
+- **Metered-400 path DELETED — zero orphan callers** (`reportUsageToStripeIfConfigured`/`reportUsageRecord`/`usage_records` grep empty). Closes r1's latent-bug find.
+- **`checkout.session.completed` capture idempotent under retry:** event-id dedup (`INSERT OR IGNORE webhook_events`); `captureSubscriptionState` runs only on first delivery; absolute UPDATE.
+- **MRR curve:** `monthlyRevenueCents(provisionedCount, checkout_discount_pct)`, gated on `isPaidPlan && billing_state='active'` — consistent with the meter.
+- **`AUTHED_PATH_PATTERNS`:** `/remove-mailboxes` added (authed customer mutation).
+- **Secrets:** gate reads `sk_test_` from the gitignored `.dev.vars` at runtime, enforces `sk_test_`, never prints it; no `sk_` literal committed.
+
+### UNVERIFIABLE / NEW
+
+- `account().usageCents` surfaces internal per-mailbox COGS to the customer's agent — not a metered-sends claim and the tool clarifies real billing, but a slightly confusing number for a customer surface (minor; consider dropping from the customer view or renaming).
