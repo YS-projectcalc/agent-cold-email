@@ -67,7 +67,9 @@ trap 'rm -f "$TMPFILE" "$CURL_CFG"' EXIT
   echo "header = \"Authorization: Bearer $SDN_INGEST_TOKEN\""
 } > "$CURL_CFG"
 
-if ! curl -sf -m 120 -o "$TMPFILE" "$SDN_URL"; then
+# -L is load-bearing: Treasury answers HEAD directly but 302-redirects GETs
+# (proven live 2026-07-24: HEAD→200 with Content-Disposition, GET→302 size:0).
+if ! curl -sfL --max-redirs 5 -m 120 -o "$TMPFILE" "$SDN_URL"; then
   echo "push-sdn.sh: FAILED — curl fetch of $SDN_URL did not return 200" >&2
   exit 1
 fi
