@@ -14,6 +14,7 @@ describe("ingestSdnCsv — droplet-relay ingest: parse/swap reuse, floor guard, 
   beforeEach(async () => {
     await env.DB.prepare(`DELETE FROM sdn_entries`).run();
     await env.DB.prepare(`DELETE FROM sdn_list_meta`).run();
+    await env.DB.prepare(`DELETE FROM sdn_alert_state`).run();
   });
 
   it("a floor-satisfying valid CSV ingests, tagged sdn-relay-<ts>, no alert", async () => {
@@ -41,7 +42,7 @@ describe("ingestSdnCsv — droplet-relay ingest: parse/swap reuse, floor guard, 
     const after = await getSdnListMeta(env);
     expect(after?.activeVersion).toBe(before?.activeVersion);
     expect(after?.entryCount).toBe(5001);
-    expect(mailer.sent.some((m) => m.subject.includes("SDN relay ingest failed (malformed)"))).toBe(true);
+    expect(mailer.sent.some((m) => m.subject.includes("SDN list load failing"))).toBe(true);
   });
 
   it("an empty CSV is rejected the same way", async () => {
@@ -80,7 +81,7 @@ describe("ingestSdnCsv — droplet-relay ingest: parse/swap reuse, floor guard, 
     // forged-CSV attack ends as a no-op, never a swap.
     expect(after?.activeVersion).toBe(before?.activeVersion);
     expect(after?.entryCount).toBe(5001);
-    expect(mailer.sent.some((m) => m.subject.includes("SDN relay ingest failed (below floor)"))).toBe(true);
+    expect(mailer.sent.some((m) => m.subject.includes("SDN list load failing"))).toBe(true);
   });
 
   it("idempotence — ingesting the identical CSV twice leaves exactly one active version's rows (no duplicates)", async () => {
@@ -104,5 +105,39 @@ describe("ingestSdnCsv — droplet-relay ingest: parse/swap reuse, floor guard, 
     // never grows across repeated ingests of the same content.
     const countRow = await env.DB.prepare(`SELECT COUNT(*) as c FROM sdn_entries`).first<{ c: number }>();
     expect(countRow?.c).toBe(5001);
+  });
+
+  // Scope addition (2026-07-24, "born throttled" requirement): the ingest
+  // alert MUST share the SAME alert-storm throttle as maybeRefreshSdnList —
+  // repeated failing ingests (e.g. a droplet retried manually, or a bad CSV
+  // pushed several times in a row) must alert once, not once per attempt.
+  describe("alert throttle — the ingest failure alert is born throttled", () => {
+    it("10 consecutive malformed-CSV ingests send exactly 1 email (not 10)", async () => {
+      const mailer = new SandboxOpsMailer();
+      let now = 6_000_000;
+      for (let i = 0; i < 10; i++) {
+        const outcome = await ingestSdnCsv(env, sdnMalformedCsv, now, mailer);
+        expect(outcome.ok).toBe(false); // confirms every call really did attempt
+        now += 60_000;
+      }
+      expect(mailer.sent).toHaveLength(1);
+      expect(mailer.sent[0]!.subject).toBe("[coldrig] SDN list load failing — kept prior good list");
+    });
+
+    it("a floor-satisfying ingest after a failure streak sends exactly ONE recovery email", async () => {
+      const mailer = new SandboxOpsMailer();
+      let now = 7_000_000;
+      for (let i = 0; i < 3; i++) {
+        await ingestSdnCsv(env, sdnMalformedCsv, now, mailer);
+        now += 60_000;
+      }
+      expect(mailer.sent).toHaveLength(1);
+
+      const outcome = await ingestSdnCsv(env, sdnValidLargeCsv, now, mailer);
+      expect(outcome.ok).toBe(true);
+      expect(mailer.sent).toHaveLength(2);
+      expect(mailer.sent[1]!.subject).toBe("[coldrig] SDN list load RECOVERED");
+      expect(mailer.sent[1]!.text).toContain("3 consecutive failed attempt(s)");
+    });
   });
 });

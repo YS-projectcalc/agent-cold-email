@@ -28,6 +28,7 @@ describe("POST /admin/sdn/ingest — G1a droplet-relay ingest endpoint", () => {
   beforeEach(async () => {
     await env.DB.prepare(`DELETE FROM sdn_entries`).run();
     await env.DB.prepare(`DELETE FROM sdn_list_meta`).run();
+    await env.DB.prepare(`DELETE FROM sdn_alert_state`).run();
   });
 
   describe("auth — the SDN_INGEST_TOKEN carve-out (require-admin-auth.ts)", () => {
