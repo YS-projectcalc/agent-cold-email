@@ -11,10 +11,43 @@
 // signal a corrupt/truncated/wrong-shaped fetch. The caller (sdn-refresh.ts)
 // catches this and keeps the prior good list rather than swapping in a
 // half-built one.
+//
+// WIRE-SHAPE FIX (live-verified 2026-07-24 at first arming push): the real
+// feed — 5.6MB, 19,241 lines, otherwise exactly the assumed 12-column/
+// no-header shape — ends with a legacy DOS EOF marker: a lone 0x1A (SUB,
+// Ctrl-Z) as the file's final "line". `parseCsvRows` (csv.ts) is a generic
+// RFC-4180-ish tokenizer with no knowledge of this DOS convention — it just
+// saw one more 1-field "row", correctly tripping the 12-column fail-loud
+// check (400 on every real ingest, an over-block, not silent corruption — but
+// still needed a fix, not a workaround). This is an OFAC-feed-specific quirk,
+// not a general CSV concern, so the fix lives HERE (as preprocessing before
+// parseCsvRows) rather than teaching the generic tokenizer about DOS EOF
+// markers.
 import { normalizeName, tokenize } from "./normalize.js";
 import { parseCsvRows } from "./csv.js";
 
 const EXPECTED_COLUMNS = 12;
+
+/**
+ * Strips a trailing run of blank/whitespace-only lines and/or a lone 0x1A
+ * (DOS EOF marker) lines, ANCHORED to the end of the file only — scans
+ * backward from the last line and stops the INSTANT a line with real content
+ * is reached. An 0x1A or blank line anywhere else (i.e. with genuine data
+ * still following it) is left completely untouched and reaches
+ * `parseCsvRows`/the column-count check exactly as before: mid-file
+ * corruption/truncation must still fail loud, never be silently tolerated.
+ * Handles CRLF, lone-CR, and LF line endings uniformly (splits on any of the
+ * three) — the real feed's convention wasn't fully confirmed at build time,
+ * so this doesn't assume one.
+ */
+function stripTrailingEofArtifacts(text: string): string {
+  const lines = text.split(/\r\n|\r|\n/);
+  let end = lines.length;
+  while (end > 0 && /^[\s\x1a]*$/.test(lines[end - 1] ?? "")) {
+    end--;
+  }
+  return lines.slice(0, end).join("\n");
+}
 
 export interface ParsedSdnEntry {
   uid: string;
@@ -39,7 +72,7 @@ function nullableField(raw: string): string | null {
  * is a per-row data-quality issue, not a feed-shape corruption signal.
  */
 export function parseSdnCsv(text: string): ParsedSdnEntry[] {
-  const rows = parseCsvRows(text);
+  const rows = parseCsvRows(stripTrailingEofArtifacts(text));
   if (rows.length === 0) {
     throw new Error("SDN.CSV parse failed: zero rows found in fetched text");
   }
