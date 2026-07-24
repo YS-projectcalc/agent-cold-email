@@ -29,6 +29,7 @@ import {
   applyStripeWebhookEvent,
   completeSimulatedCheckout,
   startCheckout,
+  syncMailboxQuantity,
   type CheckoutResult,
   type CompleteCheckoutResult,
   type WebhookApplyResult,
@@ -701,6 +702,12 @@ export class TenantDO extends DurableObject<Env> {
     // is still 'pending'. INERT unless armed (config-gated inside), so a no-op in
     // the default build and every test; a stuck push resolves on the next sweep.
     await reconcileMailboxCredentialPushes(ctx);
+    // Quantity-billing reconcile (design §8.5) — re-push the Stripe mailbox
+    // quantity for this tenant if `mailbox_qty_synced` drifted from the live
+    // provisioned count (a lost push, or a release on a non-active tenant that
+    // later recovered). Active-only + set-to-N idempotent inside; a no-op in the
+    // default build and every test (no real Stripe subscription).
+    await syncMailboxQuantity(ctx);
     return result;
   }
 

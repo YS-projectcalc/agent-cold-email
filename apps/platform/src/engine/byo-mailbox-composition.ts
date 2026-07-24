@@ -8,6 +8,7 @@
 import { ValidationError, type ConnectByoMailboxInput, type RequestManagedByoMailboxesInput } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
+import { syncMailboxQuantity } from "./billing.js";
 import { assertNotLifecycleFrozen } from "./billing-state.js";
 import { requireByoDomainRow } from "./byo-intake.js";
 import { provisionMailboxesForDomain, slugify } from "./provisioning.js";
@@ -45,6 +46,9 @@ export async function requestManagedByoMailboxes(
     personaSlug,
     inboxesEach: input.count,
   });
+  // Mirror the Stripe mailbox quantity to the higher provisioned count (design
+  // §2/§9) — no-op unless active with a real Stripe subscription.
+  await syncMailboxQuantity(ctx);
   return { mailboxEmails };
 }
 

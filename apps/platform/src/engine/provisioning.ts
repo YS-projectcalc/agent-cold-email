@@ -2,7 +2,7 @@ import { CapacityPendingError, isPaidPlan, RegistrarUnarmedError, type SetupInfr
 import { newId } from "../schema.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { TenantContext } from "../tenant-context.js";
-import { reportUsageToStripeIfConfigured } from "./billing.js";
+import { reportUsageToStripeIfConfigured, syncMailboxQuantity } from "./billing.js";
 import { assertNotLifecycleFrozen } from "./billing-state.js";
 import { assertBrandOwnership } from "./brand-guard.js";
 import { gatherMailboxHealth } from "./deliverability.js";
@@ -266,6 +266,9 @@ export async function runSetupInfrastructure(
       // the account surfaces capacity_pending via G3, and a later provision
       // retries once the founder raises the ceiling / upgrades the plan. Any
       // domains/mailboxes provisioned before the gate stay provisioned.
+      // Sync the meter to the rows that actually landed (design §7 N1 — a
+      // partially-failed batch bills only what came up, floored at 5).
+      await syncMailboxQuantity(ctx);
       return { jobId: newId("job") };
     }
     if (err instanceof RegistrarUnarmedError) {
@@ -274,6 +277,10 @@ export async function runSetupInfrastructure(
     throw err;
   }
 
+  // Mirror the Stripe mailbox quantity to the now-higher provisioned count
+  // (design §2/§9 — a provision raises the count, increases prorate). No-op
+  // unless active with a real Stripe subscription (syncMailboxQuantity guards).
+  await syncMailboxQuantity(ctx);
   return { jobId: newId("job") };
 }
 
