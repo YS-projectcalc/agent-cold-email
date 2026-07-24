@@ -45,9 +45,11 @@ paths:
       tags: [bootstrap]
       summary: Create a tenant and mint a bearer token.
       description: >
-        Unauthenticated bootstrap call. Always mints a demo-plan tenant in
-        the current build (no live paid/Stripe checkout path yet) — a demo
-        tenant is structurally incapable of reaching a real vendor adapter.
+        Unauthenticated bootstrap call. Always mints a demo-plan tenant — a
+        demo tenant is structurally incapable of reaching a real vendor
+        adapter. Upgrade to the paid `managed` plan via POST /checkout
+        (`{ mailboxes, interval }`), billed on the per-mailbox curve ($49
+        platform + $10 x provisioned mailboxes, minimum 5).
       security: []
       requestBody:
         required: true
@@ -897,8 +899,10 @@ paths:
         SPEC.md §20.6 shape (a) — the primary build target: the vendor
         provisions new mailboxes under the customer's own domain, reusing
         the same provisioning path as the lookalike-domain flow. Requires
-        the domain to already be active (past DNS verification). No
-        pricing is published for BYO-connected mailboxes specifically.
+        the domain to already be active (past DNS verification). These are
+        platform-provisioned mailboxes, so they count toward the standard
+        per-mailbox quantity billing ($10/mailbox); pass `quoteOnly: true`
+        to preview the new count + projected monthly before provisioning.
       parameters:
         - $ref: '#/components/parameters/ByoDomainId'
       requestBody:

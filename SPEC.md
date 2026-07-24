@@ -214,7 +214,7 @@ Can/should we pre-warm domain+mailbox stock ahead of signup so new tenants skip 
 
 ---
 
-## 18. Pricing (founder-ratified provisional curve, 2026-07-14 — canonical product intent; core billing migration pending)
+## 18. Pricing (founder-ratified curve, 2026-07-14 — canonical product intent; core billing migration SHIPPED 2026-07-24)
 
 Value metric = **provisioned mailbox/month** (tracks reserved underlying capacity) + a **$49/month platform fee** (control plane, agent surface, deliverability loop, and support). The paid minimum is five provisioned mailboxes. Every additional mailbox is $10/month:
 
@@ -233,7 +233,7 @@ Domains are bundled and operationally allocated at roughly one domain per two to
 | **60 mailboxes** | $649 | ~20 | ~39,600 sends/mo | ~$288–378 | ~42–56% |
 | **Custom** | quote from the published curve | 61+ | health-limited | verified before quote | negotiated; no automatic volume discount |
 
-The continuous curve removes the old $99→$299 bundle cliff and lands the common 10-mailbox evaluation at $149. The $49 embedded platform fee supports strong entry economics; marginal margin compresses at larger counts, so do not stack an automatic volume discount on top. **Free/Demo remains structurally sandbox-only** (type-guarded, tested). Paid real-sending activation is not live. Card-on-file, quantity-based billing, quote-before-provision, auto-renew disclosure, easy cancellation, and owner spend ceilings must be implemented and verified before activation. The current code still models legacy `launch`/`growth`/`scale` fixed tiers; that implementation is stale relative to this product decision and must not be treated as the final billing contract.
+The continuous curve removes the old $99→$299 bundle cliff and lands the common 10-mailbox evaluation at $149. The $49 embedded platform fee supports strong entry economics; marginal margin compresses at larger counts, so do not stack an automatic volume discount on top. **Free/Demo remains structurally sandbox-only** (type-guarded, tested). Card-on-file, quantity-based billing, quote-before-provision, and easy cancellation are implemented as of the quantity-billing migration (2026-07-24, `docs/research/quantity-billing-design-2026-07-23.md`): the legacy `launch`/`growth`/`scale` fixed tiers are RETIRED, collapsed to the single paid plan `managed` billed on this curve via two durable Stripe Prices (a $49 platform item + a $10 mailbox item whose quantity tracks the live provisioned count). Downgrades take no mid-cycle credit; `REPLACE_DOMAIN` is bill-neutral (releases the burned mailboxes). Real-sending activation + the Stripe live-key swap remain owner-gated (`ACTIVATION.md`).
 
 ---
 
