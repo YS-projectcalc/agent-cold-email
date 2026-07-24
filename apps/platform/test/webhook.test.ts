@@ -47,11 +47,11 @@ describe("POST /webhooks/stripe — idempotent per event id (ARCHITECTURE.md #3)
   it("checkout.session.completed upgrades the tenant plan exactly once, even redelivered", async () => {
     const { tenantId, token } = await mintTenant("Webhook Co", "demo");
     const eventId = `evt_${crypto.randomUUID()}`;
-    const event = checkoutCompletedEvent(eventId, tenantId, "scale");
+    const event = checkoutCompletedEvent(eventId, tenantId, "managed");
 
     const first = await postWebhook<WebhookResponse>(event);
     expect(first.status).toBe(200);
-    expect(first.body).toMatchObject({ applied: true, duplicate: false, plan: "scale" });
+    expect(first.body).toMatchObject({ applied: true, duplicate: false, plan: "managed" });
 
     // Redelivery of the SAME event id — must be a no-op, not a second upgrade.
     const second = await postWebhook<WebhookResponse>(event);
@@ -59,7 +59,7 @@ describe("POST /webhooks/stripe — idempotent per event id (ARCHITECTURE.md #3)
     expect(second.body).toMatchObject({ applied: false, duplicate: true });
 
     const account = await api<AccountResponse>("/account", { token });
-    expect(account.body.plan).toBe("scale");
+    expect(account.body.plan).toBe("managed");
     expect(account.body.billingState).toBe("active");
 
     // Exactly one upgrade-credit ledger entry, not two.
@@ -75,7 +75,7 @@ describe("POST /webhooks/stripe — idempotent per event id (ARCHITECTURE.md #3)
   });
 
   it("invoice.payment_failed marks the tenant past_due", async () => {
-    const { tenantId, token } = await mintTenant("Dunning Co", "launch");
+    const { tenantId, token } = await mintTenant("Dunning Co", "managed");
     const event = invoicePaymentFailedEvent(`evt_${crypto.randomUUID()}`, tenantId);
 
     const res = await postWebhook<WebhookResponse>(event);
@@ -84,11 +84,11 @@ describe("POST /webhooks/stripe — idempotent per event id (ARCHITECTURE.md #3)
 
     const account = await api<AccountResponse>("/account", { token });
     expect(account.body.billingState).toBe("past_due");
-    expect(account.body.plan).toBe("launch"); // payment failure doesn't itself change the plan
+    expect(account.body.plan).toBe("managed"); // payment failure doesn't itself change the plan
   });
 
   it("customer.subscription.deleted cancels billing and downgrades the tenant to free", async () => {
-    const { tenantId, token } = await mintTenant("Cancel Co", "growth");
+    const { tenantId, token } = await mintTenant("Cancel Co", "managed");
     const event = {
       id: `evt_${crypto.randomUUID()}`,
       type: "customer.subscription.deleted",

@@ -8,6 +8,7 @@
 import { ValidationError, type ConnectByoMailboxInput, type RequestManagedByoMailboxesInput } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
+import { buildMailboxBilling, syncMailboxQuantity, type MailboxBilling } from "./billing.js";
 import { assertNotLifecycleFrozen } from "./billing-state.js";
 import { requireByoDomainRow } from "./byo-intake.js";
 import { provisionMailboxesForDomain, slugify } from "./provisioning.js";
@@ -15,7 +16,11 @@ import { ONE_DAY_MS, warmupDailyCap } from "./warmup.js";
 
 export interface ManagedMailboxesResult {
   mailboxEmails: string[];
+  /** SPEC §18 — the new count + projected monthly on the add (no silent capacity addition). */
+  billing: MailboxBilling;
 }
+
+export type RequestManagedByoMailboxesResult = ManagedMailboxesResult | { quoteOnly: true; billing: MailboxBilling };
 
 /**
  * SPEC.md §20.6 shape (a) — the founder-ruled PRIMARY build target: vendor
@@ -29,11 +34,19 @@ export async function requestManagedByoMailboxes(
   ctx: TenantContext,
   domainId: string,
   input: RequestManagedByoMailboxesInput,
-): Promise<ManagedMailboxesResult> {
+): Promise<RequestManagedByoMailboxesResult> {
   assertNotLifecycleFrozen(ctx, "request_managed_byo_mailboxes");
   const row = requireByoDomainRow(ctx, domainId);
   if (row.byo_status !== "active") {
     throw new ValidationError(`domain ${row.domain} is not yet active (byo_status=${row.byo_status}) — mailboxes can only be attached to an active BYO domain`);
+  }
+
+  const liveProvisioned = (): number =>
+    ctx.sql.exec<{ n: number }>(`SELECT COUNT(*) as n FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL`, ctx.tenantId).one().n;
+
+  // Quote-before-add PREVIEW (SPEC §18, design §2) — no provisioning.
+  if (input.quoteOnly) {
+    return { quoteOnly: true, billing: buildMailboxBilling(ctx, liveProvisioned() + input.count) };
   }
 
   const personaSlug = slugify(input.personaSlug ?? row.domain);
@@ -45,7 +58,11 @@ export async function requestManagedByoMailboxes(
     personaSlug,
     inboxesEach: input.count,
   });
-  return { mailboxEmails };
+  // Mirror the Stripe mailbox quantity to the higher provisioned count (design
+  // §2/§9) — no-op unless active with a real Stripe subscription.
+  await syncMailboxQuantity(ctx);
+  // SPEC §18 — return the new count + projected monthly on the add.
+  return { mailboxEmails, billing: buildMailboxBilling(ctx, liveProvisioned()) };
 }
 
 export interface ConnectByoMailboxResult {

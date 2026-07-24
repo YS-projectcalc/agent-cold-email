@@ -9,6 +9,8 @@ import { lookupTenantContactEmail } from "../db.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
+import { syncMailboxQuantity } from "./billing.js";
+import { releaseMailboxes } from "./lifecycle.js";
 import { alertRegistrarUnarmed } from "./registrar-alert.js";
 import { isLifecycleFrozen, readLifecycleState } from "./billing-state.js";
 import {
@@ -123,78 +125,100 @@ async function applyReplaceDomain(
   );
   pauseDomainMailboxes(ctx, action.domainId);
 
-  if (countReplacementsInWindow(ctx) >= MAX_REPLACEMENTS_PER_WINDOW) {
-    // Spawn cap hit: retire but do NOT provision — prevents an infinite
-    // burn->replace->burn chain. Surfaced so the agent/owner can intervene.
-    logAction(ctx, "REPLACE_DOMAIN_CAPPED", action.domain, {
-      domainId: action.domainId,
-      reason: action.reason,
-      cap: MAX_REPLACEMENTS_PER_WINDOW,
-      note: "retired + mailboxes paused; replacement withheld (per-window cap reached)",
-    });
-    return;
-  }
+  // §7.1 REQUIRED (adversary B2-rework) — RELEASE the burned domain's mailboxes
+  // on the UNCONDITIONAL retire leg, BEFORE the replacement-vs-withhold decision,
+  // so the swap is bill-NEUTRAL-or-lowering in every branch: replacement succeeds
+  // -> release N then provision N = net 0; withheld / vendor-throw -> release N,
+  // no provision = -N. Without this the burned mailboxes keep `released_at IS NULL`,
+  // keep counting, and the autonomous reconcile would push set-to-2N — a silent
+  // double-bill (SPEC §18 "no silent capacity addition") + a G4 vendor-slot leak.
+  // Reuses the teardown release path (revoke-before-mark ordering preserved).
+  await releaseMailboxes(ctx, { domainId: action.domainId });
 
-  const profile = ctx.sql
-    .exec<{ brand: string; primary_domain: string }>(
-      `SELECT brand, primary_domain FROM tenant_profile WHERE id = ?`,
-      ctx.tenantId,
-    )
-    .one();
-
-  const inboxesEach = Math.max(
-    1,
-    ctx.sql
-      .exec<{ n: number }>(
-        `SELECT COUNT(*) as n FROM mailboxes WHERE tenant_id = ? AND domain_id = ?`,
-        ctx.tenantId,
-        action.domainId,
-      )
-      .one().n,
-  );
-  const domainIndex = ctx.sql
-    .exec<{ n: number }>(`SELECT COUNT(*) as n FROM domains WHERE tenant_id = ?`, ctx.tenantId)
-    .one().n;
-
-  // N-G5-2 (ga-gates G5 build review) — VendorError isolation. The burning domain
-  // is already retired + its mailboxes paused ABOVE (unconditionally), so no
-  // unsafe sending continues regardless of what happens next. The replacement's
-  // vendor calls (searchLookalikes → domain.buy → mailbox.provision) CAN throw a
-  // VendorError once the real vendor path is armed — a RegistrarUnarmedError (G5
-  // gate (a) hard-block), a CapacityPendingError (G2/G4 ceiling), or a transient
-  // upstream error. Unlike setup_infrastructure (a request the caller can 503),
-  // this runs inside the tick's deliverability sweep — an unguarded throw would
-  // crash the WHOLE tick for this tenant (no sends scheduled) and produce only a
-  // console.error, no founder alert. Isolate it here (mirroring
-  // runSetupInfrastructure's catch): alert the founder on the registrar block,
-  // log the withheld replacement ops-visibly, and let the sweep/tick continue.
   try {
-    const replacementDomain = await pickReplacementDomain(ctx, profile.brand, profile.primary_domain);
-    const provisioned = await provisionDomainWithMailboxes(ctx, {
-      domain: replacementDomain,
-      domainIndex,
-      personaSlug: slugify(profile.brand),
-      inboxesEach,
-    });
-
-    logAction(ctx, "REPLACE_DOMAIN", action.domain, {
-      burningDomainId: action.domainId,
-      replacementDomain: provisioned.domain,
-      replacementDomainId: provisioned.domainId,
-      mailboxesProvisioned: provisioned.mailboxEmails.length,
-      reason: action.reason,
-    });
-  } catch (err) {
-    if (!(err instanceof VendorError)) throw err; // a genuine bug (not a vendor signal) must NOT be swallowed
-    if (err instanceof RegistrarUnarmedError) {
-      await alertRegistrarUnarmed(ctx, profile.primary_domain, err, mailer);
+    if (countReplacementsInWindow(ctx) >= MAX_REPLACEMENTS_PER_WINDOW) {
+      // Spawn cap hit: retire but do NOT provision — prevents an infinite
+      // burn->replace->burn chain. Surfaced so the agent/owner can intervene.
+      // The burned mailboxes were already released above -> this leg is -N.
+      logAction(ctx, "REPLACE_DOMAIN_CAPPED", action.domain, {
+        domainId: action.domainId,
+        reason: action.reason,
+        cap: MAX_REPLACEMENTS_PER_WINDOW,
+        note: "retired + mailboxes released; replacement withheld (per-window cap reached)",
+      });
+      return;
     }
-    logAction(ctx, "REPLACE_DOMAIN_FAILED", action.domain, {
-      burningDomainId: action.domainId,
-      reason: action.reason,
-      error: err.message,
-      note: "burning domain retired + mailboxes paused; replacement withheld (vendor error) — isolated so the tick continues",
-    });
+
+    const profile = ctx.sql
+      .exec<{ brand: string; primary_domain: string }>(
+        `SELECT brand, primary_domain FROM tenant_profile WHERE id = ?`,
+        ctx.tenantId,
+      )
+      .one();
+
+    // inboxesEach is the burned domain's ORIGINAL mailbox count (this query does
+    // NOT filter released_at, so the just-released rows still count) — so we
+    // provision exactly N replacements and the swap nets to zero.
+    const inboxesEach = Math.max(
+      1,
+      ctx.sql
+        .exec<{ n: number }>(
+          `SELECT COUNT(*) as n FROM mailboxes WHERE tenant_id = ? AND domain_id = ?`,
+          ctx.tenantId,
+          action.domainId,
+        )
+        .one().n,
+    );
+    const domainIndex = ctx.sql
+      .exec<{ n: number }>(`SELECT COUNT(*) as n FROM domains WHERE tenant_id = ?`, ctx.tenantId)
+      .one().n;
+
+    // N-G5-2 (ga-gates G5 build review) — VendorError isolation. The burning domain
+    // is already retired + its mailboxes released ABOVE (unconditionally), so no
+    // unsafe sending continues regardless of what happens next. The replacement's
+    // vendor calls (searchLookalikes → domain.buy → mailbox.provision) CAN throw a
+    // VendorError once the real vendor path is armed — a RegistrarUnarmedError (G5
+    // gate (a) hard-block), a CapacityPendingError (G2/G4 ceiling), or a transient
+    // upstream error. Unlike setup_infrastructure (a request the caller can 503),
+    // this runs inside the tick's deliverability sweep — an unguarded throw would
+    // crash the WHOLE tick for this tenant (no sends scheduled) and produce only a
+    // console.error, no founder alert. Isolate it here (mirroring
+    // runSetupInfrastructure's catch): alert the founder on the registrar block,
+    // log the withheld replacement ops-visibly, and let the sweep/tick continue.
+    try {
+      const replacementDomain = await pickReplacementDomain(ctx, profile.brand, profile.primary_domain);
+      const provisioned = await provisionDomainWithMailboxes(ctx, {
+        domain: replacementDomain,
+        domainIndex,
+        personaSlug: slugify(profile.brand),
+        inboxesEach,
+      });
+
+      logAction(ctx, "REPLACE_DOMAIN", action.domain, {
+        burningDomainId: action.domainId,
+        replacementDomain: provisioned.domain,
+        replacementDomainId: provisioned.domainId,
+        mailboxesProvisioned: provisioned.mailboxEmails.length,
+        reason: action.reason,
+      });
+    } catch (err) {
+      if (!(err instanceof VendorError)) throw err; // a genuine bug (not a vendor signal) must NOT be swallowed
+      if (err instanceof RegistrarUnarmedError) {
+        await alertRegistrarUnarmed(ctx, profile.primary_domain, err, mailer);
+      }
+      logAction(ctx, "REPLACE_DOMAIN_FAILED", action.domain, {
+        burningDomainId: action.domainId,
+        reason: action.reason,
+        error: err.message,
+        note: "burning domain retired + mailboxes released; replacement withheld (vendor error) — isolated so the tick continues",
+      });
+    }
+  } finally {
+    // §7.1 sync placement — the meter reflects reality in EVERY branch (success
+    // = net 0, withheld/failed = -N; never +N). Active-only + set-to-N inside;
+    // a no-op in the default build (no real Stripe subscription). Runs even on a
+    // re-thrown genuine bug (harmless — the release already lowered the count).
+    await syncMailboxQuantity(ctx);
   }
 }
 

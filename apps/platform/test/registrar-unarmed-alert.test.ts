@@ -42,7 +42,7 @@ async function withInjectedDomain<T>(tenantId: string, domain: DomainPort, fn: (
   return runInDurableObject(tenantStub(tenantId), async (_instance, state) => {
     const sql = state.storage.sql;
     const profile = sql
-      .exec<{ plan: "demo" | "free" | "launch" | "growth" | "scale"; clock_base: number; clock_offset: number; clock_multiplier: number }>(
+      .exec<{ plan: "demo" | "free" | "managed"; clock_base: number; clock_offset: number; clock_multiplier: number }>(
         `SELECT plan, clock_base, clock_offset, clock_multiplier FROM tenant_profile WHERE id = ?`,
         tenantId,
       )
@@ -69,6 +69,7 @@ const SETUP_INPUT = {
   persona: "Sender",
   physicalAddress: "1 St",
   senderIdentity: "Sender <s@registraralertco.com>",
+  quoteOnly: false,
 };
 
 describe("G5 gate (a) — runSetupInfrastructure's registrar-unarmed handling", () => {

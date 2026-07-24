@@ -10,6 +10,7 @@ import type {
   ListLeadsQueryInput,
   Provenance,
   RegisterByoDomainInput,
+  RemoveMailboxesInput,
   RequestManagedByoMailboxesInput,
   SetupInfrastructureInput,
   SuppressLeadInput,
@@ -28,9 +29,12 @@ import type { Env } from "./env.js";
 import {
   applyStripeWebhookEvent,
   completeSimulatedCheckout,
+  removeMailboxes,
   startCheckout,
+  syncMailboxQuantity,
   type CheckoutResult,
   type CompleteCheckoutResult,
+  type RemoveMailboxesResult,
   type WebhookApplyResult,
 } from "./engine/billing.js";
 import { runDemo, type DemoRunSummary } from "./engine/demo.js";
@@ -86,7 +90,7 @@ import {
   connectByoMailbox,
   requestManagedByoMailboxes,
   type ConnectByoMailboxResult,
-  type ManagedMailboxesResult,
+  type RequestManagedByoMailboxesResult,
 } from "./engine/byo-mailbox-composition.js";
 import { newId, TENANT_DO_SCHEMA } from "./schema.js";
 import type { TenantContext } from "./tenant-context.js";
@@ -213,6 +217,14 @@ export class TenantDO extends DurableObject<Env> {
     this.addColumnIfMissing("tenant_profile", "screening_status", "TEXT NOT NULL DEFAULT 'clear'");
     this.addColumnIfMissing("tenant_profile", "screening_list_version", "TEXT");
     this.addColumnIfMissing("tenant_profile", "screened_at", "INTEGER");
+    // Quantity-billing migration (design §9) — Stripe subscription-item ids +
+    // drift-detection quantity + interval + captured discount (see schema.ts).
+    // All defaults keep existing (demo) rows byte-identical.
+    this.addColumnIfMissing("tenant_profile", "stripe_platform_item_id", "TEXT");
+    this.addColumnIfMissing("tenant_profile", "stripe_mailbox_item_id", "TEXT");
+    this.addColumnIfMissing("tenant_profile", "mailbox_qty_synced", "INTEGER NOT NULL DEFAULT 0");
+    this.addColumnIfMissing("tenant_profile", "billing_interval", "TEXT NOT NULL DEFAULT 'month'");
+    this.addColumnIfMissing("tenant_profile", "checkout_discount_pct", "INTEGER NOT NULL DEFAULT 0");
     // Created here, not in TENANT_DO_SCHEMA, so they run only after the columns
     // above are guaranteed to exist (safe for DOs that predate the column). Each
     // collapses any pre-existing rows that would violate the unique key BEFORE
@@ -565,7 +577,7 @@ export class TenantDO extends DurableObject<Env> {
     return acknowledgePrimaryDomainConsent(this.requireContext(), id, input);
   }
 
-  async requestManagedByoMailboxes(id: string, input: RequestManagedByoMailboxesInput): Promise<ManagedMailboxesResult> {
+  async requestManagedByoMailboxes(id: string, input: RequestManagedByoMailboxesInput): Promise<RequestManagedByoMailboxesResult> {
     return requestManagedByoMailboxes(this.requireContext(), id, input);
   }
 
@@ -604,6 +616,13 @@ export class TenantDO extends DurableObject<Env> {
 
   async checkout(input: CheckoutInput, origin: string): Promise<CheckoutResult> {
     return startCheckout(this.requireContext(), input, origin);
+  }
+
+  // Customer-initiated downgrade (design §2) — releases N mailboxes now + syncs
+  // the lower Stripe quantity (proration none). Tenant-authed, POST /remove-mailboxes.
+  async removeMailboxes(input: RemoveMailboxesInput): Promise<RemoveMailboxesResult> {
+    const result = await removeMailboxes(this.requireContext(), input);
+    return result;
   }
 
   async completeCheckoutSimulated(sessionId: string): Promise<CompleteCheckoutResult> {
@@ -693,6 +712,12 @@ export class TenantDO extends DurableObject<Env> {
     // is still 'pending'. INERT unless armed (config-gated inside), so a no-op in
     // the default build and every test; a stuck push resolves on the next sweep.
     await reconcileMailboxCredentialPushes(ctx);
+    // Quantity-billing reconcile (design §8.5) — re-push the Stripe mailbox
+    // quantity for this tenant if `mailbox_qty_synced` drifted from the live
+    // provisioned count (a lost push, or a release on a non-active tenant that
+    // later recovered). Active-only + set-to-N idempotent inside; a no-op in the
+    // default build and every test (no real Stripe subscription).
+    await syncMailboxQuantity(ctx);
     return result;
   }
 

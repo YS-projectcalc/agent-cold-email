@@ -31,14 +31,14 @@ const INBOXKIT_CONFIG = { apiKey: "test-key", workspaceId: "00000000-0000-4000-8
 
 describe("InboxKit adapters — unreachable from the current call-site shape", () => {
   it("the real tenant-do.ts call-site shape (no inboxKitConfig arg) keeps domain SANDBOX even if activated were hypothetically true", () => {
-    const bundle = createVendorAdapters("launch", clock, true); // matches tenant-do.ts's 4-positional-arg call today (trailing args omitted)
+    const bundle = createVendorAdapters("managed", clock, true); // matches tenant-do.ts's 4-positional-arg call today (trailing args omitted)
     expect(bundle.kind).toBe("sandbox");
     expect(bundle.domain).not.toBeInstanceOf(RegistrarUnarmedDomainPort);
     expect(bundle.domain).not.toBeInstanceOf(RealInboxKitDomainPort);
   });
 
   it("mailbox stays SANDBOX (functional, not merely dark) without an InboxKit config, even if activated were hypothetically true", () => {
-    const bundle = createVendorAdapters("launch", clock, true);
+    const bundle = createVendorAdapters("managed", clock, true);
     expect(bundle.mailbox).toBeInstanceOf(SandboxMailboxPort);
   });
 
@@ -49,12 +49,12 @@ describe("InboxKit adapters — unreachable from the current call-site shape", (
   });
 
   it("activated=false (unpaid/frozen tenant) keeps sandbox even with inboxKitConfig supplied", () => {
-    const bundle = createVendorAdapters("launch", clock, false, undefined, INBOXKIT_CONFIG);
+    const bundle = createVendorAdapters("managed", clock, false, undefined, INBOXKIT_CONFIG);
     expect(bundle.kind).toBe("sandbox");
   });
 
   it("mailbox still flips real with inboxKitConfig on an activated+paid bundle — proves the mailbox gate is config-driven, not a dead/always-false branch (mailbox is UNAFFECTED by gate (a))", () => {
-    const bundle = createVendorAdapters("launch", clock, true, undefined, INBOXKIT_CONFIG);
+    const bundle = createVendorAdapters("managed", clock, true, undefined, INBOXKIT_CONFIG);
     expect(bundle.kind).toBe("real");
     expect(bundle.mailbox).not.toBeInstanceOf(SandboxMailboxPort);
   });
@@ -67,7 +67,7 @@ describe("InboxKit adapters — unreachable from the current call-site shape", (
   // restoring the old welded factory logic makes this test go RED (quoted in
   // the build report); the fix below is what turns it GREEN.
   it("gate (a): inboxKitConfig armed alone (registrarConfig absent) NEVER wires a real domain port — domain.buy hard-blocks with RegistrarUnarmedError, not InboxKit-as-registrar", async () => {
-    const bundle = createVendorAdapters("launch", clock, true, undefined, INBOXKIT_CONFIG);
+    const bundle = createVendorAdapters("managed", clock, true, undefined, INBOXKIT_CONFIG);
     expect(bundle.kind).toBe("real");
     expect(bundle.domain).toBeInstanceOf(RegistrarUnarmedDomainPort);
     expect(bundle.domain).not.toBeInstanceOf(RealInboxKitDomainPort);

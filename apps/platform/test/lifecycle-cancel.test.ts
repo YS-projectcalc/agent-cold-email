@@ -66,8 +66,8 @@ describe("POST /cancel — voluntary cancellation + teardown/reclaim (D5)", () =
   // stops any new spend). This test FAILS on the old code (old code returns a
   // non-null teardown with 2 domains released + drops the live counts to 0).
   it("end_of_period cancel DEFERS teardown — domains/mailboxes stay live until the period boundary", async () => {
-    const { tenantId, token } = await mintTenant("Cancel Co", "launch");
-    await activatePaidPlan(tenantId, "launch");
+    const { tenantId, token } = await mintTenant("Cancel Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
     await provisionAndLaunch(token);
 
     // Default cancel = end-of-billing-period.
@@ -109,8 +109,8 @@ describe("POST /cancel — voluntary cancellation + teardown/reclaim (D5)", () =
   });
 
   it("immediate cancel releases all infra, stops campaigns, books annual-domain liability, and reflects in account()", async () => {
-    const { tenantId, token } = await mintTenant("Cancel Co", "launch");
-    await activatePaidPlan(tenantId, "launch");
+    const { tenantId, token } = await mintTenant("Cancel Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
     await provisionAndLaunch(token);
 
     const cancel = await api<CancelResponse>("/cancel", {
@@ -180,8 +180,8 @@ describe("POST /cancel — voluntary cancellation + teardown/reclaim (D5)", () =
   });
 
   it("is idempotent — a re-cancel is a no-op that never double-books liability or re-releases infra", async () => {
-    const { tenantId, token } = await mintTenant("Cancel Co", "launch");
-    await activatePaidPlan(tenantId, "launch");
+    const { tenantId, token } = await mintTenant("Cancel Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
     await provisionAndLaunch(token);
 
     const first = await api<CancelResponse>("/cancel", {
@@ -214,7 +214,7 @@ describe("POST /cancel — voluntary cancellation + teardown/reclaim (D5)", () =
 
   // Adversarial panel-03 finding #8 — /cancel had no Content-Length body cap.
   it("rejects an over-cap request body with 413 (finding #8)", async () => {
-    const { token } = await mintTenant("Cancel Body Co", "launch");
+    const { token } = await mintTenant("Cancel Body Co", "managed");
     const oversized = JSON.stringify({ immediate: false, pad: "x".repeat(9 * 1024) });
     const res = await api("/cancel", { method: "POST", token, body: oversized });
     expect(res.status).toBe(413);
@@ -239,8 +239,8 @@ describe("teardownTenant — I3 credential revoke wired into cancel/teardown (be
   }
 
   it("calls the engine's revoke for every released mailbox when the engine is armed", async () => {
-    const { tenantId, token } = await mintTenant("Revoke Wired Co", "launch");
-    await activatePaidPlan(tenantId, "launch");
+    const { tenantId, token } = await mintTenant("Revoke Wired Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
     await provisionAndLaunch(token);
     const expectedEmails = await releasedMailboxEmails(tenantId);
     expect(expectedEmails).toHaveLength(4);
@@ -262,8 +262,8 @@ describe("teardownTenant — I3 credential revoke wired into cancel/teardown (be
   });
 
   it("teardown still succeeds (correct summary, no throw) when the engine is armed but unreachable — best-effort never blocks/fails the cancel", async () => {
-    const { tenantId, token } = await mintTenant("Revoke Unreachable Co", "launch");
-    await activatePaidPlan(tenantId, "launch");
+    const { tenantId, token } = await mintTenant("Revoke Unreachable Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
     await provisionAndLaunch(token);
     const expectedEmails = await releasedMailboxEmails(tenantId);
 
@@ -286,8 +286,8 @@ describe("teardownTenant — I3 credential revoke wired into cancel/teardown (be
   });
 
   it("is a no-op (no revoke calls, no throw) when the engine is dark — the deployed default, matching every OTHER cancel test in this file", async () => {
-    const { tenantId, token } = await mintTenant("Revoke Dark Co", "launch");
-    await activatePaidPlan(tenantId, "launch");
+    const { tenantId, token } = await mintTenant("Revoke Dark Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
     await provisionAndLaunch(token);
 
     // No engineClient injected -> the production default (built from

@@ -32,7 +32,7 @@ describe("POST /webhooks/stripe — signature is mandatory (panel-03 finding #1)
     const forged = JSON.stringify({
       id: `evt_${crypto.randomUUID()}`,
       type: "checkout.session.completed",
-      data: { object: { metadata: { tenantId, plan: "scale" } } },
+      data: { object: { metadata: { tenantId, plan: "managed" } } },
     });
 
     const savedSecret = env.STRIPE_WEBHOOK_SECRET;
@@ -59,7 +59,7 @@ describe("POST /webhooks/stripe — signature is mandatory (panel-03 finding #1)
       body: JSON.stringify({
         id: `evt_${crypto.randomUUID()}`,
         type: "checkout.session.completed",
-        data: { object: { metadata: { tenantId, plan: "scale" } } },
+        data: { object: { metadata: { tenantId, plan: "managed" } } },
       }),
     });
     expect(res.status).toBe(400);
@@ -72,7 +72,7 @@ describe("POST /webhooks/stripe — signature is mandatory (panel-03 finding #1)
     const realBody = JSON.stringify({
       id: `evt_${crypto.randomUUID()}`,
       type: "checkout.session.completed",
-      data: { object: { metadata: { tenantId, plan: "scale" } } },
+      data: { object: { metadata: { tenantId, plan: "managed" } } },
     });
     // Sign a DIFFERENT payload, then send `realBody` — signature won't match.
     const wrongSig = await signStripeEvent("{}");
@@ -90,11 +90,11 @@ describe("POST /webhooks/stripe — signature is mandatory (panel-03 finding #1)
     const res = await postWebhook<{ applied: boolean; plan?: string }>({
       id: `evt_${crypto.randomUUID()}`,
       type: "checkout.session.completed",
-      data: { object: { metadata: { tenantId, plan: "scale" } } },
+      data: { object: { metadata: { tenantId, plan: "managed" } } },
     });
     expect(res.status).toBe(200);
     expect(res.body.applied).toBe(true);
-    expect((await readProfile(tenantId)).plan).toBe("scale");
+    expect((await readProfile(tenantId)).plan).toBe("managed");
   });
 
   // Adversarial panel-03 finding #8 — the unauthenticated webhook had no

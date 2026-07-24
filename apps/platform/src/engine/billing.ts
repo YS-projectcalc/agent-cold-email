@@ -7,14 +7,33 @@
 // Stripe is the source of truth once activated (ARCHITECTURE.md #3); these
 // functions mirror that state onto tenant_profile.
 
-import { isPaidPlanTier, NotFoundError, PLAN_QUOTAS, ValidationError, type CheckoutInput, type TenantPlan } from "@coldstart/shared";
-import { createStripeCheckoutSession, reportUsageRecord } from "../billing/stripe-client.js";
+import {
+  billableMailboxes,
+  isPaidPlan,
+  MINIMUM_BILLABLE_MAILBOXES,
+  monthlyRevenueCents,
+  NotFoundError,
+  ValidationError,
+  type CheckoutInput,
+  type RemoveMailboxesInput,
+  type TenantPlan,
+} from "@coldstart/shared";
+import {
+  createStripeCheckoutSession,
+  ensureStripePrices,
+  getSubscription,
+  setSubscriptionItemQuantity,
+  STRIPE_PRICES,
+  stripeMode,
+  type StripePriceMap,
+} from "../billing/stripe-client.js";
 import type { StripeEventInput } from "../billing/stripe-webhook.js";
 import type { Env } from "../env.js";
 import { newId } from "../schema.js";
 import { screenTenant } from "../ofac/screening.js";
 import type { TenantContext } from "../tenant-context.js";
-import { clearTeardownRecord } from "./lifecycle.js";
+import { assertNotLifecycleFrozen } from "./billing-state.js";
+import { clearTeardownRecord, releaseMailboxes } from "./lifecycle.js";
 import { reactivateFromDunning } from "./ops-summary.js";
 
 /**
@@ -55,32 +74,96 @@ export interface CheckoutResult {
   sessionId: string;
 }
 
+// The single paid plan every checkout subscribes to (design §4 — the tiers
+// collapsed to one `managed` plan billed on the per-mailbox curve).
+const MANAGED_PLAN: TenantPlan = "managed";
+
+/**
+ * The mailbox quantity to send at checkout = max(5, provisioned-at-checkout)
+ * (design §3). A brand-new tenant has 0 provisioned → floors at 5 (= the $99
+ * minimum); the count then TRACKS real provisioning as setup runs (§2). The
+ * customer's requested `input.mailboxes` bounds the intended size at the
+ * boundary (5..60 self-serve; 61+ is a custom quote) and seeds the quote, but
+ * the billed quantity mirrors provisioning, never an unprovisioned commitment.
+ */
+function checkoutMailboxQuantity(ctx: TenantContext): number {
+  const provisioned = ctx.sql
+    .exec<{ n: number }>(`SELECT COUNT(*) as n FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL`, ctx.tenantId)
+    .one().n;
+  return Math.max(MINIMUM_BILLABLE_MAILBOXES, provisioned);
+}
+
+/**
+ * Resolves the two durable Price ids for a billing interval, reading the D1
+ * `stripe_prices` cache first and only calling `ensureStripePrices` (a Stripe
+ * round trip) on a cache miss — then caching all four ids for the mode (design
+ * §3). The arm-time bootstrap pre-warms this cache so the common checkout path
+ * never races; the lazy miss here is the backstop, race-safe via
+ * ensureStripePrices' duplicate-lookup_key re-fetch.
+ */
+async function resolveCheckoutPriceIds(
+  ctx: TenantContext,
+  secretKey: string,
+  interval: "month" | "year",
+): Promise<{ platformPriceId: string; mailboxPriceId: string }> {
+  const mode = stripeMode(secretKey);
+  const platformKey = interval === "year" ? STRIPE_PRICES.platform_yearly.lookupKey : STRIPE_PRICES.platform_monthly.lookupKey;
+  const mailboxKey = interval === "year" ? STRIPE_PRICES.mailbox_yearly.lookupKey : STRIPE_PRICES.mailbox_monthly.lookupKey;
+
+  const cached = await ctx.env.DB.prepare(
+    `SELECT lookup_key, price_id FROM stripe_prices WHERE mode = ? AND lookup_key IN (?, ?)`,
+  )
+    .bind(mode, platformKey, mailboxKey)
+    .all<{ lookup_key: string; price_id: string }>();
+  const byKey = new Map(cached.results.map((r) => [r.lookup_key, r.price_id]));
+  if (byKey.has(platformKey) && byKey.has(mailboxKey)) {
+    return { platformPriceId: byKey.get(platformKey)!, mailboxPriceId: byKey.get(mailboxKey)! };
+  }
+
+  const map = await ensureStripePrices(secretKey);
+  await cacheStripePrices(ctx, mode, map);
+  return {
+    platformPriceId: interval === "year" ? map.platform_yearly : map.platform_monthly,
+    mailboxPriceId: interval === "year" ? map.mailbox_yearly : map.mailbox_monthly,
+  };
+}
+
+/** Persists the resolved `lookup_key -> price_id` map for a mode into the D1 cache (idempotent upsert). */
+async function cacheStripePrices(ctx: TenantContext, mode: string, map: StripePriceMap): Promise<void> {
+  const now = ctx.clock.now();
+  const stmt = ctx.env.DB.prepare(
+    `INSERT INTO stripe_prices (lookup_key, mode, price_id, created_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT (lookup_key, mode) DO UPDATE SET price_id = excluded.price_id`,
+  );
+  const slugs = Object.keys(STRIPE_PRICES) as (keyof StripePriceMap)[];
+  await ctx.env.DB.batch(slugs.map((slug) => stmt.bind(STRIPE_PRICES[slug].lookupKey, mode, map[slug], now)));
+}
+
 export async function startCheckout(ctx: TenantContext, input: CheckoutInput, origin: string): Promise<CheckoutResult> {
-  const quota = PLAN_QUOTAS[input.plan];
   const stripeKey = ctx.env.STRIPE_SECRET_KEY;
 
   if (stripeKey) {
+    const { platformPriceId, mailboxPriceId } = await resolveCheckoutPriceIds(ctx, stripeKey, input.interval);
     const session = await createStripeCheckoutSession(stripeKey, {
       tenantId: ctx.tenantId,
-      plan: input.plan,
-      priceCents: quota.priceCents,
-      label: quota.label,
+      platformPriceId,
+      mailboxPriceId,
+      mailboxQuantity: checkoutMailboxQuantity(ctx),
       successUrl: `${origin}/checkout/success?tenant=${ctx.tenantId}`,
       cancelUrl: `${origin}/checkout/cancel?tenant=${ctx.tenantId}`,
     });
     return { mode: "stripe", url: session.url, sessionId: session.id };
   }
 
-  // Reuse an existing PENDING session for the same plan instead of inserting a
-  // new row on every call — otherwise a tenant looping POST /checkout grows its
-  // own DO SQLite storage unboundedly (adversarial panel-03 finding #10, same
-  // self-amplifier class /demo/run was hardened against). Bounds pending
-  // sessions to at most one per (tenant, plan).
+  // Reuse an existing PENDING session instead of inserting a new row on every
+  // call — otherwise a tenant looping POST /checkout grows its own DO SQLite
+  // storage unboundedly (adversarial panel-03 finding #10). Bounds pending
+  // sessions to at most one per tenant (there is now one paid plan, `managed`).
   const existing = ctx.sql
     .exec<{ id: string }>(
       `SELECT id FROM checkout_sessions WHERE tenant_id = ? AND plan = ? AND status = 'pending' ORDER BY created_at ASC LIMIT 1`,
       ctx.tenantId,
-      input.plan,
+      MANAGED_PLAN,
     )
     .toArray()[0];
   const sessionId = existing?.id ?? newId("cs");
@@ -90,7 +173,7 @@ export async function startCheckout(ctx: TenantContext, input: CheckoutInput, or
       `INSERT INTO checkout_sessions (id, tenant_id, plan, status, created_at) VALUES (?, ?, ?, 'pending', ?)`,
       sessionId,
       ctx.tenantId,
-      input.plan,
+      MANAGED_PLAN,
       now,
     );
   }
@@ -182,7 +265,7 @@ function readStripeMetadataPlan(obj: Record<string, unknown>): TenantPlan | null
   const metadata = obj.metadata;
   if (!metadata || typeof metadata !== "object") return null;
   const plan = (metadata as Record<string, unknown>).plan;
-  return typeof plan === "string" && isPaidPlanTier(plan) ? plan : null;
+  return typeof plan === "string" && isPaidPlan(plan) ? plan : null;
 }
 
 /**
@@ -271,6 +354,15 @@ export async function applyStripeWebhookEvent(ctx: TenantContext, event: StripeE
       if (res.rowsWritten === 0) {
         // Frozen by an open dispute — checkout did not apply (plan unchanged).
         return { applied: false, duplicate: false };
+      }
+      // Quantity-billing (design §9): store the captured discount % (from the
+      // session totals) + resolve/store the subscription-item ids + confirmed
+      // mailbox quantity so syncMailboxQuantity can set-to-N without re-resolving.
+      // The item-id capture needs a real Stripe subscription (a getSubscription
+      // round trip), so it is gated on the key — a simulated tenant has none.
+      ctx.sql.exec(`UPDATE tenant_profile SET checkout_discount_pct = ? WHERE id = ?`, readCheckoutDiscountPct(obj), ctx.tenantId);
+      if (ctx.env.STRIPE_SECRET_KEY && subscriptionId) {
+        await captureSubscriptionState(ctx, ctx.env.STRIPE_SECRET_KEY, subscriptionId);
       }
       // Re-subscribe bookkeeping (findings #4 + #6).
       clearTeardownRecord(ctx);
@@ -399,29 +491,176 @@ export async function applyStripeWebhookEvent(ctx: TenantContext, event: StripeE
 }
 
 /**
- * Reports one metered-usage increment toward Stripe metered billing.
- * Inert/no-op unless `env.STRIPE_SECRET_KEY` AND a stored
- * `stripe_subscription_id` both exist — i.e. unreachable in this build.
- * Never throws: a Stripe reporting hiccup must not corrupt or block the
- * local ledger write it follows (that write already committed).
- * `idempotencyKey` is the source send/provision id — see reportUsageRecord (B5).
+ * The live PROVISIONED mailbox count — the billing meter (design §2, founder
+ * ruling 1). `released_at IS NULL` (the exact query quota.ts/lifecycle.ts run).
  */
-export async function reportUsageToStripeIfConfigured(
-  ctx: TenantContext,
-  quantity: number,
-  idempotencyKey: string,
-): Promise<void> {
-  const key = ctx.env.STRIPE_SECRET_KEY;
-  if (!key) return;
+function provisionedMailboxCount(ctx: TenantContext): number {
+  return ctx.sql
+    .exec<{ n: number }>(`SELECT COUNT(*) as n FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL`, ctx.tenantId)
+    .one().n;
+}
+
+export interface SyncQuantityResult {
+  /** True iff a set-to-N request was actually sent to Stripe on this call. */
+  pushed: boolean;
+  /** The desired mailbox quantity = max(5, provisioned) at this call. */
+  quantity: number;
+  /** The proration behavior sent (null if nothing was pushed). */
+  proration: "create_prorations" | "none" | null;
+}
+
+/**
+ * Mirrors the Stripe mailbox-item quantity to the live provisioned count
+ * (design §2/§8). Billing FOLLOWS provisioning: `desired = max(5, provisioned)`
+ * and the item quantity is SET to it (absolute, never increment — a
+ * missed/duplicated push self-heals on the next sync). ACTIVE-ONLY (§7): a
+ * frozen/dunning/canceled tenant is a no-op, so a teardown-driven release can
+ * never push qty into a canceling subscription. NO-OP when there is no drift,
+ * or when the tenant has no real Stripe subscription (a simulated /
+ * unarmed-key tenant — the mechanic only applies to a real Stripe subscription).
+ * Increases prorate (`create_prorations`); decreases do NOT credit
+ * (`proration_behavior: "none"` — founder ruling 2). NEVER throws: a Stripe
+ * hiccup leaves `mailbox_qty_synced` stale and the reconcile sweep retries, so
+ * a push failure can never fail the provision/release that called it.
+ */
+export async function syncMailboxQuantity(ctx: TenantContext): Promise<SyncQuantityResult> {
   const row = ctx.sql
-    .exec<{ subId: string | null }>(`SELECT stripe_subscription_id as subId FROM tenant_profile WHERE id = ?`, ctx.tenantId)
+    .exec<{ billing_state: string; mailbox_qty_synced: number; stripe_subscription_id: string | null; stripe_mailbox_item_id: string | null }>(
+      `SELECT billing_state, mailbox_qty_synced, stripe_subscription_id, stripe_mailbox_item_id FROM tenant_profile WHERE id = ?`,
+      ctx.tenantId,
+    )
     .one();
-  if (!row.subId) return;
-  try {
-    // B5: dedupe key derived from the source send/provision id so a redelivered
-    // report can't double-increment Stripe metered usage.
-    await reportUsageRecord(key, row.subId, quantity, ctx.clock.now(), `usage-report:${idempotencyKey}`);
-  } catch (err) {
-    console.error("stripe usage report failed (non-fatal — the local ledger entry already committed)", err);
+  const desired = billableMailboxes(provisionedMailboxCount(ctx));
+
+  // Active-only (§7) — a teardown/freeze release never reaches Stripe.
+  if (row.billing_state !== "active") return { pushed: false, quantity: desired, proration: null };
+  // No drift — the common case, no round trip.
+  if (row.mailbox_qty_synced === desired) return { pushed: false, quantity: desired, proration: null };
+  // No real Stripe subscription (simulated / unarmed) — nothing to mirror; do
+  // NOT advance `synced` (there is no Stripe state to be in sync with).
+  const key = ctx.env.STRIPE_SECRET_KEY;
+  if (!key || !row.stripe_subscription_id || !row.stripe_mailbox_item_id) {
+    return { pushed: false, quantity: desired, proration: null };
   }
+
+  const proration: "create_prorations" | "none" = desired > row.mailbox_qty_synced ? "create_prorations" : "none";
+  try {
+    // Per-attempt-unique idempotency key: the set is ABSOLUTE (self-idempotent),
+    // so the key must NOT dedupe a later distinct transition to the same target
+    // within Stripe's 24h window (which would silently drop it) — it only guards
+    // a within-call network retry. The reconcile sweep is the real safety net.
+    await setSubscriptionItemQuantity(
+      key,
+      row.stripe_mailbox_item_id,
+      desired,
+      proration,
+      `mbxqty:${ctx.tenantId}:${desired}:${ctx.clock.now()}`,
+    );
+    ctx.sql.exec(`UPDATE tenant_profile SET mailbox_qty_synced = ? WHERE id = ?`, desired, ctx.tenantId);
+    return { pushed: true, quantity: desired, proration };
+  } catch (err) {
+    console.error("stripe mailbox quantity sync failed (non-fatal — the reconcile sweep will retry)", err);
+    return { pushed: false, quantity: desired, proration };
+  }
+}
+
+/**
+ * Percent-off discount captured from a `checkout.session.completed` event
+ * (design §9/N5), derived from the session totals (`amount_discount /
+ * amount_subtotal`) so mrrCents/quote apply it without a Stripe round trip.
+ * 0 when there is no coupon or the subtotal is 0.
+ */
+function readCheckoutDiscountPct(obj: Record<string, unknown>): number {
+  const subtotal = typeof obj.amount_subtotal === "number" ? obj.amount_subtotal : 0;
+  const totalDetails = obj.total_details;
+  const discount =
+    totalDetails && typeof totalDetails === "object" && typeof (totalDetails as Record<string, unknown>).amount_discount === "number"
+      ? ((totalDetails as Record<string, unknown>).amount_discount as number)
+      : 0;
+  if (subtotal <= 0 || discount <= 0) return 0;
+  return Math.round((discount / subtotal) * 100);
+}
+
+/**
+ * Resolves + stores the platform/mailbox subscription-item ids, the confirmed
+ * mailbox quantity (-> `mailbox_qty_synced`), and the interval at checkout
+ * completion (design §9). One `getSubscription` round trip, gated on
+ * `STRIPE_SECRET_KEY` by the caller — a simulated / test-mode-unarmed checkout
+ * has no real Stripe subscription, so the ids stay NULL and the quantity
+ * mechanic no-ops for that tenant.
+ */
+async function captureSubscriptionState(ctx: TenantContext, secretKey: string, subscriptionId: string): Promise<void> {
+  const items = await getSubscription(secretKey, subscriptionId);
+  const platform = items.find((i) => i.lookupKey === STRIPE_PRICES.platform_monthly.lookupKey || i.lookupKey === STRIPE_PRICES.platform_yearly.lookupKey);
+  const mailbox = items.find((i) => i.lookupKey === STRIPE_PRICES.mailbox_monthly.lookupKey || i.lookupKey === STRIPE_PRICES.mailbox_yearly.lookupKey);
+  if (!mailbox) return; // not our subscription shape — leave state unset
+  const interval = mailbox.lookupKey === STRIPE_PRICES.mailbox_yearly.lookupKey ? "year" : "month";
+  ctx.sql.exec(
+    `UPDATE tenant_profile
+       SET stripe_platform_item_id = ?, stripe_mailbox_item_id = ?, mailbox_qty_synced = ?, billing_interval = ?
+     WHERE id = ?`,
+    platform?.id ?? null,
+    mailbox.id,
+    mailbox.quantity,
+    interval,
+    ctx.tenantId,
+  );
+}
+
+export interface MailboxBilling {
+  /**
+   * The mailbox count this projection is for — REALITY, not the ask (SPEC §18
+   * "the proposed new count"). On an actual add/remove it is the live provisioned
+   * count AFTER the operation (so a capacity_pending partial reflects only what
+   * landed); on a quoteOnly preview it is the projected count (current + delta).
+   */
+  provisionedAfter: number;
+  /** Projected monthly price for that count on the curve, folding any stored
+   *  checkout discount, integer cents. Floors at the 5-mailbox / $99 minimum. */
+  projectedMonthlyCents: number;
+  /** Human-readable pricing formula (SPEC §18) so no add is a silent bill surprise. */
+  formula: string;
+}
+
+/**
+ * The billing projection returned on EVERY mailbox add/remove response (SPEC
+ * §18 "no silent capacity addition" — the response must carry the proposed new
+ * count + projected monthly price). `provisionedAfter` is passed by the caller:
+ * the REAL post-operation count on an actual add/remove, or the projected count
+ * on a quoteOnly preview. The monthly folds the discount captured at checkout
+ * and floors at 5. Read-only.
+ */
+export function buildMailboxBilling(ctx: TenantContext, provisionedAfter: number): MailboxBilling {
+  const discountPct = ctx.sql
+    .exec<{ d: number }>(`SELECT checkout_discount_pct as d FROM tenant_profile WHERE id = ?`, ctx.tenantId)
+    .one().d;
+  return {
+    provisionedAfter,
+    projectedMonthlyCents: monthlyRevenueCents(provisionedAfter, discountPct),
+    formula: "$49 platform + $10/mailbox, 5 minimum",
+  };
+}
+
+export interface RemoveMailboxesResult {
+  releasedCount: number;
+  /** The projected bill after the release (the lower count, floored at $99). */
+  billing: MailboxBilling;
+}
+
+/**
+ * Customer-initiated downgrade (design §2 — the symmetrical deprovision path,
+ * distinct from teardown). Releases the N newest live mailboxes NOW (effective
+ * immediately for provisioning) and mirrors the LOWER Stripe quantity with
+ * proration_behavior 'none' — no mid-cycle credit (founder ruling 2), effective
+ * next renewal for billing. Guards against a frozen tenant (must re-subscribe
+ * first). Reuses the shared releaseMailboxes path (revoke-before-mark + G4
+ * slot decrement). The quoted consent is enforced at the boundary
+ * (RemoveMailboxesInput.acknowledged must be an explicit `true`).
+ */
+export async function removeMailboxes(ctx: TenantContext, input: RemoveMailboxesInput): Promise<RemoveMailboxesResult> {
+  assertNotLifecycleFrozen(ctx, "remove_mailboxes");
+  const { releasedCount } = await releaseMailboxes(ctx, { limit: input.count });
+  // Decrease: syncMailboxQuantity picks proration_behavior 'none' (desired < synced).
+  await syncMailboxQuantity(ctx);
+  return { releasedCount, billing: buildMailboxBilling(ctx, provisionedMailboxCount(ctx)) };
 }

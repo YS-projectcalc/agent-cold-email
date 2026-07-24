@@ -53,7 +53,7 @@ function readProvisioningState(ctx: TenantContext): string {
 
 describe("withSpendCeiling — sandbox tenants never touch the ceiling", () => {
   it("a sandbox bundle runs fn with NO reservation and NO ledger row (structural $0 guarantee)", async () => {
-    const { tenantId } = await mintTenant("Sandbox Spend Co", "launch");
+    const { tenantId } = await mintTenant("Sandbox Spend Co", "managed");
     // NOTE: NOT realCtx — the real minted tenant is sandbox (billing 'none').
     const ran = await withTenantContext(tenantId, async (ctx) => {
       let called = false;
@@ -72,7 +72,7 @@ describe("withSpendCeiling — sandbox tenants never touch the ceiling", () => {
 
 describe("G2 — two concurrent reserves that jointly exceed the ceiling: exactly one succeeds", () => {
   it("the atomic conditional UPDATE serializes — one commits, one lands capacity_pending", async () => {
-    const { tenantId } = await mintTenant("Ceiling Race Co", "launch");
+    const { tenantId } = await mintTenant("Ceiling Race Co", "managed");
     const { successes, rejections, committed, reserved, slots } = await realCtx(tenantId, async (ctx) => {
       const pk = periodKey(ctx.clock.now());
       // Pre-seed a ceiling that admits ONE mailbox (690) but not two (1380).
@@ -112,7 +112,7 @@ describe("G2 — two concurrent reserves that jointly exceed the ceiling: exactl
 
 describe("withSpendCeiling — commit and release move the ledger correctly", () => {
   it("a successful vendor call commits the reserve (reserved→committed, slot held) and clears the marker", async () => {
-    const { tenantId } = await mintTenant("Commit Co", "launch");
+    const { tenantId } = await mintTenant("Commit Co", "managed");
     await realCtx(tenantId, async (ctx) => {
       const pk = periodKey(ctx.clock.now());
       // Pre-set the marker so we can prove a successful spend clears it.
@@ -131,7 +131,7 @@ describe("withSpendCeiling — commit and release move the ledger correctly", ()
   });
 
   it("a failed vendor call RELEASES the reserve (reserved and slot back to 0) and re-throws", async () => {
-    const { tenantId } = await mintTenant("Release Co", "launch");
+    const { tenantId } = await mintTenant("Release Co", "managed");
     await realCtx(tenantId, async (ctx) => {
       const pk = periodKey(ctx.clock.now());
       await expect(
@@ -153,7 +153,7 @@ describe("withSpendCeiling — commit and release move the ledger correctly", ()
 
 describe("G4 — provisioning the (plan+1)th mailbox: attempt-then-capacity_pending + alert, never silent success", () => {
   it("over plan-slot capacity → CapacityPendingError('slot_capacity'), fn NOT run, one founder alert, $ reserve rolled back", async () => {
-    const { tenantId } = await mintTenant("Slot Cap Co", "launch");
+    const { tenantId } = await mintTenant("Slot Cap Co", "managed");
     const mailer = new SandboxOpsMailer();
     // OPS_ALERT_EMAIL is a required binding (env.ts) — present in the test env,
     // so the alert path actually attempts a send into our sandbox mailer.
@@ -190,7 +190,7 @@ describe("G4 — provisioning the (plan+1)th mailbox: attempt-then-capacity_pend
   });
 
   it("the alert fires ONCE per transition, not once per rejected mailbox (no storm)", async () => {
-    const { tenantId } = await mintTenant("No Storm Co", "launch");
+    const { tenantId } = await mintTenant("No Storm Co", "managed");
     const mailer = new SandboxOpsMailer();
     await realCtx(tenantId, async (ctx) => {
       await ctx.env.DB.prepare(`INSERT OR REPLACE INTO vendor_slot_state (id, slots_used, updated_at) VALUES (1, 10, ?)`)
@@ -257,7 +257,7 @@ describe("reapStaleReservations — reclaims reservations orphaned by a crash (d
 
 describe("releaseMailboxSlots — teardown decrements the account slot counter", () => {
   it("decrements by the count of real slot-counted mailboxes released", async () => {
-    const { tenantId } = await mintTenant("Teardown Slots Co", "launch");
+    const { tenantId } = await mintTenant("Teardown Slots Co", "managed");
     await realCtx(tenantId, async (ctx) => {
       await ctx.env.DB.prepare(`INSERT OR REPLACE INTO vendor_slot_state (id, slots_used, updated_at) VALUES (1, 3, ?)`)
         .bind(ctx.clock.now())

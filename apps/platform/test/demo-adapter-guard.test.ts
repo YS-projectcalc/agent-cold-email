@@ -24,18 +24,18 @@ describe("vendor adapter factory — demo/free tenants cannot reach a real adapt
   });
 
   it("keeps a paid-plan tenant on sandbox while NOT activated (unpaid/frozen/none — the common case)", () => {
-    const bundle = createVendorAdapters("launch", clock, /* activated */ false);
+    const bundle = createVendorAdapters("managed", clock, /* activated */ false);
     expect(bundle.kind).toBe("sandbox");
   });
 
   it("a paid+activated tenant still gets SANDBOX domain/mailbox/billing without inboxKitConfig — `activated` is EmailPort-only (I1 scope; I3/I4 unbuilt)", () => {
-    const bundle = createVendorAdapters("launch", clock, /* activated */ true);
+    const bundle = createVendorAdapters("managed", clock, /* activated */ true);
     expect(bundle.kind).toBe("sandbox");
     expect(bundle.domain).toBeInstanceOf(SandboxDomainPort);
   });
 
   it("a paid+activated tenant WITHOUT engineConfig (the engine not armed yet — every test env, and prod before ACTIVATION.md's Cloudflare Tunnel step) still gets a WORKING sandbox EmailPort, not a permanently-dark one", async () => {
-    const bundle = createVendorAdapters("launch", clock, /* activated */ true); // no engineConfig
+    const bundle = createVendorAdapters("managed", clock, /* activated */ true); // no engineConfig
     expect(bundle.email).toBeInstanceOf(SandboxEmailPort);
     const result = await bundle.email.send(
       { fromEmail: "a@b.test", toEmail: "c@d.test", subject: "s", body: "b", threadId: "t", inReplyToMessageId: null },
@@ -45,7 +45,7 @@ describe("vendor adapter factory — demo/free tenants cannot reach a real adapt
   });
 
   it("...but WITH engineConfig ALSO wired, that same activated+paid tenant's EmailPort DOES flip real — proves the gate is config-driven, not a dead/always-sandbox branch (instanceof only — no live network call)", () => {
-    const bundle = createVendorAdapters("launch", clock, /* activated */ true, { baseUrl: "https://engine.example.internal", authSecret: "s" });
+    const bundle = createVendorAdapters("managed", clock, /* activated */ true, { baseUrl: "https://engine.example.internal", authSecret: "s" });
     expect(bundle.email).toBeInstanceOf(RealEmailPort);
   });
 

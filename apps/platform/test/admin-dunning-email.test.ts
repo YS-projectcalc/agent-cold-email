@@ -46,7 +46,7 @@ describe("dunning suspend notices", () => {
 
   it("flags (does not invent) a missing contact email — founder copy only", async () => {
     // mintTenant bypasses /signup, so it has NO contact email on file.
-    const { tenantId } = await mintTenant("No Contact Co", "growth");
+    const { tenantId } = await mintTenant("No Contact Co", "managed");
     await driveToSuspend(tenantId);
 
     const mailer = new SandboxOpsMailer();

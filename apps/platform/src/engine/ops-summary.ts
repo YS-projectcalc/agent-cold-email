@@ -8,7 +8,7 @@
 // (possibly stale — see db.ts's insertTenantIndex, never updated post-signup)
 // mirror of plan/status.
 
-import { isPaidPlanTier, PLAN_QUOTAS } from "@coldstart/shared";
+import { isPaidPlan, monthlyRevenueCents } from "@coldstart/shared";
 import type { TenantContext } from "../tenant-context.js";
 import { getDeliverabilitySummary } from "./reporting.js";
 
@@ -89,8 +89,8 @@ export function reactivateFromDunning(ctx: TenantContext): boolean {
 
 export function getOpsSummary(ctx: TenantContext, sinceMs: number): TenantOpsSummary {
   const profile = ctx.sql
-    .exec<{ brand: string; plan: string; status: string; billing_state: string; last_decline_code: string | null }>(
-      `SELECT brand, plan, status, billing_state, last_decline_code FROM tenant_profile WHERE id = ?`,
+    .exec<{ brand: string; plan: string; status: string; billing_state: string; last_decline_code: string | null; checkout_discount_pct: number }>(
+      `SELECT brand, plan, status, billing_state, last_decline_code, checkout_discount_pct FROM tenant_profile WHERE id = ?`,
       ctx.tenantId,
     )
     .one();
@@ -122,8 +122,16 @@ export function getOpsSummary(ctx: TenantContext, sinceMs: number): TenantOpsSum
     .exec<{ n: number }>(`SELECT COUNT(*) as n FROM webhook_events WHERE type = 'invoice.payment_failed'`)
     .one().n;
 
+  // MRR follows the per-mailbox curve on the LIVE provisioned count (design §9),
+  // folding any discount captured at checkout — not a fixed tier price. Zero
+  // unless the tenant is on the paid plan AND billing is active.
+  const provisionedMailboxes = ctx.sql
+    .exec<{ n: number }>(`SELECT COUNT(*) as n FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL`, ctx.tenantId)
+    .one().n;
   const mrrCents =
-    isPaidPlanTier(profile.plan) && profile.billing_state === "active" ? PLAN_QUOTAS[profile.plan].priceCents : 0;
+    isPaidPlan(profile.plan) && profile.billing_state === "active"
+      ? monthlyRevenueCents(provisionedMailboxes, profile.checkout_discount_pct)
+      : 0;
 
   // Windowed failure signals (watchtower). One GROUP-free aggregate over the
   // events log: terminal-'failed' sends + spam complaints since `sinceMs`.

@@ -95,6 +95,65 @@ export function clearTeardownRecord(ctx: TenantContext): void {
   ctx.sql.exec(`DELETE FROM teardown_records WHERE tenant_id = ?`, ctx.tenantId);
 }
 
+export interface ReleaseMailboxesResult {
+  releasedCount: number;
+  slotCountedReleased: number;
+}
+
+/**
+ * Releases mailboxes back to the vendor + marks them `released_at` (design §7.1
+ * — extracted from teardown's mailbox loop, CLAUDE.md rule c). The billing
+ * meter is `COUNT(*) WHERE released_at IS NULL`, so a released mailbox stops
+ * counting. Three scopes via `opts`:
+ *   - `{}`            — all this tenant's live mailboxes (teardown).
+ *   - `{ domainId }`  — one domain's mailboxes (REPLACE_DOMAIN's burned domain).
+ *   - `{ limit }`     — the N newest live mailboxes (a customer downgrade).
+ *
+ * PRESERVES the revoke-BEFORE-mark ordering (i3i4-r2 crash-safety): a crash
+ * between the vendor release and the `released_at` mark leaves the row unmarked,
+ * so a retry re-attempts both idempotently. Decrements the G4 account slot
+ * counter by the count of REAL plan-slot mailboxes released (mailboxes.slot_counted).
+ * Callers that touch billing must `syncMailboxQuantity` afterward.
+ */
+export async function releaseMailboxes(
+  ctx: TenantContext,
+  opts: { domainId?: string; limit?: number } = {},
+  engineClient: EngineMailboxClient = new EngineMailboxClient(engineConfigFromEnv(ctx.env)),
+): Promise<ReleaseMailboxesResult> {
+  const now = ctx.clock.now();
+  let query = `SELECT id, email, slot_counted FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL`;
+  const params: (string | number)[] = [ctx.tenantId];
+  if (opts.domainId) {
+    query += ` AND domain_id = ?`;
+    params.push(opts.domainId);
+  }
+  query += ` ORDER BY created_at DESC`;
+  if (opts.limit != null) {
+    query += ` LIMIT ?`;
+    params.push(opts.limit);
+  }
+  const mailboxes = ctx.sql.exec<{ id: string; email: string; slot_counted: number }>(query, ...params).toArray();
+
+  let slotCountedReleased = 0;
+  for (const m of mailboxes) {
+    await ctx.adapters.mailbox.release(m.email, `release-mbx:${ctx.tenantId}:${m.id}`);
+    if (m.slot_counted) slotCountedReleased++;
+    // Revoke BEFORE marking released_at (i3i4-r2): a crash in between leaves the
+    // row unmarked -> a retry re-attempts release + revoke (both idempotent).
+    await revokePushedMailboxCredentials(ctx, m.email, engineClient);
+    ctx.sql.exec(
+      `UPDATE mailboxes SET released_at = ?, deliv_status = 'paused' WHERE id = ? AND tenant_id = ?`,
+      now,
+      m.id,
+      ctx.tenantId,
+    );
+  }
+  // G4 — decrement the account slot counter by the REAL plan-slot mailboxes just
+  // released (precise via slot_counted; no-op when none were slot-counted).
+  await releaseMailboxSlots(ctx, slotCountedReleased, now);
+  return { releasedCount: mailboxes.length, slotCountedReleased };
+}
+
 /**
  * Reclaims a tenant's dedicated infrastructure: release every domain +
  * mailbox back to the vendor (DomainPort/MailboxPort.release — sandbox executes
@@ -158,40 +217,12 @@ export async function teardownTenant(
     }
   }
 
-  // 2. Release mailboxes back to the vendor. released_at marks the reclaim;
-  //    deliv_status='paused' stops the tick's capacity picker from sending
-  //    from them immediately (the send-side kill — see engine/tick.ts).
-  const mailboxes = ctx.sql
-    .exec<{ id: string; email: string; slot_counted: number }>(
-      `SELECT id, email, slot_counted FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL`,
-      ctx.tenantId,
-    )
-    .toArray();
-
-  let slotCountedReleased = 0;
-  for (const m of mailboxes) {
-    await ctx.adapters.mailbox.release(m.email, `release-mbx:${ctx.tenantId}:${m.id}`);
-    if (m.slot_counted) slotCountedReleased++;
-    // I3 credential lifecycle (adversary i3i4-build-review-2026-07-23 finding
-    // 2): a released vendor slot's pushed OAuth refresh token must stop
-    // resolving on the engine — best-effort, never fails the teardown.
-    // Hardening (i3i4-build-review r2 residual): revoke BEFORE marking
-    // released_at, so a crash between the vendor release and the mark leaves the
-    // row UNmarked → a re-teardown re-attempts release + revoke (both idempotent),
-    // narrowing the window in which a released slot still has live engine creds.
-    await revokePushedMailboxCredentials(ctx, m.email, engineClient);
-    ctx.sql.exec(
-      `UPDATE mailboxes SET released_at = ?, deliv_status = 'paused' WHERE id = ? AND tenant_id = ?`,
-      now,
-      m.id,
-      ctx.tenantId,
-    );
-  }
-  // G4 — decrement the account slot counter (D1) by the count of REAL plan-slot
-  // mailboxes just released. Precise (mailboxes.slot_counted), so it works even
-  // though the tenant is frozen and reads sandbox at teardown; no-op (never
-  // touches D1) when none were slot-counted, e.g. the whole default build.
-  await releaseMailboxSlots(ctx, slotCountedReleased, now);
+  // 2. Release ALL this tenant's mailboxes back to the vendor (shared helper,
+  //    CLAUDE.md rule c) — released_at marks the reclaim + deliv_status='paused'
+  //    stops the tick's capacity picker immediately, and the G4 account slot
+  //    counter is decremented by the real plan-slot mailboxes released. The
+  //    revoke-before-mark crash-safety ordering lives in releaseMailboxes.
+  const { releasedCount: mailboxesReleased } = await releaseMailboxes(ctx, {}, engineClient);
 
   // 3. Stop all campaigns (reuse the existing pause-all path — CLAUDE.md rule c).
   const campaignsStopped = ctx.sql
@@ -206,7 +237,7 @@ export async function teardownTenant(
     reason: opts.reason,
     effective: opts.effective,
     domainsReleased: domains.length,
-    mailboxesReleased: mailboxes.length,
+    mailboxesReleased,
     campaignsStopped,
     annualDomainLiabilityCents,
     ts: now,

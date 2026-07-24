@@ -33,7 +33,9 @@ export const byoDomainsRoute = new Hono<{ Bindings: Env; Variables: AuthedVariab
   .post("/byo-domains/:id/managed-mailboxes", async (c) => {
     const parsed = await parseJsonBody(c, RequestManagedByoMailboxesInput);
     if (!parsed.ok) return parsed.response;
-    return c.json(await c.get("tenantStub").requestManagedByoMailboxes(c.req.param("id"), parsed.data), 201);
+    const result = await c.get("tenantStub").requestManagedByoMailboxes(c.req.param("id"), parsed.data);
+    // A quoteOnly preview provisions nothing -> 200; a real provision creates -> 201.
+    return c.json(result, "quoteOnly" in result ? 200 : 201);
   })
   .post("/byo-domains/:id/connect-mailbox", async (c) => {
     const parsed = await parseJsonBody(c, ConnectByoMailboxInput);

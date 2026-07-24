@@ -1,14 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createStripeCheckoutSession } from "../src/billing/stripe-client.js";
 
-// I2 (self-serve activation design §2.5) — promo-code checkout.
-// F2 (adversarial 2026-07-21, BLOCKING): promo eligibility is restricted to
-// the `launch` plan IN CODE — a growth/scale session must never enable
-// `allow_promotion_codes`, regardless of what a founder-minted coupon
-// restricts it to at Stripe, so a code can never be entered against a
-// higher-value tier through this session at all.
+// Quantity-billing migration (design §2/§3) — checkout builds TWO durable-Price
+// line items (platform qty 1 + mailbox qty N) instead of one inline price. The
+// tiers collapsed to one paid plan (`managed`), so promo entry is enabled for
+// every checkout; `payment_method_collection: "if_required"` still collects a
+// card whenever the discounted invoice is > $0 (design §10 scenario 5). The
+// real-Stripe crux is the Tier-2 test-mode gate (tools/billing-gate/).
 
-describe("createStripeCheckoutSession — promo code params (F2 plan-restricted)", () => {
+describe("createStripeCheckoutSession — two durable-Price line items", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   function stubFetchCapture(): { body: () => URLSearchParams } {
@@ -25,95 +25,50 @@ describe("createStripeCheckoutSession — promo code params (F2 plan-restricted)
 
   const baseParams = {
     tenantId: "ten_test",
+    platformPriceId: "price_platform_monthly",
+    mailboxPriceId: "price_mailbox_monthly",
+    mailboxQuantity: 8,
     successUrl: "https://example.com/success",
     cancelUrl: "https://example.com/cancel",
   };
 
-  it("enables allow_promotion_codes + payment_method_collection:if_required for the launch plan", async () => {
+  it("emits a platform item (qty 1) + a mailbox item (qty N) referencing durable Price ids — no inline price_data", async () => {
     const capture = stubFetchCapture();
-    await createStripeCheckoutSession("sk_test_fake", { ...baseParams, plan: "launch", priceCents: 9_900, label: "Launch" });
+    await createStripeCheckoutSession("sk_test_fake", baseParams);
+
+    const body = capture.body();
+    expect(body.get("line_items[0][price]")).toBe("price_platform_monthly");
+    expect(body.get("line_items[0][quantity]")).toBe("1");
+    expect(body.get("line_items[1][price]")).toBe("price_mailbox_monthly");
+    expect(body.get("line_items[1][quantity]")).toBe("8");
+    // The retired inline-price shape is gone (un-couponable, un-durable).
+    expect(body.get("line_items[0][price_data][unit_amount]")).toBeNull();
+    expect(body.get("mode")).toBe("subscription");
+  });
+
+  it("enables allow_promotion_codes + payment_method_collection:if_required for the single managed plan", async () => {
+    const capture = stubFetchCapture();
+    await createStripeCheckoutSession("sk_test_fake", baseParams);
 
     const body = capture.body();
     expect(body.get("allow_promotion_codes")).toBe("true");
     expect(body.get("payment_method_collection")).toBe("if_required");
   });
 
-  it("does NOT enable promo codes for growth — plan-restricted in code (F2)", async () => {
-    const capture = stubFetchCapture();
-    await createStripeCheckoutSession("sk_test_fake", { ...baseParams, plan: "growth", priceCents: 29_900, label: "Growth" });
-
-    const body = capture.body();
-    expect(body.get("allow_promotion_codes")).toBeNull();
-    expect(body.get("payment_method_collection")).toBeNull();
-  });
-
-  it("does NOT enable promo codes for scale — plan-restricted in code (F2)", async () => {
-    const capture = stubFetchCapture();
-    await createStripeCheckoutSession("sk_test_fake", { ...baseParams, plan: "scale", priceCents: 79_900, label: "Scale" });
-
-    const body = capture.body();
-    expect(body.get("allow_promotion_codes")).toBeNull();
-    expect(body.get("payment_method_collection")).toBeNull();
-  });
-
-  it("still carries the tenant/plan metadata regardless of promo eligibility (positive control)", async () => {
-    const capture = stubFetchCapture();
-    await createStripeCheckoutSession("sk_test_fake", { ...baseParams, plan: "launch", priceCents: 9_900, label: "Launch" });
-
-    const body = capture.body();
-    expect(body.get("client_reference_id")).toBe("ten_test");
-    expect(body.get("metadata[plan]")).toBe("launch");
-    expect(body.get("mode")).toBe("subscription");
-  });
-});
-
-// Brand class-sweep (2026-07-22, founder ORDER, ROADMAP.md): the checkout
-// page must show the ratified "Coldrig" brand, never the retired "ColdStart"
-// working name — and the "(test mode)" suffix must be DERIVED from the
-// secret key's sk_test_/sk_live_ prefix (the same key already threaded into
-// this function), not hardcoded, so a live-mode customer never sees a
-// test-mode label.
-describe("createStripeCheckoutSession — product name brand + test-mode derivation", () => {
-  afterEach(() => vi.unstubAllGlobals());
-
-  function stubFetchCapture(): { body: () => URLSearchParams } {
-    let captured = "";
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (_url: unknown, init: RequestInit) => {
-        captured = String(init.body ?? "");
-        return new Response(JSON.stringify({ id: "cs_test_1", url: "https://checkout.stripe.com/test" }), { status: 200 });
-      }),
-    );
-    return { body: () => new URLSearchParams(captured) };
-  }
-
-  const baseParams = {
-    tenantId: "ten_test",
-    successUrl: "https://example.com/success",
-    cancelUrl: "https://example.com/cancel",
-    plan: "launch",
-    priceCents: 9_900,
-    label: "Launch",
-  };
-
-  it("names the product 'Coldrig <label> (test mode)' for a sk_test_ key", async () => {
+  it("carries the tenant id + the managed plan on both session and subscription metadata", async () => {
     const capture = stubFetchCapture();
     await createStripeCheckoutSession("sk_test_fake", baseParams);
 
-    const name = capture.body().get("line_items[0][price_data][product_data][name]");
-    expect(name).toBe("Coldrig Launch (test mode)");
-  });
-
-  it("names the product 'Coldrig <label>' with NO suffix for a sk_live_ key", async () => {
-    const capture = stubFetchCapture();
-    await createStripeCheckoutSession("sk_live_fake", baseParams);
-
-    const name = capture.body().get("line_items[0][price_data][product_data][name]");
-    expect(name).toBe("Coldrig Launch");
+    const body = capture.body();
+    expect(body.get("client_reference_id")).toBe("ten_test");
+    expect(body.get("metadata[tenantId]")).toBe("ten_test");
+    expect(body.get("metadata[plan]")).toBe("managed");
+    expect(body.get("subscription_data[metadata][plan]")).toBe("managed");
   });
 });
 
 // Reintroduction tripwire for this surface lives in brand-copy-guard.test.ts
 // (scans the raw source of every customer-visible-surface file, this one
-// included, for the retired brand string).
+// included, for the retired brand string). The customer-visible product names
+// now live on the durable Products ("Coldrig Platform"/"Coldrig Mailbox",
+// stripe-client.ts STRIPE_PRICES), not on the inline checkout payload.

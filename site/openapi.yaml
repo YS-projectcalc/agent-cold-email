@@ -45,9 +45,11 @@ paths:
       tags: [bootstrap]
       summary: Create a tenant and mint a bearer token.
       description: >
-        Unauthenticated bootstrap call. Always mints a demo-plan tenant in
-        the current build (no live paid/Stripe checkout path yet) — a demo
-        tenant is structurally incapable of reaching a real vendor adapter.
+        Unauthenticated bootstrap call. Always mints a demo-plan tenant — a
+        demo tenant is structurally incapable of reaching a real vendor
+        adapter. Upgrade to the paid `managed` plan via POST /checkout
+        (`{ mailboxes, interval }`), billed on the per-mailbox curve ($49
+        platform + $10 x provisioned mailboxes, minimum 5).
       security: []
       requestBody:
         required: true
@@ -87,7 +89,11 @@ paths:
               $ref: '#/components/schemas/SetupInfrastructureInput'
       responses:
         '202':
-          description: Provisioning started.
+          description: >
+            Provisioning started. Returns { jobId, billing } where `billing`
+            (MailboxBilling) is the SPEC §18 projection for the real
+            post-provision mailbox count. A quoteOnly:true request instead
+            returns 200 with { quoteOnly: true, billing } and provisions nothing.
           content:
             application/json:
               schema:
@@ -897,8 +903,10 @@ paths:
         SPEC.md §20.6 shape (a) — the primary build target: the vendor
         provisions new mailboxes under the customer's own domain, reusing
         the same provisioning path as the lookalike-domain flow. Requires
-        the domain to already be active (past DNS verification). No
-        pricing is published for BYO-connected mailboxes specifically.
+        the domain to already be active (past DNS verification). These are
+        platform-provisioned mailboxes, so they count toward the standard
+        per-mailbox quantity billing ($10/mailbox); pass `quoteOnly: true`
+        to preview the new count + projected monthly before provisioning.
       parameters:
         - $ref: '#/components/parameters/ByoDomainId'
       requestBody:
@@ -1249,6 +1257,13 @@ components:
           minLength: 1
           maxLength: 200
           description: Legal sender identity captured at setup, injected into every message footer.
+        quoteOnly:
+          type: boolean
+          default: false
+          description: >
+            SPEC §18 quote-before-add. true previews the new mailbox count +
+            projected monthly (returns 200 { quoteOnly, billing }) WITHOUT
+            provisioning. false (default) provisions and returns { jobId, billing }.
 
     SequenceStepInput:
       type: object
@@ -1587,6 +1602,7 @@ components:
       properties:
         count: { type: integer, minimum: 1, maximum: 10 }
         personaSlug: { type: string, minLength: 1, maxLength: 50, description: "Optional; defaults to a slug of the domain." }
+        quoteOnly: { type: boolean, default: false, description: "SPEC §18 quote-before-add — true previews the new count + projected monthly without provisioning." }
 
     ConnectByoMailboxSmtpInput:
       type: object
@@ -1676,13 +1692,28 @@ components:
         verified: { type: boolean }
         checksSoFar: { type: integer }
 
+    MailboxBilling:
+      type: object
+      description: >
+        SPEC §18 billing projection returned on every mailbox add/remove (no
+        silent capacity addition). `provisionedAfter` is the live mailbox count
+        AFTER the call — reality, not the ask (a capacity-limited partial or a
+        quoteOnly preview both report the true resulting count).
+      required: [provisionedAfter, projectedMonthlyCents, formula]
+      properties:
+        provisionedAfter: { type: integer, description: Live provisioned mailbox count after this operation. }
+        projectedMonthlyCents: { type: integer, description: Projected monthly on the $49 + $10/mailbox curve (min 5), folding any checkout discount. }
+        formula: { type: string }
+
     ManagedMailboxesResult:
       type: object
-      required: [mailboxEmails]
+      required: [mailboxEmails, billing]
       properties:
         mailboxEmails:
           type: array
           items: { type: string }
+        billing:
+          $ref: '#/components/schemas/MailboxBilling'
 
     ConnectByoMailboxResult:
       type: object

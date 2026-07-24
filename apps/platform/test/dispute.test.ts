@@ -61,8 +61,8 @@ async function provisionAndLaunch(token: string): Promise<void> {
 // twice -> applied once; dispute.closed(won) -> unfreeze.
 describe("charge.dispute.* webhook — chargeback freeze/unfreeze lane (D5)", () => {
   it("dispute.created freezes the tenant (sends stop); dispute.closed(won) unfreezes (sends resume)", async () => {
-    const { tenantId, token } = await mintTenant("Dispute Co", "launch");
-    await activatePaidPlan(tenantId, "launch");
+    const { tenantId, token } = await mintTenant("Dispute Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
     await provisionAndLaunch(token);
 
     const disputeId = "dp_test_1";
@@ -110,8 +110,8 @@ describe("charge.dispute.* webhook — chargeback freeze/unfreeze lane (D5)", ()
   });
 
   it("is idempotent by event id — the same dispute.created delivered twice applies once", async () => {
-    const { tenantId } = await mintTenant("Dispute Idem Co", "launch");
-    await activatePaidPlan(tenantId, "launch");
+    const { tenantId } = await mintTenant("Dispute Idem Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
 
     const eventId = `evt_${crypto.randomUUID()}`;
     const event = disputeCreatedEvent(eventId, tenantId, "dp_idem_1");
@@ -135,8 +135,8 @@ describe("charge.dispute.* webhook — chargeback freeze/unfreeze lane (D5)", ()
   });
 
   it("a lost dispute keeps the tenant frozen (owner decides via terminate)", async () => {
-    const { tenantId } = await mintTenant("Dispute Lost Co", "launch");
-    await activatePaidPlan(tenantId, "launch");
+    const { tenantId } = await mintTenant("Dispute Lost Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
     const disputeId = "dp_lost_1";
 
     await postWebhook(disputeCreatedEvent(`evt_${crypto.randomUUID()}`, tenantId, disputeId));

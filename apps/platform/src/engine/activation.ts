@@ -7,7 +7,7 @@
 // (billing-state.ts), which flips it off — the existing freeze/abuse machine
 // IS the deactivation mechanism, for free. See design §2.1.
 
-import { isPaidPlanTier, type TenantPlan } from "@coldstart/shared";
+import { isPaidPlan, type TenantPlan } from "@coldstart/shared";
 import type { Env } from "../env.js";
 import { isLifecycleFrozen } from "./billing-state.js";
 
@@ -23,7 +23,7 @@ export interface ActivationState {
 /**
  * PURE activation predicate (design §2.1's formula, verbatim):
  *   activated(tenant) =
- *        plan is a paid tier (isPaidPlanTier)
+ *        plan is the paid plan (isPaidPlan)
  *     && billing_state === 'active'
  *     && NOT isLifecycleFrozen(status, billing_state)
  *     && screening_status === 'clear'
@@ -37,7 +37,7 @@ export function isTenantActivated(
   billingState: string,
   screening: ScreeningStatus,
 ): boolean {
-  return isPaidPlanTier(plan) && billingState === "active" && !isLifecycleFrozen(status, billingState) && screening === "clear";
+  return isPaidPlan(plan) && billingState === "active" && !isLifecycleFrozen(status, billingState) && screening === "clear";
 }
 
 /**
@@ -115,7 +115,7 @@ export function deriveActivationState(args: {
   realSendPathLive: boolean;
   capacityPending: boolean;
 }): ActivationSurfaceState {
-  if (!isPaidPlanTier(args.plan)) return "sandbox";
+  if (!isPaidPlan(args.plan)) return "sandbox";
   if (isLifecycleFrozen(args.status, args.billingState)) {
     return args.billingState === "canceled" || args.billingState === "canceling" ? "canceled" : "suspended";
   }

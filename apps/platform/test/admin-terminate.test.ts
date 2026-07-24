@@ -56,7 +56,7 @@ async function seedSuppression(tenantId: string, email: string): Promise<void> {
 // invariant: terminating tenant A leaves tenant B's infra untouched.
 describe("POST /admin/tenants/:id/terminate — abuse offboarding (D5)", () => {
   it("non-admin (wrong or tenant token) is rejected 401 before any effect", async () => {
-    const { tenantId } = await mintTenant("Term NoAuth Co", "launch");
+    const { tenantId } = await mintTenant("Term NoAuth Co", "managed");
 
     const wrongAdmin = await adminApi(`/admin/tenants/${tenantId}/terminate`, {
       method: "POST",
@@ -66,7 +66,7 @@ describe("POST /admin/tenants/:id/terminate — abuse offboarding (D5)", () => {
     expect(wrongAdmin.status).toBe(401);
 
     // A tenant's own bearer token must not reach the admin surface either.
-    const { token } = await mintTenant("Term NoAuth2 Co", "launch");
+    const { token } = await mintTenant("Term NoAuth2 Co", "managed");
     const tenantToken = await api(`/admin/tenants/${tenantId}/terminate`, {
       method: "POST",
       token,
@@ -76,13 +76,13 @@ describe("POST /admin/tenants/:id/terminate — abuse offboarding (D5)", () => {
   });
 
   it("suspends + reclaims infra + retains suppressions + logs enforcement, and leaves a second tenant untouched", async () => {
-    const a = await mintTenant("Term A Co", "launch");
-    await activatePaidPlan(a.tenantId, "launch");
+    const a = await mintTenant("Term A Co", "managed");
+    await activatePaidPlan(a.tenantId, "managed");
     await provision(a.token, "TermA");
     await seedSuppression(a.tenantId, "optout@example.com");
 
-    const b = await mintTenant("Term B Co", "launch");
-    await activatePaidPlan(b.tenantId, "launch");
+    const b = await mintTenant("Term B Co", "managed");
+    await activatePaidPlan(b.tenantId, "managed");
     await provision(b.token, "TermB");
 
     // Terminate A only.
@@ -181,8 +181,8 @@ describe("POST /admin/tenants/:id/terminate — abuse offboarding (D5)", () => {
   });
 
   it("is idempotent — a re-terminate re-suspends but logs no second enforcement action", async () => {
-    const { tenantId, token } = await mintTenant("Term Idem Co", "launch");
-    await activatePaidPlan(tenantId, "launch");
+    const { tenantId, token } = await mintTenant("Term Idem Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
     await provision(token, "TermIdem");
 
     const first = await adminApi<TerminateResponse>(`/admin/tenants/${tenantId}/terminate`, {

@@ -27,27 +27,27 @@ describe("isTenantActivated — pure predicate (design §2.1's formula, verbatim
   });
 
   it("paid + active + not frozen + screening clear -> activated", () => {
-    expect(isTenantActivated("launch", "active", "active", "clear")).toBe(true);
-    expect(isTenantActivated("growth", "active", "active", "clear")).toBe(true);
-    expect(isTenantActivated("scale", "active", "active", "clear")).toBe(true);
+    expect(isTenantActivated("managed", "active", "active", "clear")).toBe(true);
+    expect(isTenantActivated("managed", "active", "active", "clear")).toBe(true);
+    expect(isTenantActivated("managed", "active", "active", "clear")).toBe(true);
   });
 
   it("paid but billing_state isn't 'active' yet (none/past_due/canceled) -> not activated", () => {
-    expect(isTenantActivated("launch", "active", "none", "clear")).toBe(false);
-    expect(isTenantActivated("launch", "active", "past_due", "clear")).toBe(false);
-    expect(isTenantActivated("launch", "active", "canceled", "clear")).toBe(false);
+    expect(isTenantActivated("managed", "active", "none", "clear")).toBe(false);
+    expect(isTenantActivated("managed", "active", "past_due", "clear")).toBe(false);
+    expect(isTenantActivated("managed", "active", "canceled", "clear")).toBe(false);
   });
 
   it("paid + billing_state active but status='suspended' -> not activated (isLifecycleFrozen)", () => {
-    expect(isTenantActivated("launch", "suspended", "active", "clear")).toBe(false);
+    expect(isTenantActivated("managed", "suspended", "active", "clear")).toBe(false);
   });
 
   it("paid + billing_state='disputed' -> not activated even if it somehow read as otherwise fine", () => {
-    expect(isTenantActivated("launch", "active", "disputed", "clear")).toBe(false);
+    expect(isTenantActivated("managed", "active", "disputed", "clear")).toBe(false);
   });
 
   it("screening not clear -> not activated even when paid + billing-active + unfrozen", () => {
-    expect(isTenantActivated("launch", "active", "active", "review")).toBe(false);
+    expect(isTenantActivated("managed", "active", "active", "review")).toBe(false);
   });
 });
 
@@ -58,7 +58,7 @@ describe("isTenantActivated — pure predicate (design §2.1's formula, verbatim
 // defaults to 'clear' (schema.ts), a 'review' verdict blocks activation.
 describe("readActivationState — real screening_status column (G1, replaces the stub)", () => {
   it("a brand-new tenant defaults screening_status='clear' (schema.ts DEFAULT — every existing row stays byte-identical)", async () => {
-    const { tenantId } = await mintTenant("Fresh Screening Co", "launch");
+    const { tenantId } = await mintTenant("Fresh Screening Co", "managed");
     const row = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
       state.storage.sql.exec<{ screening_status: string }>(`SELECT screening_status FROM tenant_profile WHERE id = ?`, tenantId).one(),
     );
@@ -66,7 +66,7 @@ describe("readActivationState — real screening_status column (G1, replaces the
   });
 
   it("a directly-set 'review' status flips `activated` false even for an otherwise fully-activatable tenant, and back on 'clear'", async () => {
-    const { tenantId } = await mintTenant("Screening Flip Co", "launch");
+    const { tenantId } = await mintTenant("Screening Flip Co", "managed");
     await runInDurableObject(tenantStub(tenantId), async (_i, state) => {
       state.storage.sql.exec(`UPDATE tenant_profile SET billing_state = 'active' WHERE id = ?`, tenantId);
     });
@@ -89,7 +89,7 @@ describe("readActivationState — real screening_status column (G1, replaces the
 
 describe("readActivationState — fresh SQL read reflects a billing-state flip immediately", () => {
   it("no caching: a direct billing_state write is visible on the VERY NEXT read", async () => {
-    const { tenantId } = await mintTenant("Fresh Read Co", "launch");
+    const { tenantId } = await mintTenant("Fresh Read Co", "managed");
 
     const before = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
       readActivationState(state.storage.sql, tenantId),
@@ -120,7 +120,7 @@ interface TenantDOWithBuildAdapters {
 
 describe("TenantDO.buildAdapters — no cached real/sandbox DECISION (F3, design §2.2 option-1)", () => {
   it("a billing_state flip is visible on the VERY NEXT buildAdapters() call, same DO instance, no restart", async () => {
-    const { tenantId } = await mintTenant("Adapter Fresh Co", "launch");
+    const { tenantId } = await mintTenant("Adapter Fresh Co", "managed");
 
     // The email gate ALSO requires the engine to be wired (ENGINE_BASE_URL/
     // ENGINE_AUTH_SECRET — factory.ts's doc comment on why `activated` alone
@@ -164,7 +164,7 @@ describe("TenantDO.buildAdapters — no cached real/sandbox DECISION (F3, design
   });
 
   it("WITHOUT the engine wired (ENGINE_BASE_URL/ENGINE_AUTH_SECRET unset — every test env, and prod before the founder arms it), a genuinely paid+active tenant's EmailPort stays sandbox and WORKS, never a permanently-dark real port", async () => {
-    const { tenantId } = await mintTenant("Unarmed Engine Co", "launch");
+    const { tenantId } = await mintTenant("Unarmed Engine Co", "managed");
     await runInDurableObject(tenantStub(tenantId), async (instance, state) => {
       const internals = instance as unknown as TenantDOWithBuildAdapters;
       state.storage.sql.exec(`UPDATE tenant_profile SET billing_state = 'active' WHERE id = ?`, tenantId);
@@ -186,7 +186,7 @@ describe("TenantDO.buildAdapters — no cached real/sandbox DECISION (F3, design
   // regardless of any column), and GREEN now that readActivationState reads
   // the real column — see the report's revert-fail-restore proof.
   it("a 'review' tenant's buildAdapters() stays SandboxEmailPort even fully engine-armed — screening BLOCKS activation, doesn't just annotate it", async () => {
-    const { tenantId } = await mintTenant("Screening Review Co", "launch");
+    const { tenantId } = await mintTenant("Screening Review Co", "managed");
     const savedBaseUrl = env.ENGINE_BASE_URL;
     const savedAuthSecret = env.ENGINE_AUTH_SECRET;
     (env as { ENGINE_BASE_URL?: string }).ENGINE_BASE_URL = "https://engine.example.internal";
@@ -224,14 +224,14 @@ describe("webhook-driven billing transitions flip the I1 activation gate", () =>
   });
 
   it("checkout.session.completed activates; invoice.payment_failed deactivates", async () => {
-    const { tenantId } = await mintTenant("Webhook Gate Co", "launch");
+    const { tenantId } = await mintTenant("Webhook Gate Co", "managed");
 
     const before = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
       readActivationState(state.storage.sql, tenantId),
     );
     expect(before.activated).toBe(false);
 
-    await activatePaidPlan(tenantId, "launch");
+    await activatePaidPlan(tenantId, "managed");
     const active = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
       readActivationState(state.storage.sql, tenantId),
     );
@@ -252,8 +252,8 @@ describe("webhook-driven billing transitions flip the I1 activation gate", () =>
   });
 
   it("customer.subscription.deleted (cancellation) deactivates a previously-active tenant", async () => {
-    const { tenantId } = await mintTenant("Cancel Gate Co", "launch");
-    await activatePaidPlan(tenantId, "launch");
+    const { tenantId } = await mintTenant("Cancel Gate Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
     const active = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
       readActivationState(state.storage.sql, tenantId),
     );

@@ -36,7 +36,7 @@ describe("POST /checkout — simulated test-mode upgrade (B1 money path)", () =>
     const checkout = await api<CheckoutResponse>("/checkout", {
       method: "POST",
       token,
-      body: JSON.stringify({ plan: "growth" }),
+      body: JSON.stringify({ mailboxes: 20 }),
     });
     expect(checkout.status).toBe(201);
     expect(checkout.body.mode).toBe("simulated");
@@ -44,10 +44,10 @@ describe("POST /checkout — simulated test-mode upgrade (B1 money path)", () =>
 
     const complete = await api<{ upgraded: boolean; plan: string }>(simulatePath(checkout.body.url));
     expect(complete.status).toBe(200);
-    expect(complete.body).toEqual({ upgraded: true, plan: "growth" });
+    expect(complete.body).toEqual({ upgraded: true, plan: "managed" });
 
     const after = await api<AccountResponse>("/account", { token });
-    expect(after.body.plan).toBe("growth");
+    expect(after.body.plan).toBe("managed");
     expect(after.body.billingState).toBe("active");
   });
 
@@ -56,7 +56,7 @@ describe("POST /checkout — simulated test-mode upgrade (B1 money path)", () =>
     const checkout = await api<CheckoutResponse>("/checkout", {
       method: "POST",
       token,
-      body: JSON.stringify({ plan: "launch" }),
+      body: JSON.stringify({ mailboxes: 5 }),
     });
     const path = simulatePath(checkout.body.url);
 
@@ -64,10 +64,10 @@ describe("POST /checkout — simulated test-mode upgrade (B1 money path)", () =>
     expect(first.body.upgraded).toBe(true);
 
     const second = await api<{ upgraded: boolean; plan: string }>(path);
-    expect(second.body).toEqual({ upgraded: false, plan: "launch" });
+    expect(second.body).toEqual({ upgraded: false, plan: "managed" });
 
     const account = await api<AccountResponse>("/account", { token });
-    expect(account.body.plan).toBe("launch"); // still launch, not re-applied/changed
+    expect(account.body.plan).toBe("managed"); // still managed, not re-applied/changed
   });
 
   it("a checkout session is tenant-scoped — another tenant's query params can't complete it", async () => {
@@ -77,7 +77,7 @@ describe("POST /checkout — simulated test-mode upgrade (B1 money path)", () =>
     const checkout = await api<CheckoutResponse>("/checkout", {
       method: "POST",
       token: tenantA.token,
-      body: JSON.stringify({ plan: "scale" }),
+      body: JSON.stringify({ mailboxes: 60 }),
     });
 
     // Swap tenant A's session id onto tenant B's tenantId in the query string.
@@ -92,13 +92,13 @@ describe("POST /checkout — simulated test-mode upgrade (B1 money path)", () =>
   });
 
   it("requires auth to start a checkout", async () => {
-    const res = await api("/checkout", { method: "POST", body: JSON.stringify({ plan: "launch" }) });
+    const res = await api("/checkout", { method: "POST", body: JSON.stringify({ mailboxes: 5 }) });
     expect(res.status).toBe(401);
   });
 
-  it("rejects an unrecognized plan tier", async () => {
+  it("rejects an out-of-range mailbox count (below the 5-mailbox minimum)", async () => {
     const { token } = await signup("Bad Plan Co", "founder@badplan.test");
-    const res = await api("/checkout", { method: "POST", token, body: JSON.stringify({ plan: "enterprise" }) });
+    const res = await api("/checkout", { method: "POST", token, body: JSON.stringify({ mailboxes: 3 }) });
     expect(res.status).toBe(400);
   });
 
@@ -106,7 +106,7 @@ describe("POST /checkout — simulated test-mode upgrade (B1 money path)", () =>
   // checkout_sessions row on every call — a tenant looping POST /checkout grew
   // its own DO storage unboundedly. A pending session for the same plan is now
   // reused. FAILS on the old code (old code leaves 5 rows).
-  it("repeated /checkout for the same plan reuses one pending session (bounded storage, finding #10)", async () => {
+  it("repeated /checkout reuses one pending session (bounded storage, finding #10)", async () => {
     const { tenantId, token } = await signup("Loop Checkout Co", "founder@loopcheckout.test");
 
     const sessionIds = new Set<string>();
@@ -114,7 +114,7 @@ describe("POST /checkout — simulated test-mode upgrade (B1 money path)", () =>
       const res = await api<{ sessionId: string }>("/checkout", {
         method: "POST",
         token,
-        body: JSON.stringify({ plan: "launch" }),
+        body: JSON.stringify({ mailboxes: 5 }),
       });
       expect(res.status).toBe(201);
       sessionIds.add(res.body.sessionId);
@@ -163,7 +163,7 @@ describe("GET /checkout/simulate — fails closed once live Stripe keys are conf
     const sessionId = "cs_pre_arming_test_session";
     await runInDurableObject(tenantStub(tenantId), async (_i, state) => {
       state.storage.sql.exec(
-        `INSERT INTO checkout_sessions (id, tenant_id, plan, status, created_at) VALUES (?, ?, 'launch', 'pending', ?)`,
+        `INSERT INTO checkout_sessions (id, tenant_id, plan, status, created_at) VALUES (?, ?, 'managed', 'pending', ?)`,
         sessionId,
         tenantId,
         Date.now(),
@@ -209,7 +209,7 @@ describe("GET /checkout/simulate — fails closed once live Stripe keys are conf
     const sessionId = "cs_engine_armed_before_stripe_session";
     await runInDurableObject(tenantStub(tenantId), async (_i, state) => {
       state.storage.sql.exec(
-        `INSERT INTO checkout_sessions (id, tenant_id, plan, status, created_at) VALUES (?, ?, 'launch', 'pending', ?)`,
+        `INSERT INTO checkout_sessions (id, tenant_id, plan, status, created_at) VALUES (?, ?, 'managed', 'pending', ?)`,
         sessionId,
         tenantId,
         Date.now(),
@@ -249,7 +249,7 @@ describe("GET /checkout/simulate — fails closed once live Stripe keys are conf
     const sessionId = "cs_direct_do_call_session";
     await runInDurableObject(tenantStub(tenantId), async (_i, state) => {
       state.storage.sql.exec(
-        `INSERT INTO checkout_sessions (id, tenant_id, plan, status, created_at) VALUES (?, ?, 'launch', 'pending', ?)`,
+        `INSERT INTO checkout_sessions (id, tenant_id, plan, status, created_at) VALUES (?, ?, 'managed', 'pending', ?)`,
         sessionId,
         tenantId,
         Date.now(),

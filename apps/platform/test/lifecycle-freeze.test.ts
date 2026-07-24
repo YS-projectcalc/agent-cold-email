@@ -59,8 +59,8 @@ function disputeCreated(tenantId: string) {
 // active/past_due and the tick resumes sending).
 describe("chargeback freeze is sticky against routine billing events (finding #2)", () => {
   it("checkout.session.completed does NOT lift a dispute freeze; tick still sends 0", async () => {
-    const { tenantId, token } = await mintTenant("Freeze Co", "launch");
-    await activatePaidPlan(tenantId, "launch");
+    const { tenantId, token } = await mintTenant("Freeze Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
     await provisionAndLaunch(token);
 
     const created = await postWebhook<WebhookResponse>(disputeCreated(tenantId));
@@ -71,7 +71,7 @@ describe("chargeback freeze is sticky against routine billing events (finding #2
     await postWebhook({
       id: `evt_${crypto.randomUUID()}`,
       type: "checkout.session.completed",
-      data: { object: { metadata: { tenantId, plan: "scale" } } },
+      data: { object: { metadata: { tenantId, plan: "managed" } } },
     });
     expect(await billingStateOf(tenantId)).toBe("disputed"); // still frozen
 
@@ -80,8 +80,8 @@ describe("chargeback freeze is sticky against routine billing events (finding #2
   });
 
   it("customer.subscription.updated(active) does NOT lift a dispute freeze; tick still sends 0", async () => {
-    const { tenantId, token } = await mintTenant("Freeze Sub Co", "launch");
-    await activatePaidPlan(tenantId, "launch");
+    const { tenantId, token } = await mintTenant("Freeze Sub Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
     await provisionAndLaunch(token, "Freeze Sub Co", "freezesub.com");
 
     await postWebhook<WebhookResponse>(disputeCreated(tenantId));
@@ -100,8 +100,8 @@ describe("chargeback freeze is sticky against routine billing events (finding #2
   });
 
   it("invoice.payment_failed does NOT overwrite a dispute freeze with past_due", async () => {
-    const { tenantId } = await mintTenant("Freeze Inv Co", "launch");
-    await activatePaidPlan(tenantId, "launch");
+    const { tenantId } = await mintTenant("Freeze Inv Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
     await postWebhook<WebhookResponse>(disputeCreated(tenantId));
     expect(await billingStateOf(tenantId)).toBe("disputed");
 
@@ -122,8 +122,8 @@ describe("chargeback freeze is sticky against routine billing events (finding #2
 // returns 202/201).
 describe("a canceled tenant cannot re-provision, relaunch, or send (finding #5)", () => {
   it("cancel -> setup_infrastructure rejected, launch_campaign rejected, tick sends 0", async () => {
-    const { tenantId, token } = await mintTenant("Canceled Write Co", "growth");
-    await activatePaidPlan(tenantId, "growth");
+    const { tenantId, token } = await mintTenant("Canceled Write Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
     await provisionAndLaunch(token, "Canceled Write Co", "canceledwrite.com");
 
     // Immediate cancel -> billing_state='canceled'.

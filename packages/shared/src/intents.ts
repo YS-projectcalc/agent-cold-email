@@ -19,6 +19,11 @@ export const SetupInfrastructureInput = z.object({
   persona: z.string().min(1).max(200),
   physicalAddress: z.string().min(1).max(500),
   senderIdentity: z.string().min(1).max(200),
+  // Quote-before-add (SPEC §18 "no silent capacity addition", design §2):
+  // `quoteOnly: true` returns the proposed new mailbox count + projected monthly
+  // price WITHOUT provisioning, so the agent can preview the bill impact before
+  // committing. Default false = provision as normal (backward-compatible).
+  quoteOnly: z.boolean().default(false),
 });
 export type SetupInfrastructureInput = z.infer<typeof SetupInfrastructureInput>;
 
@@ -58,13 +63,30 @@ export const MarkInput = z.object({
 });
 export type MarkInput = z.infer<typeof MarkInput>;
 
-// B1 money path — plan literals kept in sync with PLAN_QUOTAS' keys in
-// pricing.ts by convention (only 3 tiers; a zod-level derivation would add
-// more indirection than it saves here).
+// Money path — the quantity-billing migration (design §2/§3) replaces the
+// retired plan-tier enum with a mailbox count + billing interval. Checkout
+// subscribes the tenant to the single `managed` plan on the per-mailbox curve:
+// a $49 platform item (qty 1) + a $10 mailbox item (qty = max(5, mailboxes)).
+// `mailboxes` is the initial committed size (5..60 self-serve; 61+ is a custom
+// quote, SPEC §18); the billed quantity then TRACKS the live provisioned count.
 export const CheckoutInput = z.object({
-  plan: z.enum(["launch", "growth", "scale"]),
+  mailboxes: z.number().int().min(5).max(60),
+  interval: z.enum(["month", "year"]).default("month"),
 });
 export type CheckoutInput = z.infer<typeof CheckoutInput>;
+
+// Customer-initiated downgrade (design §2 — the symmetrical deprovision path,
+// distinct from teardown). Releases `count` mailboxes now (effective
+// immediately for provisioning) and syncs the lower Stripe quantity with
+// proration_behavior 'none' (founder ruling 2 — no mid-cycle credit).
+// `acknowledged` must be an explicit `true`: a downgrade forfeits the current
+// cycle's paid capacity with no refund, so the consent is quoted + confirmed,
+// never defaulted (same posture as AcknowledgeByoConsentInput).
+export const RemoveMailboxesInput = z.object({
+  count: z.number().int().min(1).max(60),
+  acknowledged: z.literal(true),
+});
+export type RemoveMailboxesInput = z.infer<typeof RemoveMailboxesInput>;
 
 // Query params for the unauthenticated GET /checkout/simulate landing route
 // (test-mode-only simulated Stripe Checkout return). The session id is
@@ -149,6 +171,9 @@ export type AcknowledgeByoConsentInput = z.infer<typeof AcknowledgeByoConsentInp
 export const RequestManagedByoMailboxesInput = z.object({
   count: z.number().int().min(1).max(10),
   personaSlug: z.string().min(1).max(50).optional(),
+  // Quote-before-add (SPEC §18, design §2) — preview the new count + projected
+  // monthly without provisioning. Default false = provision as normal.
+  quoteOnly: z.boolean().default(false),
 });
 export type RequestManagedByoMailboxesInput = z.infer<typeof RequestManagedByoMailboxesInput>;
 

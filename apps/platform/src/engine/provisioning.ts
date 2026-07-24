@@ -1,8 +1,8 @@
-import { CapacityPendingError, isPaidPlanTier, RegistrarUnarmedError, type SetupInfrastructureInput } from "@coldstart/shared";
+import { CapacityPendingError, isPaidPlan, RegistrarUnarmedError, type SetupInfrastructureInput } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { TenantContext } from "../tenant-context.js";
-import { reportUsageToStripeIfConfigured } from "./billing.js";
+import { buildMailboxBilling, syncMailboxQuantity, type MailboxBilling } from "./billing.js";
 import { assertNotLifecycleFrozen } from "./billing-state.js";
 import { assertBrandOwnership } from "./brand-guard.js";
 import { gatherMailboxHealth } from "./deliverability.js";
@@ -105,12 +105,17 @@ export async function provisionMailboxesForDomain(
     );
     mailboxEmails.push(provisioned.email);
 
-    // Per-mailbox/mo metering — paid tiers only (see MAILBOX_MONTHLY_FEE_CENTS
-    // comment above). Reuses the SAME idempotency key as mailbox.provision()
-    // as the ledger's source_send_id (a generic idempotency anchor, not
-    // send-specific — see schema.ts), so a retried/duplicated provisioning
-    // call can never double-charge this mailbox.
-    if (isPaidPlanTier(ctx.plan)) {
+    // Per-mailbox/mo INTERNAL COGS metering — paid plan only (see
+    // MAILBOX_MONTHLY_FEE_CENTS comment above). The local ledger 'usage' write
+    // stays as the founder's internal cost tracking (account().usageCents);
+    // it is NOT the customer's bill. The customer is billed by the licensed
+    // Stripe QUANTITY (syncMailboxQuantity, design §2) — the former per-mailbox
+    // Stripe usage report was DELETED with the migration: that endpoint only
+    // accepts metered items, but checkout creates a LICENSED item (a latent 400
+    // if ever armed), and keeping both would double-count the per-mailbox charge.
+    // Reuses the SAME idempotency key as mailbox.provision() as the ledger's
+    // source_send_id so a retried provision can never double-count.
+    if (isPaidPlan(ctx.plan)) {
       await ctx.adapters.billing.recordUsage(
         ctx.tenantId,
         "mailbox provisioned (mo)",
@@ -126,7 +131,6 @@ export async function provisionMailboxesForDomain(
         now,
         provisionIdempotencyKey,
       );
-      await reportUsageToStripeIfConfigured(ctx, 1, provisionIdempotencyKey);
     }
 
     // Self-serve I3 credential push (F6): record-then-push the just-provisioned
@@ -203,7 +207,7 @@ export async function runSetupInfrastructure(
   // runDeliverabilitySweep, so a test can assert the gate (a) alert content
   // with a SandboxOpsMailer without any production call site needing to change.
   mailer: OpsMailer = createOpsMailer(ctx.env),
-): Promise<{ jobId: string }> {
+): Promise<{ jobId: string; billing: MailboxBilling } | { quoteOnly: true; billing: MailboxBilling }> {
   // Lifecycle freeze — BEFORE any spend. A suspended/disputed/canceled tenant
   // must not provision fresh infra (real registrar/mailbox spend at activation
   // on an account we deliberately froze — adversarial panel-03 finding #5).
@@ -215,6 +219,18 @@ export async function runSetupInfrastructure(
 
   // Plan quota / provisioning-cap guard (B1 brief) — BEFORE any spend.
   assertWithinProvisioningCap(ctx, { domains: input.domains, mailboxes: input.domains * input.inboxesEach });
+
+  // The live provisioned mailbox count (the billing meter) — read for the
+  // in-response billing projection (SPEC §18 "no silent capacity addition").
+  const liveProvisioned = (): number =>
+    ctx.sql.exec<{ n: number }>(`SELECT COUNT(*) as n FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL`, ctx.tenantId).one().n;
+
+  // Quote-before-add PREVIEW (design §2): return the PROJECTED new count +
+  // monthly WITHOUT provisioning or mutating the profile — the request is fully
+  // validated above so the projection reflects a genuinely-acceptable request.
+  if (input.quoteOnly) {
+    return { quoteOnly: true, billing: buildMailboxBilling(ctx, liveProvisioned() + input.domains * input.inboxesEach) };
+  }
 
   ctx.sql.exec(
     `UPDATE tenant_profile SET brand = ?, primary_domain = ?, physical_address = ?, sender_identity = ? WHERE id = ?`,
@@ -230,10 +246,10 @@ export async function runSetupInfrastructure(
   // — a tenant could screen-clean at checkout, then set a sanctioned brand at
   // setup_infrastructure and evade G1 entirely. Scoped to paid tiers only:
   // demo/free can never activate regardless of screening_status
-  // (isTenantActivated requires isPaidPlanTier), so screening an
+  // (isTenantActivated requires isPaidPlan), so screening an
   // exploration-only sandbox tenant here would just be wasted D1 reads on the
   // common demo path.
-  if (isPaidPlanTier(ctx.plan)) {
+  if (isPaidPlan(ctx.plan)) {
     await screenTenant(ctx, { trigger: "brand_change" });
   }
 
@@ -266,7 +282,11 @@ export async function runSetupInfrastructure(
       // the account surfaces capacity_pending via G3, and a later provision
       // retries once the founder raises the ceiling / upgrades the plan. Any
       // domains/mailboxes provisioned before the gate stay provisioned.
-      return { jobId: newId("job") };
+      // Sync the meter to the rows that actually landed (design §7 N1 — a
+      // partially-failed batch bills only what came up, floored at 5). The
+      // billing projection reflects REALITY (what landed), not the ask.
+      await syncMailboxQuantity(ctx);
+      return { jobId: newId("job"), billing: buildMailboxBilling(ctx, liveProvisioned()) };
     }
     if (err instanceof RegistrarUnarmedError) {
       await alertRegistrarUnarmed(ctx, input.primaryDomain, err, mailer);
@@ -274,7 +294,13 @@ export async function runSetupInfrastructure(
     throw err;
   }
 
-  return { jobId: newId("job") };
+  // Mirror the Stripe mailbox quantity to the now-higher provisioned count
+  // (design §2/§9 — a provision raises the count, increases prorate). No-op
+  // unless active with a real Stripe subscription (syncMailboxQuantity guards).
+  await syncMailboxQuantity(ctx);
+  // SPEC §18 — return the new count + projected monthly on the add (no silent
+  // capacity addition); computed from the REAL post-provision count.
+  return { jobId: newId("job"), billing: buildMailboxBilling(ctx, liveProvisioned()) };
 }
 
 export interface MailboxHealthReport {

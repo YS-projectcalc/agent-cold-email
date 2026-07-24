@@ -25,17 +25,20 @@ export function classifySupportMessage(subject: string, body: string): SupportCa
   return "other";
 }
 
-// SPEC.md §18 canonical pricing (kept as prose here, not re-imported from
-// @coldstart/shared's PLAN_QUOTAS, so a support draft never accidentally
-// quotes a stale computed number mid-refactor — this KB is deliberately a
-// static, reviewable snapshot of the pricing page copy).
+// SPEC.md §18 canonical pricing curve (kept as prose here, not re-imported from
+// @coldstart/shared, so a support draft never accidentally quotes a stale
+// computed number mid-refactor — this KB is deliberately a static, reviewable
+// snapshot of the pricing page copy). The quantity-billing migration (design
+// §11) rewrote this from the retired 3-tier ladder ($99/$299/$799 + a wrong
+// $13/mailbox) to the single continuous per-mailbox curve.
 function draftBillingAnswer(): string {
   return (
-    "Pricing is per-mailbox plus a platform fee (domains bundled, no separate send meter): " +
-    "Launch $99/mo (5 mailboxes, 2 domains, ~1,000 sends/mo), Growth $299/mo (20 mailboxes, 6 domains, ~6,000 sends/mo), " +
-    "Scale $799/mo (60 mailboxes, 18 domains, ~20,000 sends/mo), Custom $49 platform + $13/mailbox/mo for 60+ mailboxes. " +
-    "Free/Demo is $0, sandbox-only (no real sends). Billing runs on Stripe (currently test mode); " +
-    "check `account()` (or GET /account) for your current plan, usage, and billing status."
+    "Pricing is one continuous per-mailbox plan (no tiers, domains bundled, no separate send meter): " +
+    "$49/mo platform + $10/mo per provisioned mailbox, minimum 5 mailboxes ($99/mo). So 5 mailboxes is $99, " +
+    "10 is $149, 20 is $249, 60 is $649; 61+ mailboxes is a custom quote. The bill follows the mailboxes you " +
+    "actually have — provisioning more raises it, removing mailboxes lowers it (no mid-cycle credit; the lower " +
+    "price takes effect at your next renewal). Free/Demo is $0, sandbox-only (no real sends). Billing runs on " +
+    "Stripe (currently test mode); check `account()` (or GET /account) for your current plan, mailbox count, and billing status."
   );
 }
 

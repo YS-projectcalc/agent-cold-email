@@ -97,7 +97,7 @@ describe("POST /demo/run — sandbox-only accelerated pipeline run", () => {
   });
 
   it("structurally rejects a non-demo/free-plan tenant with 403 — never exposes tick over HTTP to real tenants", async () => {
-    const { token } = await mintTenant("Paid Co", "launch");
+    const { token } = await mintTenant("Paid Co", "managed");
     const res = await api("/demo/run", { method: "POST", token });
     expect(res.status).toBe(403);
   });

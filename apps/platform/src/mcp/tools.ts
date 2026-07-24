@@ -1,15 +1,16 @@
-// The 24 MCP tools (tools 13-15 added by SPEC.md §19.5, tools 16-17 by the
+// The 25 MCP tools (tools 13-15 added by SPEC.md §19.5, tools 16-17 by the
 // §19.0 parity-gap follow-up, tools 18-19 by the ROADMAP.md WIN-THE-COMPARISON
 // (d) webhooks lane, tools 20-21 by SPEC.md §20's BYO domain intake, tools
 // 22-24 by SPEC.md §22's warm-lead thin layer (increments #1-#3, founder-gated
-// 2026-07-21) — AGENTS.md's public tool table is a canonical doc folded by the
+// 2026-07-21), remove_mailboxes by the quantity-billing migration (design §11)
+// — AGENTS.md's public tool table is a canonical doc folded by the
 // orchestrator, not updated here).
 // Each tool dispatches to the SAME TenantDO method the equivalent HTTP route
 // calls (src/routes/*.ts) — the MCP surface is a second transport onto the
 // exact same facade, never a parallel implementation (CLAUDE.md rule c).
 
 import type { ZodType } from "zod";
-import { ActivityQueryInput, InboxQueryInput, ListLeadsQueryInput, SuppressLeadInput, UpdateLeadInput } from "@coldstart/shared";
+import { ActivityQueryInput, InboxQueryInput, ListLeadsQueryInput, RemoveMailboxesInput, SuppressLeadInput, UpdateLeadInput } from "@coldstart/shared";
 import type { TenantDO } from "../tenant-do.js";
 import {
   CampaignIdInput,
@@ -63,7 +64,7 @@ function tool<T>(
 export const MCP_TOOLS: McpTool<any>[] = [
   tool(
     "setup_infrastructure",
-    "Provision sending infrastructure: buy branded lookalike domains, create mailboxes, start warmup. Inputs: brand, primaryDomain, domains + inboxesEach counts, persona, physicalAddress, senderIdentity. Async — returns { jobId }; poll infrastructure_status for progress. Resend the same idempotencyKey on retry to avoid double-provisioning.",
+    "Provision sending infrastructure: buy branded lookalike domains, create mailboxes, start warmup. Inputs: brand, primaryDomain, domains + inboxesEach counts, persona, physicalAddress, senderIdentity. Billing is per-provisioned-mailbox ($10/mailbox + $49 platform, min 5) and the billed quantity follows what you provision here — pass quoteOnly:true first to preview the new count + projected monthly price before committing (no silent capacity addition). Every response carries a `billing` projection { provisionedAfter (the live count AFTER this call — reality, not the ask), projectedMonthlyCents, formula }: on quoteOnly it's the preview, on an actual provision it's the real post-provision bill (a capacity-limited partial reflects only what landed). Async — returns { jobId, billing }; poll infrastructure_status for progress. Resend the same idempotencyKey on retry to avoid double-provisioning.",
     SetupInfrastructureToolInput,
     // Domains/mailboxes/ledger are additive (insert-only, never deleted).
     // tenant_profile's brand/primaryDomain/physicalAddress/senderIdentity ARE
@@ -160,10 +161,19 @@ export const MCP_TOOLS: McpTool<any>[] = [
   ),
   tool(
     "account",
-    "Account overview: brand, plan, status, billingState, activationState, resource counts, usageCents, quota, deliverability (loop state: paused/throttled mailboxes, burning domains, auto-replacements, recentActions[]), and teardown (reclaim summary once canceled, else null). activationState is the HONEST send state — trust it over 'sent' counts: 'active' = real sending live; 'pending_provisioning' = paid but infrastructure still being armed, sends shown are sandbox previews that DON'T leave; 'capacity_pending' = provisioning held at a spend/plan-slot limit; 'screening_hold' = account under review; 'sandbox' = demo/free. Use metrics for counts, infrastructure_status for per-mailbox health.",
+    "Account overview: brand, plan, status, billingState, activationState, resource counts, usageCents, quota, deliverability (loop state: paused/throttled mailboxes, burning domains, auto-replacements, recentActions[]), and teardown (reclaim summary once canceled, else null). Billing is per-provisioned-mailbox: $49 platform + $10 x live provisioned mailboxes, minimum 5 ($99); the billed quantity tracks the real provisioned count (deprovision lowers it). activationState is the HONEST send state — trust it over 'sent' counts: 'active' = real sending live; 'pending_provisioning' = paid but infrastructure still being armed, sends shown are sandbox previews that DON'T leave; 'capacity_pending' = provisioning held at a spend/plan-slot limit; 'screening_hold' = account under review; 'sandbox' = demo/free. Use metrics for counts, infrastructure_status for per-mailbox health.",
     EmptyInput,
     { title: "Account Overview", readOnlyHint: true },
     (stub) => stub.account(),
+  ),
+  tool(
+    "remove_mailboxes",
+    "Downgrade: release your N NEWEST live mailboxes now and lower the billed quantity. Inputs: count, acknowledged (must be true — this is a quoted, irreversible-this-cycle consent: the release is immediate for provisioning but there is NO mid-cycle credit; the lower price takes effect next renewal, minimum 5 mailboxes / $99). Returns { releasedCount, quote } where quote is the new projected monthly. To ADD mailboxes use setup_infrastructure / configure_byo_domain (request_managed_mailboxes).",
+    RemoveMailboxesInput,
+    // Releases real mailboxes (irreversible via this API — re-provision to grow
+    // back) + lowers billing; honestly flagged destructive.
+    { title: "Remove Mailboxes (Downgrade)", destructiveHint: true },
+    (stub, args) => stub.removeMailboxes(args),
   ),
   // --- SPEC.md §19.5 (M1 dashboard+inbox) — tools 13-15. Parity law (§19.0):
   // the agent can read/write every bit of dashboard state a human can. ---
@@ -262,7 +272,7 @@ export const MCP_TOOLS: McpTool<any>[] = [
   ),
   tool(
     "configure_byo_domain",
-    "Register or advance a BYO domain/mailbox intake (SPEC.md §20). action = register (needs domain + domainRelationship: fresh_standalone|subdomain_of_primary|is_primary — runs the pre-flight live-infra scan + abuse gate + reputation ladder, returns the starting byoStatus) | poll_dns (needs id — re-checks DNS delegation/records, advances pending_dns → active, or → abandoned after 7 idle days) | acknowledge_consent (needs id + acknowledged:true — REQUIRED before a primary domain can proceed past pending_consent; this does not remove your business's exposure, it documents informed consent) | request_managed_mailboxes (needs id + count — platform-provisioned mailboxes on an ALREADY-ACTIVE domain, the primary shape) | connect_mailbox (needs id + email + transport — declares an EXISTING OAuth/SMTP+IMAP connection you already have, bypassing provisioning; transport is { kind:'smtp', host, port, secure, user, pass } | { kind:'gmail_api', clientId, clientSecret, refreshToken } | { kind:'ms_graph', mode, tenantId, clientId, clientSecret, refreshToken? }).",
+    "Register or advance a BYO domain/mailbox intake (SPEC.md §20). action = register (needs domain + domainRelationship: fresh_standalone|subdomain_of_primary|is_primary — runs the pre-flight live-infra scan + abuse gate + reputation ladder, returns the starting byoStatus) | poll_dns (needs id — re-checks DNS delegation/records, advances pending_dns → active, or → abandoned after 7 idle days) | acknowledge_consent (needs id + acknowledged:true — REQUIRED before a primary domain can proceed past pending_consent; this does not remove your business's exposure, it documents informed consent) | request_managed_mailboxes (needs id + count — platform-provisioned mailboxes on an ALREADY-ACTIVE domain, the primary shape; every response carries a `billing` projection { provisionedAfter, projectedMonthlyCents, formula } — quoteOnly:true previews it without provisioning) | connect_mailbox (needs id + email + transport — declares an EXISTING OAuth/SMTP+IMAP connection you already have, bypassing provisioning; transport is { kind:'smtp', host, port, secure, user, pass } | { kind:'gmail_api', clientId, clientSecret, refreshToken } | { kind:'ms_graph', mode, tenantId, clientId, clientSecret, refreshToken? }).",
     ConfigureByoDomainInput,
     // request_managed_mailboxes provisions real (sandbox-mode) infra + accrues
     // metering on paid tiers; connect_mailbox stores a connection secret.
@@ -278,7 +288,7 @@ export const MCP_TOOLS: McpTool<any>[] = [
         case "acknowledge_consent":
           return stub.acknowledgeByoConsent(args.id!, { acknowledged: true });
         case "request_managed_mailboxes":
-          return stub.requestManagedByoMailboxes(args.id!, { count: args.count!, personaSlug: args.personaSlug });
+          return stub.requestManagedByoMailboxes(args.id!, { count: args.count!, personaSlug: args.personaSlug, quoteOnly: args.quoteOnly ?? false });
         case "connect_mailbox":
           return stub.connectByoMailbox(args.id!, { email: args.email!, transport: args.transport! });
       }
