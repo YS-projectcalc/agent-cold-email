@@ -140,3 +140,16 @@ The build is strong: 5 of 6 deviations hold, the §7.1 fix I required has a genu
 ### UNVERIFIABLE / NEW
 
 - `account().usageCents` surfaces internal per-mailbox COGS to the customer's agent — not a metered-sends claim and the tool clarifies real billing, but a slightly confusing number for a customer surface (minor; consider dropping from the customer view or renaming).
+
+### D4-build CLOSED — final ack (2026-07-24)
+
+**D4-build is CLOSED. FINAL BUILD VERDICT: SHIP.** The fix (`08e4757`) resolves it by the letter; all four ack points verified:
+
+1. **Every addition response returns the §18 count + price.** All five call sites now return `billing: { provisionedAfter, projectedMonthlyCents, formula }` (`buildMailboxBilling`, `billing.ts:633`): `setup_infrastructure` on quoteOnly-preview / capacity_pending / success (`provisioning.ts:232,289,303`), BYO `request_managed_mailboxes` preview + provision (`byo-mailbox-composition.ts:49,65`), and `remove_mailboxes` (`billing.ts:665`). The default `quoteOnly:false` add path now returns `{ jobId, billing }` — the proposed count and projected monthly price are in the response, satisfying §18's letter.
+2. **`provisionedAfter` is REALITY, not the ask.** It reads the live `released_at IS NULL` count *after* the op (`liveProvisioned`, `provisioning.ts:225`), so a capacity-limited partial reports what LANDED — the new test asserts `provisionedAfter=1` on a 3-ask capacity_pending partial, and `2` billed at the floored $99 on a sub-floor provision. Honest, not a naive echo of the request.
+3. **RED-on-old-shape confirmed.** `add-billing-projection.test.ts` (its own comment: "there was no billing field on the default add response") asserts the `billing` field on the default add — RED on the pre-fix `{ jobId }`-only shape. Ran it: 9/9 pass (add-projection + remove).
+4. **Claim surfaces match + no dangling schema.** The MCP `setup_infrastructure`/`request_managed_mailboxes` descriptions document the `billing` projection; `openapi.yaml` defines a `MailboxBilling` component schema (`:1695-1705`) and adds `quoteOnly` to both request schemas — and a full `$ref` resolution over the spec shows **zero dangling refs** (`MailboxBilling` defined, every `#/components/schemas/*` resolves). `projectMailboxQuote` is fully deleted (zero orphan refs; the surviving `MailboxQuote` is the separate shared-pricing curve type).
+
+**Standard lanes:** platform **784/784 (113 files)**, typecheck clean; Stripe-touching code untouched, so the independent 5/5 Tier-2 test-mode gate re-run stands.
+
+**Whole billing arc CLOSED:** r1 (committed-meter → founder ruled active) → r2 (autonomous burn-replace double-bill → §7.1) → build (D4 §18 silent-add → in-response billing projection). Every finding resolved. Safe to merge → battery → deploy → live `ensureStripePrices` bootstrap → live two-item session verify.
