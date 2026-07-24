@@ -118,3 +118,29 @@ build brief's hard rule: no live vendor/gov calls during this build):
    designed to stay well under typical Worker cron limits, but this was never
    provable without running it against the real file size (design's own
    flagged unknown, `ga-gates-design-2026-07-22.md` §G1a).
+
+## The droplet-relay's trust model (added 2026-07-24)
+
+Treasury's TLS front-end blocks every Cloudflare-Worker-origin fetch to the
+SDN.CSV host, so a droplet relays the feed to the Worker via
+`POST /admin/sdn/ingest` (`apps/platform/src/ofac/sdn-ingest.ts`,
+`tools/sdn-relay/`). This ingest path introduces a threat model the direct
+Worker fetch doesn't have: a leaked/stolen `SDN_INGEST_TOKEN` lets an
+attacker submit an arbitrary candidate list, not just observe a fixed
+Treasury URL. Two defenses narrow this, and one residual is fundamentally
+NOT closeable by this code:
+
+- **`MIN_SDN_ENTRIES` (≥5000 entries)** closes the TINY-forgery case — a
+  stolen token cannot neuter screening by pushing a near-empty "clean" list.
+- **The monotonicity guard** (content-hash + entry-count sanity — SDN.CSV
+  carries no publication-date column, so this is the cheapest honest signal
+  available) narrows naive REPLAY of an old genuine list.
+- **What is NOT closed, and cannot be**: a large, plausibly-sized (≥5000,
+  entry-count-similar) list with SPECIFIC names surgically removed passes
+  both guards above and would silently drop those names from screening.
+  Treasury does not cryptographically sign the SDN.CSV feed, so there is no
+  check this code can perform to prove a candidate list is unmodified. Token
+  secrecy — the droplet-local env file (`/root/sdn-relay.env`, never in this
+  repo, `chmod 600`), the token's narrow scope (this one endpoint only, never
+  `ADMIN_TOKEN`) — is therefore the PRIMARY control for this residual, not a
+  fallback behind a code-level defense that doesn't fully exist.

@@ -105,24 +105,40 @@ export async function screenTenant(ctx: TenantContext, opts: ScreenTenantOptions
   // loads — src/ofac/screening-recovery.ts's cron sweep re-screens every
   // tenant still holding this exact sentinel.
   if (!listVersion) {
-    persistVerdict(ctx, "review", LIST_UNAVAILABLE_VERSION);
-    await upsertScreeningReview(ctx.env, {
-      tenantId: ctx.tenantId,
-      matchedTerms: [
-        {
-          reason: "sdn_list_unavailable",
-          note: "no active SDN list was loaded at screening time — held fail-closed, not a name match",
-        },
-      ],
+    return failClosedListUnavailable(
+      ctx,
+      opts,
       screenedFields,
-      listVersion: LIST_UNAVAILABLE_VERSION,
-      createdAt: ctx.clock.now(),
-    });
-    await alertScreeningListUnavailable(ctx, opts.trigger, opts.mailer ?? createOpsMailer(ctx.env));
-    return { status: "review", listVersion: LIST_UNAVAILABLE_VERSION, matches: [] };
+      "no active SDN list was loaded at screening time — held fail-closed, not a name match",
+    );
   }
 
   const entries = await getActiveSdnEntries(ctx.env, listVersion);
+
+  // TOCTOU fail-open guard (adversary finding 1, docs/adversarial/
+  // sdn-relay-review-2026-07-24.md): this function reads `listVersion` above
+  // and `entries` here in TWO SEPARATE awaits — a concurrent swapInSdnList
+  // can flip `active_version` to a NEW version and run its post-flip cleanup
+  // (`DELETE FROM sdn_entries WHERE list_version != <new>`, sdn-list.ts) in
+  // between, deleting every row this now-stale `listVersion` pointed to.
+  // `matchAgainstSdn(candidates, [])` would then return zero matches ->
+  // 'clear' — the OPPOSITE of the null-version case above, and the wrong
+  // direction for a sanctions gate: a sanctioned tenant could be cleared
+  // purely by racing a list swap. swapInSdnList's cleanup is a SINGLE atomic
+  // DELETE per version (not incremental), so this race can only ever produce
+  // EXACTLY zero entries for a stale pointer — never a partial count — which
+  // is why this checks `=== 0` and not a size floor: a floor threshold would
+  // also misfire against every pre-existing test's small (2-5 entry)
+  // intentionally-tiny fixture lists, which are legitimate, not a race.
+  if (entries.length === 0) {
+    return failClosedListUnavailable(
+      ctx,
+      opts,
+      screenedFields,
+      `active list_version ${listVersion} returned zero entries — this can only mean a concurrent list swap raced this read (never a legitimate empty list); held fail-closed, not a name match`,
+    );
+  }
+
   const matches = matchAgainstSdn(candidates, entries);
 
   if (matches.length === 0) {
@@ -153,6 +169,32 @@ export async function screenTenant(ctx: TenantContext, opts: ScreenTenantOptions
  */
 export function clearScreeningStatus(ctx: TenantContext): void {
   ctx.sql.exec(`UPDATE tenant_profile SET screening_status = 'clear' WHERE id = ?`, ctx.tenantId);
+}
+
+/**
+ * Shared by BOTH the "no list loaded yet" case and the TOCTOU race case
+ * above (CLAUDE.md rule c) — fail CLOSED to the sentinel `review` verdict,
+ * record a review row explaining why (never framed as a name match), alert
+ * the founder, and let the SAME self-heal recovery sweep
+ * (screening-recovery.ts) pick this tenant up again once a stable read
+ * succeeds.
+ */
+async function failClosedListUnavailable(
+  ctx: TenantContext,
+  opts: ScreenTenantOptions,
+  screenedFields: Record<string, string | null>,
+  note: string,
+): Promise<ScreenTenantResult> {
+  persistVerdict(ctx, "review", LIST_UNAVAILABLE_VERSION);
+  await upsertScreeningReview(ctx.env, {
+    tenantId: ctx.tenantId,
+    matchedTerms: [{ reason: "sdn_list_unavailable", note }],
+    screenedFields,
+    listVersion: LIST_UNAVAILABLE_VERSION,
+    createdAt: ctx.clock.now(),
+  });
+  await alertScreeningListUnavailable(ctx, opts.trigger, opts.mailer ?? createOpsMailer(ctx.env));
+  return { status: "review", listVersion: LIST_UNAVAILABLE_VERSION, matches: [] };
 }
 
 function persistVerdict(ctx: TenantContext, status: ScreeningStatus, listVersion: string | null): void {

@@ -7,17 +7,35 @@
 import type { Env } from "../env.js";
 import type { ParsedSdnEntry } from "./sdn-parse.js";
 
-// Rows per multi-row INSERT — bounded well under SQLite's ~999 bind-param
-// ceiling (6 columns * 100 rows = 600 params) while still batching (design
-// line 47's "parse+upsert must be batched to stay inside the cron CPU
-// budget" — this is the batching; see sdn-refresh.ts for the CPU-budget note).
-const INSERT_BATCH_SIZE = 100;
+// Rows per multi-row INSERT. CORRECTED 2026-07-24 (droplet-relay build,
+// first code path to ever exercise this at realistic ~5k+ entry scale): the
+// original comment assumed vanilla SQLite's ~999 bind-param ceiling, but
+// Cloudflare D1's REAL per-statement limit is 100 bound parameters —
+// empirically confirmed (101 params throws `D1_ERROR: too many SQL variables`,
+// 100 succeeds). 6 columns * 100 rows = 600 params silently could never have
+// worked at any real scale; it just never got exercised (every existing test
+// fixture is 4-5 rows, and the real ~17k Treasury feed has never successfully
+// reached swapInSdnList — Workers fetch to Treasury 525s, see sdn-refresh.ts).
+// floor(100 / 6 columns) = 16 rows/statement is the max that stays under the
+// real ceiling. To preserve the ORIGINAL design intent (design line 47:
+// "batched to stay inside the cron CPU budget" — i.e. few network round
+// trips, not many small statements), every 16-row chunk's INSERT is queued
+// into ONE `env.DB.batch()` call below rather than awaited one at a time —
+// batch() sends every statement in a single round trip while each statement
+// independently still respects the 100-param ceiling.
+const INSERT_BATCH_SIZE = 16;
 
 export interface SdnListMeta {
   activeVersion: string | null;
   publishedDate: string | null;
   fetchedAt: number | null;
   entryCount: number;
+  /** Adversary finding 2 (docs/adversarial/sdn-relay-review-2026-07-24.md) —
+   * a content hash of the raw feed text, written ONLY by the droplet-relay
+   * ingest (sdn-ingest.ts's monotonicity guard). The direct-fetch refresh
+   * (sdn-refresh.ts) leaves this `null` (no attacker-controlled-replay threat
+   * model on that path). */
+  contentHash: string | null;
 }
 
 export interface SdnEntryRow {
@@ -33,11 +51,12 @@ interface SdnListMetaD1Row {
   published_date: string | null;
   fetched_at: number | null;
   entry_count: number;
+  content_hash: string | null;
 }
 
 export async function getSdnListMeta(env: Env): Promise<SdnListMeta | null> {
   const row = await env.DB.prepare(
-    `SELECT active_version, published_date, fetched_at, entry_count FROM sdn_list_meta WHERE id = 1`,
+    `SELECT active_version, published_date, fetched_at, entry_count, content_hash FROM sdn_list_meta WHERE id = 1`,
   ).first<SdnListMetaD1Row>();
   if (!row) return null;
   return {
@@ -45,6 +64,7 @@ export async function getSdnListMeta(env: Env): Promise<SdnListMeta | null> {
     publishedDate: row.published_date,
     fetchedAt: row.fetched_at,
     entryCount: row.entry_count,
+    contentHash: row.content_hash,
   };
 }
 
@@ -96,9 +116,10 @@ export async function getActiveSdnEntries(env: Env, listVersion: string): Promis
  */
 export async function swapInSdnList(
   env: Env,
-  params: { listVersion: string; entries: ParsedSdnEntry[]; publishedDate: string; fetchedAt: number },
+  params: { listVersion: string; entries: ParsedSdnEntry[]; publishedDate: string; fetchedAt: number; contentHash?: string },
 ): Promise<void> {
   try {
+    const statements: D1PreparedStatement[] = [];
     for (let i = 0; i < params.entries.length; i += INSERT_BATCH_SIZE) {
       const chunk = params.entries.slice(i, i + INSERT_BATCH_SIZE);
       const placeholders = chunk.map(() => "(?, ?, ?, ?, ?, ?)").join(", ");
@@ -106,12 +127,19 @@ export async function swapInSdnList(
       for (const entry of chunk) {
         values.push(params.listVersion, entry.uid, entry.nameNormalized, JSON.stringify(entry.tokens), entry.entityType, entry.program);
       }
-      await env.DB.prepare(
-        `INSERT INTO sdn_entries (list_version, uid, name_normalized, tokens_json, entity_type, program) VALUES ${placeholders}`,
-      )
-        .bind(...values)
-        .run();
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO sdn_entries (list_version, uid, name_normalized, tokens_json, entity_type, program) VALUES ${placeholders}`,
+        ).bind(...values),
+      );
     }
+    // One network round trip for every chunked INSERT (D1's `.batch()`) —
+    // preserves the ORIGINAL design intent (stay inside the cron CPU budget)
+    // even though each individual statement is now capped at 16 rows (see
+    // INSERT_BATCH_SIZE's comment above). Empirically verified working up to
+    // 1100+ statements in one batch() call, comfortably above the ~1063 a
+    // real ~17k-entry list needs at 16 rows/statement.
+    if (statements.length > 0) await env.DB.batch(statements);
   } catch (err) {
     // Best-effort cleanup of the orphaned partial version — never touches the
     // active pointer, so correctness does not depend on this succeeding.
@@ -121,15 +149,16 @@ export async function swapInSdnList(
 
   // Atomic flip — single UPDATE/UPSERT, the shadow-swap moment.
   await env.DB.prepare(
-    `INSERT INTO sdn_list_meta (id, active_version, published_date, fetched_at, entry_count)
-     VALUES (1, ?, ?, ?, ?)
+    `INSERT INTO sdn_list_meta (id, active_version, published_date, fetched_at, entry_count, content_hash)
+     VALUES (1, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
        active_version = excluded.active_version,
        published_date = excluded.published_date,
        fetched_at = excluded.fetched_at,
-       entry_count = excluded.entry_count`,
+       entry_count = excluded.entry_count,
+       content_hash = excluded.content_hash`,
   )
-    .bind(params.listVersion, params.publishedDate, params.fetchedAt, params.entries.length)
+    .bind(params.listVersion, params.publishedDate, params.fetchedAt, params.entries.length, params.contentHash ?? null)
     .run();
 
   // Cleanup old versions AFTER the swap — non-load-bearing (see doc comment).

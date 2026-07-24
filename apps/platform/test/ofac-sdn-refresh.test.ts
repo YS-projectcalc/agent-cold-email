@@ -22,6 +22,7 @@ describe("maybeRefreshSdnList — shadow-swap + once-daily guard + fail-loud (F5
   beforeEach(async () => {
     await env.DB.prepare(`DELETE FROM sdn_entries`).run();
     await env.DB.prepare(`DELETE FROM sdn_list_meta`).run();
+    await env.DB.prepare(`DELETE FROM sdn_alert_state`).run();
   });
 
   it("a fresh env (no meta row) refreshes, swapping in the fetched entries", async () => {
@@ -67,7 +68,7 @@ describe("maybeRefreshSdnList — shadow-swap + once-daily guard + fail-loud (F5
     // The prior good list is UNCHANGED — same version, same entry count.
     expect(after?.activeVersion).toBe(before?.activeVersion);
     expect(after?.entryCount).toBe(4);
-    expect(mailer.sent.some((m) => m.subject.includes("SDN list refresh failed"))).toBe(true);
+    expect(mailer.sent.some((m) => m.subject.includes("SDN list load failing"))).toBe(true);
   });
 
   it("an empty fetch ALSO keeps the prior good list and alerts", async () => {
@@ -112,5 +113,43 @@ describe("maybeRefreshSdnList — shadow-swap + once-daily guard + fail-loud (F5
     const after = await getSdnListMeta(env);
     expect(after?.entryCount).toBe(5);
     expect(after?.activeVersion).not.toBe(before?.activeVersion);
+  });
+
+  // CLASS FIX (2026-07-24, founder-reported: 160 identical emails in one day)
+  // — during a persistent outage, `fetchedAt` never advances (a failure never
+  // writes sdn_list_meta), so the once-daily guard's "is it due" check ALWAYS
+  // falls through and every 5-min cron tick genuinely attempts a refresh. This
+  // reproduces exactly that scenario end-to-end and proves the alert (not the
+  // retry — retries stay per-tick, cheap and self-healing) is throttled.
+  describe("alert-storm class fix — a persistent outage across MANY 5-min ticks alerts once, not per-tick", () => {
+    const FIVE_MIN_MS = 5 * 60 * 1000;
+
+    it("20 consecutive failed 5-min ticks send exactly 1 email (not 20)", async () => {
+      const mailer = new SandboxOpsMailer();
+      let now = 10_000_000;
+      for (let tick = 0; tick < 20; tick++) {
+        const outcome = await maybeRefreshSdnList(env, now, fetchReturning("", false), mailer);
+        expect(outcome.reason).toBe("failed"); // confirms every tick really did attempt (the retry cadence itself)
+        now += FIVE_MIN_MS;
+      }
+      expect(mailer.sent).toHaveLength(1);
+      expect(mailer.sent[0]!.subject).toBe("[coldrig] SDN list load failing — kept prior good list");
+    });
+
+    it("a success after a failure streak sends exactly ONE recovery email, closing the loop", async () => {
+      const mailer = new SandboxOpsMailer();
+      let now = 20_000_000;
+      for (let tick = 0; tick < 5; tick++) {
+        await maybeRefreshSdnList(env, now, fetchReturning("", false), mailer);
+        now += FIVE_MIN_MS;
+      }
+      expect(mailer.sent).toHaveLength(1); // the one first-failure alert
+
+      const outcome = await maybeRefreshSdnList(env, now, fetchReturning(sdnValidCsv), mailer);
+      expect(outcome.reason).toBe("refreshed");
+      expect(mailer.sent).toHaveLength(2);
+      expect(mailer.sent[1]!.subject).toBe("[coldrig] SDN list load RECOVERED");
+      expect(mailer.sent[1]!.text).toContain("5 consecutive failed attempt(s)");
+    });
   });
 });

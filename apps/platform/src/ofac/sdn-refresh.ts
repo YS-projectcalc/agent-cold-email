@@ -6,13 +6,14 @@
 // FAIL-LOUD (F5 convention): a corrupt/empty/unreachable fetch NEVER swaps in
 // a bad list — sdn-parse.ts throws on a malformed feed, swapInSdnList never
 // advances `sdn_list_meta` on that throw, and this function catches it, alerts
-// the founder, and leaves the once-daily guard's cursor UNCHANGED so the next
+// the founder (THROTTLED — see sdn-alert.ts's reconcileSdnAlert, class fix
+// 2026-07-24), and leaves the once-daily guard's cursor UNCHANGED so the next
 // 5-min sweep retries sooner than waiting a full day.
-import { escapeHtml } from "../html-escape.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { Env } from "../env.js";
 import { parseSdnCsv } from "./sdn-parse.js";
 import { getSdnListFetchedAt, swapInSdnList } from "./sdn-list.js";
+import { reconcileSdnAlert } from "./sdn-alert.js";
 
 // Public Treasury OFAC download — no API key, no auth (design "Founder-tunable
 // knobs" table: `OFAC_LIST_URL`, overridable if OFAC moves the endpoint).
@@ -59,28 +60,12 @@ export async function maybeRefreshSdnList(
       publishedDate: new Date(nowMs).toISOString().slice(0, 10),
       fetchedAt: nowMs,
     });
+    await reconcileSdnAlert(env, { success: true, detail: `direct refresh succeeded — ${entries.length} entries` }, mailer, nowMs);
     return { refreshed: true, reason: "refreshed", entryCount: entries.length };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error("SDN list refresh failed — keeping the prior good list", err);
-    await alertSdnRefreshFailure(env, message, mailer);
+    await reconcileSdnAlert(env, { success: false, detail: `direct refresh: ${message}` }, mailer, nowMs);
     return { refreshed: false, reason: "failed", error: message };
-  }
-}
-
-async function alertSdnRefreshFailure(env: Env, message: string, mailer: OpsMailer): Promise<void> {
-  if (!env.OPS_ALERT_EMAIL) return;
-  const text =
-    `The daily SDN (OFAC sanctions) list refresh FAILED — the platform is continuing to screen against the PRIOR good list, ` +
-    `not a corrupt/partial one.\n\nError: ${message}\n\nThis will retry on the next ops-sweep cron tick (~5 min).`;
-  try {
-    await mailer.send({
-      to: env.OPS_ALERT_EMAIL,
-      subject: `[coldrig] SDN list refresh failed — kept prior good list`,
-      text,
-      html: `<p>${escapeHtml(text).replace(/\n/g, "<br>")}</p>`,
-    });
-  } catch (mailErr) {
-    console.error(`SDN refresh-failure alert: send to ${env.OPS_ALERT_EMAIL} failed (dark or transient)`, mailErr);
   }
 }

@@ -113,6 +113,11 @@ export async function postWebhook<T = unknown>(event: unknown): Promise<ApiResul
 // exact value once before every test file's DB migrations run.
 export const TEST_ADMIN_TOKEN = "test-admin-token-for-vitest";
 
+// G1a droplet-relay — the narrow bearer secret POST /admin/sdn/ingest ALSO
+// accepts (require-admin-auth.ts's carve-out), matching hermetic-env.ts's
+// ALLOWLISTED_TEST_BINDINGS.SDN_INGEST_TOKEN test value.
+export const TEST_SDN_INGEST_TOKEN = "test-sdn-ingest-token-for-vitest";
+
 export async function adminApi<T = unknown>(
   path: string,
   init: (RequestInit & { adminToken?: string }) | undefined = {},
