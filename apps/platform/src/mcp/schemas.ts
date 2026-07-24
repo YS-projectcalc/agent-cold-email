@@ -153,6 +153,7 @@ export const ConfigureByoDomainInput = z
     acknowledged: z.literal(true).optional().describe("Required (must be true) for acknowledge_consent — SPEC.md §20.4's separate, unbundled risk acknowledgment."),
     count: z.number().int().min(1).max(10).optional().describe("Required for request_managed_mailboxes — how many platform-provisioned mailboxes to attach."),
     personaSlug: z.string().min(1).max(50).optional().describe("Optional for request_managed_mailboxes — defaults to a slug of the domain."),
+    quoteOnly: z.boolean().optional().describe("Optional for request_managed_mailboxes — true previews the new mailbox count + projected monthly price WITHOUT provisioning (SPEC §18 quote-before-add)."),
     email: z.string().email().optional().describe("Required for connect_mailbox — the existing mailbox address."),
     transport: ConnectByoMailboxTransportInput.optional().describe(
       "Required for connect_mailbox — { kind: 'smtp', host, port, secure, user, pass } | { kind: 'gmail_api', clientId, clientSecret, refreshToken } | { kind: 'ms_graph', mode: 'delegated'|'app_only', tenantId, clientId, clientSecret, refreshToken? }.",

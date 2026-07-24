@@ -42,6 +42,8 @@ const EXPECTED_TOOL_NAMES = [
   "pause",
   "pause_all",
   "account",
+  // Quantity-billing migration (design §2/§11) — customer-initiated downgrade.
+  "remove_mailboxes",
   // SPEC.md §19.5 — tools 13-15 (M1 dashboard+inbox brief).
   "get_dashboard",
   "configure_dashboard",
@@ -89,12 +91,12 @@ describe("POST /mcp — hosted MCP JSON-RPC 2.0 endpoint", () => {
     expect(res.body).toBeUndefined();
   });
 
-  it("tools/list returns exactly the 24 tools with a JSON-Schema inputSchema each — no auth required", async () => {
+  it("tools/list returns exactly the 25 tools with a JSON-Schema inputSchema each — no auth required", async () => {
     const res = await api<JsonRpcSuccess<ToolListResult>>("/mcp", { method: "POST", body: rpc("tools/list") });
     expect(res.status).toBe(200);
     const names = res.body.result.tools.map((t) => t.name);
     expect(names).toEqual(EXPECTED_TOOL_NAMES);
-    expect(res.body.result.tools).toHaveLength(24);
+    expect(res.body.result.tools).toHaveLength(25);
     for (const t of res.body.result.tools) {
       expect(typeof t.description).toBe("string");
       expect(t.description.length).toBeGreaterThan(0);

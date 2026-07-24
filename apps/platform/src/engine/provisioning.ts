@@ -2,7 +2,7 @@ import { CapacityPendingError, isPaidPlan, RegistrarUnarmedError, type SetupInfr
 import { newId } from "../schema.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { TenantContext } from "../tenant-context.js";
-import { reportUsageToStripeIfConfigured, syncMailboxQuantity } from "./billing.js";
+import { projectMailboxQuote, syncMailboxQuantity, type MailboxQuote } from "./billing.js";
 import { assertNotLifecycleFrozen } from "./billing-state.js";
 import { assertBrandOwnership } from "./brand-guard.js";
 import { gatherMailboxHealth } from "./deliverability.js";
@@ -105,11 +105,16 @@ export async function provisionMailboxesForDomain(
     );
     mailboxEmails.push(provisioned.email);
 
-    // Per-mailbox/mo metering — paid tiers only (see MAILBOX_MONTHLY_FEE_CENTS
-    // comment above). Reuses the SAME idempotency key as mailbox.provision()
-    // as the ledger's source_send_id (a generic idempotency anchor, not
-    // send-specific — see schema.ts), so a retried/duplicated provisioning
-    // call can never double-charge this mailbox.
+    // Per-mailbox/mo INTERNAL COGS metering — paid plan only (see
+    // MAILBOX_MONTHLY_FEE_CENTS comment above). The local ledger 'usage' write
+    // stays as the founder's internal cost tracking (account().usageCents);
+    // it is NOT the customer's bill. The customer is billed by the licensed
+    // Stripe QUANTITY (syncMailboxQuantity, design §2) — the former per-mailbox
+    // Stripe usage report was DELETED with the migration: that endpoint only
+    // accepts metered items, but checkout creates a LICENSED item (a latent 400
+    // if ever armed), and keeping both would double-count the per-mailbox charge.
+    // Reuses the SAME idempotency key as mailbox.provision() as the ledger's
+    // source_send_id so a retried provision can never double-count.
     if (isPaidPlan(ctx.plan)) {
       await ctx.adapters.billing.recordUsage(
         ctx.tenantId,
@@ -126,7 +131,6 @@ export async function provisionMailboxesForDomain(
         now,
         provisionIdempotencyKey,
       );
-      await reportUsageToStripeIfConfigured(ctx, 1, provisionIdempotencyKey);
     }
 
     // Self-serve I3 credential push (F6): record-then-push the just-provisioned
@@ -203,7 +207,7 @@ export async function runSetupInfrastructure(
   // runDeliverabilitySweep, so a test can assert the gate (a) alert content
   // with a SandboxOpsMailer without any production call site needing to change.
   mailer: OpsMailer = createOpsMailer(ctx.env),
-): Promise<{ jobId: string }> {
+): Promise<{ jobId: string } | { quoteOnly: true; quote: MailboxQuote }> {
   // Lifecycle freeze — BEFORE any spend. A suspended/disputed/canceled tenant
   // must not provision fresh infra (real registrar/mailbox spend at activation
   // on an account we deliberately froze — adversarial panel-03 finding #5).
@@ -215,6 +219,17 @@ export async function runSetupInfrastructure(
 
   // Plan quota / provisioning-cap guard (B1 brief) — BEFORE any spend.
   assertWithinProvisioningCap(ctx, { domains: input.domains, mailboxes: input.domains * input.inboxesEach });
+
+  // Quote-before-add (SPEC §18 "no silent capacity addition", design §2): a
+  // preview returns the proposed new count + projected monthly WITHOUT
+  // provisioning or mutating the profile — the request is fully validated above
+  // so the quote reflects a genuinely-acceptable request.
+  if (input.quoteOnly) {
+    const currentProvisioned = ctx.sql
+      .exec<{ n: number }>(`SELECT COUNT(*) as n FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL`, ctx.tenantId)
+      .one().n;
+    return { quoteOnly: true, quote: projectMailboxQuote(ctx, currentProvisioned + input.domains * input.inboxesEach) };
+  }
 
   ctx.sql.exec(
     `UPDATE tenant_profile SET brand = ?, primary_domain = ?, physical_address = ?, sender_identity = ? WHERE id = ?`,

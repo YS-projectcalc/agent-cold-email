@@ -10,6 +10,7 @@ import type {
   ListLeadsQueryInput,
   Provenance,
   RegisterByoDomainInput,
+  RemoveMailboxesInput,
   RequestManagedByoMailboxesInput,
   SetupInfrastructureInput,
   SuppressLeadInput,
@@ -28,10 +29,12 @@ import type { Env } from "./env.js";
 import {
   applyStripeWebhookEvent,
   completeSimulatedCheckout,
+  removeMailboxes,
   startCheckout,
   syncMailboxQuantity,
   type CheckoutResult,
   type CompleteCheckoutResult,
+  type RemoveMailboxesResult,
   type WebhookApplyResult,
 } from "./engine/billing.js";
 import { runDemo, type DemoRunSummary } from "./engine/demo.js";
@@ -87,7 +90,7 @@ import {
   connectByoMailbox,
   requestManagedByoMailboxes,
   type ConnectByoMailboxResult,
-  type ManagedMailboxesResult,
+  type RequestManagedByoMailboxesResult,
 } from "./engine/byo-mailbox-composition.js";
 import { newId, TENANT_DO_SCHEMA } from "./schema.js";
 import type { TenantContext } from "./tenant-context.js";
@@ -574,7 +577,7 @@ export class TenantDO extends DurableObject<Env> {
     return acknowledgePrimaryDomainConsent(this.requireContext(), id, input);
   }
 
-  async requestManagedByoMailboxes(id: string, input: RequestManagedByoMailboxesInput): Promise<ManagedMailboxesResult> {
+  async requestManagedByoMailboxes(id: string, input: RequestManagedByoMailboxesInput): Promise<RequestManagedByoMailboxesResult> {
     return requestManagedByoMailboxes(this.requireContext(), id, input);
   }
 
@@ -613,6 +616,13 @@ export class TenantDO extends DurableObject<Env> {
 
   async checkout(input: CheckoutInput, origin: string): Promise<CheckoutResult> {
     return startCheckout(this.requireContext(), input, origin);
+  }
+
+  // Customer-initiated downgrade (design §2) — releases N mailboxes now + syncs
+  // the lower Stripe quantity (proration none). Tenant-authed, POST /remove-mailboxes.
+  async removeMailboxes(input: RemoveMailboxesInput): Promise<RemoveMailboxesResult> {
+    const result = await removeMailboxes(this.requireContext(), input);
+    return result;
   }
 
   async completeCheckoutSimulated(sessionId: string): Promise<CompleteCheckoutResult> {

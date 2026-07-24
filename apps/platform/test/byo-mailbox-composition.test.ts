@@ -18,7 +18,8 @@ describe("requestManagedByoMailboxes — SPEC.md §20.6 shape (a), the founder-r
     const record = await activeDomain(tenantId, "delegated-managed.com");
     expect(record.byoStatus).toBe("pending_dns");
 
-    const result = await withTenantContext(tenantId, (ctx) => requestManagedByoMailboxes(ctx, record.domainId, { count: 2, personaSlug: "ops" }));
+    const result = await withTenantContext(tenantId, (ctx) => requestManagedByoMailboxes(ctx, record.domainId, { count: 2, personaSlug: "ops", quoteOnly: false }));
+    if (!("mailboxEmails" in result)) throw new Error("expected a provisioned result, got a quote");
     expect(result.mailboxEmails).toHaveLength(2);
     expect(result.mailboxEmails.every((e) => e.endsWith("@delegated-managed.com"))).toBe(true);
 
@@ -45,7 +46,7 @@ describe("requestManagedByoMailboxes — SPEC.md §20.6 shape (a), the founder-r
     );
     expect(record.byoStatus).toBe("pending_dns"); // never polled -> still pending
 
-    await expect(withTenantContext(tenantId, (ctx) => requestManagedByoMailboxes(ctx, record.domainId, { count: 1 }))).rejects.toThrow(
+    await expect(withTenantContext(tenantId, (ctx) => requestManagedByoMailboxes(ctx, record.domainId, { count: 1, quoteOnly: false }))).rejects.toThrow(
       ValidationError,
     );
   });
@@ -55,7 +56,7 @@ describe("requestManagedByoMailboxes — SPEC.md §20.6 shape (a), the founder-r
     const { tenantId: tenantB } = await signup("Managed Isolation B", "mib@example.com");
     const record = await activeDomain(tenantA, "delegated-isolation.com");
 
-    await expect(withTenantContext(tenantB, (ctx) => requestManagedByoMailboxes(ctx, record.domainId, { count: 1 }))).rejects.toThrow(/not found/i);
+    await expect(withTenantContext(tenantB, (ctx) => requestManagedByoMailboxes(ctx, record.domainId, { count: 1, quoteOnly: false }))).rejects.toThrow(/not found/i);
   });
 });
 

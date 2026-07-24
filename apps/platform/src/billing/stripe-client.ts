@@ -118,44 +118,6 @@ export async function createStripeCheckoutSession(
   return { id: json.id, url: json.url };
 }
 
-/**
- * Reports one metered-usage increment. NOTE: Stripe's usage-records endpoint
- * is keyed by SUBSCRIPTION ITEM id, not subscription id — resolving the
- * correct line-item id from a subscription (a GET /v1/subscriptions/{id}
- * round trip) is an activation-time detail (ACTIVATION.md), since it's
- * unreachable without a real key regardless. Callers pass whatever
- * identifier they have; this function's job is only the documented call
- * shape, not the lookup.
- *
- * B5 (CLASS B): `idempotencyKey` is sent as Stripe's `Idempotency-Key` header,
- * derived from the source send/provision id by the caller. Stripe dedupes on
- * it for 24h, so a redelivered/retried report (an at-least-once tick re-run,
- * a network retry) can't double-increment metered usage even though `action:
- * increment` is otherwise additive.
- */
-export async function reportUsageRecord(
-  secretKey: string,
-  subscriptionItemId: string,
-  quantity: number,
-  timestampMs: number,
-  idempotencyKey: string,
-): Promise<void> {
-  const body = new URLSearchParams();
-  body.set("quantity", String(quantity));
-  body.set("timestamp", String(Math.floor(timestampMs / 1000)));
-  body.set("action", "increment");
-
-  const res = await fetch(`${STRIPE_API_BASE}/subscription_items/${subscriptionItemId}/usage_records`, {
-    method: "POST",
-    headers: { ...stripeHeaders(secretKey), "Idempotency-Key": idempotencyKey },
-    body: body.toString(),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`stripe usage record report failed: ${res.status} ${text}`);
-  }
-}
-
 interface StripePriceListItem {
   id: string;
   lookup_key: string | null;

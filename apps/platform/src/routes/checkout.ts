@@ -1,19 +1,29 @@
 import { Hono } from "hono";
-import { CheckoutInput, CheckoutSimulateQuery } from "@coldstart/shared";
+import { CheckoutInput, CheckoutSimulateQuery, RemoveMailboxesInput } from "@coldstart/shared";
 import type { Env } from "../env.js";
 import { isRealSpendArmed } from "../engine/billing.js";
 import type { AuthedVariables } from "../require-auth.js";
 import { parseJsonBody } from "../validate.js";
 
-// POST /checkout — authed, tenant-scoped (B1 money path). Mounted behind
-// requireAuth in index.ts.
-export const checkoutRoute = new Hono<{ Bindings: Env; Variables: AuthedVariables }>().post("/checkout", async (c) => {
-  const parsed = await parseJsonBody(c, CheckoutInput);
-  if (!parsed.ok) return parsed.response;
-  const origin = new URL(c.req.url).origin;
-  const result = await c.get("tenantStub").checkout(parsed.data, origin);
-  return c.json(result, 201);
-});
+// POST /checkout + POST /remove-mailboxes — authed, tenant-scoped (money path).
+// Mounted behind requireAuth in index.ts.
+export const checkoutRoute = new Hono<{ Bindings: Env; Variables: AuthedVariables }>()
+  .post("/checkout", async (c) => {
+    const parsed = await parseJsonBody(c, CheckoutInput);
+    if (!parsed.ok) return parsed.response;
+    const origin = new URL(c.req.url).origin;
+    const result = await c.get("tenantStub").checkout(parsed.data, origin);
+    return c.json(result, 201);
+  })
+  // Customer-initiated downgrade (design §2) — releases N mailboxes now and
+  // syncs the lower Stripe quantity (no mid-cycle credit). `acknowledged: true`
+  // is the quoted consent (RemoveMailboxesInput).
+  .post("/remove-mailboxes", async (c) => {
+    const parsed = await parseJsonBody(c, RemoveMailboxesInput);
+    if (!parsed.ok) return parsed.response;
+    const result = await c.get("tenantStub").removeMailboxes(parsed.data);
+    return c.json(result, 200);
+  });
 
 // GET /checkout/simulate — UNAUTHENTICATED, mirroring the fact that Stripe's
 // own hosted checkout return page isn't bearer-token-gated either: the

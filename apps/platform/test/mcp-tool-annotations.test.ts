@@ -46,8 +46,10 @@ const READ_ONLY_TOOLS = new Set([
 // suppress_lead joins this set (SPEC.md §22): it cancels pending sends +
 // permanently reclassifies every campaign-lead row sharing the email, and
 // there is deliberately no un-suppress tool — the same "worst-case action"
-// honesty bar as pause/pause_all's "no resume tool".
-const DESTRUCTIVE_TOOLS = new Set(["launch_campaign", "reply", "pause", "pause_all", "configure_dashboard", "configure_webhook", "configure_byo_domain", "suppress_lead"]);
+// honesty bar as pause/pause_all's "no resume tool". remove_mailboxes
+// (quantity-billing migration): releases real mailboxes (irreversible via this
+// API — re-provision to grow back) + lowers billing, no un-remove tool.
+const DESTRUCTIVE_TOOLS = new Set(["launch_campaign", "reply", "pause", "pause_all", "configure_dashboard", "configure_webhook", "configure_byo_domain", "suppress_lead", "remove_mailboxes"]);
 
 // Tools that mutate but only additively/reversibly: setup_infrastructure
 // (creates new resources, never deletes/overwrites existing ones), mark and
@@ -66,9 +68,9 @@ async function listTools(): Promise<ToolListResult["tools"]> {
 }
 
 describe("tools/list — MCP tool annotations (Anthropic Connectors Directory requirement)", () => {
-  it("every one of the 24 tools carries a non-empty annotations.title", async () => {
+  it("every one of the 25 tools carries a non-empty annotations.title", async () => {
     const tools = await listTools();
-    expect(tools).toHaveLength(24);
+    expect(tools).toHaveLength(25);
     for (const t of tools) {
       expect(t.annotations, `${t.name} is missing annotations`).toBeDefined();
       expect(typeof t.annotations!.title, `${t.name}.annotations.title`).toBe("string");
@@ -113,10 +115,10 @@ describe("tools/list — MCP tool annotations (Anthropic Connectors Directory re
     }
   });
 
-  it("classification covers exactly the 24 tools with no overlap between sets", async () => {
+  it("classification covers exactly the 25 tools with no overlap between sets", async () => {
     const tools = await listTools();
     const classified = new Set([...READ_ONLY_TOOLS, ...DESTRUCTIVE_TOOLS, ...ADDITIVE_NONDESTRUCTIVE_TOOLS]);
-    expect(classified.size).toBe(24);
+    expect(classified.size).toBe(25);
     expect(tools.map((t) => t.name).sort()).toEqual([...classified].sort());
   });
 });

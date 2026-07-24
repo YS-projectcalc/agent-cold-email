@@ -19,6 +19,11 @@ export const SetupInfrastructureInput = z.object({
   persona: z.string().min(1).max(200),
   physicalAddress: z.string().min(1).max(500),
   senderIdentity: z.string().min(1).max(200),
+  // Quote-before-add (SPEC §18 "no silent capacity addition", design §2):
+  // `quoteOnly: true` returns the proposed new mailbox count + projected monthly
+  // price WITHOUT provisioning, so the agent can preview the bill impact before
+  // committing. Default false = provision as normal (backward-compatible).
+  quoteOnly: z.boolean().default(false),
 });
 export type SetupInfrastructureInput = z.infer<typeof SetupInfrastructureInput>;
 
@@ -166,6 +171,9 @@ export type AcknowledgeByoConsentInput = z.infer<typeof AcknowledgeByoConsentInp
 export const RequestManagedByoMailboxesInput = z.object({
   count: z.number().int().min(1).max(10),
   personaSlug: z.string().min(1).max(50).optional(),
+  // Quote-before-add (SPEC §18, design §2) — preview the new count + projected
+  // monthly without provisioning. Default false = provision as normal.
+  quoteOnly: z.boolean().default(false),
 });
 export type RequestManagedByoMailboxesInput = z.infer<typeof RequestManagedByoMailboxesInput>;
 

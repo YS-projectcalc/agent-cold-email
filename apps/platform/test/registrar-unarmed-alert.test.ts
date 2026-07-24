@@ -69,6 +69,7 @@ const SETUP_INPUT = {
   persona: "Sender",
   physicalAddress: "1 St",
   senderIdentity: "Sender <s@registraralertco.com>",
+  quoteOnly: false,
 };
 
 describe("G5 gate (a) — runSetupInfrastructure's registrar-unarmed handling", () => {

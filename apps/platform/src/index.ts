@@ -99,6 +99,7 @@ const AUTHED_PATH_PATTERNS = [
   "/threads/*",
   "/account",
   "/checkout",
+  "/remove-mailboxes",
   "/cancel",
   "/demo/run",
   "/dashboard/logout",

@@ -7,12 +7,22 @@
 // Stripe is the source of truth once activated (ARCHITECTURE.md #3); these
 // functions mirror that state onto tenant_profile.
 
-import { billableMailboxes, isPaidPlan, MINIMUM_BILLABLE_MAILBOXES, NotFoundError, ValidationError, type CheckoutInput, type TenantPlan } from "@coldstart/shared";
+import {
+  billableMailboxes,
+  isPaidPlan,
+  MINIMUM_BILLABLE_MAILBOXES,
+  monthlyRevenueCents,
+  NotFoundError,
+  quoteProvisionedMailboxes,
+  ValidationError,
+  type CheckoutInput,
+  type RemoveMailboxesInput,
+  type TenantPlan,
+} from "@coldstart/shared";
 import {
   createStripeCheckoutSession,
   ensureStripePrices,
   getSubscription,
-  reportUsageRecord,
   setSubscriptionItemQuantity,
   STRIPE_PRICES,
   stripeMode,
@@ -23,7 +33,8 @@ import type { Env } from "../env.js";
 import { newId } from "../schema.js";
 import { screenTenant } from "../ofac/screening.js";
 import type { TenantContext } from "../tenant-context.js";
-import { clearTeardownRecord } from "./lifecycle.js";
+import { assertNotLifecycleFrozen } from "./billing-state.js";
+import { clearTeardownRecord, releaseMailboxes } from "./lifecycle.js";
 import { reactivateFromDunning } from "./ops-summary.js";
 
 /**
@@ -597,30 +608,56 @@ async function captureSubscriptionState(ctx: TenantContext, secretKey: string, s
   );
 }
 
+export interface MailboxQuote {
+  /** Proposed billable mailbox count = clamp(5..60, proposed). */
+  mailboxes: number;
+  /** Projected monthly price AFTER any stored checkout discount, integer cents. */
+  monthlyCents: number;
+  /** Bundled domains at ceil(mailboxes/3). */
+  estimatedDomains: number;
+  /** The discount % folded into monthlyCents (0 when none). */
+  discountPct: number;
+}
+
 /**
- * Reports one metered-usage increment toward Stripe metered billing.
- * Inert/no-op unless `env.STRIPE_SECRET_KEY` AND a stored
- * `stripe_subscription_id` both exist — i.e. unreachable in this build.
- * Never throws: a Stripe reporting hiccup must not corrupt or block the
- * local ledger write it follows (that write already committed).
- * `idempotencyKey` is the source send/provision id — see reportUsageRecord (B5).
+ * The projected bill for a proposed provisioned-mailbox count (SPEC §18 quote,
+ * design §2): the clamped billable count + the curve monthly folding any
+ * discount captured at checkout, so the agent can preview the impact before
+ * adding/removing capacity. Read-only.
  */
-export async function reportUsageToStripeIfConfigured(
-  ctx: TenantContext,
-  quantity: number,
-  idempotencyKey: string,
-): Promise<void> {
-  const key = ctx.env.STRIPE_SECRET_KEY;
-  if (!key) return;
-  const row = ctx.sql
-    .exec<{ subId: string | null }>(`SELECT stripe_subscription_id as subId FROM tenant_profile WHERE id = ?`, ctx.tenantId)
-    .one();
-  if (!row.subId) return;
-  try {
-    // B5: dedupe key derived from the source send/provision id so a redelivered
-    // report can't double-increment Stripe metered usage.
-    await reportUsageRecord(key, row.subId, quantity, ctx.clock.now(), `usage-report:${idempotencyKey}`);
-  } catch (err) {
-    console.error("stripe usage report failed (non-fatal — the local ledger entry already committed)", err);
-  }
+export function projectMailboxQuote(ctx: TenantContext, proposedProvisioned: number): MailboxQuote {
+  const q = quoteProvisionedMailboxes(proposedProvisioned);
+  const discountPct = ctx.sql
+    .exec<{ d: number }>(`SELECT checkout_discount_pct as d FROM tenant_profile WHERE id = ?`, ctx.tenantId)
+    .one().d;
+  return {
+    mailboxes: q.mailboxes,
+    monthlyCents: monthlyRevenueCents(q.mailboxes, discountPct),
+    estimatedDomains: q.estimatedDomains,
+    discountPct,
+  };
+}
+
+export interface RemoveMailboxesResult {
+  releasedCount: number;
+  /** The projected bill after the release (the lower quantity, floored at $99). */
+  quote: MailboxQuote;
+}
+
+/**
+ * Customer-initiated downgrade (design §2 — the symmetrical deprovision path,
+ * distinct from teardown). Releases the N newest live mailboxes NOW (effective
+ * immediately for provisioning) and mirrors the LOWER Stripe quantity with
+ * proration_behavior 'none' — no mid-cycle credit (founder ruling 2), effective
+ * next renewal for billing. Guards against a frozen tenant (must re-subscribe
+ * first). Reuses the shared releaseMailboxes path (revoke-before-mark + G4
+ * slot decrement). The quoted consent is enforced at the boundary
+ * (RemoveMailboxesInput.acknowledged must be an explicit `true`).
+ */
+export async function removeMailboxes(ctx: TenantContext, input: RemoveMailboxesInput): Promise<RemoveMailboxesResult> {
+  assertNotLifecycleFrozen(ctx, "remove_mailboxes");
+  const { releasedCount } = await releaseMailboxes(ctx, { limit: input.count });
+  // Decrease: syncMailboxQuantity picks proration_behavior 'none' (desired < synced).
+  await syncMailboxQuantity(ctx);
+  return { releasedCount, quote: projectMailboxQuote(ctx, provisionedMailboxCount(ctx)) };
 }
