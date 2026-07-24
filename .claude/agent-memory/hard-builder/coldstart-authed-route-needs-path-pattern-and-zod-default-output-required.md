@@ -1,0 +1,7 @@
+# ColdStart: a new authed route 500s (not 401) until added to AUTHED_PATH_PATTERNS; + zod .default() makes the OUTPUT type required for direct callers
+
+Two build traps hit while adding the `remove_mailboxes` route + `quoteOnly` field (quantity-billing migration):
+
+1. **Per-path auth, not per-router.** `apps/platform/src/index.ts` applies `requireAuth` via an EXPLICIT list — `for (const pattern of AUTHED_PATH_PATTERNS) authed.use(pattern, requireAuth, csrfGuard)` — NOT to the whole `authed` router (a blanket `"*"` would swallow unknown paths into 401 instead of 404, a deliberate M1 §19.1 fix). So adding a new authed route to an existing route-group file (e.g. a second `.post()` on `checkoutRoute`) does NOT authenticate it: an unauthed request reaches the handler, `c.get("tenantStub")` is undefined → **500, not 401**. Fix: add the literal path to `AUTHED_PATH_PATTERNS`. The comment there already warns "Adding a new authed route anywhere below MUST add its path pattern here too."
+
+2. **`z.boolean().default(false)` makes the field REQUIRED in the inferred OUTPUT type** (`z.infer`), optional only in the INPUT. Engine functions take the parsed output type, so callers that go through the zod boundary (HTTP route / DO RPC) get it defaulted — but TESTS that call the engine fn DIRECTLY with a raw object literal must now supply the field, or typecheck fails (`Property 'quoteOnly' is missing`). Adding a defaulted field to a shared `*Input` schema silently breaks every direct-engine-call test site. Sweep them.
