@@ -101,6 +101,26 @@ export interface ReleaseMailboxesResult {
 }
 
 /**
+ * The billing meter (design §2/§3): a released mailbox (`released_at` set —
+ * see `releaseMailboxes` below) stops counting toward what's billed.
+ * Single-sourced here so the CHARGE (engine/billing.ts's
+ * `checkoutMailboxQuantity`) and the DISPLAY (engine/reporting.ts's
+ * `getAccount`, surfaced to the dashboard's Go-live quote) read the EXACT
+ * same count and can never diverge again — adversary golive-ux-review-
+ * 2026-07-27.md round-2 finding: `getAccount` used a plain `COUNT(*)`
+ * (no `released_at` filter) while checkout used this released_at-aware
+ * count, so a tenant with SOFT-released mailboxes (`removeMailboxes`,
+ * deliverability auto-replacement, or teardown/cancel releasing ALL —
+ * `DELETE FROM mailboxes` never happens, releases are always soft) saw a
+ * quote/"provisioned now" figure that didn't match the real charge.
+ */
+export function billableMailboxCount(ctx: TenantContext): number {
+  return ctx.sql
+    .exec<{ n: number }>(`SELECT COUNT(*) as n FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL`, ctx.tenantId)
+    .one().n;
+}
+
+/**
  * Releases mailboxes back to the vendor + marks them `released_at` (design §7.1
  * — extracted from teardown's mailbox loop, CLAUDE.md rule c). The billing
  * meter is `COUNT(*) WHERE released_at IS NULL`, so a released mailbox stops

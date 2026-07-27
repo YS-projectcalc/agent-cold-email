@@ -32,8 +32,8 @@ import type { Env } from "../env.js";
 import { newId } from "../schema.js";
 import { screenTenant } from "../ofac/screening.js";
 import type { TenantContext } from "../tenant-context.js";
-import { assertNotLifecycleFrozen } from "./billing-state.js";
-import { clearTeardownRecord, releaseMailboxes } from "./lifecycle.js";
+import { assertNotLifecycleFrozen, readLifecycleState } from "./billing-state.js";
+import { billableMailboxCount, clearTeardownRecord, releaseMailboxes } from "./lifecycle.js";
 import { reactivateFromDunning } from "./ops-summary.js";
 
 /**
@@ -85,12 +85,13 @@ const MANAGED_PLAN: TenantPlan = "managed";
  * customer's requested `input.mailboxes` bounds the intended size at the
  * boundary (5..60 self-serve; 61+ is a custom quote) and seeds the quote, but
  * the billed quantity mirrors provisioning, never an unprovisioned commitment.
+ * The underlying count is `billableMailboxCount` (engine/lifecycle.ts) — the
+ * SAME function `getAccount` (engine/reporting.ts) reads for the dashboard's
+ * Go-live quote, single-sourced so the two can never diverge again (adversary
+ * golive-ux-review-2026-07-27.md round-2 finding).
  */
 function checkoutMailboxQuantity(ctx: TenantContext): number {
-  const provisioned = ctx.sql
-    .exec<{ n: number }>(`SELECT COUNT(*) as n FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL`, ctx.tenantId)
-    .one().n;
-  return Math.max(MINIMUM_BILLABLE_MAILBOXES, provisioned);
+  return Math.max(MINIMUM_BILLABLE_MAILBOXES, billableMailboxCount(ctx));
 }
 
 /**
@@ -139,7 +140,30 @@ async function cacheStripePrices(ctx: TenantContext, mode: string, map: StripePr
   await ctx.env.DB.batch(slugs.map((slug) => stmt.bind(STRIPE_PRICES[slug].lookupKey, mode, map[slug], now)));
 }
 
+/**
+ * Adversary NB#3 (golive-ux-review-2026-07-27.md finding 3) — an
+ * already-active tenant hitting POST /checkout a second time (e.g. clicking
+ * a UI "Go live" control meant for sandbox/canceled/suspended tenants) would
+ * start a SECOND Stripe Checkout Session/subscription while the DO tracks
+ * only ONE `stripe_subscription_id` (tenant-do.ts) — the webhook then
+ * overwrites the tracked id and the first subscription orphans while still
+ * billing. `billing_state === 'active'` is the ONE state that means "already
+ * paying, nothing to reactivate" — every ActivationSurfaceState that reads as
+ * 'active'/'pending_provisioning'/'capacity_pending' to the UI shares this
+ * SAME underlying billing_state (see engine/activation.ts's
+ * deriveActivationState — all three branch off `billingState === 'active'`),
+ * so this one check covers all three at once. Reactivation from 'canceled'/
+ * 'past_due'/'none' stays allowed (design §2/§9 — that's the intended path
+ * back to paying).
+ */
 export async function startCheckout(ctx: TenantContext, input: CheckoutInput, origin: string): Promise<CheckoutResult> {
+  const { billingState } = readLifecycleState(ctx);
+  if (billingState === "active") {
+    throw new ValidationError(
+      "checkout rejected: this tenant's billing is already active. Use POST /remove-mailboxes to change mailbox count, or POST /cancel first to reactivate on a new checkout.",
+    );
+  }
+
   const stripeKey = ctx.env.STRIPE_SECRET_KEY;
 
   if (stripeKey) {

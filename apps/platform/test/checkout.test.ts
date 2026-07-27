@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
-import { api, mintTenant, signup, tenantStub } from "./helpers.js";
+import { activatePaidPlan, api, cookieApi, createDashboardSession, mintTenant, signup, tenantStub } from "./helpers.js";
 
 interface CheckoutResponse {
   mode: "stripe" | "simulated";
@@ -102,6 +102,34 @@ describe("POST /checkout — simulated test-mode upgrade (B1 money path)", () =>
     expect(res.status).toBe(400);
   });
 
+  // Adversary NB#3 (golive-ux-review-2026-07-27.md finding 3): the Go-live
+  // section was ungated, so an already-active tenant clicking it would start
+  // a SECOND Stripe Checkout Session/subscription; the DO tracks a single
+  // `stripe_subscription_id`, so the webhook overwrites it and the first
+  // subscription orphans while still billing. FAILS on the old code (old
+  // code has no billing_state guard in startCheckout, billing.ts:142-156).
+  it("rejects a second checkout for a tenant whose billing is already active", async () => {
+    const { token } = await signup("Already Active Co", "founder@alreadyactive.test");
+    await activatePaidPlan((await api<{ tenantId: string }>("/account", { token })).body.tenantId, "managed");
+
+    const res = await api("/checkout", { method: "POST", token, body: JSON.stringify({ mailboxes: 10 }) });
+    expect(res.status).toBe(400);
+    expect((res.body as { error: string }).error).toMatch(/already.*active/i);
+  });
+
+  // Reactivation (a canceled tenant re-subscribing) is INTENDED — the guard
+  // must only block an ALREADY-active tenant, not every non-'none' state.
+  it("still allows checkout for a canceled tenant (reactivation)", async () => {
+    const { token } = await signup("Reactivate Co", "founder@reactivate.test");
+    const tenantId = (await api<{ tenantId: string }>("/account", { token })).body.tenantId;
+    await activatePaidPlan(tenantId, "managed");
+    const cancel = await api<{ billingState: string }>("/cancel", { method: "POST", token, body: JSON.stringify({ immediate: true }) });
+    expect(cancel.body.billingState).toBe("canceled");
+
+    const res = await api<{ mode: string }>("/checkout", { method: "POST", token, body: JSON.stringify({ mailboxes: 5 }) });
+    expect(res.status).toBe(201);
+  });
+
   // Adversarial panel-03 finding #10: startCheckout INSERTed a new
   // checkout_sessions row on every call — a tenant looping POST /checkout grew
   // its own DO storage unboundedly. A pending session for the same plan is now
@@ -129,6 +157,39 @@ describe("POST /checkout — simulated test-mode upgrade (B1 money path)", () =>
         .one().n,
     );
     expect(rows).toBe(1);
+  });
+});
+
+// Dashboard "Go live" checkout entry (founder-ordered UX fix) — POST /checkout
+// is on index.ts's AUTHED_PATH_PATTERNS, so it already runs behind
+// requireAuth's cookie fallback (require-auth.ts) AND the global csrfGuard
+// (csrf-guard.ts) exactly like every other authed route; this pins that down
+// for the ONE route the dashboard's new human checkout button actually calls,
+// so a future refactor of the pattern list can't silently drop it.
+describe("POST /checkout — dashboard cookie-session auth (same pattern as every other authed route)", () => {
+  it("a cookie-authed request with the CSRF header succeeds exactly like a bearer request", async () => {
+    const { token } = await signup("Cookie Checkout Co", "founder@cookiecheckout.test");
+    const session = await createDashboardSession(token);
+
+    const checkout = await cookieApi<{ mode: string; url: string; sessionId: string }>("/checkout", session, {
+      method: "POST",
+      csrf: true,
+      body: JSON.stringify({ mailboxes: 10 }),
+    });
+    expect(checkout.status).toBe(201);
+    expect(checkout.body.url).toBeTruthy();
+  });
+
+  it("a cookie-authed request WITHOUT the CSRF header is rejected (403), never silently allowed", async () => {
+    const { token } = await signup("No CSRF Checkout Co", "founder@nocsrfcheckout.test");
+    const session = await createDashboardSession(token);
+
+    const checkout = await cookieApi("/checkout", session, {
+      method: "POST",
+      csrf: false,
+      body: JSON.stringify({ mailboxes: 10 }),
+    });
+    expect(checkout.status).toBe(403);
   });
 });
 

@@ -34,7 +34,7 @@ describe("SignupPage", () => {
 
     renderSignup();
     fireEvent.change(screen.getByLabelText(/company or brand/i), { target: { value: "Northstar" } });
-    fireEvent.change(screen.getByLabelText(/work email/i), { target: { value: "owner@northstar.example" } });
+    fireEvent.change(screen.getByLabelText(/^email$/i), { target: { value: "owner@northstar.example" } });
     fireEvent.click(screen.getByRole("button", { name: /free sign up/i }));
 
     expect(await screen.findByRole("heading", { name: /save your tenant token now/i })).toBeInTheDocument();
@@ -43,5 +43,15 @@ describe("SignupPage", () => {
 
     const signupCall = fetchMock.mock.calls.find(([, init]) => init?.method === "POST");
     expect(JSON.parse(String(signupCall?.[1]?.body))).toEqual({ brand: "Northstar", contactEmail: "owner@northstar.example" });
+  });
+
+  // A real pilot customer was put off by the "work email" ask (personal
+  // emails are explicitly acceptable) — the label and placeholder must not
+  // imply a work/company email is required.
+  it("asks for just 'Email', with no work/company-email implication", () => {
+    renderSignup();
+    expect(screen.getByLabelText(/^email$/i)).toBeInTheDocument();
+    expect(screen.queryByText(/work email/i)).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/you@example\.com/i)).toBeInTheDocument();
   });
 });

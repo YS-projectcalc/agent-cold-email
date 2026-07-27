@@ -25,6 +25,7 @@ interface AccountResponse {
   billingState: string;
   domains: number;
   mailboxes: number;
+  billableMailboxes: number;
   teardown: TeardownSummary | null;
 }
 
@@ -140,6 +141,18 @@ describe("POST /cancel — voluntary cancellation + teardown/reclaim (D5)", () =
     expect(account.body.teardown).not.toBeNull();
     expect(account.body.teardown?.domainsReleased).toBe(2);
     expect(account.body.teardown?.mailboxesReleased).toBe(4);
+
+    // Adversary golive-ux-review-2026-07-27.md round-2 finding — mailbox
+    // releases are SOFT (`released_at` set, rows never deleted), so plain
+    // COUNT(*) (`mailboxes`) still shows the 4 torn-down rows. `mailboxes`
+    // staying 4 is the pre-existing/documented count-all behavior (unchanged
+    // here on purpose — this test pins down the DIVERGENCE, not a mailboxes
+    // regression); `billableMailboxes` is the billing meter
+    // (released_at IS NULL) and must show 0 — the exact number the server
+    // would actually charge on a reactivation checkout. FAILS on the old code
+    // (old code has no `billableMailboxes` field on /account at all).
+    expect(account.body.mailboxes).toBe(4);
+    expect(account.body.billableMailboxes).toBe(0);
 
     // Ground-truth the DO state: every domain released, every mailbox released
     // + paused (send-side kill), every campaign paused, one liability ledger

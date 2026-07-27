@@ -5,6 +5,7 @@ import type {
   AccountSummary,
   ActivityPage,
   CampaignListItem,
+  CheckoutResult,
   DashboardViewDetail,
   DashboardViewSummary,
   EventCounts,
@@ -194,6 +195,16 @@ export function useAccount(refreshSeconds: number) {
     queryKey: ["account"],
     queryFn: () => apiRequest<AccountSummary>("/account"),
     ...pollingOptions(refreshSeconds),
+  });
+}
+
+// The dashboard's ONE checkout entry point (founder-ordered "Go live" UX fix)
+// — BillingPage's Go-live section is the only caller; the sandbox banner and
+// setup checklist LINK to that section rather than calling this again.
+export function useCheckout() {
+  return useMutation({
+    mutationFn: (input: { mailboxes: number; interval?: "month" | "year" }) =>
+      apiRequest<CheckoutResult>("/checkout", { method: "POST", body: input }),
   });
 }
 
