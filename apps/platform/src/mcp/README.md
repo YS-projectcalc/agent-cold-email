@@ -2,7 +2,7 @@
 
 The hosted MCP surface (B5 brief) — a direct JSON-RPC 2.0 handler over
 streamable HTTP, mounted at `POST /mcp` (`../routes/mcp.ts`). Deliberately
-NOT the Agents SDK `McpAgent`: the facade started as 17 tools (now 24, with
+NOT the Agents SDK `McpAgent`: the facade started as 17 tools (now 25, with
 no resources, prompts, sampling, or SSE streaming — see `tools.ts`'s own
 header comment for the current count), so a thin hand-rolled handler keeps
 the surface small and auditable (ARCHITECTURE.md #7 called for `McpAgent`

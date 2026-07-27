@@ -3,7 +3,7 @@ info:
   title: agent-cold-email API
   version: "0.1.0"
   description: >
-    Agent-native cold-email infrastructure, live in production. 24 curated
+    Agent-native cold-email infrastructure, live in production. 25 curated
     intents behind one bearer token per tenant (a subset — the /dashboard/*
     session + views endpoints — also accept an httpOnly session cookie minted
     by POST /dashboard/session, for the optional human dashboard SPA; see
