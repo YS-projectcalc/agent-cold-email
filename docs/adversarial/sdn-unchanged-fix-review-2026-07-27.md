@@ -179,3 +179,111 @@ pushes and asserts the weekend email volume does not storm and no false "RECOVER
 - The 07-24 review predicted this exact boundary race as "minor noise" under the assumption that daily
   *content* ingests reset `fetched_at`; the weekend-unchanged case turns that once-a-day blip into a
   persistent every-5-min weekend storm. Its suggested mitigation remains unimplemented.
+
+---
+
+# ROUND 2 — re-attack of fix A (2026-07-27, same worktree HEAD a0249705, uncommitted)
+
+## VERDICT: SHIP
+
+The round-1 BLOCKING finding (storm not fixed + false-RECOVERED flapping) is CLOSED. The builder implemented
+fix A: a new narrow updater `touchSdnListFreshness(env, nowMs)` (`sdn-list.ts:191-193`,
+`UPDATE sdn_list_meta SET fetched_at = ? WHERE id = 1`) called on the `"unchanged"` branch
+(`sdn-ingest.ts:167`), plus the co-fire test I required (`test/ofac-sdn-storm-interaction.test.ts`). No new
+BLOCKING finding survives self-refutation. Two NON-BLOCKING doc items below; the code itself is sound to ship.
+Judged against the round-1 checklist (storm actually fixed, no security regression, no worse behavior) — PASS.
+
+### (a) Storm CLOSED — confirmed by trace + co-fire test
+
+A daily byte-identical push now advances `fetched_at` → `maybeRefreshSdnList` returns `"fresh"`
+(`sdn-refresh.ts:44-45`) → the 525 loop never attempts → no storm, no streak, no flapping. Walked the
+arithmetic across weekend and 3+ day holiday patterns: as long as the relay pushes byte-identical at least once
+per 24h, `fetched_at` stays <24h and every direct-refresh tick short-circuits to `"fresh"`. The only residual
+email is the pre-existing 07-24 boundary-race noise (a *missed or slipped-past-24h* daily push → exactly 1
+failure + 1 recovery, the intended backstop), never a storm. **Verification:** ran
+`ofac-sdn-storm-interaction.test.ts` — passes; it seeds a real ingest, fires 3 direct-refresh ticks/day
+(incl. the boundary-critical `+24h−5min` tick) across 2 days with daily unchanged pushes asserting ZERO
+emails, then stops the relay and asserts the 525 alarm fires once `fetched_at` >24h.
+
+### (b) Suppression re-opened by fix A — NON-BLOCKING (the alarm was never a stolen-token control)
+
+My round-1 prediction was correct in mechanism: advancing `fetched_at` on `"unchanged"` DOES let a stolen
+`SDN_INGEST_TOKEN` silence the direct-refresh staleness alarm by replaying the current byte-identical list
+once per <24h (`fetched_at` stays fresh → the 525 alarm never fires → the frozen list sits alert-silent while
+Treasury publishes unscreened additions). Round-1's byte-identical *reject* had blocked exactly this.
+
+But it does **not** rise to blocking, and I graded it honestly by attacking my own alarm: **the freshness
+alarm was never a control against a token-holder in the first place.** A stolen token could ALWAYS keep the
+alarm silent — by pushing any within-10% *modified* list (current list ±a few entries, or with targeted names
+removed), which is a real swap that advances `fetched_at` identically AND is strictly more powerful (actual
+list tampering). So fix A grants no new suppression *capability* — only a marginally stealthier *variant*
+(zero content change vs a ≥1-byte change), and even that leaves a monitorable anomaly (`fetched_at` advancing
+while `active_version`/`content_hash`/`published_date` stay frozen for weeks). Round-1's byte-identical reject
+had ~zero real security value (bypassable with a 1-byte edit), so removing it loses ~nothing. The honesty
+statement's disclosed residual (`ofac-v1-honesty-statement-2026-07-23.md:138-146`: "token secrecy is the
+PRIMARY control … a plausibly-sized list with specific names surgically removed passes both guards") already
+subsumes replay-suppression as a strictly-weaker instance. The `"genuine-staleness backstop is PRESERVED, not
+weakened"` claim in the module comment / HANDOFF / test name is true for the **non-adversarial** (droplet-down)
+case — which is what the alarm is actually for — and the co-fire test proves that case.
+
+### (c) `touchSdnListFreshness` narrowness — HELD
+
+The SQL touches ONLY `fetched_at` (`sdn-list.ts:192`); it writes no `active_version`/`content_hash`/
+`entry_count`/`published_date` and never touches `sdn_entries`. It is reached only AFTER parse succeeds, the
+≥5000 floor passes, an active version exists, AND the candidate is byte-identical to the current active list
+(`sdn-ingest.ts:144-167`) — so it cannot introduce a new version or rows and bypasses none of `swapInSdnList`'s
+guards (it isn't a swap). A concurrent-swap TOCTOU on the shared row is benign (touch only sets `fetched_at`,
+both writers use wall-clock `now`; a few-ms regression can't un-fresh a fresh list; ingests are serial from the
+one droplet). Garbage/below-floor/malformed pushes do NOT reach it, so an attacker cannot advance `fetched_at`
+with junk. Held.
+
+### (d) Co-fire test cadence realism — HELD, with a minor coverage note
+
+The test samples 3 ticks/day, not the full ~288, but that does NOT let a storm hide: the sample includes the
+**maximal-staleness tick** (`+24h−5min`), and if the closest-to-the-boundary tick is `"fresh"`, every earlier
+tick is fresher. The RED proof is well-targeted: the *first-cut* relabel (ok:true/`"unchanged"` but WITHOUT
+`touchSdnListFreshness`) fails at the day-2 `+5min` tick (`fetched_at` still stale → refresh returns
+`"failed"`, not `"fresh"`), isolating exactly the `fetched_at`-advancement contribution rather than the mere
+relabel. Minor gap: the perfectly-aligned schedule (push always exactly at 24h) does not exercise the
+late/slipped-push boundary race, so the "1 failure + 1 recovery on a late push" case is unproven — but that is
+a known-accepted minor case, not a correctness defect.
+
+### (e) Battery (re-run in the worktree)
+
+- SDN co-run (incl. the new `ofac-sdn-storm-interaction.test.ts`): **6 files / 54 tests passed**, exit 0.
+- Typecheck (`tsc --noEmit`): **exit 0**.
+- Full platform suite (`npx vitest run --reporter=dot`): **117 files / 820 tests passed**, exit 0 (+1 file /
+  +1 test vs round 1 = the new co-fire test).
+
+## NON-BLOCKING (round 2) — recommended before merge
+
+1. **Canonical trust-model doc is now stale on replay handling.** `ofac-v1-honesty-statement-2026-07-23.md:135-137`
+   still says "The monotonicity guard (content-hash + entry-count sanity …) narrows naive REPLAY of an old
+   genuine list." Under fix A the content-hash no longer *rejects* a byte-identical replay — it *accepts* it as
+   `"unchanged"` AND advances `fetched_at`. HANDOFF and the relay README were updated for fix A; this honesty
+   statement (the doc the README points readers to for the residual, and the doc whose 07-24 finding-2 the
+   round-1 byte-identical-reject implemented) was not. One-line correction: note byte-identical replays are now
+   accepted and advance `fetched_at`, and that the resulting replay-suppression of the staleness alarm is a
+   strictly-weaker instance of the already-disclosed targeted-removal residual (token secrecy remains the
+   control).
+2. **Doc-precision on "backstop preserved."** Add a half-sentence that the staleness backstop holds for the
+   droplet-down case but NOT against a token-holder actively replaying byte-identical content (same as the
+   pre-existing modified-swap suppression) — so no future reader mistakes the freshness alarm for a
+   token-theft control.
+
+## Round-2 attacks that FAILED (why the PASS is meaningful)
+
+- Storm re-derivation across weekend + 3-day-holiday + missed-push patterns → only pre-existing minor
+  boundary noise, never a storm (trace + test).
+- Stolen-token replay suppression as a *new* capability → refuted: a modified within-10% swap already grants
+  identical (stronger) suppression; the alarm was never a token control.
+- `touchSdnListFreshness` guard-bypass / junk-advances-fetched_at / concurrent-swap regression → all reached
+  only on a byte-identical valid push; SQL touches one column; no bypass.
+- Test coverage hiding a storm via sparse sampling → refuted: the boundary-critical tick is sampled; RED proof
+  isolates the `fetched_at` advancement.
+
+## UNVERIFIABLE (round 2)
+
+- Live prod confirmation that daily relay pushes actually land within 24h of each other (so `fetched_at` never
+  laps) — depends on the droplet cron's real jitter vs the ops-sweep tick; resolves via the live
+  `sdn_list_meta.fetched_at` history across a weekend.
