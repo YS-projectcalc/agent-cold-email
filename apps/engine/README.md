@@ -27,11 +27,13 @@ assertion that they can't drift.
 
 | Method | Path            | Auth | Body → Response |
 |--------|-----------------|------|-----------------|
-| GET    | `/health`       | no   | `200 { status:"ok", uptimeSec }` |
+| GET    | `/health`       | no   | `200 { status:"ok", uptimeSec, parked }` |
 | POST   | `/v1/send`      | yes  | `{ input: SendEmailInput, idempotencyKey } → 200 SendEmailResult` |
 | POST   | `/v1/poll`      | yes  | `{ mailboxEmail, sinceCursor } → 200 { events: PolledEvent[], cursor }` |
 | POST   | `/v1/mailboxes` | yes  | `{ email, credentials, idempotencyKey? } → 200 { email, outcome, contentHash, priorContentHash? }` |
 | DELETE | `/v1/mailboxes` | yes  | `{ email, idempotencyKey? } → 200 { email, removed }` |
+| GET    | `/v1/intents`   | yes  | `200 { parked: ParkedIntent[] }` — unverified intents awaiting operator resolution |
+| POST   | `/v1/intents/resolve` | yes | `{ key, outcome:"sent"\|"resendable", by? } → 200 { key, outcome, resolved:true } \| 404` |
 
 **Pushed credentials + resolve-union (self-serve activation I3).** `POST
 /v1/mailboxes` is the push-to-droplet credential path: the Worker provisions a
@@ -81,7 +83,13 @@ fast on permanent ones):
 | 401 | bad/missing bearer secret | permanent |
 | 409 | same-key send already in flight | **retryable** |
 | 422 | no credentials for that mailbox | **retryable** (operator-fixable: creds file) |
+| 424 | prior dispatch unverified (dangling/parked intent) | **permanent — DROP, never re-send** |
 | 5xx | SMTP/IMAP transient failure | **retryable** |
+
+A 424 is the pre-send intent log's drop signal (see below): the row lands terminal
+`'failed'` + an ops event, never a requeue. The Worker needs ZERO code for this —
+424 is simply not in `RETRYABLE_ENGINE_STATUSES`, so the existing all-non-{409,422}-
+4xx-permanent grade drops it.
 
 **Why the engine resolves credentials, not the Worker:** the frozen `EmailPort`
 carries only the mailbox email (`send`) / address (`poll`) — never credentials.
@@ -107,6 +115,57 @@ withholds).
 > whichever the delivered message carried. `smtp` preserves the header (wire ==
 > minted); `ms_graph` is expected to honor the submitted MIME `Message-ID`, pending
 > the Gate-2 live smoke (below).
+
+## Durable pre-send intent log (crash-after-accept ⇒ never a double-send)
+
+A crash after a transport ACCEPTS a message but before the send is recorded used
+to drop the in-memory claim, so the consumer's retry re-sent the lead (the
+ACTIVATION Gate-2 residual). The engine now keeps a fsync'd write-ahead log
+(`send-log.jsonl` in `ENGINE_STATE_DIR`) — the durable truth — of which
+`engine-state.json` is a periodic COMPACTION snapshot. Design +
+frozen adversary verdict: `docs/research/pre-send-intent-log-design-2026-07-27.md`.
+
+**Write-ahead sequence (per send).** `intent` (fsync'd — dispatch may not begin
+until it resolves; a disk-full append fails CLOSED with 503 before any wire I/O) →
+dispatch → [gmail only: `submitted{id}` between the messages.send return and the
+wire-id read-back] → `recorded`. A crash anywhere after `intent` leaves a durable
+**dangling** the next boot reconciles.
+
+**Boot reconciliation (before `server.listen`).** Each dangling is verified per
+transport, PARKING on any uncertainty (drop, never duplicate):
+
+| transport | at boot |
+|-----------|---------|
+| `gmail_api` + `submitted{id}` | `messages.get` → finalize with the wire id + minted alias; **404 ⇒ treat as sent** (finalize with the minted id); inconclusive ⇒ park |
+| `gmail_api` intent-only | park (v1 — the Gmail SENT-folder verify-absent scan is the flagged increment 5) |
+| `ms_graph` | park (202 is an async accept; not-found is never definitive) |
+| `smtp` | park (nothing server-side to read) |
+
+Bounded per-key (15s / 2 tries) **and** in aggregate (a global deadline; overflow
+keys park without a provider verify) so a mass crash never holds the listen open
+past the Worker's retry budget.
+
+**Parked ⇒ 424.** A parked (or replayed-dangling) key that the consumer retries is
+DROPPED with a 424 `SendUnverifiedError` (never a second send). `/health` carries
+`{ parked: N }` for the watchtower prober. Inspect + resolve via `GET /v1/intents`
+and `POST /v1/intents/resolve`. **Operator honesty:** by the time a key parks, the
+platform's orphan-reclaim has usually already driven the `scheduled_sends` row to
+terminal `'failed'` (no requeue). `resolve → resendable` clears the ENGINE block
+only; a legitimate re-send is a CAMPAIGN-LEVEL re-drive (a new row/key), not an
+intent-resolve. At GA volume, crash-stranded sends are a steady trickle of
+silently-DROPPED sends needing manual campaign re-drive — a known, correct-by-
+drop-direction GA limitation, not a harmless edge.
+
+**Migration + durability.** First boot on old state loads the v1 snapshot (no
+`version`/`parked`/`danglings` fields → both default to `{}`), replays an empty
+log, and reconciles nothing. The one-time exposure is sends in flight during the
+upgrade RESTART itself (the old code held no intents) — deploy in a quiet window
+with a PLATFORM-side send pause. Torn-tail tolerance: a crash mid-append leaves a
+final line with no trailing newline (its fsync never returned ⇒ its submit never
+started) — dropped + quarantined; a malformed INTERIOR line is real bit-rot and
+fails LOUD (refuse to boot). The synchronous `writeSync`+`fsyncSync` append is an
+accepted single-instance throughput ceiling (multi-instance is a non-goal); a
+load test on real DO block storage is an arming-time obligation.
 
 ## Send transports (HTTPS/443 — the SMTP-egress-wall path)
 
@@ -268,6 +327,15 @@ Provisioning runbook (droplet sizing, secrets, one-real-send smoke test) lives i
 npm run build -w @coldstart/engine
 docker build -t coldstart-engine apps/engine
 ```
+
+**Redeploy / stop — drain, don't truncate.** The engine traps SIGTERM to drain
+(refuse new sends, let in-flight sends finish + record). Always stop it with
+`docker stop -t 150 engine` (the bare `docker stop` default is 10s — it SIGKILLs
+mid-send). A truncated drain is still SAFE (SIGKILL mid-send → dangling → park →
+drop, never duplicate), but the `-t 150` window (SMTP worst-case ≈100s) lets
+in-flight sends land cleanly. During a cut, PAUSE platform sending first (stop the
+tick / pause campaigns) — the OLD code has no drain, so the one-time in-flight
+exposure at the restart is closed platform-side, not by this drain.
 
 ## Scaling beyond one instance
 

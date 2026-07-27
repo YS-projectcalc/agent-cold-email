@@ -3,7 +3,7 @@ import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type MailboxCredentials, mailboxCredentialsSchema } from "./config.js";
 import { BadRequestError } from "./errors.js";
-import { loadJsonStateFile } from "./store.js";
+import { loadJsonStateFile } from "./json-store.js";
 
 /**
  * Durable store for PUSHED mailbox credentials (self-serve activation I3).

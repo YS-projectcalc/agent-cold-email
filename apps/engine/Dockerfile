@@ -34,6 +34,14 @@ VOLUME ["/app/state"]
 USER node
 EXPOSE 8080
 
+# STOPSIGNAL SIGTERM (Docker's default, stated explicitly): `docker stop` sends
+# SIGTERM, which index.ts traps to drain gracefully — stop accepting new sends,
+# let in-flight sends finish + record, then exit. Deploy with `docker stop -t 150`
+# (SMTP worst-case ≈100s, smtp.ts) so the drain completes before SIGKILL. A
+# SIGKILL mid-send is still SAFE: it leaves a durable dangling that boot
+# reconciliation parks (drop, never duplicate).
+STOPSIGNAL SIGTERM
+
 # ENGINE_AUTH_SECRET + MAILBOX_CREDENTIALS(_FILE) are injected at `docker run`
 # time (never baked into the image — CLAUDE.md rule g).
 CMD ["node", "dist/index.js"]

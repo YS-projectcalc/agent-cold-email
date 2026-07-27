@@ -34,15 +34,38 @@ const GMAIL_TOKEN_URL = "https://oauth2.googleapis.com/token";
 // minted id — well under the 180s Worker timeout.
 const WIRE_ID_READBACK_TIMEOUT_MS = 15_000;
 
+/**
+ * Boot-reconciliation lookup of a dangling gmail send by its provider id:
+ *  - `found`     — messages.get 200 with the wire Message-ID (finalize with it + minted alias)
+ *  - `sent`      — 404 (created then purged) or 200 without a Message-ID header: the 200 on
+ *                  the ORIGINAL send proved creation, so the message WAS sent (finalize with the minted id)
+ *  - `uncertain` — 403 / 5xx / network / timeout: cannot confirm ⇒ PARK (drop, never re-send)
+ */
+export type GmailLookup = { kind: "found"; wireId: string } | { kind: "sent" } | { kind: "uncertain" };
+
 export interface GmailSender {
   /**
-   * Sends `input` and returns the WIRE Message-ID Gmail stamped on the delivered
-   * message (read back via messages.get) so the engine records the id a reply
-   * will actually carry. Returns undefined if the read-back fails after a
-   * successful send — the send is NOT failed (it is delivered); the engine then
-   * falls back to the minted id.
+   * Submit `input` via messages.send and return Gmail's internal message `id`
+   * (undefined if the 200 body carried none). The message IS sent once this
+   * resolves (Gmail's send is synchronous create+send). Split from `wireId` so
+   * the engine can durably append `submitted{id}` BETWEEN the POST return and the
+   * read-back: a crash in the read-back window then leaves a dangling that boot
+   * reconciliation can finalize via messages.get instead of parking.
    */
-  send(transport: GmailTransport, input: SendEmailInput, messageId: string): Promise<string | undefined>;
+  submit(transport: GmailTransport, input: SendEmailInput, messageId: string): Promise<string | undefined>;
+  /**
+   * Read back the WIRE Message-ID Gmail stamped on a just-submitted message (by
+   * its internal `id`) so the engine records the id a reply will actually carry.
+   * Best-effort: returns undefined on ANY failure — the message is already sent,
+   * so the engine falls back to the minted id, never failing a delivered send.
+   */
+  wireId(transport: GmailTransport, gmailId: string): Promise<string | undefined>;
+  /**
+   * Boot reconciliation of a dangling gmail send that has a `submitted{id}` line
+   * (see GmailLookup). A 404 is treated as SENT (the original 200 proved
+   * creation); only a genuinely inconclusive status parks.
+   */
+  lookup(transport: GmailTransport, gmailId: string): Promise<GmailLookup>;
 }
 
 /**
@@ -69,10 +92,9 @@ export function createGmailSender(fetchImpl: FetchLike = fetch, sleep?: (ms: num
   }
 
   return {
-    async send(transport, input, messageId) {
+    async submit(transport, input, messageId) {
       const raw = await buildRawMessage(input, messageId);
       const tokens = tokensFor(transport);
-      const label = `gmail:${input.fromEmail}`;
       const sendBody = await apiSend(
         fetchImpl,
         tokens,
@@ -81,13 +103,18 @@ export function createGmailSender(fetchImpl: FetchLike = fetch, sleep?: (ms: num
           contentType: "application/json",
           body: JSON.stringify({ raw: raw.toString("base64url") }),
           okStatus: 200,
-          label,
+          label: `gmail:${input.fromEmail}`,
         },
         sleep,
       );
-      const gmailId = parseGmailMessageId(sendBody);
-      if (!gmailId) return undefined; // no id to read back → engine keeps the minted id
-      return fetchWireMessageId(fetchImpl, tokens, gmailId);
+      return parseGmailMessageId(sendBody); // undefined ⇒ no id to read back
+    },
+    async wireId(transport, gmailId) {
+      const result = await getMessageIdHeader(fetchImpl, tokensFor(transport), gmailId);
+      return result.kind === "found" ? result.wireId : undefined;
+    },
+    async lookup(transport, gmailId) {
+      return getMessageIdHeader(fetchImpl, tokensFor(transport), gmailId);
     },
   };
 }
@@ -103,18 +130,17 @@ function parseGmailMessageId(body: string): string | undefined {
 }
 
 /**
- * Read the wire `Message-ID` header off a just-sent message. Best-effort: the send
- * already succeeded, so ANY failure here (403 missing read scope, 404, network,
- * malformed body) returns undefined rather than throwing — losing the wire id
- * degrades reply-matching for that one send (engine falls back to the minted id),
- * it must never fail a message that already went out. One refresh-on-401, no
- * backoff loop (this is a post-send lookup, not the send itself).
+ * messages.get?format=metadata for the wire `Message-ID`, graded for both the
+ * alive read-back (wireId, which cares only found-vs-not) AND boot reconciliation
+ * (lookup, which must distinguish 404-⇒-sent from an inconclusive failure). One
+ * refresh-on-401, no backoff loop (a post-send lookup, not the send itself),
+ * bounded by the read-back timeout so a hung lookup never delays the caller.
  */
-async function fetchWireMessageId(
+async function getMessageIdHeader(
   fetchImpl: FetchLike,
   tokens: TokenCache,
   gmailId: string,
-): Promise<string | undefined> {
+): Promise<GmailLookup> {
   const url = `${GMAIL_MESSAGES_BASE}/${encodeURIComponent(gmailId)}?format=metadata&metadataHeaders=Message-ID`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), WIRE_ID_READBACK_TIMEOUT_MS);
@@ -123,13 +149,18 @@ async function fetchWireMessageId(
       fetchImpl(url, { method: "GET", headers: { authorization: `Bearer ${token}` }, signal: controller.signal });
     let res = await get(await tokens.get());
     if (res.status === 401) res = await get(await tokens.get(true));
-    if (res.status !== 200) return undefined;
+    // 404 ⇒ the message was created (the original send's 200 proved it) then
+    // deleted/purged ⇒ it WAS sent (finalize with the minted id, never re-send).
+    if (res.status === 404) return { kind: "sent" };
+    if (res.status !== 200) return { kind: "uncertain" };
     const body = (await res.json()) as { payload?: { headers?: Array<{ name?: string; value?: string }> } };
     const header = body.payload?.headers?.find((h) => h.name?.toLowerCase() === "message-id");
     const value = header?.value?.trim();
-    return value || undefined;
+    // 200 with the header ⇒ the wire id; 200 without ⇒ the message exists (sent),
+    // but we cannot read the wire id, so finalize with the minted id.
+    return value ? { kind: "found", wireId: value } : { kind: "sent" };
   } catch {
-    return undefined;
+    return { kind: "uncertain" };
   } finally {
     clearTimeout(timer);
   }

@@ -56,10 +56,25 @@ export const mailboxRemoveRequestSchema = z.object({
   idempotencyKey: z.string().min(1).optional(),
 });
 
+// Ops: resolve a parked (unverified) intent (POST /v1/intents/resolve).
+//   outcome:"sent"       — the operator confirmed the send DID go out: record the
+//                          minted id so a retry hits the cache and the platform
+//                          row can land 'sent' (if it wins the race with the tick).
+//   outcome:"resendable" — clear the engine-local block. NOTE: this is engine-
+//                          local only; the platform row is already terminal
+//                          'failed' with no requeue, so a legitimate re-send is a
+//                          CAMPAIGN-LEVEL re-drive (new row/key), not this action.
+export const intentResolveRequestSchema = z.object({
+  key: z.string().min(1),
+  outcome: z.enum(["sent", "resendable"]),
+  by: z.string().min(1).optional(),
+});
+
 export type SendRequest = z.infer<typeof sendRequestSchema>;
 export type PollRequest = z.infer<typeof pollRequestSchema>;
 export type MailboxWriteRequest = z.infer<typeof mailboxWriteRequestSchema>;
 export type MailboxRemoveRequest = z.infer<typeof mailboxRemoveRequestSchema>;
+export type IntentResolveRequest = z.infer<typeof intentResolveRequestSchema>;
 
 // Compile-time drift guard: the validated request `input` MUST satisfy the
 // frozen SendEmailInput. If a field is added/renamed/retyped on either side and

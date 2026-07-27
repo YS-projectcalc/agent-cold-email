@@ -107,6 +107,7 @@ export type Endpoint = z.infer<typeof endpointSchema>;
 export type MailboxCredentials = z.infer<typeof mailboxCredentialsSchema>;
 export type GmailTransport = z.infer<typeof gmailTransportSchema>;
 export type GraphTransport = z.infer<typeof graphTransportSchema>;
+export type SendTransport = z.infer<typeof sendTransportSchema>;
 
 const credentialsMapSchema = z.record(z.string().email(), mailboxCredentialsSchema);
 export type CredentialsMap = z.infer<typeof credentialsMapSchema>;

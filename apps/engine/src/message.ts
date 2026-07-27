@@ -23,6 +23,13 @@ export function buildMailOptions(input: SendEmailInput, messageId: string): Mail
   const headers: Record<string, string> = {};
   if (input.listUnsubscribe) headers["List-Unsubscribe"] = input.listUnsubscribe;
   if (input.listUnsubscribePost) headers["List-Unsubscribe-Post"] = input.listUnsubscribePost;
+  // A stable, transport-invariant link back to the MINTED id. Unlike the
+  // Message-ID header (which Gmail rewrites on the wire), this custom header
+  // survives every transport unchanged, so a future SENT-folder reconciliation
+  // scan (increment 5) can match a delivered message to its intent even when the
+  // wire Message-ID differs. Set == the minted id here so it is byte-identical on
+  // SMTP / Gmail / Graph (parity by construction via this single builder).
+  headers["X-Coldrig-Send-Token"] = messageId;
   return {
     from: input.fromEmail,
     to: input.toEmail,
