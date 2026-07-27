@@ -123,5 +123,25 @@ describe("POST /admin/sdn/ingest — G1a droplet-relay ingest endpoint", () => {
       const after = await getSdnListMeta(env);
       expect(after?.activeVersion).toBe(before?.activeVersion);
     });
+
+    // Class fix 2026-07-27 ("benign no-new-publication conflated with refresh
+    // failure", fix A per adversary NO-SHIP
+    // docs/adversarial/sdn-unchanged-fix-review-2026-07-27.md) — a
+    // byte-identical re-push (weekend droplet relay, Treasury published
+    // nothing new) must 200, not 422, or push-sdn.sh logs FAILED and the
+    // ops-alert streak grows on a non-failure. It ALSO advances fetched_at
+    // (fix A) so the direct-fetch refresh's freshness guard sees this as
+    // current — everything else in sdn_list_meta stays untouched (no swap).
+    it("200s on a byte-identical re-push (reason 'unchanged'), advances fetched_at, keeps the rest of the prior good list untouched", async () => {
+      await postCsv(sdnValidLargeCsv, TEST_SDN_INGEST_TOKEN);
+      const before = await getSdnListMeta(env);
+
+      const res = await postCsv(sdnValidLargeCsv, TEST_SDN_INGEST_TOKEN);
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ ok: true, reason: "unchanged", entryCount: 5001 });
+      const after = await getSdnListMeta(env);
+      expect(after?.fetchedAt).toBeGreaterThan(before!.fetchedAt!); // advanced (real clock), not a no-op
+      expect({ ...after, fetchedAt: null }).toEqual({ ...before, fetchedAt: null });
+    });
   });
 });
