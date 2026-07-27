@@ -144,3 +144,12 @@ NOT closeable by this code:
   repo, `chmod 600`), the token's narrow scope (this one endpoint only, never
   `ADMIN_TOKEN`) — is therefore the PRIMARY control for this residual, not a
   fallback behind a code-level defense that doesn't fully exist.
+
+---
+
+## Addendum 2026-07-27 (post fix-A, sdn-unchanged-fix-review round 2 — append-only correction)
+
+Two statements above are superseded by the 2026-07-27 "unchanged" ingest fix (adversary-SHIP round 2):
+
+1. The content-hash guard no longer REJECTS byte-identical replays — a byte-identical push is now accepted as a VERIFIED-FRESHNESS signal (HTTP 200, `reason:"unchanged"`, advances `fetched_at` only; list content/version untouched). The monotonicity entry-count guard is unchanged.
+2. Scope the staleness alarm honestly: it is a DROPLET-DOWN control (relay stops → fetched_at ages past 24h → direct refresh resumes → 525 → alert). It is NOT a token-theft control — a stolen SDN_INGEST_TOKEN could always suppress it via a within-10% modified swap, and can now also do so via byte-identical replays (stealthier, no new capability; observable anomaly: `fetched_at` advancing while `active_version`/`content_hash` stay frozen). Token secrecy remains the primary control, exactly as §"residual (b)" already states.
