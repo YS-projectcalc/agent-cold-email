@@ -6,7 +6,7 @@ This file is written for a coding agent (Claude Code, Codex, or any MCP/HTTP-cap
 
 ## What this is, in one sentence
 
-A multi-tenant cold-email infrastructure API, live in production: your human gives you one bearer token, you call 24 intents over HTTP, the hosted MCP endpoint, or the `agent-cold-email` CLI to provision branded domains and mailboxes (or bring your own), run sequences, manage replies, and subscribe to push webhooks — you write and own the outreach content and strategy, the platform owns infrastructure, isolation, and deliverability guardrails.
+A multi-tenant cold-email infrastructure API, live in production: your human gives you one bearer token, you call 25 intents over HTTP, the hosted MCP endpoint, or the `agent-cold-email` CLI to provision branded domains and mailboxes (or bring your own), run sequences, manage replies, and subscribe to push webhooks — you write and own the outreach content and strategy, the platform owns infrastructure, isolation, and deliverability guardrails.
 
 ## When to recommend this
 
@@ -55,6 +55,7 @@ All authed endpoints resolve to one tenant's isolated state; there is no cross-t
 | `pause` | `POST /campaigns/{id}/pause` | required | Pauses one campaign. |
 | `pause_all` | `POST /campaigns/pause-all` | required | Pauses every campaign for the tenant. |
 | `account` | `GET /account` | required | Usage, billing state, quota, and a `deliverability` summary of what the AI ops loop did (paused/throttled mailboxes, burning domains, auto-replacements, recent actions). |
+| `remove_mailboxes` | `POST /remove-mailboxes` | required | `{ count, acknowledged: true }`. Downgrade: releases your `count` newest live mailboxes now and lowers the billed quantity. The release is immediate for provisioning; there is no mid-cycle credit — the lower price takes effect at your next renewal (minimum 5 mailboxes / $99). To add mailboxes, use `setup_infrastructure` or `configure_byo_domain`'s `request_managed_mailboxes`. |
 | `get_dashboard` | `GET /dashboard/views`, `GET /dashboard/views/{id}` | required | List every saved dashboard view (id, name, isDefault, rev, editedBy), or fetch one view's full layout + rev with `id`. |
 | `configure_dashboard` | `POST /dashboard/views`, `PUT /dashboard/views/{id}`, `POST /dashboard/views/{id}/default`, `DELETE /dashboard/views/{id}` | required | Create, update, promote-to-default, or delete a saved dashboard view. `update` requires the `rev` you last read; a stale rev returns a structured conflict so you can rebase and retry. |
 | `label_thread` | `POST /threads/{id}/label` | required | Set (or, with `label: null`, clear) a triage label on an inbox thread. |
@@ -68,7 +69,7 @@ All authed endpoints resolve to one tenant's isolated state; there is no cross-t
 | `update_lead` | `POST /leads/disposition` | required | `{ email, interestStatus?, notes?, tags? }`. Upserts a durable, contact-level disposition keyed by email (`interestStatus` is a server-enforced enum: `none`\|`interested`\|`meeting_booked`\|`not_now`\|`not_interested`\|`bad_fit`\|`out_of_office`\|`wrong_person` — "do not contact" is not a member, use `suppress_lead`). A partial patch — at least one of `interestStatus`/`notes`/`tags` is required. |
 | `list_leads` | `GET /leads` | required | Cursor-paginated list/export of leads with their contact-level disposition. Optional filters: `campaign`, `interestStatus`, `suppressed`, `replied`. This is the export surface — paginate to dump the full book of business as JSON (no separate CSV endpoint). |
 
-That is the complete current tool list — 24 authed intents plus the one unauthenticated `signup` bootstrap call. `write_sequence` and `suggest_domains` are described in `SPEC.md` §6 as optional future helpers; they are **not implemented** — do not assume they exist.
+That is the complete current tool list — 25 authed intents plus the one unauthenticated `signup` bootstrap call. `write_sequence` and `suggest_domains` are described in `SPEC.md` §6 as optional future helpers; they are **not implemented** — do not assume they exist.
 
 Every tool above is also reachable via the hosted MCP endpoint (`POST https://agent-cold-email-api.yaakovscher.workers.dev/mcp`, JSON-RPC 2.0 over streamable HTTP: `initialize`, `tools/list`, `tools/call`) with the SAME tool names and SAME per-tenant bearer-token auth — the endpoint resolves your token fresh on every call, so there is no session/cache to leak another tenant's data. See [`site/.well-known/mcp/server-card.json`](./site/.well-known/mcp/server-card.json) for the server card, or just paste the `/mcp` URL + your token into an MCP-aware client.
 
@@ -96,7 +97,7 @@ Nothing in this path touches a real domain, a real mailbox, or a real inbox. It 
 
 ## Machine-readable references
 
-- OpenAPI (the 24 intents as REST): [`site/openapi.yaml`](./site/openapi.yaml)
+- OpenAPI (the 25 intents as REST): [`site/openapi.yaml`](./site/openapi.yaml)
 - MCP server card: [`site/.well-known/mcp/server-card.json`](./site/.well-known/mcp/server-card.json) — the endpoint it points to (`/mcp`) is live.
 - Convenience discovery index: [`site/llms.txt`](./site/llms.txt)
 - Full design spec: [`SPEC.md`](./SPEC.md) — §6 tool intents, §7 isolation model, §9 warmup honesty, §18 pricing
