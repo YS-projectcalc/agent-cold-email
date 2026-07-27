@@ -1,14 +1,16 @@
 import type { PollResult, SendEmailInput, SendEmailResult } from "@coldstart/shared";
 import { classifyMessage } from "./classify.js";
 import type { CredentialsMap, MailboxCredentials } from "./config.js";
-import { SendInProgressError, UnknownMailboxError } from "./errors.js";
+import { SendInProgressError, SendUnverifiedError, UnknownMailboxError } from "./errors.js";
 import type { GmailSender } from "./gmail.js";
 import type { GraphSender } from "./graph.js";
 import type { ImapFetcher } from "./imap.js";
 import type { MailboxCredentialStore, RemoveResult, UpsertResult } from "./mailbox-store.js";
 import { mintMessageId } from "./message-id.js";
+import { reconcile, type ReconcileSummary } from "./reconcile.js";
+import type { Transport } from "./send-log.js";
 import type { SmtpSender } from "./smtp.js";
-import type { EngineStore } from "./store.js";
+import type { EngineStore, ParkedIntent } from "./store.js";
 import type { MailboxRemoveRequest, MailboxWriteRequest } from "./wire.js";
 
 /**
@@ -99,28 +101,85 @@ export class EmailEngine {
       throw new SendInProgressError(idempotencyKey);
     }
     try {
+      // The 424 intent gate. claimSend (sync) just proved no OTHER live send holds
+      // this key, and this turn's intent is not appended yet — so a parked key, or
+      // a dangling from a PRIOR life (a crash after a transport accepted but before
+      // recordSend, replayed at boot), must be DROPPED here, never re-dispatched.
+      // Sync, no await between claimSend and this check ⇒ TOCTOU-free.
+      if (this.store.isBlocked(idempotencyKey)) throw new SendUnverifiedError(idempotencyKey);
+
       const creds = this.resolve(input.fromEmail);
       const mintedId = mintMessageId(input.fromEmail, creds.messageIdDomain);
+      const transport: Transport = creds.send?.kind ?? "smtp";
+
+      // Write-ahead intent, fsync'd. Fail-closed: a disk-full append THROWS here
+      // (⇒ 503) BEFORE any wire I/O, so the engine never sends without a durable
+      // record of the attempt — the whole basis of the crash double-send fix.
+      this.store.appendIntent(idempotencyKey, {
+        transport,
+        from: input.fromEmail,
+        to: input.toEmail,
+        mintedId,
+        threadId: input.threadId,
+      });
+
       // A transport may report a WIRE Message-ID that differs from the one we
-      // minted (Gmail rewrites it on send; gmail.ts reads it back). The canonical
-      // id — returned from /v1/send and stored as scheduled_sends.message_id — is
-      // the wire id when known, because that is the id an inbound reply/bounce
-      // carries. SMTP/Graph preserve the header, so they report undefined and the
-      // minted id stays canonical.
-      const wireId = await this.dispatchSend(creds, input, mintedId);
+      // minted (Gmail rewrites it; the read-back learns it). The canonical id —
+      // returned from /v1/send and stored as scheduled_sends.message_id — is the
+      // wire id when known (the id an inbound reply/bounce carries); SMTP/Graph
+      // preserve the header, so they report undefined and the minted id stays
+      // canonical.
+      // `onAccepted` fires the instant the transport ACCEPTS the message (submit/
+      // send resolved) — for EVERY transport, carrying the provider id when there
+      // is one (gmail). It flips `sentOnWire` BEFORE the (possibly-throwing)
+      // submitted append, so the catch below can tell "nothing went out" from "the
+      // message went out but a bookkeeping append failed."
+      let sentOnWire = false;
+      let wireId: string | undefined;
+      try {
+        wireId = await this.dispatchSend(creds, input, mintedId, (providerRef) => {
+          sentOnWire = true;
+          if (providerRef) this.store.appendSubmitted(idempotencyKey, providerRef);
+        });
+      } catch (err) {
+        if (!sentOnWire) {
+          // Dispatch failed BEFORE anything went out ⇒ the intent is NOT a
+          // dangling: record the failed attempt (clears the dangling so a boot
+          // doesn't spuriously park a never-sent intent) and re-throw so the
+          // Worker retries under its cap (current semantics kept).
+          try {
+            this.store.appendAttemptFailed(idempotencyKey, err instanceof Error ? err.message : String(err));
+          } catch {
+            // A failure logging the failure must not mask the real transport error.
+          }
+        }
+        // else: the message WENT OUT but a bookkeeping append (e.g. a transient
+        // fsync IO error on the `submitted` line) threw. NEVER downgrade a sent
+        // message to attempt-failed — that would clear the dangling and let an
+        // alive retry re-send (reviewer NB1 double-send). Leave the key DANGLING:
+        // a retry hits the 424 gate, and boot reconciliation finalizes it (gmail
+        // with a durable submitted{id}) or parks it (drop, never duplicate).
+        throw err;
+      }
+
       const canonicalId = wireId ?? mintedId;
       const sentAt = this.now();
-      // Record AFTER a successful send: a failed send throws before this, so its
-      // key is never cached and a retry genuinely re-sends. Both the canonical and
-      // (when it differs) the minted id map to this thread, so the poll path
-      // reconstructs the thread whichever id the delivered message ended up with.
       const aliasIds = canonicalId === mintedId ? [] : [mintedId];
-      await this.store.recordSend(idempotencyKey, canonicalId, input.threadId, sentAt, aliasIds);
+      try {
+        this.store.recordSend(idempotencyKey, canonicalId, input.threadId, sentAt, aliasIds);
+      } catch (err) {
+        // Recorded-append failed AFTER a successful submit. Memory is already
+        // updated (getSend hits ⇒ an alive retry returns cached, no double-send);
+        // the dangling reconciles at next boot (gmail heal via submitted / smtp
+        // park). Return 200 off memory rather than fail a send that already went
+        // out — the correct drop-nothing, duplicate-nothing outcome.
+        console.warn(
+          `[engine] recorded-append failed for ${idempotencyKey} after a successful submit; returning 200 off memory, reconciles at next boot: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
       return { messageId: canonicalId, sentAt };
     } finally {
-      // Release whether the send succeeded (now cached) or threw (never cached,
-      // so a retry SHOULD re-send). Either exit leaves the claim clear for the
-      // next legitimate attempt.
+      // Release whether the send succeeded, threw, or was dropped as unverified.
       this.store.releaseSend(idempotencyKey);
     }
   }
@@ -201,20 +260,65 @@ export class EmailEngine {
     creds: MailboxCredentials,
     input: SendEmailInput,
     messageId: string,
+    onAccepted: (providerRef?: string) => void,
   ): Promise<string | undefined> {
     const send = creds.send;
     if (!send || send.kind === "smtp") {
       if (!creds.smtp) throw new Error(`internal: mailbox ${input.fromEmail} selected smtp transport but has no smtp endpoint`);
       await this.smtp.send(creds.smtp, input, messageId);
+      onAccepted(); // accepted on the wire (no provider id — Message-ID preserved)
       return undefined; // SMTP preserves the Message-ID header: wire == minted
     }
     if (send.kind === "gmail_api") {
       if (!this.gmail) throw new Error(`internal: mailbox ${input.fromEmail} needs the gmail_api transport but it is not wired`);
-      return this.gmail.send(send, input, messageId);
+      // Two-phase: submit (the message IS sent once this resolves), signal accepted
+      // + durably record the provider id, THEN read the wire Message-ID back. The
+      // submitted line between the two is what lets boot reconciliation finalize a
+      // crash in the read-back window with the true wire id instead of parking it.
+      const gmailId = await this.gmail.submit(send, input, messageId);
+      onAccepted(gmailId); // sentOnWire even if gmailId is undefined (submit got 200)
+      return gmailId ? this.gmail.wireId(send, gmailId) : undefined;
     }
     if (!this.graph) throw new Error(`internal: mailbox ${input.fromEmail} needs the ms_graph transport but it is not wired`);
     await this.graph.send(send, input, messageId);
+    onAccepted(); // accepted on the wire (no provider id — Graph honors the header)
     return undefined; // Graph honors the submitted MIME Message-ID: wire == minted (Gate-2 verifies)
+  }
+
+  /**
+   * Boot reconciliation (index.ts calls this BEFORE server.listen): resolve every
+   * dangling intent the crash-recovery replay surfaced — finalize gmail sends that
+   * durably reached `submitted{id}`, park everything else. Bounded so a mass crash
+   * cannot hold the listen indefinitely. Returns a summary the boot log emits.
+   */
+  async reconcilePendingSends(opts?: { aggregateDeadlineMs?: number }): Promise<ReconcileSummary> {
+    return reconcile({
+      store: this.store,
+      resolveSend: (from) => this.resolveOptional(from)?.send,
+      gmail: this.gmail,
+      now: this.now,
+      aggregateDeadlineMs: opts?.aggregateDeadlineMs,
+    });
+  }
+
+  /** Parked (unverified) intent count — surfaced on /health for the watchtower prober. */
+  parkedCount(): number {
+    return this.store.parkedCount();
+  }
+
+  /** The parked-intent list for GET /v1/intents (ops). */
+  listParkedIntents(): ParkedIntent[] {
+    return this.store.listParked();
+  }
+
+  /** Resolve a parked/dangling key for POST /v1/intents/resolve (ops). */
+  resolveIntent(key: string, outcome: "sent" | "resendable", by: string): { resolved: boolean } {
+    return this.store.resolveIntent(key, outcome, by);
+  }
+
+  /** In-flight send count — for the SIGTERM graceful-drain wait (index.ts). */
+  inFlightCount(): number {
+    return this.store.inFlightCount();
   }
 
   /**
@@ -253,5 +357,10 @@ export class EmailEngine {
     const creds = this.credentials[email] ?? this.credentialStore?.get(email);
     if (!creds) throw new UnknownMailboxError(email);
     return creds;
+  }
+
+  /** Like `resolve` but returns undefined for an unknown mailbox (reconcile: a removed mailbox parks, never throws). */
+  private resolveOptional(email: string) {
+    return this.credentials[email] ?? this.credentialStore?.get(email);
   }
 }

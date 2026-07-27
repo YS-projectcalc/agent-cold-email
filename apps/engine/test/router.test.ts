@@ -33,10 +33,12 @@ function req(over: Partial<EngineRequest>): EngineRequest {
 }
 
 let dir: string;
+let store: EngineStore;
 let engine: EmailEngine;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "engine-router-"));
-  engine = new EmailEngine({ credentials: creds, store: new EngineStore(dir), smtp: noopSmtp, imap: emptyImap });
+  store = new EngineStore(dir);
+  engine = new EmailEngine({ credentials: creds, store, smtp: noopSmtp, imap: emptyImap });
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -55,10 +57,10 @@ const sendBody = (from = SENDER) =>
   });
 
 describe("route", () => {
-  it("serves /health with no auth", async () => {
+  it("serves /health with no auth, carrying the parked-intent count for the prober", async () => {
     const res = await route(engine, SECRET, req({ method: "GET", path: "/health" }));
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ status: "ok" });
+    expect(res.body).toMatchObject({ status: "ok", parked: 0 });
   });
 
   it("401s an unauthenticated /v1/send", async () => {
@@ -117,5 +119,48 @@ describe("route", () => {
   it("404s an unknown route", async () => {
     const res = await route(engine, SECRET, req({ method: "GET", path: "/nope" }));
     expect(res.status).toBe(404);
+  });
+
+  it("401s an unauthenticated GET /v1/intents", async () => {
+    const res = await route(engine, SECRET, req({ method: "GET", path: "/v1/intents" }));
+    expect(res.status).toBe(401);
+  });
+
+  it("200s an authed GET /v1/intents and returns the parked list", async () => {
+    store.appendIntent("pk", { transport: "smtp", from: SENDER, to: "x@y.test", mintedId: "<m@x>", threadId: "thr" });
+    store.park("pk", "smtp has no server-side sent record — parked");
+    const res = await route(engine, SECRET, req({ method: "GET", path: "/v1/intents", authHeader: auth }));
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ parked: [expect.objectContaining({ key: "pk", reason: expect.stringMatching(/parked/), to: "x@y.test" })] });
+  });
+
+  it("404s POST /v1/intents/resolve for a key that is neither parked nor dangling", async () => {
+    const body = JSON.stringify({ key: "nope", outcome: "resendable" });
+    const res = await route(engine, SECRET, req({ method: "POST", path: "/v1/intents/resolve", authHeader: auth, rawBody: body }));
+    expect(res.status).toBe(404);
+  });
+
+  it("resolves a parked key as 'sent' (200) and removes it from the parked list", async () => {
+    store.appendIntent("pk", { transport: "smtp", from: SENDER, to: "x@y.test", mintedId: "<m@x>", threadId: "thr" });
+    store.park("pk", "parked");
+    const body = JSON.stringify({ key: "pk", outcome: "sent", by: "ops-runbook" });
+    const res = await route(engine, SECRET, req({ method: "POST", path: "/v1/intents/resolve", authHeader: auth, rawBody: body }));
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ key: "pk", outcome: "sent", resolved: true });
+    // No longer parked; a send for that key now hits the cache (recorded as sent).
+    const list = await route(engine, SECRET, req({ method: "GET", path: "/v1/intents", authHeader: auth }));
+    expect(list.body).toEqual({ parked: [] });
+    expect(store.getSend("pk")).toMatchObject({ messageId: "<m@x>" });
+  });
+
+  it("refuses a new send with 503 while draining (accepting:false), so the Worker retries the restarted engine", async () => {
+    const res = await route(engine, SECRET, req({ method: "POST", path: "/v1/send", authHeader: auth, rawBody: sendBody() }), { accepting: false });
+    expect(res.status).toBe(503);
+  });
+
+  it("still serves /health while draining (only sends are refused)", async () => {
+    const res = await route(engine, SECRET, req({ method: "GET", path: "/health" }), { accepting: false });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: "ok", parked: 0 });
   });
 });

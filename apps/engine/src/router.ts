@@ -1,7 +1,7 @@
 import { assertAuthorized } from "./auth.js";
-import { BadRequestError, statusFor } from "./errors.js";
+import { BadRequestError, statusFor, UpstreamTransientError } from "./errors.js";
 import type { EmailEngine } from "./engine.js";
-import { mailboxRemoveRequestSchema, mailboxWriteRequestSchema, pollRequestSchema, sendRequestSchema } from "./wire.js";
+import { intentResolveRequestSchema, mailboxRemoveRequestSchema, mailboxWriteRequestSchema, pollRequestSchema, sendRequestSchema } from "./wire.js";
 
 export interface EngineRequest {
   method: string;
@@ -13,6 +13,11 @@ export interface EngineRequest {
 export interface EngineResponse {
   status: number;
   body: unknown;
+}
+
+export interface RouteOptions {
+  /** False during a SIGTERM graceful drain: new sends are refused 503 (retry hits the restarted engine) while in-flight sends finish. */
+  accepting?: boolean;
 }
 
 const startedAt = Date.now();
@@ -34,17 +39,35 @@ const startedAt = Date.now();
  * Errors map to a status the Worker re-grades: 401/400/422 permanent, 5xx
  * transient (see errors.ts / RealEmailPort).
  */
-export async function route(engine: EmailEngine, authSecret: string, req: EngineRequest): Promise<EngineResponse> {
+export async function route(engine: EmailEngine, authSecret: string, req: EngineRequest, opts: RouteOptions = {}): Promise<EngineResponse> {
   try {
     if (req.method === "GET" && req.path === "/health") {
-      return { status: 200, body: { status: "ok", uptimeSec: Math.floor((Date.now() - startedAt) / 1000) } };
+      // `parked` = un-verified intents awaiting operator resolution (the watchtower
+      // prober alerts on a non-zero/growing count — see GET /v1/intents).
+      return { status: 200, body: { status: "ok", uptimeSec: Math.floor((Date.now() - startedAt) / 1000), parked: engine.parkedCount() } };
     }
 
     if (req.method === "POST" && req.path === "/v1/send") {
       assertAuthorized(req.authHeader, authSecret);
+      // Graceful drain: refuse NEW sends as transient so the Worker retries
+      // against the restarted engine, while in-flight sends finish (index.ts).
+      if (opts.accepting === false) throw new UpstreamTransientError("engine is draining (shutting down) — retry");
       const { input, idempotencyKey } = sendRequestSchema.parse(parseJson(req.rawBody));
       const result = await engine.send(input, idempotencyKey);
       return { status: 200, body: result };
+    }
+
+    if (req.method === "GET" && req.path === "/v1/intents") {
+      assertAuthorized(req.authHeader, authSecret);
+      return { status: 200, body: { parked: engine.listParkedIntents() } };
+    }
+
+    if (req.method === "POST" && req.path === "/v1/intents/resolve") {
+      assertAuthorized(req.authHeader, authSecret);
+      const { key, outcome, by } = intentResolveRequestSchema.parse(parseJson(req.rawBody));
+      const result = engine.resolveIntent(key, outcome, by ?? "operator");
+      if (!result.resolved) return { status: 404, body: { error: `no parked or dangling intent for key ${key}` } };
+      return { status: 200, body: { key, outcome, resolved: true } };
     }
 
     if (req.method === "POST" && req.path === "/v1/poll") {

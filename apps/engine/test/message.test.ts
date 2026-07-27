@@ -48,6 +48,15 @@ describe("buildMailOptions", () => {
     expect(headers["List-Unsubscribe"]).toBeUndefined();
     expect(headers["List-Unsubscribe-Post"]).toBeUndefined();
   });
+
+  it("carries the X-Coldrig-Send-Token (== the minted id) on EVERY send, even one with no List-Unsubscribe", () => {
+    // The token is the transport-invariant link back to the minted id (survives
+    // Gmail's Message-ID rewrite) — it must ride the wire regardless of the
+    // compliance headers, so a bare internal send still carries it.
+    const opts = buildMailOptions(compliantInput({ listUnsubscribe: undefined, listUnsubscribePost: undefined }), MID);
+    const headers = opts.headers as Record<string, string>;
+    expect(headers["X-Coldrig-Send-Token"]).toBe(MID);
+  });
 });
 
 describe("buildRawMessage", () => {

@@ -44,6 +44,12 @@ const ENGINE_REQUEST_TIMEOUT_MS = 3 * 60 * 1000;
 //   422 — unknown mailbox: the operator adds the mailbox to the engine creds
 //         file, after which a retry succeeds. Terminal-failing here would burn
 //         the whole due queue (no requeue path) on a fixable misconfiguration.
+// DELIBERATELY NOT here: 424 SendUnverifiedError (engine pre-send intent log,
+// apps/engine/src/errors.ts) — a key whose prior dispatch is durably dangling or
+// parked (a crash after the transport accepted but before recordSend). It grades
+// PERMANENT so the row lands terminal 'failed' + an ops event: the governing rule
+// is DROP one send rather than ever duplicate one, and a retry could double-send.
+// Operator recovery is campaign-level (a new row/key), not a tick requeue.
 const RETRYABLE_ENGINE_STATUSES = new Set([409, 422]);
 
 export class RealEmailPort implements EmailPort {

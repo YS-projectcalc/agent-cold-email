@@ -159,22 +159,39 @@ describe("EmailEngine.send", () => {
   });
 });
 
+// Doubles for the split API. Graph uses send(); Gmail uses submit()/wireId(). One
+// class satisfies both slots (the routing tests pass it as either) — submit()
+// records the call and returns a synthetic provider id so the engine appends the
+// `submitted` line and then calls wireId().
 class FakeApiSender<T> {
   calls: { transport: T; input: SendEmailInput; messageId: string }[] = [];
   async send(transport: T, input: SendEmailInput, messageId: string): Promise<void> {
     this.calls.push({ transport, input, messageId });
   }
+  async submit(transport: T, input: SendEmailInput, messageId: string): Promise<string | undefined> {
+    this.calls.push({ transport, input, messageId });
+    return "gm-fake-id";
+  }
+  async wireId(): Promise<string | undefined> {
+    return undefined;
+  }
 }
 
-// A Gmail sender that models the wire-rewrite: it is called with the MINTED id,
-// but reports back the WIRE id Gmail actually stamped (or undefined when the
-// read-back failed) — exactly what the real gmail.ts returns after messages.get.
+// A Gmail sender that models the wire-rewrite: submit() is called with the MINTED
+// id and returns a provider id; wireId() reports back the WIRE id Gmail actually
+// stamped (or undefined when the read-back failed) — exactly what the real
+// gmail.ts submit()/wireId() split returns.
 class WireRewritingGmail {
   calls: { input: SendEmailInput; messageId: string }[] = [];
-  constructor(private readonly wireId: string | undefined) {}
-  async send(_t: unknown, input: SendEmailInput, messageId: string): Promise<string | undefined> {
+  submittedFor: string[] = [];
+  constructor(private readonly wire: string | undefined) {}
+  async submit(_t: unknown, input: SendEmailInput, messageId: string): Promise<string | undefined> {
     this.calls.push({ input, messageId });
-    return this.wireId;
+    return "gm-internal-id";
+  }
+  async wireId(_t: unknown, gmailId: string): Promise<string | undefined> {
+    this.submittedFor.push(gmailId);
+    return this.wire;
   }
 }
 

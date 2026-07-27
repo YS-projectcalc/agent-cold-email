@@ -62,11 +62,30 @@ export class SendInProgressError extends Error {
   }
 }
 
+/**
+ * A send whose key has a durable UNVERIFIED prior dispatch — a parked intent, or
+ * a dangling intent/submitted from a prior life (a crash after the transport
+ * accepted but before the send was recorded). FAILED DEPENDENCY (424): the engine
+ * DROPS this send rather than risk a double-send. 424 is deliberately NOT in the
+ * Worker's RETRYABLE_ENGINE_STATUSES, so the row lands terminal 'failed' + an ops
+ * event (drop one send, never duplicate one) with ZERO platform code changes.
+ */
+export class SendUnverifiedError extends Error {
+  readonly status = 424;
+  constructor(idempotencyKey: string) {
+    super(
+      `send for idempotency key ${idempotencyKey} has an unverified prior dispatch (dangling or parked) — dropped, not re-sent, to avoid a double-send`,
+    );
+    this.name = "SendUnverifiedError";
+  }
+}
+
 export function statusFor(err: unknown): number {
   if (err instanceof UnauthorizedError) return err.status;
   if (err instanceof BadRequestError) return err.status;
   if (err instanceof UnknownMailboxError) return err.status;
   if (err instanceof SendInProgressError) return err.status;
+  if (err instanceof SendUnverifiedError) return err.status;
   if (err instanceof UpstreamTransientError) return err.status;
   // Unknown failures are treated as transient (503) so a mis-classified bug
   // surfaces as a retry, not a permanent drop of a real send.
