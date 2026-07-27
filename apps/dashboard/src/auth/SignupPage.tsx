@@ -73,7 +73,7 @@ export function SignupPage() {
       description="Test provisioning, warmup, campaigns, replies, and failure handling without a card, vendor spend, real domains, or real email."
     >
       <div className="mb-5 rounded-[var(--radius-card)] border border-warn-border bg-warn-bg px-3 py-2 text-xs leading-5 text-warn-text">
-        <strong className="block">Sandbox only.</strong> Real sending and paid infrastructure are not active yet.
+        <strong className="block">Sandbox only.</strong> This creates a free sandbox tenant with simulated sending — go live with real sending anytime from Billing once you're ready.
       </div>
       <form onSubmit={submit} className="space-y-4">
         <div>
@@ -81,8 +81,8 @@ export function SignupPage() {
           <input id="brand" required maxLength={200} value={brand} onChange={(event) => setBrand(event.target.value)} placeholder="Northstar" className="w-full rounded-[var(--radius-card)] border border-line bg-canvas px-3 py-2.5 text-sm text-ink" />
         </div>
         <div>
-          <label htmlFor="contact-email" className="mb-1 block text-sm font-medium text-ink">Work email</label>
-          <input id="contact-email" required type="email" value={contactEmail} onChange={(event) => setContactEmail(event.target.value)} placeholder="you@company.com" className="w-full rounded-[var(--radius-card)] border border-line bg-canvas px-3 py-2.5 text-sm text-ink" />
+          <label htmlFor="contact-email" className="mb-1 block text-sm font-medium text-ink">Email</label>
+          <input id="contact-email" required type="email" value={contactEmail} onChange={(event) => setContactEmail(event.target.value)} placeholder="you@example.com" className="w-full rounded-[var(--radius-card)] border border-line bg-canvas px-3 py-2.5 text-sm text-ink" />
         </div>
         {signup.isError && <p role="alert" className="text-sm text-chip-danger-text">{signup.error instanceof Error ? signup.error.message : "Could not create the sandbox."}</p>}
         <button type="submit" disabled={signup.isPending || !brand.trim() || !contactEmail.trim()} className="w-full rounded-full border border-accent bg-accent px-4 py-2.5 text-sm font-semibold text-accent-contrast shadow-[0_9px_22px_rgba(46,92,255,.2)] disabled:opacity-45">

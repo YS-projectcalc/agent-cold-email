@@ -197,6 +197,13 @@ export interface AccountSummary {
   activationState: ActivationSurfaceState;
   domains: number;
   mailboxes: number;
+  // Adversary golive-ux-review-2026-07-27.md round-2 finding — `mailboxes`
+  // above counts ALL rows (including soft-released ones: removeMailboxes,
+  // deliverability auto-replacement, teardown/cancel). This is the BILLING
+  // meter (released_at IS NULL — same count the server actually charges);
+  // anything quoting a real charge (BillingPage's Go-live section) must
+  // read THIS, never `mailboxes`.
+  billableMailboxes: number;
   campaigns: number;
   leads: number;
   sends: number;
@@ -211,4 +218,14 @@ export interface RevConflictBody {
   error: string;
   currentRev: number;
   currentLayout: DashboardLayout;
+}
+
+// POST /checkout's response (apps/platform/src/engine/billing.ts's
+// CheckoutResult) — the dashboard's "Go live" button redirects the browser to
+// `url` regardless of `mode` ('stripe' in production, 'simulated' in this
+// build's test environment — see routes/checkout.ts).
+export interface CheckoutResult {
+  mode: "stripe" | "simulated";
+  url: string;
+  sessionId: string;
 }

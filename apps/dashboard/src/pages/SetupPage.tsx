@@ -1,11 +1,30 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
+import { Link } from "react-router-dom";
 import { useAccount, useInfrastructureStatus } from "../api/queries";
+import type { ActivationSurfaceState } from "../api/types";
 import { CopyButton } from "../lib/CopyButton";
-import { card, cardPad, chipClasses, label } from "../lib/ui";
+import { card, cardPad, chipClasses, label, type ChipTone } from "../lib/ui";
 
 type ClientKey = "codex" | "claude" | "cursor" | "cline";
 
 const MCP_URL = "https://agent-cold-email-api.yaakovscher.workers.dev/mcp";
+
+// Round-3 fold-in (adversary-ruled fix-in-same-cut, golive-ux-review-
+// 2026-07-27.md ruling on builder-flagged deviation (c)) — the header chip
+// used to hardcode "Sandbox · no real sends" regardless of real state, FALSE
+// once `active` becomes reachable (unreachable today — realSendPathLive
+// needs engine+InboxKit armed — but latent). State-derived exactly like
+// BillingPage's HEADER_CHIP map (same ActivationSurfaceState, page-specific
+// copy).
+const HEADER_CHIP: Record<ActivationSurfaceState, { tone: ChipTone; text: string }> = {
+  sandbox: { tone: "warning", text: "Sandbox · no real sends" },
+  active: { tone: "success", text: "Live · real sending active" },
+  pending_provisioning: { tone: "warning", text: "Billing active · no real sends yet" },
+  capacity_pending: { tone: "warning", text: "Billing active · capacity hold" },
+  screening_hold: { tone: "info", text: "Under review" },
+  suspended: { tone: "danger", text: "Billing needs attention" },
+  canceled: { tone: "neutral", text: "Canceled" },
+};
 
 const CLIENTS: Record<ClientKey, { label: string; note: string; code: string; steps: string[] }> = {
   codex: {
@@ -34,7 +53,46 @@ const CLIENTS: Record<ClientKey, { label: string; note: string; code: string; st
   },
 };
 
-function SetupStatus({ done, title, detail }: { done: boolean; title: string; detail: string }) {
+// Adversary BLOCKING #2 (golive-ux-review-2026-07-27.md finding 2) — the
+// old done-predicate was `activationState !== "sandbox"` with a flat
+// "Billing is active — real sending is live." copy, which is FALSE for
+// every paid-but-not-fully-live state (this unarmed deploy's real day-one
+// case, pending_provisioning) and for suspended/canceled (where even
+// "billing is active" is false). Every ActivationSurfaceState (mirrors
+// ActivationBanner.tsx's state list) gets its own honest, non-done copy;
+// "done" is reserved for the ONE state where real sending is truly live.
+function goLiveStatus(activationState: ActivationSurfaceState | undefined): { done: boolean; detail: ReactNode } {
+  switch (activationState) {
+    case "active":
+      return { done: true, detail: "Billing is active — real sending is live." };
+    case "pending_provisioning":
+      return { done: false, detail: "Billing is active — real sending is still being provisioned; sends shown are still simulated." };
+    case "capacity_pending":
+      return { done: false, detail: "Provisioning is paused at a capacity limit — our team has been notified; sends shown are still simulated." };
+    case "screening_hold":
+      return { done: false, detail: "Your account is under review — we'll be in touch before real sending goes live." };
+    case "suspended":
+      return { done: false, detail: "Billing needs attention — resolve it, or reactivate via Billing, before real sending can go live." };
+    case "canceled":
+      return { done: false, detail: "Billing was canceled — reactivate from Billing to go live again." };
+    case "sandbox":
+    default:
+      return {
+        done: false,
+        detail: (
+          <>
+            Ready when you are —{" "}
+            <Link to="/billing#go-live" className="font-semibold text-accent">
+              start checkout
+            </Link>
+            .
+          </>
+        ),
+      };
+  }
+}
+
+function SetupStatus({ done, title, detail }: { done: boolean; title: string; detail: ReactNode }) {
   return (
     <li className="flex gap-3 border-b border-line py-3 last:border-b-0">
       <span className={`mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-full text-xs font-bold ${done ? "bg-chip-success-bg text-chip-success-text" : "bg-surface-inset text-ink-muted"}`}>{done ? "✓" : "·"}</span>
@@ -53,12 +111,16 @@ export function SetupPage() {
     infrastructure: (account.data?.mailboxes ?? 0) > 0,
     campaign: (account.data?.campaigns ?? 0) > 0,
   }), [account.data]);
+  // Founder ruling (mid-build addendum) — "Go live" is the checklist's final
+  // step; its done-state + copy come from the SAME activationState field
+  // SandboxBanner/BillingPage's header chip read (not a new state fetch).
+  const goLive = useMemo(() => goLiveStatus(account.data?.activationState), [account.data?.activationState]);
 
   return (
     <div className="mx-auto max-w-[1180px] space-y-6">
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div><p className={label}>Owner setup</p><h1 className="mt-1 text-2xl font-semibold tracking-[-0.04em] text-ink">Connect the agent. Keep the owner in control.</h1><p className="mt-2 max-w-[68ch] text-sm leading-6 text-ink-muted">Your agent operates Coldrig through one tenant-scoped MCP connection. This screen gives the human the exact handoff, the safety boundary, and a visible readiness checklist.</p></div>
-        <span className={chipClasses("warning")}>Sandbox · no real sends</span>
+        <span className={chipClasses(account.data?.activationState ? HEADER_CHIP[account.data.activationState].tone : "neutral")}>{account.data?.activationState ? HEADER_CHIP[account.data.activationState].text : "Checking…"}</span>
       </header>
 
       <div className="grid gap-6 lg:grid-cols-[.72fr_1.28fr]">
@@ -69,6 +131,7 @@ export function SetupPage() {
             <SetupStatus done={false} title="Agent connected" detail="Confirm this inside your chosen client with its MCP server list." />
             <SetupStatus done={checklist.infrastructure} title="Infrastructure configured" detail={infra.data?.mailboxes ? `${infra.data.mailboxes} sandbox mailboxes are present.` : "Ask the agent to call setup_infrastructure in the sandbox."} />
             <SetupStatus done={checklist.campaign} title="Sandbox exercised" detail="Run a simulated campaign and inspect a reply before considering production." />
+            <SetupStatus done={goLive.done} title="Go live" detail={goLive.detail} />
           </ul>
           <div className="mt-5 rounded-[var(--radius-card)] bg-surface-inset p-4">
             <p className="text-xs font-semibold text-ink">Safe evaluation prompt</p>

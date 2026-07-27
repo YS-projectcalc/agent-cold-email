@@ -5,7 +5,7 @@ import {
   realSendPathLive,
   type ActivationSurfaceState,
 } from "./activation.js";
-import { getTeardownSummary, type TeardownSummary } from "./lifecycle.js";
+import { billableMailboxCount, getTeardownSummary, type TeardownSummary } from "./lifecycle.js";
 import { capFor } from "./quota.js";
 
 // campaign_results() / metrics() — SPEC.md §6: "replies, bounces,
@@ -100,6 +100,14 @@ export interface AccountSummary {
   activationState: ActivationSurfaceState;
   domains: number;
   mailboxes: number;
+  /** Adversary golive-ux-review-2026-07-27.md round-2 finding — `mailboxes`
+   *  above is a plain COUNT(*) (includes soft-released rows: removeMailboxes,
+   *  deliverability auto-replacement, teardown/cancel release ALL but never
+   *  DELETE). This field is the BILLING meter (`released_at IS NULL`,
+   *  `billableMailboxCount` in engine/lifecycle.ts) — the SAME count
+   *  `checkoutMailboxQuantity` bills — so a UI quoting a real charge (the
+   *  dashboard's Go-live section) reads THIS, never `mailboxes`. */
+  billableMailboxes: number;
   campaigns: number;
   leads: number;
   sends: number;
@@ -206,6 +214,7 @@ export function getAccount(ctx: TenantContext): AccountSummary {
     activationState,
     domains: count("domains"),
     mailboxes: count("mailboxes"),
+    billableMailboxes: billableMailboxCount(ctx),
     campaigns: count("campaigns"),
     leads: count("leads"),
     sends,
