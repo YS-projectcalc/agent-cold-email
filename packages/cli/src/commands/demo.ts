@@ -70,5 +70,5 @@ export async function runDemo(args: ParsedArgs): Promise<void> {
   }
 
   console.log("\nThis ran in a sandbox — no real domains, no real mailboxes, no real emails sent.");
-  console.log("Real sending is early-access: join the waitlist or sign up to run this live once it's available.");
+  console.log("Ready to go live? Free signup, no card (`agent-cold-email signup`) — then call the checkout tool for a Stripe Checkout link; enter any promo code on Stripe's own page.");
 }

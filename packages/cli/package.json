@@ -1,6 +1,6 @@
 {
   "name": "agent-cold-email",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "mcpName": "io.github.YS-projectcalc/agent-cold-email",
   "description": "CLI for agent-cold-email, agent-native cold-email infrastructure: provision isolated branded domains and mailboxes, run sequences, and manage replies with one bearer token. Run `npx agent-cold-email demo` for a no-signup sandbox demo, no card, no real emails sent. Also installable as a stdio MCP server (`agent-cold-email mcp`).",
   "type": "module",
