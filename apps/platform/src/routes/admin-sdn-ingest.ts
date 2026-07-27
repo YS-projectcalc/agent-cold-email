@@ -25,9 +25,10 @@ import { ingestSdnCsv, type SdnIngestOutcome } from "../ofac/sdn-ingest.js";
 // can't neuter screening).
 const STATUS_BY_REASON: Record<SdnIngestOutcome["reason"], 200 | 400 | 422 | 500> = {
   ingested: 200,
+  unchanged: 200, // byte-identical to the active list — a benign no-new-publication, not a failure (class fix 2026-07-27)
   malformed: 400, // structurally broken CSV (wrong column count / zero rows)
   "below-floor": 422, // syntactically valid CSV, semantically too few entries
-  stale: 422, // syntactically valid CSV, but a replay/regression vs the active list (monotonicity guard)
+  stale: 422, // syntactically valid CSV, but an entry-count regression vs the active list (monotonicity guard) — unweakened
   "write-failed": 500, // our own D1 write failed — not the caller's fault
 };
 

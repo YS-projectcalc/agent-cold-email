@@ -172,3 +172,22 @@ export async function getSdnListFetchedAt(env: Env): Promise<number | null> {
   const row = await env.DB.prepare(`SELECT fetched_at FROM sdn_list_meta WHERE id = 1`).first<{ fetched_at: number | null }>();
   return row?.fetched_at ?? null;
 }
+
+/**
+ * Advances ONLY `fetched_at` — never `active_version`/`content_hash`/
+ * `entry_count`/`published_date`, and never touches `sdn_entries`. This is
+ * NOT a shadow-swap (no new version, no rows written), so it is deliberately
+ * a separate narrow updater rather than a `swapInSdnList` call.
+ *
+ * Used by the droplet-relay ingest's "unchanged" outcome (sdn-ingest.ts,
+ * fix A, docs/adversarial/sdn-unchanged-fix-review-2026-07-27.md): a
+ * byte-identical relay push means the droplet genuinely reached Treasury and
+ * confirmed the active list IS current, which satisfies exactly the "did we
+ * last reach Treasury recently" freshness `maybeRefreshSdnList`'s once-daily
+ * guard keys on (sdn-refresh.ts) — advancing `fetched_at` here quiets that
+ * guard's 5-min direct-fetch retry loop for another 24h. No-op if no active
+ * list exists yet (nothing to touch).
+ */
+export async function touchSdnListFreshness(env: Env, nowMs: number): Promise<void> {
+  await env.DB.prepare(`UPDATE sdn_list_meta SET fetched_at = ? WHERE id = 1`).bind(nowMs).run();
+}

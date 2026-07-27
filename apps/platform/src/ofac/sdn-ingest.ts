@@ -34,20 +34,60 @@
 //        (docs/research/ofac-v1-honesty-statement-2026-07-23.md) for the
 //        full trust-model writeup.
 //
-//  2. Monotonicity guard — rejects a candidate that looks like a REPLAY of
-//     already-active content (byte-identical) or a suspicious entry-count
+//  2. Monotonicity guard — rejects a candidate with a suspicious entry-count
 //     regression from the active list (organic SDN churn is never a large
 //     single-step drop). SDN.CSV carries no reliable publication-date column
 //     (sdn-parse.ts's column contract), so this uses the cheapest honest
-//     signal available: a content hash + entry-count sanity. This is a
-//     narrowing measure against naive replay, NOT a defense against (b)
-//     above — a well-crafted doctored list with a DIFFERENT hash and a
-//     plausible entry count sails through this guard exactly as (b) says it
-//     must, absent a signed feed.
+//     signal available: entry-count sanity. This is a narrowing measure
+//     against a naive stale/truncated feed, NOT a defense against (b)
+//     above — a well-crafted doctored list with a plausible entry count
+//     sails through this guard exactly as (b) says it must, absent a
+//     signed feed.
+//
+//     A candidate that is byte-identical to the active list (content hash
+//     match) is a DIFFERENT case, handled separately — see "unchanged"
+//     below.
+//
+//     CLASS FIX (2026-07-27, "benign no-new-publication conflated with
+//     refresh failure" — REVISED same day, fix A, per adversary NO-SHIP
+//     docs/adversarial/sdn-unchanged-fix-review-2026-07-27.md; the first cut
+//     of this fix was itself defective, see "WHY fetched_at must advance"
+//     below): Treasury publishes no SDN updates on weekends, so the
+//     droplet's daily relay re-pushes the same byte-identical CSV — that
+//     used to be treated as reason:"stale"/ok:false, extending the ops-alert
+//     failure streak and emailing the founder a false "SDN list NOT loading"
+//     alarm every weekend. A byte-identical push is NOT a failure: it is
+//     proof the droplet reached Treasury and confirmed the active list IS
+//     current. It returns { ok:true, reason:"unchanged" } WITHOUT calling
+//     swapInSdnList (no new version, no rows written) — but it DOES call
+//     `touchSdnListFreshness` (sdn-list.ts) to advance ONLY `fetched_at`.
+//
+//     WHY fetched_at must advance (the actual weekend-storm fix): the
+//     recurring alarm was never driven by the once-daily relay itself — it
+//     is driven by the Worker's OWN 5-min direct-fetch cron
+//     (maybeRefreshSdnList, sdn-refresh.ts), which 525s on EVERY attempt
+//     once `fetched_at` is >24h stale (Treasury blocks Worker egress — see
+//     this file's own header comment + push-sdn.sh). The FIRST version of
+//     this fix deliberately left `fetched_at` untouched on "unchanged",
+//     reasoning that it would let the direct refresh "keep retrying" — but
+//     since that refresh ALWAYS 525s in prod, "keep retrying" meant "storm
+//     every 5 minutes all weekend," and a weekend-straddling failure streak
+//     also produced a false "RECOVERED" email on the next unchanged push,
+//     immediately followed by a fresh un-throttled "failing" alert
+//     (adversary finding 1 — worse than the original incident). Advancing
+//     `fetched_at` on a verified-unchanged push satisfies exactly the
+//     freshness `maybeRefreshSdnList`'s guard keys on (`nowMs - fetchedAt <
+//     REFRESH_INTERVAL_MS`) — the direct refresh returns "fresh" and skips
+//     its own fetch entirely for another 24h, so the 525 loop actually goes
+//     quiet. The genuine-staleness backstop is PRESERVED, not weakened: if
+//     the relay itself stops delivering (droplet down), `fetched_at` goes
+//     stale after 24h exactly as before, the direct refresh resumes
+//     attempting, 525s, and the alarm fires — co-fired proof in
+//     test/ofac-sdn-storm-interaction.test.ts.
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { Env } from "../env.js";
 import { parseSdnCsv, type ParsedSdnEntry } from "./sdn-parse.js";
-import { getSdnListMeta, swapInSdnList } from "./sdn-list.js";
+import { getSdnListMeta, swapInSdnList, touchSdnListFreshness } from "./sdn-list.js";
 import { reconcileSdnAlert } from "./sdn-alert.js";
 
 // The real SDN.CSV is ~17k entries (design brief, 2026-07-24 fetch). No
@@ -67,7 +107,7 @@ const MAX_ACCEPTABLE_SHRINK_RATIO = 0.9;
 
 export interface SdnIngestOutcome {
   ok: boolean;
-  reason: "ingested" | "malformed" | "below-floor" | "stale" | "write-failed";
+  reason: "ingested" | "malformed" | "below-floor" | "stale" | "unchanged" | "write-failed";
   entryCount?: number;
   listVersion?: string;
   error?: string;
@@ -89,12 +129,13 @@ export async function ingestSdnCsv(
   mailer: OpsMailer = createOpsMailer(env),
 ): Promise<SdnIngestOutcome> {
   const outcome = await ingest(env, csvText, nowMs);
-  await reconcileSdnAlert(
-    env,
-    { success: outcome.ok, detail: `relay ingest: ${outcome.error ?? `${outcome.entryCount} entries (${outcome.listVersion})`}` },
-    mailer,
-    nowMs,
-  );
+  const detail =
+    outcome.reason === "unchanged"
+      ? `relay ingest: unchanged — candidate is byte-identical to the active list (${outcome.entryCount} entries, ${outcome.listVersion}); verified-fresh, no swap performed`
+      : `relay ingest: ${outcome.error ?? `${outcome.entryCount} entries (${outcome.listVersion})`}`;
+  // Single-pathed: `success` always rides `outcome.ok` (true for both
+  // "ingested" and "unchanged") — only the `detail` text distinguishes them.
+  await reconcileSdnAlert(env, { success: outcome.ok, detail }, mailer, nowMs);
   return outcome;
 }
 
@@ -118,11 +159,14 @@ async function ingest(env: Env, csvText: string, nowMs: number): Promise<SdnInge
   const currentMeta = await getSdnListMeta(env);
   if (currentMeta?.activeVersion) {
     if (currentMeta.contentHash && currentMeta.contentHash === contentHash) {
-      const message =
-        `candidate is byte-identical to the currently active list (content hash match) — accepting it would only ` +
-        `reset the refresh clock (fetched_at), suppressing the direct refresh for 24h, without adding any fresher data`;
-      console.error(`SDN relay ingest: stale (duplicate content) — keeping the prior good list (${message})`);
-      return { ok: false, reason: "stale", entryCount: entries.length, error: message };
+      // Byte-identical replay — NOT a failure (class fix 2026-07-27, fix A:
+      // see the module doc comment's "WHY fetched_at must advance"). No
+      // swapInSdnList (no new version, no rows written) — but DOES advance
+      // fetched_at so the direct-fetch refresh's 24h freshness guard sees
+      // this as current and skips its own 525-doomed fetch attempt.
+      await touchSdnListFreshness(env, nowMs);
+      console.log(`SDN relay ingest: unchanged (duplicate content, verified fresh) — keeping the prior good list, no swap, fetched_at advanced`);
+      return { ok: true, reason: "unchanged", entryCount: entries.length, listVersion: currentMeta.activeVersion };
     }
     const minAcceptable = Math.floor(currentMeta.entryCount * MAX_ACCEPTABLE_SHRINK_RATIO);
     if (entries.length < minAcceptable) {

@@ -86,27 +86,67 @@ describe("ingestSdnCsv — droplet-relay ingest: parse/swap reuse, floor guard, 
   });
 
   // Idempotence — ingesting the identical CSV twice must never leave
-  // duplicate active lists. UPDATED (adversary finding 2, monotonicity guard
-  // 2026-07-24): the SECOND identical ingest is now explicitly REJECTED as a
-  // stale duplicate-content replay (not silently accepted as a version bump)
-  // — a stronger form of the same "clean no-op" guarantee: byte-identical
-  // resubmission adds no fresher data and would only reset the refresh
-  // clock, so the guard says so instead of pretending it's a real update.
-  it("idempotence — re-ingesting the IDENTICAL CSV is rejected as a stale duplicate (no version bump, no duplicate rows)", async () => {
+  // duplicate active lists. CLASS FIX (2026-07-27, "benign no-new-publication
+  // conflated with refresh failure", fix A per adversary NO-SHIP
+  // docs/adversarial/sdn-unchanged-fix-review-2026-07-27.md — Treasury
+  // publishes no SDN updates on weekends, so the droplet's daily relay
+  // re-pushes a byte-identical CSV): the SECOND identical ingest is now
+  // `ok:true, reason:"unchanged"` — a verified-fresh no-op, NOT a failure —
+  // rather than the old `ok:false, reason:"stale"` that extended the
+  // ops-alert failure streak. It ALSO advances `fetched_at` (fix A) so the
+  // direct-fetch refresh's 24h freshness guard sees this as current and
+  // skips its own 525-doomed attempt — see test/ofac-sdn-storm-interaction.test.ts
+  // for the co-fired proof that this actually quiets the weekend storm.
+  it("byte-identical re-ingest is accepted as 'unchanged' (ok:true), no swap — fetched_at ADVANCES to the push time (fix A), everything else untouched, alert reconciled as success", async () => {
     const mailer = new SandboxOpsMailer();
     const first = await ingestSdnCsv(env, sdnValidLargeCsv, 5_000_000, mailer);
     expect(first.ok).toBe(true);
+    const before = await getSdnListMeta(env);
 
     const second = await ingestSdnCsv(env, sdnValidLargeCsv, 5_100_000, mailer);
-    expect(second).toMatchObject({ ok: false, reason: "stale" });
-    expect(second.error).toContain("byte-identical");
 
-    const meta = await getSdnListMeta(env);
-    expect(meta?.activeVersion).toBe(first.listVersion); // unchanged — no version bump
-    expect(meta?.entryCount).toBe(5001);
+    expect(second).toMatchObject({ ok: true, reason: "unchanged", entryCount: 5001, listVersion: first.listVersion });
+
+    const after = await getSdnListMeta(env);
+    // fetched_at ADVANCES to the push time — this is the whole point of fix
+    // A: the droplet genuinely reached Treasury and confirmed the list is
+    // current, which is what quiets the direct-refresh 525 loop for another
+    // 24h. Everything else (active_version/content_hash/entry_count/
+    // published_date) is untouched — NOT a swap.
+    expect(after?.fetchedAt).toBe(5_100_000);
+    expect({ ...after, fetchedAt: null }).toEqual({ ...before, fetchedAt: null });
+    expect(after?.activeVersion).toBe(first.listVersion); // no version bump
+    expect(after?.entryCount).toBe(5001);
 
     const countRow = await env.DB.prepare(`SELECT COUNT(*) as c FROM sdn_entries`).first<{ c: number }>();
-    expect(countRow?.c).toBe(5001); // no duplicate rows from the rejected re-ingest
+    expect(countRow?.c).toBe(5001); // no duplicate rows from the unchanged re-ingest
+
+    // "unchanged" is a SUCCESS from the alert's point of view, not a failure —
+    // no failure email, and (see the streak-reset test below) it resets an
+    // existing failure streak exactly like a real ingest would.
+    expect(mailer.sent).toHaveLength(0);
+  });
+
+  it("a byte-identical (unchanged) push after a failure streak sends exactly ONE recovery email — a weekend replay is a successful freshness check, not a failure", async () => {
+    const mailer = new SandboxOpsMailer();
+    let now = 5_500_000;
+    const first = await ingestSdnCsv(env, sdnValidLargeCsv, now, mailer);
+    expect(first.ok).toBe(true);
+    now += 60_000;
+
+    for (let i = 0; i < 3; i++) {
+      await ingestSdnCsv(env, sdnMalformedCsv, now, mailer);
+      now += 60_000;
+    }
+    expect(mailer.sent).toHaveLength(1); // one failure email for the new streak
+
+    // The droplet's next daily push is the SAME byte-identical CSV (Treasury
+    // published nothing new over the weekend) — this must recover the streak,
+    // not extend it.
+    const outcome = await ingestSdnCsv(env, sdnValidLargeCsv, now, mailer);
+    expect(outcome).toMatchObject({ ok: true, reason: "unchanged" });
+    expect(mailer.sent).toHaveLength(2);
+    expect(mailer.sent[1]!.subject).toBe("[coldrig] SDN list load RECOVERED");
   });
 
   // Scope addition (2026-07-24, "born throttled" requirement): the ingest
@@ -144,11 +184,12 @@ describe("ingestSdnCsv — droplet-relay ingest: parse/swap reuse, floor guard, 
   });
 
   // Adversary finding 2 (docs/adversarial/sdn-relay-review-2026-07-24.md) —
-  // monotonicity guard: reject a candidate that looks like a stale replay
-  // (byte-identical content) or a suspicious entry-count regression from the
-  // active list, vs a genuinely fresh/different-but-legitimate update.
-  describe("monotonicity guard — rejects stale replay, accepts genuine fresh updates", () => {
-    it("a byte-identical re-ingest of the CURRENTLY active content is rejected as stale (covered above by the idempotence test) — sanity: a DIFFERENT-content, SAME-size update is accepted", async () => {
+  // monotonicity guard: reject a candidate with a suspicious entry-count
+  // regression from the active list, vs a genuinely fresh/different-but-legitimate
+  // update. (Byte-identical replay is handled separately as "unchanged", NOT
+  // rejected — see the idempotence test above; class fix 2026-07-27.)
+  describe("monotonicity guard — rejects entry-count regression, accepts genuine fresh updates", () => {
+    it("a byte-identical re-ingest of the CURRENTLY active content is accepted as 'unchanged' (covered above by the idempotence test) — sanity: a DIFFERENT-content, SAME-size update is accepted", async () => {
       const first = await ingestSdnCsv(env, sdnValidLargeCsv, 8_000_000); // 5001 entries
       expect(first.ok).toBe(true);
 

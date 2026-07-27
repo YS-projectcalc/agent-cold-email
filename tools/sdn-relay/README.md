@@ -33,8 +33,16 @@ raw CSV to the Worker's `POST /admin/sdn/ingest`.
   `MIN_SDN_ENTRIES` floor guard PLUS a monotonicity guard
   (`apps/platform/src/ofac/sdn-ingest.ts`) — a stolen `SDN_INGEST_TOKEN` can
   at most submit a full, real-looking SDN list; it cannot neuter screening by
-  pushing a tiny "clean" one, and a naive replay of an old genuine list is
-  rejected too. It CANNOT be fully closed against a large, plausibly-sized
+  pushing a tiny "clean" one, and a suspicious entry-count regression from an
+  old genuine list is rejected too. A byte-identical re-push of the currently
+  active content (e.g. the droplet's daily relay on a weekend when Treasury
+  publishes nothing new) is recognized as `reason:"unchanged"` — a
+  verified-fresh no-op, 200, NOT a failure — rather than rejected; it does
+  NOT swap in a new version, but it DOES advance `sdn_list_meta.fetched_at`
+  to the push time (this is what actually quiets the direct-refresh 5-min
+  cron below for the next 24h — see `apps/platform/test/
+  ofac-sdn-storm-interaction.test.ts`). It CANNOT
+  be fully closed against a large, plausibly-sized
   list with specific names surgically removed — Treasury does not sign the
   feed, so token secrecy is the real control for that residual, not this
   code (see `docs/research/ofac-v1-honesty-statement-2026-07-23.md`).
