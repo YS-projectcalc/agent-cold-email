@@ -193,7 +193,7 @@
   <pre><code>{ id?: string (1-200 chars) }   // omit to list every domain</code></pre>
 
   <h3><code>configure_byo_domain</code></h3>
-  <p>Register or advance a BYO domain intake (SPEC.md §20). Registration, the pre-flight scan, and consent tracking are live today; real DNS delegation, live reputation checks, and platform-provisioned mailboxes on your own domain activate via the same concierge step as real sending generally.</p>
+  <p>Register or advance a BYO domain intake (SPEC.md §20). Registration, the pre-flight scan, and consent tracking are live today; real DNS delegation, live reputation checks, and platform-provisioned mailboxes on your own domain are self-serve and automatic once you've gone live, with mailbox send-authorization completing on our side.</p>
   <pre><code>{
   action: "register" | "poll_dns" | "acknowledge_consent" | "request_managed_mailboxes" | "connect_mailbox",
   domain?: string (3-253 chars),               // required for register
@@ -241,7 +241,7 @@
   <p>Returns <code>{ leads[], nextCursor }</code>; each row: leadId, email, firstName, company, campaignId, campaignName, globalStatus, interestStatus, notes, tags, suppressed, lastEventType, lastEventTs, createdAt.</p>
 
   <h2 id="demo">The no-signup CLI demo</h2>
-  <p><code>npx agent-cold-email demo</code> mints a demo tenant, provisions sample infrastructure, and runs the accelerated sandbox pipeline end to end (warmup, sends, replies, bounces, stop-on-reply) in one command — no signup or token-wrangling required. The npm CLI is live at v0.2.0 (registry-verified 2026-07-15). The same 25 tools are available over the hosted MCP endpoint or directly over HTTP (<a href="/docs#quickstart">quickstart</a>). The demo path stays sandboxed; real sending is live in production for activated accounts, via a short concierge activation step.</p>
+  <p><code>npx agent-cold-email demo</code> mints a demo tenant, provisions sample infrastructure, and runs the accelerated sandbox pipeline end to end (warmup, sends, replies, bounces, stop-on-reply) in one command — no signup or token-wrangling required. The npm CLI is live at v0.2.0 (registry-verified 2026-07-15). The same 25 tools are available over the hosted MCP endpoint or directly over HTTP (<a href="/docs#quickstart">quickstart</a>). The demo path stays sandboxed; real sending is live in production, and going live is self-serve — call <code>POST /checkout</code>, pay, and mailbox send-authorization completes on our side.</p>
 
   <h2 id="auth">Auth model</h2>
   <p>One bearer token per tenant, minted by the unauthenticated <code>POST /signup</code> bootstrap call. Every other tool call requires <code>Authorization: Bearer &lt;token&gt;</code> and resolves server-side to exactly one tenant's isolated state — there is no cross-tenant data access at any layer.</p>

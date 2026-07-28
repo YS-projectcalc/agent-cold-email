@@ -12,7 +12,7 @@ The public marketing + docs site for `agent-cold-email`: static HTML/CSS/JS, no 
 - `unsubscribe.html`, `why-email.html` — noindex recipient-experience previews. They deliberately do not claim a real suppression record while production sending is inactive.
 - `404.html` — branded not-found route with recovery paths.
 - `docs.html` — quickstart, MCP setup, CLI usage, full tool reference, the free demo, auth model.
-- `pricing.html` — quantity-price calculator: $49 platform + $10/provisioned mailbox, five-mailbox/$99 minimum (backend quantity billing is live in Stripe; real-send activation for new accounts remains the concierge-gated step).
+- `pricing.html` — quantity-price calculator: $49 platform + $10/provisioned mailbox, five-mailbox/$99 minimum (backend quantity billing is live in Stripe; going live is self-serve via `POST /checkout`, and mailbox send-authorization is the one remaining step that completes on our side).
 - `compare.html` — honest DIY-vs-Coldrig comparison with explicit sandbox/production boundary.
 - `for-agents.html` + `agent-evaluation.md` — indexable and Markdown versions of the evidence-led agent decision brief: fit rule, seven-point checklist, claim ledger, price math, runnable test, and disqualifiers.
 - `compare-vs-salesforge.html` — sourced comparison with the strongest current agent-operated alternative, including where Salesforge/Forge Stack is the honest production choice today.

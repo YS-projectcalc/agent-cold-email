@@ -10,10 +10,11 @@ info:
     SPEC.md §19). Content generation is the caller's job; this API owns
     infrastructure provisioning, sequencing, isolation, and compliance
     guardrails. Real sending runs live in production (Gmail API, HTTPS/443);
-    new accounts activate real sending through a short
-    concierge step while self-serve activation rolls out — see the
-    repository ROADMAP.md for exact current state. No deliverability or
-    inbox-placement guarantees are made by this API.
+    signup, billing, screening, and real mailbox provisioning are fully
+    self-serve and automatic — the only remaining step is mailbox
+    send-authorization completing on our side after provisioning, typically
+    same-day — see the repository ROADMAP.md for exact current state. No
+    deliverability or inbox-placement guarantees are made by this API.
   contact:
     name: EpiphanyMade
     email: support@epiphanymade.com

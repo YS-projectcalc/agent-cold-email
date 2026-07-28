@@ -21,8 +21,9 @@ declare module "*.csv?raw" {
   export default content;
 }
 
-// Claim-surface tool-count guard (site-tool-count-claims.test.ts) — scans
-// public-facing pages/manifests as raw text for stale MCP tool-count claims.
+// Claim-surface guards (site-tool-count-claims.test.ts +
+// site-claim-surface-scope.test.ts) — scan public-facing pages/manifests
+// as raw text for stale claims.
 declare module "*.html?raw" {
   const content: string;
   export default content;
