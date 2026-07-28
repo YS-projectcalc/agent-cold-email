@@ -1,6 +1,8 @@
+import { useState } from "react";
 import { useAuth } from "../auth/AuthProvider";
-import { useAccount, useInfrastructureStatus } from "../api/queries";
+import { useAccount, useInfrastructureStatus, useRotateToken } from "../api/queries";
 import { card, cardPad } from "../lib/ui";
+import { CopyButton } from "../lib/CopyButton";
 import { MailboxHealthTable } from "../widgets/MailboxHealthTable";
 import { Link } from "react-router-dom";
 
@@ -10,6 +12,8 @@ export function SettingsPage() {
   const { tenantId, logout } = useAuth();
   const infra = useInfrastructureStatus(SETTINGS_REFRESH_SECONDS);
   const account = useAccount(SETTINGS_REFRESH_SECONDS);
+  const rotateToken = useRotateToken();
+  const [confirmingRotate, setConfirmingRotate] = useState(false);
 
   return (
     <div className="space-y-6">
@@ -66,9 +70,47 @@ export function SettingsPage() {
           the session everywhere it's used from this device.
         </p>
         <div className="mb-4 rounded-[var(--radius-card)] border border-line bg-canvas p-3 text-sm">
-          <p className="font-semibold text-ink">Lost-token recovery</p>
-          <p className="mt-1 text-xs leading-5 text-ink-muted">The full token is never stored recoverably. Secure-store lookup, sandbox replacement, and verified production rotation are explained in the recovery flow.</p>
-          <a href="/app/recover" className="mt-2 inline-block text-xs font-semibold text-accent">Open recovery guidance →</a>
+          <p className="font-semibold text-ink">Rotate API token</p>
+          <p className="mt-1 text-xs leading-5 text-ink-muted">
+            The full token is never stored recoverably — rotation is the only way to regain access if it's lost, or to replace one you suspect leaked. Your old token stops
+            working immediately; update your MCP config (or any other client) with the new one.
+          </p>
+          {rotateToken.data ? (
+            <div className="mt-3 rounded-[var(--radius-card)] border border-line bg-[#151820] p-4 text-white">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <span className="text-[11px] font-semibold uppercase tracking-[.12em] text-[#9fa6b3]">New token — shown once</span>
+                <CopyButton value={rotateToken.data.token} label="Copy token" />
+              </div>
+              <code className="block overflow-x-auto whitespace-nowrap font-mono text-sm text-[#dfe4ef]">{rotateToken.data.token}</code>
+            </div>
+          ) : confirmingRotate ? (
+            <div className="mt-3 rounded-[var(--radius-card)] border border-warn-border bg-warn-bg p-3">
+              <p className="text-xs leading-5 text-warn-text">Your current token stops working the instant you confirm. Make sure you're ready to update every client before proceeding.</p>
+              {rotateToken.isError && (
+                <p role="alert" className="mt-2 text-xs text-chip-danger-text">
+                  {rotateToken.error instanceof Error ? rotateToken.error.message : "Could not rotate the token right now."}
+                </p>
+              )}
+              <div className="mt-3 flex gap-2">
+                <button
+                  type="button"
+                  disabled={rotateToken.isPending}
+                  onClick={() => rotateToken.mutate()}
+                  className="rounded-[var(--radius-card)] border border-accent bg-accent px-3 py-1.5 text-xs font-semibold text-accent-contrast disabled:opacity-60"
+                >
+                  {rotateToken.isPending ? "Rotating…" : "Confirm rotation"}
+                </button>
+                <button type="button" onClick={() => setConfirmingRotate(false)} className="rounded-[var(--radius-card)] border border-line px-3 py-1.5 text-xs font-medium text-ink hover:bg-surface">
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button type="button" onClick={() => setConfirmingRotate(true)} className="mt-2 text-xs font-semibold text-accent">
+              Rotate API token →
+            </button>
+          )}
+          <a href="/app/recover" className="mt-3 inline-block text-xs font-semibold text-accent">Signed out with no session? Email me a sign-in link →</a>
         </div>
         <button type="button" onClick={() => void logout()} className="rounded-[var(--radius-card)] border border-line px-3 py-1.5 text-sm font-medium text-ink hover:bg-surface">
           Log out

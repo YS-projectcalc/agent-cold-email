@@ -27,6 +27,14 @@ export interface LoginRequestResult {
  * (§1.5). Narrow via `"tenantId" in result`. */
 export type LoginConsumeResult = { tenantId: string } | { tenants: { tenantId: string; brand: string }[] };
 
+/** POST /token/rotate — the new bearer token, shown to the caller exactly
+ * once (the server never stores it recoverably, only its hash). The old
+ * token stops working immediately (atomic swap, see apps/platform's
+ * routes/token-rotate.ts). */
+export interface RotateTokenResult {
+  token: string;
+}
+
 export interface DashboardViewSummary {
   id: string;
   name: string;

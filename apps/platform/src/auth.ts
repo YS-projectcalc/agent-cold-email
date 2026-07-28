@@ -2,12 +2,21 @@
 // only their SHA-256(+pepper) hash is ever persisted (D1 tenants_index),
 // never the plaintext — CLAUDE.md rule g (no secrets in git/store).
 
-// Every tenant in this build is a non-activated sandbox tenant (no real
-// sending), so tokens carry a `cs_test_` prefix — mirroring Stripe's
-// test/live convention so an agent never mistakes a sandbox token for a
-// production credential (adversarial panel-02). `cs_live_` is reserved for
-// activated real-sending tenants once ACTIVATION.md is executed.
-const TOKEN_PREFIX = "cs_test_";
+// The platform is LIVE (real billing, real Stripe keys flipped — ROADMAP.md
+// 2026-07-23), so every newly-minted token carries a brand-correct,
+// mode-honest `cr_live_` prefix (Coldrig; "live" is now true, not aspirational
+// — see the prior `cs_test_`/`cs_live_` split below). Token resolution
+// (require-auth.ts's resolveTenantFromToken) is hash-based and prefix-BLIND —
+// it hashes the full presented string and looks up that hash in
+// `tenants_index`, never inspecting the prefix — so every `cs_test_` token
+// minted before this change remains valid FOREVER (grandfathered): there is
+// no re-issuance, migration, or rejection of a legacy token, and none is
+// planned. The prefix exists purely as an agent-facing signal of what a FRESH
+// token looks like, mirroring Stripe's test/live convention so an agent never
+// mistakes a sandbox credential for a production one (adversarial panel-02,
+// the reasoning that motivated having a prefix at all — only the concrete
+// value changed, since every tenant now transacts on real money).
+const TOKEN_PREFIX = "cr_live_";
 
 export function generateApiToken(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
@@ -56,7 +65,7 @@ export function resolveRequestToken(
 
 // SPEC.md §19.1 (M1) — the dashboard cookie session's opaque id. A random
 // 256-bit value, same entropy source as `generateApiToken`, but deliberately
-// NOT bearer-token-shaped (no `cs_test_` prefix) so it's never mistaken for
+// NOT bearer-token-shaped (no `cr_live_` prefix) so it's never mistaken for
 // one if it ever leaked into a log line. The cookie carries this raw id; only
 // its `hashApiToken`-computed hash is ever persisted (D1 `dashboard_sessions`),
 // mirroring how the bearer token itself is never stored in plaintext.

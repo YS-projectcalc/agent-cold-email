@@ -44,6 +44,23 @@ export async function lookupTenantByTokenHash(env: Env, tokenHash: string): Prom
   return row ?? null;
 }
 
+/**
+ * Token rotation's ONE write site (routes/token-rotate.ts) — `api_token_hash`
+ * is the ONLY place a bearer-token hash is persisted (grep-verified: no
+ * per-DO cache of it exists; every auth check re-reads this column fresh via
+ * `lookupTenantByTokenHash`). A single `UPDATE` is itself the atomicity
+ * guarantee: the column always holds EXACTLY one hash, so there is no window
+ * where a fresh SELECT sees neither the old nor the new token as valid — the
+ * swap from old to new happens in the one statement, not a delete-then-insert
+ * pair. Two concurrent rotations for the same tenant both run this UPDATE;
+ * D1/SQLite serializes writes to a row, so whichever commits LAST is the sole
+ * surviving hash — "exactly one winner" falls out of that ordering, not a
+ * separate compare-and-swap.
+ */
+export async function updateTenantIndexApiTokenHash(env: Env, id: string, newTokenHash: string): Promise<void> {
+  await env.DB.prepare(`UPDATE tenants_index SET api_token_hash = ? WHERE id = ?`).bind(newTokenHash, id).run();
+}
+
 /** Looked up by id (not token hash) — the only thing a resolved dashboard
  * cookie session carries is a tenant id (see dashboard-session helpers below),
  * so the suspended/inactive check needs its own by-id lookup. */

@@ -15,6 +15,7 @@ import type {
   LoginConsumeResult,
   LoginRequestResult,
   ReplyResult,
+  RotateTokenResult,
   SignupResult,
   ThreadDetail,
 } from "./types";
@@ -57,6 +58,17 @@ export function useSignup() {
 export function useLogout() {
   return useMutation({
     mutationFn: () => apiRequest<{ loggedOut: true }>("/dashboard/logout", { method: "POST" }),
+  });
+}
+
+/** POST /token/rotate (Settings page "Rotate API token" card) — session-
+ * cookie-authed here (apiRequest's `X-Coldstart-Client` header + credentials
+ * already satisfy the global CSRF guard for every non-GET call). The old
+ * bearer token stops authenticating immediately; the returned token is shown
+ * to the tenant exactly once. */
+export function useRotateToken() {
+  return useMutation({
+    mutationFn: () => apiRequest<RotateTokenResult>("/token/rotate", { method: "POST" }),
   });
 }
 
