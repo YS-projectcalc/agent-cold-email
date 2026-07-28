@@ -16,3 +16,26 @@ declare module "*.csv?raw" {
   const content: string;
   export default content;
 }
+
+// Claim-surface guards (site-claim-surface-scope.test.ts) — scan
+// public-facing pages/manifests as raw text for stale claims.
+declare module "*.html?raw" {
+  const content: string;
+  export default content;
+}
+declare module "*.json?raw" {
+  const content: string;
+  export default content;
+}
+declare module "*.yaml?raw" {
+  const content: string;
+  export default content;
+}
+declare module "*.txt?raw" {
+  const content: string;
+  export default content;
+}
+declare module "*.md?raw" {
+  const content: string;
+  export default content;
+}

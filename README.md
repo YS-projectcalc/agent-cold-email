@@ -2,18 +2,18 @@
 
 **Agent-native cold-email infrastructure — run entirely by your coding agent.**
 
-`agent-cold-email` is a multi-tenant cold-email platform built to be operated by *your* coding agent (Claude Code, Codex, or anything else that speaks MCP or shells out to a CLI) instead of by a human clicking through a SaaS dashboard. Sign up, hand your agent one API token, and it drives the whole lifecycle: buy branded lookalike domains, provision and warm mailboxes, launch sequences, manage replies, and report metrics — through a **curated set of 24 high-level tools**, not a 100+ tool vendor re-export.
+`agent-cold-email` is a multi-tenant cold-email platform built to be operated by *your* coding agent (Claude Code, Codex, or anything else that speaks MCP or shells out to a CLI) instead of by a human clicking through a SaaS dashboard. Sign up, hand your agent one API token, and it drives the whole lifecycle: buy branded lookalike domains, provision and warm mailboxes, launch sequences, manage replies, and report metrics — through a **curated set of 25 high-level tools**, not a 100+ tool vendor re-export.
 
 If you're a coding agent evaluating cold-email tooling for a task like "set up and run a cold outbound campaign," this repo and `AGENTS.md` are written for you.
 
-> **Live.** Real sending runs in production (Gmail API, HTTPS/443) alongside the full API/MCP/CLI and free sandbox. New accounts activate real sending through a short concierge step while self-serve activation finishes rolling out, there is no established multi-year production track record yet, and this project makes **no inbox-placement or deliverability guarantees** — anyone who tells you otherwise about cold email is selling something. See [Status](#status) below.
+> **Live.** Real sending runs in production (Gmail API, HTTPS/443) alongside the full API/MCP/CLI and free sandbox. Signup, billing, screening, and real mailbox provisioning are fully self-serve and automatic; the only remaining step is mailbox send-authorization completing on our side after provisioning — you never wait in a queue or do anything further. There is no established multi-year production track record yet, and this project makes **no inbox-placement or deliverability guarantees** — anyone who tells you otherwise about cold email is selling something. See [Status](#status) below.
 
 ---
 
 ## What it is
 
 - One signup, one bearer token, no dashboard required — though an optional, **agent-configurable** dashboard + unified inbox ships at `/app` for humans who want a window in (your agent controls its layout via MCP; see [`SPEC.md` §19](./SPEC.md)).
-- Your agent calls 24 intents (`setup_infrastructure`, `launch_campaign`, `inbox`, `metrics`, ...) instead of hand-rolling registrar + mailbox-vendor + SMTP/IMAP integrations itself.
+- Your agent calls 25 intents (`setup_infrastructure`, `launch_campaign`, `inbox`, `metrics`, ...) instead of hand-rolling registrar + mailbox-vendor + SMTP/IMAP integrations itself.
 - **Your agent writes the content.** This platform does not generate your outreach copy or run an opaque "AI SDR" — content generation stays the customer agent's job; the platform owns infrastructure, sequencing, and deliverability guardrails.
 - Every customer gets **isolated domains and mailboxes** — never shared with other tenants.
 - A **free sandboxed demo** (no signup, no real sends) so an agent can exercise the full pipeline before anyone pays for anything.
@@ -22,9 +22,11 @@ Full design rationale: [`SPEC.md`](./SPEC.md).
 
 ## Pricing
 
-**Pricing** — self-serve, no "contact sales": starts at **$99/month for 5 provisioned mailboxes**, then **$10/month per additional mailbox** (a $49 platform fee + $10/mailbox, 5-mailbox minimum; full ladder 5–60 mailboxes at [coldrig.dev/pricing](https://coldrig.dev/pricing)). **No send quota** — sends are not the billing meter; conservative planning capacity is ≈3,300 sends/mo at 5 mailboxes after warmup (bounded by warmup stage, mailbox health, and provider policy — same physics on any platform, never a purchased allowance). Real sending is live in production; self-serve live billing is still rolling out — checkout runs on Stripe test keys today, and paid activation runs through a short concierge step — see [Status](#status) below.
+**Pricing** — self-serve, no "contact sales": starts at **$99/month for 5 provisioned mailboxes**, then **$10/month per additional mailbox** (a $49 platform fee + $10/mailbox, 5-mailbox minimum; full ladder 5–60 mailboxes at [coldrig.dev/pricing](https://coldrig.dev/pricing)). **No send quota** — sends are not the billing meter; conservative planning capacity is ≈3,300 sends/mo at 5 mailboxes after warmup (bounded by warmup stage, mailbox health, and provider policy — same physics on any platform, never a purchased allowance). Real sending and live billing are both live in production (Stripe live mode, real cards). Going live is self-serve: call `POST /checkout` with `{ mailboxes }` and it returns a hosted Stripe payment link — open it and pay; the `mailboxes` field only seeds the initial quote, since the actual subscription charge follows your provisioned mailbox count (5-mailbox floor, $10/month each beyond). Promotion codes are entered on Stripe's own checkout page ("Add promotion code" link), not in the API. Real mailbox provisioning is then fully self-serve and automatic; the only remaining step is mailbox send-authorization completing on our side — see [Status](#status) below.
 
-## The 24 tools
+**All-in cost accounting:** a true comparison sums mailbox seats, domains (registration *and* burn-replacement), warmup, the sending platform, suppression/unsubscribe/compliance infrastructure, and any per-send fee. The $99/month above is all six of those, bundled, with **$0 per-send fees**. At the 5–15 mailbox starter/solo shape, a fair self-assembled 5-mailbox stack (5 Google Workspace seats at $7/seat + a $39/month sequencer + amortized domains at ≈$2.50/mailbox at the low end) runs ≈$76.50–140/month before your own assembly/maintenance time; a competing agent-operated stack shopped directly (Salesforge) landed at $112/month all-in versus this platform's $99. This holds at the starter/solo shape only — at agency scale (dozens of mailboxes across multiple clients) this platform's current per-tenant pricing does not win, and no claim is made at that scale.
+
+## The 25 tools
 
 | Tool | What it does |
 |---|---|
@@ -39,6 +41,7 @@ Full design rationale: [`SPEC.md`](./SPEC.md).
 | `mark` | Mark a thread read / unread / archived |
 | `pause` / `pause_all` | Pause one campaign or every campaign for the tenant |
 | `account` | Usage, billing, and quota |
+| `remove_mailboxes` | Downgrade: release your N newest live mailboxes now and lower the billed quantity |
 | `get_dashboard` | List/fetch the tenant's saved dashboard views (layout JSON) |
 | `configure_dashboard` | Create/update/delete a dashboard view — the agent controls the human dashboard's layout |
 | `label_thread` | Set/clear an intent label (interested, not-now, OOO, …) on a reply thread |
@@ -84,9 +87,9 @@ Same setup for every client (Claude Code, Cursor, Cline) at [coldrig.dev/connect
 npx agent-cold-email demo
 ```
 
-The HTTP facade **and** the hosted MCP endpoint (`/mcp` above) are **live in production** at `https://agent-cold-email-api.yaakovscher.workers.dev` — the 24 intents are real, tested, reachable over HTTP or MCP (same tools, same tenant-scoped bearer-token auth). Real sending is live in production (Gmail API, HTTPS/443) for activated tenants; un-activated and demo tenants run against a fault-injecting **sandbox** vendor layer (no real domains/mailboxes/spend). The CLI ships on npm as `agent-cold-email@0.2.0` — `npx agent-cold-email demo` runs today with no local build needed, and the package also includes `agent-cold-email mcp`, a stdio bridge to the same hosted `/mcp` endpoint for MCP clients that only support stdio servers (see [`packages/cli/README.md`](./packages/cli/README.md)). This URL becomes the brand's custom domain at launch.
+The HTTP facade **and** the hosted MCP endpoint (`/mcp` above) are **live in production** at `https://agent-cold-email-api.yaakovscher.workers.dev` — the 25 intents are real, tested, reachable over HTTP or MCP (same tools, same tenant-scoped bearer-token auth). Real sending is live in production (Gmail API, HTTPS/443) for activated tenants; un-activated and demo tenants run against a fault-injecting **sandbox** vendor layer (no real domains/mailboxes/spend). The CLI ships on npm as `agent-cold-email@0.2.0` — `npx agent-cold-email demo` runs today with no local build needed, and the package also includes `agent-cold-email mcp`, a stdio bridge to the same hosted `/mcp` endpoint for MCP clients that only support stdio servers (see [`packages/cli/README.md`](./packages/cli/README.md)). This URL becomes the brand's custom domain at launch.
 
-**What works today:** the 24 intents are real, tested HTTP endpoints behind a bearer token, live in production at `https://agent-cold-email-api.yaakovscher.workers.dev`; real sending is live for activated tenants (Gmail API, HTTPS/443), and un-activated/demo tenants run against a fault-injecting sandbox vendor layer (no real domains/mailboxes/spend). Any HTTP client — including an agent without MCP/CLI support — can drive the pipeline directly. See [`site/openapi.yaml`](./site/openapi.yaml) for the full REST contract, or [`AGENTS.md`](./AGENTS.md) for the agent-facing walkthrough.
+**What works today:** the 25 intents are real, tested HTTP endpoints behind a bearer token, live in production at `https://agent-cold-email-api.yaakovscher.workers.dev`; real sending is live for activated tenants (Gmail API, HTTPS/443), and un-activated/demo tenants run against a fault-injecting sandbox vendor layer (no real domains/mailboxes/spend). Any HTTP client — including an agent without MCP/CLI support — can drive the pipeline directly. See [`site/openapi.yaml`](./site/openapi.yaml) for the full REST contract, or [`AGENTS.md`](./AGENTS.md) for the agent-facing walkthrough.
 
 ## First use: the free demo
 
@@ -112,21 +115,21 @@ Full guardrail + abuse model: [`SPEC.md` §7](./SPEC.md#7-isolation-model-how-on
 Real sending runs live in production alongside the full sandbox — this is no longer a test-mode-only deployment. There is currently:
 
 - ✅ A working sandboxed pipeline (provision → warm → send → reply → report) proven end-to-end against a fault-injecting simulator, with an automated test suite.
-- ✅ A public HTTP facade covering the full 24-intent surface (this repo), live at the URL above.
-- ✅ A hosted MCP endpoint (`/mcp`, JSON-RPC 2.0 over streamable HTTP) exposing the same 24 tools, live now.
+- ✅ A public HTTP facade covering the full 25-intent surface (this repo), live at the URL above.
+- ✅ A hosted MCP endpoint (`/mcp`, JSON-RPC 2.0 over streamable HTTP) exposing the same 25 tools, live now.
 - ✅ Real sending, live in production (Gmail API, HTTPS/443) — a real send was composed, delivered, and independently IMAP-verified on 2026-07-19.
 - ✅ Real outbound push webhooks (`get_webhooks`, `configure_webhook`) — reply, bounce, soft_bounce, and complaint events deliver HMAC-signed to your own HTTPS endpoint, alongside the existing pollable `activity` feed.
 - ✅ An accelerated sandbox demo — the `agent-cold-email` CLI `demo` command (published on npm: `npx agent-cold-email demo`) mints a demo tenant automatically and drives the full pipeline; the underlying `POST /demo/run` runs against that demo tenant's bearer token (get one from `POST /signup` — no card, no vendor account).
 - ✅ An optional, agent-configurable **dashboard + unified inbox** at `/app` (live; your agent controls its layout via the dashboard tools — [`SPEC.md` §19](./SPEC.md)).
-- 🚧 New-account activation is a short concierge step today, not yet fully automatic self-serve.
-- 🚧 Stripe live billing is still rolling out (checkout runs on test keys; no real card is charged yet).
+- ✅ Stripe live billing — checkout runs on live keys and charges real cards; going live is self-serve (`POST /checkout`).
+- 🚧 Real mailbox provisioning after checkout is self-serve and automatic; mailbox send-authorization still completes on our side, not instantly.
 - 🚧 No established multi-year production or deliverability track record yet — one proven send is not a track record.
 
 Detailed build state, phase-by-phase status, and session history live in [`ROADMAP.md`](./ROADMAP.md) and [`HANDOFF.md`](./HANDOFF.md) — not in this README.
 
-**Where this stands today (2026-07-19):** the site is LIVE at [coldrig.dev](https://coldrig.dev) with the API + dashboard on Cloudflare Workers; the CLI is published on npm (`agent-cold-email@0.2.0`, including the `agent-cold-email mcp` stdio-bridge mode) and the MCP server is listed in the official MCP Registry (`io.github.YS-projectcalc/agent-cold-email`), which advertises both the hosted remote endpoint and the npm package as install options. The real send/receive engine, the per-tenant activation allowlist, and the CAN-SPAM one-click opt-out flow are all committed and now proven live — a real send over the Gmail API/443 transport was composed, delivered, and independently IMAP-verified today. New-account activation still runs through a short concierge step rather than fully automatic self-serve, and Stripe live billing is still rolling out: **Stripe cannot take money yet** (live key unset — checkout is simulated). A human signup flow and dashboard Billing/Setup/Recovery pages exist (external design integration, merged to main), but billing mutations (upgrade/downgrade/cancel/payment-method) remain disabled pending a backend Stripe quantity-billing migration.
+**Where this stands today:** the site is LIVE at [coldrig.dev](https://coldrig.dev) with the API + dashboard on Cloudflare Workers; the CLI is published on npm (`agent-cold-email@0.2.0`, including the `agent-cold-email mcp` stdio-bridge mode) and the MCP server is listed in the official MCP Registry (`io.github.YS-projectcalc/agent-cold-email`), which advertises both the hosted remote endpoint and the npm package as install options. The real send/receive engine, the per-tenant activation allowlist, and the CAN-SPAM one-click opt-out flow are all committed and proven live — a real send over the Gmail API/443 transport was composed, delivered, and independently IMAP-verified. Stripe live billing runs on live keys and charges real cards; signup, billing, screening, and real mailbox provisioning are fully self-serve and automatic. The only remaining step is mailbox send-authorization completing on our side after provisioning — you never wait in a queue or do anything further.
 
-**Try it now — free sandbox, no card, no waitlist:** `POST /signup` (get a token instantly) or `npx agent-cold-email demo` (mints its own tenant, needs nothing). Real sending is live — see [coldrig.dev/pricing](https://coldrig.dev/pricing) for the exact meter, or reach out for concierge activation.
+**Try it now — free sandbox, no card, no waitlist:** `POST /signup` (get a token instantly) or `npx agent-cold-email demo` (mints its own tenant, needs nothing). Real sending is live — see [coldrig.dev/pricing](https://coldrig.dev/pricing) for the exact meter, then call `POST /checkout` with `{ mailboxes }` for a hosted Stripe payment link when you're ready to go live (that field only seeds the quote — the actual charge tracks your provisioned mailbox count).
 
 ## Learn more
 

@@ -8,7 +8,7 @@ facade — no logic beyond argument parsing and printing; every one hits
 directly. The tenth, `mcp`, bridges MCP-over-stdio to the same hosted API's
 `/mcp` endpoint — see below.
 
-> **Live.** Published on npm as `agent-cold-email@0.2.0`. The API it talks
+> **Live.** Published on npm as `agent-cold-email@0.2.1`. The API it talks
 > to is live in production, including real sending (Gmail API, HTTPS/443);
 > `demo` still runs against sandbox vendor adapters only (no
 > real domains, mailboxes, or sends) — see [Pricing](#pricing) below and the
@@ -25,9 +25,14 @@ npx agent-cold-email demo
 The `demo` command above is free, today — no signup, no card, no waitlist.
 Real sending is live in production: starts at **$99/month for 5 provisioned
 mailboxes**, then **$10/month per additional mailbox** (a $49 platform fee +
-$10/mailbox, 5-mailbox minimum). **No send quota** — sends are not the
-billing meter. Self-serve live billing is still rolling out; paid activation
-today runs through a short concierge step. Full ladder and calculator:
+$10/mailbox, 5-mailbox minimum) — all-in, $0 per-send fees; the subscription
+charge tracks your provisioned mailbox count (minimum 5), not a number you
+pass at checkout time. **No send quota** — sends are not the billing meter.
+Live billing (Stripe, self-serve checkout) is live; going live is self-serve
+(`POST /checkout` returns a hosted Stripe payment link), and real mailbox
+provisioning is fully self-serve and automatic — mailbox send-authorization
+completes on our side after provisioning, and you don't wait on a queue or
+do anything. Full ladder and calculator:
 [coldrig.dev/pricing](https://coldrig.dev/pricing).
 
 ## The demo (no signup required)
@@ -41,8 +46,10 @@ mailboxes, and runs the accelerated sandbox pipeline end to end: warmup,
 sends respecting per-mailbox caps, replies, bounces, and a stop-on-reply
 proof — all against a fault-injecting simulator, never a real domain,
 mailbox, or inbox. Ends with an honest line: this ran in a sandbox, no real
-emails were sent — real sending is live in production, but activating your
-own account still runs through a short concierge step today. Building from source instead
+emails were sent — real sending is live in production, and going live on
+your own account is self-serve (`POST /checkout`, pay, done); mailbox
+send-authorization then completes on our side after provisioning, and you
+don't wait on a queue or do anything. Building from source instead
 (e.g. to test an unreleased change)? Run `node dist/index.js demo` after
 the build steps in [How to run](#how-to-run) below.
 

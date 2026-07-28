@@ -57,7 +57,7 @@
   </div>
   <div class="callout">
     <strong>Availability</strong>
-    Coldrig's public API, MCP endpoint, CLI, sandbox, and real sending are all live in production. New accounts activate real sending through a short concierge step while self-serve activation rolls out, and there's no established multi-year production track record yet. This comparison describes Coldrig's implemented lifecycle and integration shape.
+    Coldrig's public API, MCP endpoint, CLI, sandbox, and real sending are all live in production. Signup, billing, screening, and real mailbox provisioning are fully self-serve and automatic; the only remaining step is mailbox send-authorization completing on our side. There's no established multi-year production track record yet. This comparison describes Coldrig's implemented lifecycle and integration shape.
   </div>
 
   <h2>Why this comparison exists</h2>
@@ -108,6 +108,9 @@
     <li><strong>Wanting the guardrails enforced, not just documented</strong> — suppression and send caps that don't depend on the agent remembering to implement them correctly each time.</li>
     <li><strong>Trying it before committing</strong> — the free sandboxed demo runs the entire pipeline with no vendor signups and no spend.</li>
   </ul>
+
+  <h2>The all-in comparison, not one line item</h2>
+  <p>A fair price comparison sums every layer a working setup requires: mailbox seats, domains (registration <em>and</em> the ongoing burn-replacement cycle), warmup, the sending/sequencing platform itself, suppression/unsubscribe/compliance infrastructure, and any per-send fee. Coldrig's $99/month for 5 mailboxes is all six of those, bundled, with $0 per-send fees. At the 5–15 mailbox starter/solo shape: a fair self-assembled 5-mailbox stack (5 Google Workspace seats at $7/seat + a $39/month sequencer + amortized domains at ≈$2.50/mailbox at the low end) runs ≈$76.50–140/month before your own assembly and maintenance time. Shopped rather than estimated, a competing agent-operated stack (<a href="/compare-vs-salesforge">Salesforge</a>) landed at $112/month all-in versus Coldrig's $99. This holds at the starter/solo shape only — at agency scale (dozens of mailboxes across multiple clients) Coldrig's current per-tenant pricing does not win, and no claim is made at that scale.</p>
 
   <h2>Wholesale economics (for context, not a sales pitch)</h2>
   <p>Public 2026 wholesale pricing, so you can sanity-check the <a href="/pricing">pricing page</a> against what things actually cost underneath: domains ≈ $11–15/yr (.com/.net via Porkbun); mailboxes + warmup ≈ $5.5–6/mailbox/mo (Inboxkit-class vendor, all-in); Stripe processing ≈ 2.9% + 30¢. Fully-loaded cost per mailbox, including domain amortization and the normal 8–18%/month domain-burn replacement cycle, comes to roughly $7/mo — full sourcing in <code>docs/research/vendor-tos-economics-2026-07-09.md</code> in the repo.</p>

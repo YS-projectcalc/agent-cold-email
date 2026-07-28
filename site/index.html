@@ -8,7 +8,7 @@
   <meta name="description" content="Coldrig gives Codex, Claude Code, Cursor, and other AI agents one API and MCP surface for cold-email domains, mailboxes, warmup, campaigns, replies, and enforced sending guardrails.">
   <link rel="canonical" href="https://coldrig.dev/">
   <meta property="og:title" content="Coldrig — your agent runs outreach. We run the rig.">
-  <meta property="og:description" content="Agent-first infrastructure for cold outreach: one token, 24 focused tools, isolated domains and mailboxes, and server-side guardrails.">
+  <meta property="og:description" content="Agent-first infrastructure for cold outreach: one token, 25 focused tools, isolated domains and mailboxes, and server-side guardrails.">
   <meta property="og:url" content="https://coldrig.dev/">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Coldrig">
@@ -90,7 +90,7 @@
         </div>
         <div class="hero-proof" aria-label="Product facts">
           <span><strong>01</strong> tenant token</span>
-          <span><strong>24</strong> intent-level tools</span>
+          <span><strong>25</strong> intent-level tools</span>
           <span><strong>Tenant-scoped</strong> state</span>
         </div>
       </div>
@@ -174,7 +174,7 @@
           <div class="bento-copy">
             <span class="step-index">01 / Tools</span>
             <h3>Intent in.<br>Infrastructure out.</h3>
-            <p>Your agent asks for outcomes, not vendor plumbing. Twenty-four carefully scoped tools keep context small and execution legible.</p>
+            <p>Your agent asks for outcomes, not vendor plumbing. Twenty-five carefully scoped tools keep context small and execution legible.</p>
             <a class="text-link" href="/docs#tools">Explore the tool surface <span>→</span></a>
           </div>
           <div class="tool-stack" aria-hidden="true">
@@ -282,7 +282,7 @@
         <div class="truth-copy">
           <span class="kicker light">Verify before you commit</span>
           <h2>Prove the workflow.<br>Before you commit.</h2>
-          <p>Start with a fault-injecting sandbox that simulates provisioning, warmup, replies, bounces, timeouts, and rate limits — a safe technical pilot before you commit. Real sending is live in production for activated accounts; new accounts activate through a short concierge step.</p>
+          <p>Start with a fault-injecting sandbox that simulates provisioning, warmup, replies, bounces, timeouts, and rate limits — a safe technical pilot before you commit. Real sending is live in production; signup, billing, screening, and real mailbox provisioning are fully self-serve and automatic, and mailbox send-authorization completes on our side.</p>
           <div class="cta-row"><a class="btn inverse" href="/signup">Free sign up →</a><a class="inline-link" href="/connect">See agent setup</a><a class="inline-link" href="https://github.com/YS-projectcalc/agent-cold-email">Inspect the source ↗</a></div>
         </div>
         <div class="terminal" aria-label="Working Coldrig sandbox demo command">
@@ -297,22 +297,22 @@
           </div>
         </div>
       </div>
-      <p class="honesty-note"><strong>Plain-English status:</strong> the API, MCP endpoint, npm CLI, sandbox, and real sending are all live. New accounts activate real sending through a short concierge step while self-serve activation rolls out. Coldrig never guarantees inbox placement. <a href="/faq">Read the honest FAQ →</a></p>
+      <p class="honesty-note"><strong>Plain-English status:</strong> the API, MCP endpoint, npm CLI, sandbox, and real sending are all live. Signup, billing, screening, and real mailbox provisioning are fully self-serve and automatic; the only remaining step is mailbox send-authorization completing on our side. Coldrig never guarantees inbox placement. <a href="/faq">Read the honest FAQ →</a></p>
     </section>
 
-    <section id="waitlist" class="final-cta">
+    <section id="get-started" class="final-cta">
       <div class="wrap final-grid">
         <div>
           <span class="kicker">Live in production</span>
           <h2>Your strategy.<br>One rig underneath.</h2>
         </div>
         <div class="signup-block">
-          <p>Run the free sandbox now, or request activation to start sending for real — new accounts activate through a short concierge step. We’ll only send access and material product updates.</p>
+          <p>Run the free sandbox now, or go live in minutes: call <code>POST /checkout</code> for a hosted Stripe payment link and pay — signup, billing, screening, and real mailbox provisioning are fully self-serve and automatic, with mailbox send-authorization completing on our side. Want product updates instead of going live right now? Drop your email below.</p>
           <a class="btn primary" href="/signup">Free sign up →</a>
           <form class="waitlist" action="https://agent-cold-email-api.yaakovscher.workers.dev/api/waitlist" method="post">
             <label for="wl-email" class="sr-only">Work email address</label>
             <input id="wl-email" type="email" name="email" placeholder="you@company.com" autocomplete="email" required>
-            <button type="submit">Request real-sending activation <span aria-hidden="true">→</span></button>
+            <button type="submit">Get product updates <span aria-hidden="true">→</span></button>
           </form>
           <p class="form-status" role="status"></p>
           <p class="form-note">By joining, you agree to the <a href="/privacy">privacy policy</a>. Unsubscribe anytime.</p>

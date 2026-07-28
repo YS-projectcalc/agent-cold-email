@@ -161,11 +161,18 @@
   <section class="pricing-status" aria-labelledby="status-title">
     <span class="kicker">Honest status</span>
     <h2 id="status-title">Test the workflow before paying.</h2>
-    <p>The API, hosted MCP endpoint, npm CLI, sandbox, real sending (Gmail API, HTTPS/443), and checkout and billing (Stripe live mode, real cards) are all live in production. New accounts still activate real sending through a short concierge step. The free sandbox cannot reach a real vendor, spend money, or send an email.</p>
+    <p>The API, hosted MCP endpoint, npm CLI, sandbox, real sending (Gmail API, HTTPS/443), and checkout and billing (Stripe live mode, real cards) are all live in production. Signup, billing, screening, and real mailbox provisioning are fully self-serve and automatic — the only remaining step is mailbox send-authorization completing on our side after provisioning — you don't wait on a queue or do anything. The free sandbox cannot reach a real vendor, spend money, or send an email.</p>
     <div class="cta-row">
       <a class="btn primary" href="/docs#quickstart">Run the free sandbox <span aria-hidden="true">→</span></a>
-      <a class="btn quiet" href="/#waitlist">Request activation</a>
+      <a class="btn quiet" href="/docs#going-live">Go live: how checkout works</a>
     </div>
+  </section>
+
+  <section class="pricing-all-in" aria-labelledby="all-in-title">
+    <span class="kicker">Compare the whole stack, not one line item</span>
+    <h2 id="all-in-title">The all-in math, not just the sticker price.</h2>
+    <p>A true comparison sums every layer a working setup requires: mailbox seats, domains (registration <em>and</em> the ongoing burn-replacement cycle), warmup, the sending/sequencing platform, suppression/unsubscribe/compliance infrastructure, and any per-send fee. The $99/month above is <strong>all six of those</strong>, bundled, with <strong>$0 per-send fees</strong>.</p>
+    <p>At the 5-15 mailbox starter/solo shape: a fair self-assembled 5-mailbox stack (5 Google Workspace seats at $7/seat + a $39/month sequencer + amortized domains at roughly $2.50/mailbox at the low end) runs ≈$76.50-140/month before your own assembly and maintenance time. Shopped rather than estimated, a competing agent-operated stack (Salesforge) landed at $112/month all-in versus Coldrig's $99. This holds at the starter/solo shape; at agency scale (dozens of mailboxes across multiple clients), Coldrig's current per-tenant pricing does not win, and no claim is made at that scale.</p>
   </section>
 
   <section class="pricing-faq" aria-labelledby="faq-title">

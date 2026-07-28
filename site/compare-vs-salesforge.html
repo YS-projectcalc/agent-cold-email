@@ -50,7 +50,7 @@
 <main class="wrap">
   <span class="draft-stamp">First-party sources checked 2026-07-14</span>
   <h1>Coldrig vs Salesforge / Forge Stack for AI agents</h1>
-  <p class="lede"><strong>Choose the Forge Stack today</strong> when LinkedIn, lead sourcing, and an established multi-year production history are requirements. <strong>Choose Coldrig</strong> when you want your existing coding agent to operate a smaller, single-token, managed infrastructure-to-reply surface — real sending and push webhooks are both already live. Coldrig is not yet the winner on production track record, and new-account activation still runs through a short concierge step rather than fully automatic self-serve.</p>
+  <p class="lede"><strong>Choose the Forge Stack today</strong> when LinkedIn, lead sourcing, and an established multi-year production history are requirements. <strong>Choose Coldrig</strong> when you want your existing coding agent to operate a smaller, single-token, managed infrastructure-to-reply surface — real sending and push webhooks are both already live. Coldrig is not yet the winner on production track record; signup, billing, screening, and real mailbox provisioning are fully self-serve and automatic, with mailbox send-authorization completing on our side.</p>
 
   <div class="callout">
     <strong>Why we compare against the strongest alternative</strong>
@@ -61,14 +61,14 @@
   <table>
     <thead><tr><th>Requirement</th><th>Salesforge / Forge Stack</th><th>Coldrig</th></tr></thead>
     <tbody>
-      <tr><td>Real cold-email sending now</td><td>Yes; production product and trial</td><td>Yes; live in production (Gmail API, HTTPS/443) — new accounts activate via a short concierge step</td></tr>
+      <tr><td>Real cold-email sending now</td><td>Yes; production product and trial</td><td>Yes; live in production (Gmail API, HTTPS/443) — self-serve checkout, mailbox send-authorization completes on our side</td></tr>
       <tr><td>MCP for coding agents</td><td>Hosted endpoint for Claude Code, Cursor, and other MCP clients</td><td>Hosted streamable-HTTP endpoint plus REST and npm CLI</td></tr>
-      <tr><td>Authentication shape</td><td>One endpoint; separate product headers/keys for each Forge product used</td><td>One tenant bearer token for all 24 intents</td></tr>
+      <tr><td>Authentication shape</td><td>One endpoint; separate product headers/keys for each Forge product used</td><td>One tenant bearer token for all 25 intents</td></tr>
       <tr><td>Infrastructure</td><td>Mailforge, Infraforge, or Primeforge; Warmforge for warmup</td><td>One intended managed lifecycle behind <code>setup_infrastructure</code></td></tr>
       <tr><td>Lead sourcing</td><td>Available through Leadsforge</td><td>Not included</td></tr>
       <tr><td>Email + LinkedIn</td><td>Supported</td><td>Email only</td></tr>
       <tr><td>Webhooks</td><td>Salesforge's official MCP help lists webhooks in the supported surface</td><td>Yes — <code>get_webhooks</code>/<code>configure_webhook</code> push reply, bounce, soft_bounce, and complaint events (HMAC-signed); <code>activity</code> remains pollable too</td></tr>
-      <tr><td>Agent surface philosophy</td><td>Broad, product-specific controls across the Forge products configured</td><td>24 outcome-level intents across Coldrig's documented lifecycle</td></tr>
+      <tr><td>Agent surface philosophy</td><td>Broad, product-specific controls across the Forge products configured</td><td>25 outcome-level intents across Coldrig's documented lifecycle</td></tr>
       <tr><td>Production track record</td><td>Established product with public customers and reviews</td><td>Real sending live in production as of today; no established multi-year track record yet</td></tr>
     </tbody>
   </table>
@@ -90,14 +90,14 @@
   <p>Those are architectural advantages only when they match the owner's constraints. They do not substitute for years of production track record, which Coldrig does not yet have.</p>
 
   <h2>Pricing: compare the all-in stack</h2>
-  <p>Salesforge currently lists Pro at $48/month on monthly billing ($40/month annual) and Growth at $96/month ($80/month annual), with a 14-day trial. Mailforge, Infraforge, Primeforge, Leadsforge, and some other capacity are priced separately or by usage; calculate the exact set of products and mailbox type required. Coldrig's formula is $49/month for the platform plus $10 per provisioned mailbox, with a five-mailbox minimum. That is $99 for 5 mailboxes, $149 for 10, $199 for 15, and $249 for 20. Real sending and live billing (Stripe, self-serve checkout) are both live at this pricing; new accounts still activate real sending through a short concierge step.</p>
+  <p>Salesforge currently lists Pro at $48/month on monthly billing ($40/month annual) and Growth at $96/month ($80/month annual), with a 14-day trial. Mailforge, Infraforge, Primeforge, Leadsforge, and some other capacity are priced separately or by usage; calculate the exact set of products and mailbox type required. When one evaluator actually assembled the Forge Stack's equivalent 5-mailbox setup rather than estimating it, it landed at $112/month all-in — above Coldrig's $99. Coldrig's formula is $49/month for the platform plus $10 per provisioned mailbox, with a five-mailbox minimum. That is $99 for 5 mailboxes, $149 for 10, $199 for 15, and $249 for 20 — all-in, covering mailbox seats, domains (registration and burn-replacement), warmup, the sending platform, and compliance infrastructure, with $0 per-send fees. This holds at the 5-15 mailbox starter/solo shape; at agency scale, no pricing-advantage claim is made. Real sending and live billing (Stripe, self-serve checkout) are both live at this pricing; signup, billing, screening, and real mailbox provisioning are fully self-serve and automatic, with mailbox send-authorization completing on our side.</p>
   <div class="callout">
     <strong>Compare like with like</strong>
     Coldrig's price includes the intended domain, mailbox, warmup-state, campaign, reply, and guardrail operating layer. A Forge Stack total depends on the exact products, mailbox type, capacity, and billing terms selected. Price the complete requirement on both sides; do not compare Coldrig with the Salesforge sending application alone.
   </div>
 
   <h2>Bottom line</h2>
-  <p>If the requirement is “run a real, agent-managed cold-email operation with years of production evidence behind it,” the Forge Stack is the lower-risk recommendation today. If the requirement is “test whether one stateful, agent-controlled abstraction with real sending and push webhooks already live can replace a multi-product integration,” Coldrig is worth a pilot — start with the free sandbox, then request activation. Re-evaluate the track-record gap as Coldrig accumulates real production history.</p>
+  <p>If the requirement is “run a real, agent-managed cold-email operation with years of production evidence behind it,” the Forge Stack is the lower-risk recommendation today. If the requirement is “test whether one stateful, agent-controlled abstraction with real sending and push webhooks already live can replace a multi-product integration,” Coldrig is worth a pilot — start with the free sandbox, then go live (self-serve checkout). Re-evaluate the track-record gap as Coldrig accumulates real production history.</p>
 
   <h2>Sources and verification</h2>
   <ul>

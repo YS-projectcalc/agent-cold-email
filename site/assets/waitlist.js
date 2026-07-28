@@ -30,7 +30,7 @@ document.addEventListener("DOMContentLoaded", () => {
         body: JSON.stringify({ email: emailInput.value }),
       });
       if (res.ok) {
-        setStatus(status, "Request received — we'll follow up to activate real sending on your account.", "ok");
+        setStatus(status, "Thanks — we'll keep you posted on product updates.", "ok");
         form.reset();
       } else {
         setStatus(status, "That didn't go through. Try again in a moment.", "err");

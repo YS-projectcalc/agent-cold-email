@@ -51,7 +51,7 @@
 
   <div class="callout">
     <strong>Live in production</strong>
-    The hosted MCP endpoint, HTTP API, npm CLI, fault-injecting sandbox, and real sending (Gmail API, HTTPS/443) are all live. A public signup by default creates an isolated demo tenant that cannot reach vendor adapters; activating real sending on your own account runs through a short concierge step while self-serve activation rolls out.
+    The hosted MCP endpoint, HTTP API, npm CLI, fault-injecting sandbox, and real sending (Gmail API, HTTPS/443) are all live. A public signup by default creates an isolated demo tenant that cannot reach vendor adapters; signup, billing, screening, and real mailbox provisioning on your own account are fully self-serve and automatic — the only remaining step is mailbox send-authorization completing on our side after provisioning, and you don't wait on a queue or do anything.
   </div>
 
   <div class="doc-toc">
@@ -61,6 +61,7 @@
       <li><a href="#mcp">MCP setup</a></li>
       <li><a href="#cli">CLI usage</a></li>
       <li><a href="#demo">The free demo</a></li>
+      <li><a href="#going-live">Going live</a></li>
       <li><a href="#tools">Tool reference</a></li>
       <li><a href="#auth">Auth model</a></li>
     </ul>
@@ -103,8 +104,17 @@ npx agent-cold-email campaign launch --file campaign.json</code></pre>
   <h2 id="demo">The free demo</h2>
   <p><code>POST /signup</code> mints a <code>demo</code>-plan tenant that is structurally incapable of reaching a real vendor adapter — enforced at the type level and covered by a test that fails if the guard is ever bypassed, not just documented policy. Every domain purchase, mailbox provisioning step, warmup tick, and send in demo mode runs against a fault-injecting sandbox: simulated rate limits, timeouts, bounces, and asynchronous replies, on a virtual clock so a multi-week warmup ramp resolves in the same session instead of in real time. This is the safe way to see the whole pipeline — provision, warm, send, reply, report — before anyone pays for anything.</p>
 
+  <h2 id="going-live">Going live</h2>
+  <p>Going live is self-serve, not a sales conversation:</p>
+  <pre><code>curl -s -X POST https://agent-cold-email-api.yaakovscher.workers.dev/checkout \
+  -H 'Authorization: Bearer &lt;your-token&gt;' \
+  -H 'Content-Type: application/json' \
+  -d '{"mailboxes":5}'
+# → { "mode": "stripe", "url": "https://checkout.stripe.com/...", "sessionId": "cs_..." }</code></pre>
+  <p><code>POST /checkout</code> returns a hosted Stripe payment link — open the <code>url</code> and pay. This endpoint is HTTP-only; it is not one of the 25 MCP tools, so an agent operating purely over MCP should hand this step to the owner (or call it directly if the agent has HTTP access). <strong>Promotion codes are entered on Stripe's own checkout page</strong>, via its "Add promotion code" link — the API deliberately has no coupon-code field of its own. The <code>mailboxes</code> field seeds the initial quote only — the subscription charge actually follows your provisioned mailbox count (5-mailbox floor, $10/month each beyond), which then tracks up or down as mailboxes provision or are released. After payment, real mailbox provisioning is automatic; the only remaining step is mailbox send-authorization completing on our side.</p>
+
   <h2 id="tools">Tool reference</h2>
-  <p>All 24 authed intents, plus the one unauthenticated bootstrap call. Full JSON Schemas: <a href="openapi.yaml">openapi.yaml</a>.</p>
+  <p>All 25 authed intents, plus the one unauthenticated bootstrap call. Full JSON Schemas: <a href="openapi.yaml">openapi.yaml</a>.</p>
   <table>
     <thead><tr><th>Tool</th><th>HTTP</th><th>Body / params</th></tr></thead>
     <tbody>
@@ -124,6 +134,7 @@ npx agent-cold-email campaign launch --file campaign.json</code></pre>
       <tr><td><code>mark</code></td><td><code>POST /threads/{id}/mark</code></td><td><code>{ status: "read"|"unread"|"archived" }</code></td></tr>
       <tr><td><code>label_thread</code></td><td><code>POST /threads/{id}/label</code></td><td><code>{ label: string|null }</code></td></tr>
       <tr><td><code>account</code></td><td><code>GET /account</code></td><td>—</td></tr>
+      <tr><td><code>remove_mailboxes</code></td><td><code>POST /remove-mailboxes</code></td><td><code>{ count, acknowledged: true }</code></td></tr>
       <tr><td><code>get_dashboard</code></td><td><code>GET /dashboard/views</code>, <code>GET /dashboard/views/{id}</code></td><td>—</td></tr>
       <tr><td><code>configure_dashboard</code></td><td><code>POST/PUT/DELETE /dashboard/views[/{id}]</code>, <code>POST /dashboard/views/{id}/default</code></td><td><code>{ name, layout, note }</code> (per action)</td></tr>
       <tr><td><code>get_webhooks</code></td><td><code>GET /webhook-subscriptions</code>, <code>GET /webhook-subscriptions/{id}</code></td><td>—</td></tr>
@@ -137,7 +148,7 @@ npx agent-cold-email campaign launch --file campaign.json</code></pre>
   </table>
   <p>Two optional helpers (<code>write_sequence</code>, <code>suggest_domains</code>) are designed but not yet built — do not assume they exist today.</p>
   <p><strong>Webhook boundary:</strong> real push webhooks are live. <code>get_webhooks</code>/<code>configure_webhook</code> deliver reply, bounce, soft_bounce, and complaint events (HMAC-SHA256 signed, header <code>X-Coldrig-Signature</code>) to your own HTTPS endpoint; URLs must be a public HTTPS host. <code>activity</code> remains available as a pollable alternative for the same event classes.</p>
-  <p><strong>BYO domain boundary:</strong> domain registration, the pre-flight scan, and consent tracking via <code>get_byo_domains</code>/<code>configure_byo_domain</code> are live, reachable tools today. Real DNS delegation, live reputation checks, and platform-provisioned mailboxes on your own domain activate through the same concierge step as real sending generally — see <a href="/byo-domain">the BYO domain page</a>.</p>
+  <p><strong>BYO domain boundary:</strong> domain registration, the pre-flight scan, and consent tracking via <code>get_byo_domains</code>/<code>configure_byo_domain</code> are live, reachable tools today. Real DNS delegation, live reputation checks, and platform-provisioned mailboxes on your own domain are self-serve and automatic through provisioning; mailbox send-authorization still completes on our side — see <a href="/byo-domain">the BYO domain page</a>.</p>
 
   <h2 id="auth">Auth model</h2>
   <p>One bearer token per tenant, minted at signup. Every authed call:</p>

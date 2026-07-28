@@ -3,7 +3,7 @@
   "name": "agent-cold-email",
   "displayName": "Coldrig",
   "version": "0.2.0",
-  "description": "Agent-controlled cold-outreach infrastructure, live in production. One bearer token and 24 focused tools replace multiple vendor accounts, preserve durable infrastructure state, provision isolated domains and mailboxes, run sequences, manage replies and push webhooks, track lead disposition, and enforce guardrails server-side. The customer's own agent remains the strategy and content layer. Free sandbox demo today, no card, no waitlist; real sending runs in production (Gmail API, HTTPS/443), with new accounts activating via a short concierge step while self-serve activation rolls out. Pricing starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox, with no send quota (sends are not the billing meter).",
+  "description": "Agent-controlled cold-outreach infrastructure, live in production. One bearer token and 25 focused tools replace multiple vendor accounts, preserve durable infrastructure state, provision isolated domains and mailboxes, run sequences, manage replies and push webhooks, track lead disposition, and enforce guardrails server-side. The customer's own agent remains the strategy and content layer. Free sandbox demo today, no card, no waitlist; real sending runs in production (Gmail API, HTTPS/443). Going live is self-serve (POST /checkout returns a hosted Stripe payment link); the only remaining step is mailbox send-authorization completing on our side after provisioning. Pricing starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox, with no send quota (sends are not the billing meter) and $0 per-send fees.",
   "homepage": "https://coldrig.dev/",
   "documentation": "https://coldrig.dev/docs",
   "license": "MIT",
@@ -20,9 +20,9 @@
     "description": "One token per tenant, obtained via POST https://agent-cold-email-api.yaakovscher.workers.dev/signup (no auth required for signup itself). Pass as Authorization: Bearer <token>."
   },
   "status": "live",
-  "statusNote": "Live in production: the hosted API, MCP endpoint, npm CLI, isolated sandbox, real sending (Gmail API, HTTPS/443), and live billing (Stripe, self-serve checkout, real cards) are all live. New accounts still activate real sending through a short concierge step. Demo/sandbox tenants remain structurally unable to reach vendor adapters and incur no real spend.",
+  "statusNote": "Live in production: the hosted API, MCP endpoint, npm CLI, isolated sandbox, real sending (Gmail API, HTTPS/443), and live billing (Stripe, self-serve checkout, real cards) are all live. Signup, billing, screening, and real mailbox provisioning are fully self-serve and automatic; the only remaining step is mailbox send-authorization completing on our side after provisioning (you do not wait on a queue or do anything). Demo/sandbox tenants remain structurally unable to reach vendor adapters and incur no real spend.",
   "pricing": {
-    "model": "Starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox (a $49 platform fee + $10/mailbox, 5-mailbox minimum; ladder runs 5-60 mailboxes). No send quota — sends are not the billing meter. Self-serve live billing (Stripe, real cards) is live; new accounts still activate real sending through a short concierge step.",
+    "model": "Starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox (a $49 platform fee + $10/mailbox, 5-mailbox minimum; ladder runs 5-60 mailboxes). No send quota — sends are not the billing meter, $0 per-send fees. Self-serve live billing (Stripe, real cards, POST /checkout) is live; mailbox send-authorization completes on our side.",
     "freeTier": "Free sandboxed demo, no signup, no card, no waitlist: POST /signup or `npx agent-cold-email demo`.",
     "url": "https://coldrig.dev/pricing"
   },
@@ -79,6 +79,10 @@
     {
       "name": "account",
       "description": "Usage, billing state, quota, and what the AI deliverability control loop has done."
+    },
+    {
+      "name": "remove_mailboxes",
+      "description": "Downgrade: release your N newest live mailboxes now and lower the billed quantity."
     },
     {
       "name": "get_dashboard",
