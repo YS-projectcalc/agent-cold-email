@@ -77,12 +77,15 @@ describe("body-size cap before JSON.parse (413)", () => {
   });
 });
 
-// panel-02 distribution-honesty: demo/test tenants were minted with a
-// Stripe-style `cs_live_` prefix on a test-mode-only platform.
-describe("token prefix — non-activated tenants never carry a _live_ token", () => {
-  it("mints a cs_test_ token, never a _live_ token, for a demo-plan signup", async () => {
+// The platform is now LIVE (real billing, real Stripe keys flipped —
+// ROADMAP.md 2026-07-23), so a fresh token is brand-correct AND mode-honest:
+// `cr_live_`. This supersedes the pre-live-cutover invariant this test used
+// to assert (demo tenants never carrying a `_live_`-shaped token, panel-02
+// distribution-honesty) — that concern doesn't apply once "live" is true for
+// every tenant, not just activated real-sending ones.
+describe("token prefix — every fresh signup mints a brand-correct, mode-honest token", () => {
+  it("mints a cr_live_ token for a demo-plan signup", async () => {
     const { token } = await signup("Prefix Co", "prefix@token-test.example");
-    expect(token.startsWith("cs_test_")).toBe(true);
-    expect(token).not.toContain("_live_");
+    expect(token.startsWith("cr_live_")).toBe(true);
   });
 });

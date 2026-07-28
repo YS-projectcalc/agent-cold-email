@@ -166,6 +166,14 @@ export const MCP_TOOLS: McpTool<any>[] = [
     { title: "Account Overview", readOnlyHint: true },
     (stub) => stub.account(),
   ),
+  // Deliberate MCP parity exception (SPEC.md §19.0 parity law) — there is NO
+  // `rotate_token` tool for `POST /token/rotate` (routes/token-rotate.ts). An
+  // agent rotating its own bearer token mid-session invalidates the very
+  // credential authenticating its own current call (and any sibling call
+  // racing it) with no clean in-session recovery — a footgun, not a missed
+  // tool. Rotation is reachable via the dashboard (session-cookie) or a
+  // deliberate out-of-band bearer POST outside a live agent session; it is
+  // NOT exposed as a callable tool on this MCP surface, on purpose.
   tool(
     "remove_mailboxes",
     "Downgrade: release your N NEWEST live mailboxes now and lower the billed quantity. Inputs: count, acknowledged (must be true — this is a quoted, irreversible-this-cycle consent: the release is immediate for provisioning but there is NO mid-cycle credit; the lower price takes effect next renewal, minimum 5 mailboxes / $99). Returns { releasedCount, quote } where quote is the new projected monthly. To ADD mailboxes use setup_infrastructure / configure_byo_domain (request_managed_mailboxes).",

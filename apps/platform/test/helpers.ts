@@ -208,6 +208,24 @@ export async function mintTenant(brand: string, plan: TenantPlan): Promise<{ ten
 }
 
 /**
+ * Like `mintTenant`, but with an EXPLICIT token string instead of a freshly
+ * `generateApiToken()`-minted one — the only way to construct a fixture
+ * tenant carrying a legacy `cs_test_`-shaped token now that `generateApiToken`
+ * mints `cr_live_` (auth.ts's `TOKEN_PREFIX`). Proves the grandfathering
+ * guarantee: resolution is hash-based and prefix-blind
+ * (require-auth.ts's resolveTenantFromToken), so ANY previously-issued token
+ * shape must keep authenticating forever.
+ */
+export async function mintTenantWithToken(brand: string, plan: TenantPlan, token: string): Promise<{ tenantId: string; token: string }> {
+  const tenantId = newId("ten");
+  const tokenHash = await hashApiToken(token, env.TOKEN_HASH_PEPPER);
+  await insertTenantIndex(env, { id: tenantId, apiTokenHash: tokenHash, brand, plan, createdAt: Date.now() });
+  const stub = env.TENANT.get(env.TENANT.idFromName(tenantId));
+  await stub.initTenant({ tenantId, brand, plan });
+  return { tenantId, token };
+}
+
+/**
  * G1 OFAC screening (N-OF-1 fix, adversary OFAC build review 2026-07-23) — a
  * checkout now genuinely fail-CLOSES (`screening_status='review'`) when NO
  * SDN list is loaded (src/ofac/screening.ts). Any test that drives a tenant

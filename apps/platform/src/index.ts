@@ -23,6 +23,7 @@ import { statusRoute } from "./routes/status.js";
 import { dashboardSessionRoute } from "./routes/dashboard-session.js";
 import { loginRoute } from "./routes/login.js";
 import { dashboardRoute } from "./routes/dashboard.js";
+import { tokenRotateRoute } from "./routes/token-rotate.js";
 import { activityRoute } from "./routes/activity.js";
 import { webhookSubscriptionsRoute } from "./routes/webhook-subscriptions.js";
 import { byoDomainsRoute } from "./routes/byo-domains.js";
@@ -108,6 +109,7 @@ const AUTHED_PATH_PATTERNS = [
   "/dashboard/logout",
   "/dashboard/views",
   "/dashboard/views/*",
+  "/token/rotate",
   "/activity",
   "/webhook-subscriptions",
   "/webhook-subscriptions/*",
@@ -131,6 +133,7 @@ authed.route("/", checkoutRoute);
 authed.route("/", lifecycleRoute);
 authed.route("/", demoRoute);
 authed.route("/", dashboardRoute);
+authed.route("/", tokenRotateRoute);
 authed.route("/", activityRoute);
 authed.route("/", webhookSubscriptionsRoute);
 authed.route("/", byoDomainsRoute);
