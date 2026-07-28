@@ -1,4 +1,8 @@
 name = "agent-cold-email-api"
+workers_dev = true
+routes = [
+  { pattern = "api.coldrig.dev", custom_domain = true }
+]
 main = "src/index.ts"
 compatibility_date = "2026-07-01"
 compatibility_flags = ["nodejs_compat"]
