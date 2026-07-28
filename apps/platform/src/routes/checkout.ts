@@ -50,6 +50,18 @@ export const checkoutRoute = new Hono<{ Bindings: Env; Variables: AuthedVariable
 // so simulate works ONLY in a fully-unarmed environment.
 // `completeSimulatedCheckout` (engine/billing.ts) repeats this guard as
 // defense in depth.
+// GET /checkout/success + /checkout/cancel — UNAUTHENTICATED browser landings
+// for Stripe's hosted-checkout redirects (Stripe sends the customer's browser
+// here with no bearer; same trust posture as /checkout/simulate above). These
+// existed as success_url/cancel_url targets since the first Stripe wiring but
+// were never routed — Stripe redirected the FIRST real paying customer to the
+// Hono 404 JSON (found live 2026-07-28). Pure 302s into the dashboard, which
+// renders the tenant's real post-checkout state; no state is read or written
+// here, so there is nothing to guard.
+export const checkoutReturnRoute = new Hono<{ Bindings: Env }>()
+  .get("/checkout/success", (c) => c.redirect("/app/billing?checkout=success", 302))
+  .get("/checkout/cancel", (c) => c.redirect("/app/billing?checkout=canceled", 302));
+
 export const checkoutSimulateRoute = new Hono<{ Bindings: Env }>().get("/checkout/simulate", async (c) => {
   if (isRealSpendArmed(c.env)) {
     return c.json({ error: "simulated checkout is disabled once real vendor spend is armed" }, 404);

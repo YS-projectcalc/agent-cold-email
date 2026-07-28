@@ -8,7 +8,7 @@ import { infrastructureRoute } from "./routes/infrastructure.js";
 import { campaignsRoute } from "./routes/campaigns.js";
 import { inboxRoute } from "./routes/inbox.js";
 import { accountRoute } from "./routes/account.js";
-import { checkoutRoute, checkoutSimulateRoute } from "./routes/checkout.js";
+import { checkoutRoute, checkoutReturnRoute, checkoutSimulateRoute } from "./routes/checkout.js";
 import { lifecycleRoute } from "./routes/lifecycle.js";
 import { webhooksRoute } from "./routes/webhooks.js";
 import { unsubscribeRoute } from "./routes/unsubscribe.js";
@@ -46,6 +46,7 @@ app.route("/", signupRoute);
 app.route("/", mcpRoute);
 app.route("/", waitlistRoute);
 app.route("/", checkoutSimulateRoute);
+app.route("/", checkoutReturnRoute);
 app.route("/", webhooksRoute);
 app.route("/", unsubscribeRoute);
 // GET /status — public, no tenant/admin data (see routes/status.ts).

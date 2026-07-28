@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { env, runInDurableObject } from "cloudflare:test";
+import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { activatePaidPlan, api, cookieApi, createDashboardSession, mintTenant, signup, tenantStub } from "./helpers.js";
 
 interface CheckoutResponse {
@@ -337,5 +337,22 @@ describe("GET /checkout/simulate — fails closed once live Stripe keys are conf
 
     const after = await readProfile(tenantId);
     expect(after.billing_state).toBe("none");
+  });
+});
+
+describe("checkout return landings (Stripe browser redirects)", () => {
+  // These are the success_url/cancel_url targets startCheckout hands Stripe
+  // (engine/billing.ts). They must 302 into the dashboard, never 404 — Stripe
+  // sent the first real paying customer to the JSON 404 when they were
+  // unrouted (live incident 2026-07-28).
+  it("GET /checkout/success 302s into the dashboard billing page", async () => {
+    const res = await SELF.fetch("https://example.com/checkout/success?tenant=ten_x", { redirect: "manual" });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/app/billing?checkout=success");
+  });
+  it("GET /checkout/cancel 302s into the dashboard billing page", async () => {
+    const res = await SELF.fetch("https://example.com/checkout/cancel?tenant=ten_x", { redirect: "manual" });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/app/billing?checkout=canceled");
   });
 });
