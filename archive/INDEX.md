@@ -8,3 +8,5 @@
 - [2026-07-20-post-two-waves/](2026-07-20-post-two-waves/) — handoff run after the 07-19 double ship wave (production 443 + fully-live reframe; byo 21-tool merge + 2¢ fee deletion). `scratch-rescue/render-og-image.js` = the Playwright SVG→PNG renderer used for og-image (repo has no other generator); `prior-HANDOFF.md` = pre-handoff copy.
 
 - 2026-07-22-golive-program/ — go-live program handoff: prior-HANDOFF.md snapshot; scratch-rescue/promo-e2e/ = live Stripe test-mode promo-checkout E2E evidence (browser script + $0.00/100%-off/final screenshots, 2026-07-22); ROADMAP [x] lines drained to ROADMAP-done.md
+- 2026-07-28-mordy-golive-wave/scratch-rescue/dmhadvisor-dns-snapshot-pre-probe.json — dmhadvisor.com full DNS snapshot BEFORE the probe deleted its mail records + kwong CNAME (restore source; rescued from session scratchpad)
+- 2026-07-28-mordy-golive-wave/prior-HANDOFF.md — HANDOFF as of the 07-28 wave-close bookkeeping, pre-Mordy-purchase
