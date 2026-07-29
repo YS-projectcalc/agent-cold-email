@@ -162,6 +162,16 @@ app.onError((err, c) => {
       { error: "Domain registration is not yet enabled for this account. No purchase was made. The operator has been notified.", code: "registrar_unarmed" },
       503,
     );
+  // Registrar-arming follow-up (2026-07-28) — a tenant cleared both arming
+  // legs but the registrant on file for them is missing required fields
+  // (registrar-arming.ts's assertCompleteRegistrant). Unlike
+  // RegistrarUnarmedError above, this IS tenant-fixable (resubmit
+  // setup_infrastructure with a complete `registrant`), so the body names the
+  // missing fields — same graceful-4xx-not-500 treatment, distinguishable code.
+  if (name === "IncompleteRegistrantError") {
+    const incomplete = err as Error & { missingFields: string[] };
+    return c.json({ error: err.message, missingFields: incomplete.missingFields, code: "incomplete_registrant" }, 400);
+  }
   // SPEC.md §19.4 [F5] — a stale dashboard-view rev is a STRUCTURED 409: the
   // agent needs currentRev + currentLayout to rebase its edit, not just an
   // opaque "conflict" string.

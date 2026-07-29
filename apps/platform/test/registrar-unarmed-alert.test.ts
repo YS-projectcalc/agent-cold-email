@@ -70,6 +70,7 @@ const SETUP_INPUT = {
   physicalAddress: "1 St",
   senderIdentity: "Sender <s@registraralertco.com>",
   quoteOnly: false,
+  registerDomains: false,
 };
 
 describe("G5 gate (a) — runSetupInfrastructure's registrar-unarmed handling", () => {

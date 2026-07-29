@@ -90,6 +90,7 @@ describe("setup_infrastructure default add returns the §18 billing projection",
             physicalAddress: "1 St",
             senderIdentity: "Sender <s@cappartial.com>",
             quoteOnly: false,
+            registerDomains: false,
           },
           new SandboxOpsMailer(),
         );

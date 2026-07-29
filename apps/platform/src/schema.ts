@@ -83,6 +83,26 @@ CREATE TABLE IF NOT EXISTS tenant_profile (
   -- (design §9/N5), so mrrCents/quote apply it without a Stripe round trip.
   -- 0 when no coupon. Integer percent (e.g. 60 for MORDYPILOT's 60% off).
   checkout_discount_pct INTEGER NOT NULL DEFAULT 0,
+  -- G5 gate (a) follow-up — InboxKit-as-registrar PER-TENANT opt-in (founder
+  -- ruling 2026-07-21: "InboxKit-as-registrar is per-tenant opt-in only,
+  -- never a default"). Captured from SetupInfrastructureInput.registerDomains
+  -- at provisioning.ts's runSetupInfrastructure, alongside brand/
+  -- primary_domain/physical_address/sender_identity above — so it also
+  -- governs the deliverability control loop's REPLACE_DOMAIN
+  -- burn-replacement buys (which never go through that request body
+  -- directly). DEFAULT 0 keeps every existing row byte-identical: even with
+  -- REGISTRAR_PROVIDER=inboxkit armed, domain.buy stays hard-blocked
+  -- (RegistrarUnarmedDomainPort) until a tenant explicitly opts in (see
+  -- vendors/factory.ts / vendors/registrar-arming.ts).
+  register_domains INTEGER NOT NULL DEFAULT 0,
+  -- Registrar-arming follow-up (2026-07-28) — the tenant's structured
+  -- registrant-of-record (SetupInfrastructureInput.registrant), persisted
+  -- verbatim as JSON alongside register_domains above. NULL until a tenant
+  -- calls setup_infrastructure with registerDomains:true (zod requires
+  -- 'registrant' on that call -- packages/shared/src/intents.ts). Read back by
+  -- vendors/registrar-arming.ts's deriveInboxKitRegistrant, which PREFERS this
+  -- structured capture over the old brand/physical_address-derived partial.
+  registrant_json TEXT,
   created_at INTEGER NOT NULL,
   clock_base INTEGER NOT NULL,
   clock_offset INTEGER NOT NULL DEFAULT 0,

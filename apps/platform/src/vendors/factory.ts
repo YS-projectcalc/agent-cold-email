@@ -1,4 +1,4 @@
-import type { Clock, TenantPlan, VendorAdapters } from "@coldstart/shared";
+import type { Clock, DomainPort, TenantPlan, VendorAdapters } from "@coldstart/shared";
 import { SandboxBillingPort } from "./sandbox/billing-port.js";
 import { SandboxDnsScanPort } from "./sandbox/dns-scan-port.js";
 import { SandboxDomainPort } from "./sandbox/domain-port.js";
@@ -11,9 +11,11 @@ import { RealDnsScanPort } from "./real/dns-scan-port.js";
 import { RegistrarUnarmedDomainPort } from "./real/domain-port.js";
 import { RealEmailPort, type EngineClientConfig } from "./real/email-port.js";
 import { type InboxKitClientConfig } from "./real/inboxkit-client.js";
+import { RealInboxKitDomainPort, type InboxKitDomainRegistrant } from "./real/inboxkit-domain-port.js";
 import { RealMailboxPort } from "./real/mailbox-port.js";
 import { RealMetricsPort } from "./real/metrics-port.js";
 import { RealDomainReputationPort } from "./real/reputation-port.js";
+import type { RegistrarArmingInput } from "./registrar-arming.js";
 
 export type VendorAdapterKind = "sandbox" | "real";
 
@@ -58,13 +60,26 @@ export interface VendorAdapterBundle extends VendorAdapters {
  * the mailbox vendor's credential (`inboxKitConfig ? RealInboxKitDomainPort
  * : RealDomainPort`), so arming InboxKit for mailboxes silently also armed
  * InboxKit-as-registrar — a money-out path the founder never authorized.
- * `domain` now hard-blocks (`RegistrarUnarmedDomainPort`, throws
+ * `domain` hard-blocks (`RegistrarUnarmedDomainPort`, throws
  * `RegistrarUnarmedError` on every call) whenever the bundle would otherwise
- * go real, regardless of `inboxKitConfig` — a real registrar seam needs its
- * own dedicated arming (`REGISTRAR_PROVIDER`/`CLOUDFLARE_REGISTRAR_API_TOKEN`,
- * env.ts), and that adapter is deferred to the GA wave either way (scope note
- * 2026-07-23). Mailbox is UNAFFECTED — InboxKit remains the sole mailbox
- * vendor, gated on `inboxKitConfig` exactly as before.
+ * go real, UNLESS `registrarArming` proves BOTH of its own, independent legs
+ * (2026-07-27 wiring, `vendors/registrar-arming.ts`):
+ *   1. `armed`  — `REGISTRAR_PROVIDER === "inboxkit"` (env.ts) — the operator's
+ *                 global switch.
+ *   2. `optIn`  — the TENANT's persisted consent
+ *                 (`SetupInfrastructureInput.registerDomains`, captured onto
+ *                 `tenant_profile.register_domains` at
+ *                 provisioning.ts's runSetupInfrastructure).
+ * Both legs true -> `RealInboxKitDomainPort`, constructed with the SAME
+ * `inboxKitConfig` credentials the mailbox port uses (one InboxKit vendor
+ * account) plus a best-effort registrant derived from tenant_profile
+ * (`registrarArming.registrant` — possibly incomplete; the fail-loud
+ * completeness check lives at the actual buy() call site,
+ * provisioning.ts, never here, so an incomplete profile never bricks THIS
+ * factory call for unrelated intents). Either leg false -> the hard-block,
+ * exactly as before gate (a) and 2026-07-27 both independently. Mailbox is
+ * UNAFFECTED by any of this — InboxKit remains the sole mailbox vendor,
+ * gated on `inboxKitConfig` exactly as before.
  *
  * EmailPort itself ALSO requires the design's "global-armed: engine wired"
  * conjunct (§2.1) — `activated` alone is NOT enough: `engineConfig` (derived
@@ -84,8 +99,11 @@ export interface VendorAdapterBundle extends VendorAdapters {
  * `inboxKitConfig` absence similarly keeps mailbox dark as defense in depth —
  * this factory's gate narrows who is ELIGIBLE for a real port, each real
  * port's own dark-until-configured check narrows further to who is actually
- * WIRED. `domain` is gate (a)'s hard block instead (see above) — it never
- * reads `inboxKitConfig` at all.
+ * WIRED. `domain` is gate (a)'s hard block instead (see above) unless
+ * `registrarArming` proves both its legs — it never reads `inboxKitConfig`
+ * directly for that decision (it reuses the SAME credentials once armed, but
+ * the ARMING decision is registrarArming's own two legs, never `inboxKitConfig`'s
+ * mere presence).
  */
 export function createVendorAdapters(
   plan: TenantPlan,
@@ -101,6 +119,15 @@ export function createVendorAdapters(
    * deliberately removed this from the domain-port decision (see above).
    */
   inboxKitConfig?: InboxKitClientConfig,
+  /**
+   * G5 gate (a) follow-up (2026-07-27) — the domain port's OWN, independent
+   * arming decision (`vendors/registrar-arming.ts`). Absent (no call site
+   * supplies it — today's only call sites are the sandbox-cache line and
+   * every test that doesn't opt in) behaves EXACTLY like `{ armed: false,
+   * optIn: false, registrant: {} }` below — the pre-2026-07-27 hard-block,
+   * unchanged.
+   */
+  registrarArming?: RegistrarArmingInput,
 ): VendorAdapterBundle {
   const isDemoOrFree = plan === "demo" || plan === "free";
   // `engineConfig` is the external email engine's address/secret (env-derived
@@ -129,17 +156,14 @@ export function createVendorAdapters(
 
   return {
     kind: "real",
-    // G5 gate (a) — ALWAYS the hard-block port here, regardless of
-    // `inboxKitConfig` (see the doc comment above; adversary B1 2026-07-23).
-    // A real registrar (Cloudflare, founder-ruled default) needs its OWN
-    // `registrarConfig` arming (env.ts `REGISTRAR_PROVIDER`/
-    // `CLOUDFLARE_REGISTRAR_API_TOKEN`) before `domain.buy` can ever be
-    // considered — and even then the purchase adapter itself is deferred to
-    // the GA wave (scope note 2026-07-23: Cloudflare's public API coverage
-    // for NEW-domain purchase is unverified). So this branch never varies on
-    // `registrarConfig` either — there is no working adapter to select yet;
-    // wiring one in is a one-line change here once it exists.
-    domain: new RegistrarUnarmedDomainPort(),
+    // G5 gate (a) three-way branch (2026-07-27): the hard-block UNLESS BOTH
+    // `registrarArming` legs (armed AND opted-in) are true — see
+    // `selectRealDomainPort` below, the single source of truth for this
+    // decision (shared with TenantDO.setupInfrastructure's per-call B1
+    // re-selection). Never varies on `inboxKitConfig`'s mere presence; the real
+    // adapter reuses the SAME `inboxKitConfig` credentials as the mailbox port
+    // (one InboxKit vendor account).
+    domain: selectRealDomainPort(inboxKitConfig, registrarArming),
     // InboxKit is the unambiguous, SPEC-decided mailbox vendor (§11/§12
     // "primary = Inboxkit") — no fallback branch needed here. UNAFFECTED by
     // gate (a): mailbox arming is exactly as before.
@@ -150,4 +174,29 @@ export function createVendorAdapters(
     dnsScan: new RealDnsScanPort(),
     reputation: new RealDomainReputationPort(),
   };
+}
+
+/**
+ * The real-branch domain-port decision, factored out of `createVendorAdapters`
+ * (CLAUDE.md rule c) so the per-call re-selection in
+ * `TenantDO.setupInfrastructure` (the B1 fix,
+ * docs/adversarial/registrar-arming-review-2026-07-28.md — THIS call's opt-in +
+ * registrant is authoritative at buy time, not the pre-call persisted profile
+ * `buildAdapters` read) reuses the EXACT same two-leg gate and construction as
+ * the factory, never a parallel copy. Only meaningful for an already
+ * real-eligible bundle (`useSandbox === false`): the two-leg decouple guard is
+ * inviolable here — both `armed` (env, the operator's global switch) AND `optIn`
+ * must be true, or the hard-block `RegistrarUnarmedDomainPort` applies exactly as
+ * G5 gate (a) shipped it. The registrant is passed as a POSSIBLY-INCOMPLETE
+ * best-effort object; the fail-loud completeness check (`assertCompleteRegistrant`)
+ * lives at the actual buy() call site (engine/provisioning.ts), never here.
+ */
+export function selectRealDomainPort(
+  inboxKitConfig: InboxKitClientConfig | undefined,
+  registrarArming: RegistrarArmingInput | undefined,
+): DomainPort {
+  const useInboxKitRegistrar = Boolean(registrarArming?.armed && registrarArming?.optIn);
+  return useInboxKitRegistrar
+    ? new RealInboxKitDomainPort(inboxKitConfig, registrarArming!.registrant as InboxKitDomainRegistrant)
+    : new RegistrarUnarmedDomainPort();
 }

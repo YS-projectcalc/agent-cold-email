@@ -64,14 +64,30 @@ declare global {
       // INBOXKIT_* above (ROADMAP.md:19,33,43; adversary B1 2026-07-23: the
       // old factory logic welded `domain.buy` to the mailbox vendor
       // credential, so arming InboxKit for mailboxes silently also armed
-      // InboxKit-as-registrar). Cloudflare Registrar is the founder-ruled
-      // default provider (Namecheap fallback) — see vendors/factory.ts and
-      // vendors/real/domain-port.ts. Setting these does NOT yet wire a
-      // working purchase adapter (the Cloudflare purchase-API wire shape is
-      // unverified — GA-wave scope note 2026-07-23), but the moment they
-      // bind, real registrar-spend intent is signaled, so `// spend-arming`
-      // (R3-1): isRealSpendArmed MUST treat them as an arming signal same as
-      // INBOXKIT_*, enforced by spend-armed-env-coverage.test.ts.
+      // InboxKit-as-registrar). `REGISTRAR_PROVIDER` is the arming SWITCH —
+      // its only recognized value today is `"inboxkit"` (founder ruling
+      // 2026-07-21/2026-07-27: InboxKit-as-registrar reuses the SAME InboxKit
+      // vendor account/credentials as the mailbox port, `INBOXKIT_API_KEY`/
+      // `INBOXKIT_WORKSPACE_ID` above, but arming is this SEPARATE var —
+      // flipping InboxKit on for mailboxes must never silently also arm it as
+      // a registrar). Even with `REGISTRAR_PROVIDER=inboxkit` set, real
+      // domain purchases stay per-tenant opt-in
+      // (`SetupInfrastructureInput.registerDomains`, packages/shared/
+      // src/intents.ts) — see vendors/factory.ts's three-way domain branch.
+      // `CLOUDFLARE_REGISTRAR_API_TOKEN` is a DISTINCT, reserved-but-inert var
+      // for a hypothetical future `"cloudflare"` provider value — no
+      // Cloudflare registrar adapter exists in this build (GA-wave scope note
+      // 2026-07-23: Cloudflare's public API's new-domain-purchase coverage is
+      // unverified), so no code reads it today; kept declared so a future
+      // provider can slot in without a fresh env-coverage migration. Both
+      // `// spend-arming` (R3-1): the moment `REGISTRAR_PROVIDER` binds to a
+      // recognized value, real registrar-spend intent is signaled (gated
+      // further by the per-tenant opt-in, but the ENV signal alone must still
+      // be treated as arming for isRealSpendArmed's purposes — a spend-ceiling
+      // ceiling with no armed vendor spends $0, but an armed vendor with the
+      // ceiling bypassed would not be caught by this guard, which is why the
+      // guard errs toward treating the env as arming), enforced by
+      // spend-armed-env-coverage.test.ts.
       REGISTRAR_PROVIDER?: string; // spend-arming
       CLOUDFLARE_REGISTRAR_API_TOKEN?: string; // spend-arming
       // GA gates G2/G4 (ga-gates-design-2026-07-22.md §G2/§G4) — the
