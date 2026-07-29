@@ -13,6 +13,8 @@ import { assertWithinProvisioningCap } from "./quota.js";
 import { screenTenant } from "../ofac/screening.js";
 import { alertRegistrarUnarmed } from "./registrar-alert.js";
 import { withSpendCeiling } from "./spend-ceiling.js";
+import { RealInboxKitDomainPort } from "../vendors/real/inboxkit-domain-port.js";
+import { assertCompleteRegistrant, readRegistrarOptInState } from "../vendors/registrar-arming.js";
 import { computeWarmupDay, epochDay, warmupDailyCap, warmupStatus } from "./warmup.js";
 
 // Per-mailbox/mo metering fee (SPEC.md §18 ballpark fully-loaded cost) —
@@ -160,6 +162,20 @@ export async function provisionDomainWithMailboxes(
 ): Promise<{ domainId: string; domain: string; mailboxEmails: string[] }> {
   const domainKey = `${opts.domain}#${opts.domainIndex}`;
 
+  // G5 gate (a) follow-up (2026-07-27) — BEFORE any spend reservation or
+  // vendor call: a tenant who cleared BOTH registrar-arming legs (env armed +
+  // opted in — vendors/factory.ts's three-way branch) but whose CAN-SPAM
+  // profile can't source a complete InboxKit registrant fails loud here,
+  // naming exactly which fields are missing, instead of reserving spend for a
+  // buy that would either silently send a partial contact_details payload or
+  // waste a real vendor round trip. Detected via `instanceof` rather than a
+  // duplicated armed/optIn check — the factory is the single source of truth
+  // for THAT decision; this only re-derives the registrant (same tenant_profile
+  // source) to validate completeness at the point of actual spend.
+  if (ctx.adapters.domain instanceof RealInboxKitDomainPort) {
+    assertCompleteRegistrant(readRegistrarOptInState(ctx.sql, ctx.tenantId).registrant);
+  }
+
   // G2 money-out site #3 (design §0 inventory) — the registrar domain purchase.
   // setDns below is config-only (not spend), so it stays unwrapped. When the
   // registrar is unarmed (G5 gate (a)), domain.buy throws RegistrarUnarmedError
@@ -233,11 +249,24 @@ export async function runSetupInfrastructure(
   }
 
   ctx.sql.exec(
-    `UPDATE tenant_profile SET brand = ?, primary_domain = ?, physical_address = ?, sender_identity = ? WHERE id = ?`,
+    `UPDATE tenant_profile SET brand = ?, primary_domain = ?, physical_address = ?, sender_identity = ?, register_domains = ?, registrant_json = ? WHERE id = ?`,
     input.brand,
     input.primaryDomain,
     input.physicalAddress,
     input.senderIdentity,
+    // G5 gate (a) follow-up — the tenant's PER-TENANT, PERSISTED consent to
+    // real domain purchases (founder ruling 2026-07-21: "per-tenant opt-in
+    // only, never a default"). Persisted here alongside the other CAN-SPAM
+    // capture so it also governs the deliverability control loop's
+    // REPLACE_DOMAIN burn-replacement buys (vendors/registrar-arming.ts).
+    input.registerDomains ? 1 : 0,
+    // Registrar-arming follow-up (2026-07-28) — the structured registrant-of-
+    // record. zod (SetupInfrastructureInput's refinement) guarantees `input.registrant`
+    // is present + complete whenever `input.registerDomains` is true, so this
+    // write is never partial for a call that actually opts in THIS time.
+    // Written alongside register_domains on every call (never merged with a
+    // prior value) so the two columns can never drift apart from each other.
+    input.registrant ? JSON.stringify(input.registrant) : null,
     ctx.tenantId,
   );
 

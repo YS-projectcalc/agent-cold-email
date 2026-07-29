@@ -5,6 +5,7 @@ import type {
   CheckoutInput,
   ConnectByoMailboxInput,
   DashboardLayout,
+  DomainPort,
   InboxQueryInput,
   LaunchCampaignInput,
   ListLeadsQueryInput,
@@ -96,9 +97,10 @@ import { newId, TENANT_DO_SCHEMA } from "./schema.js";
 import type { TenantContext } from "./tenant-context.js";
 import { readActivationState } from "./engine/activation.js";
 import { clearScreeningStatus, LIST_UNAVAILABLE_VERSION, screenTenant } from "./ofac/screening.js";
-import { createVendorAdapters, type VendorAdapterBundle } from "./vendors/factory.js";
+import { createVendorAdapters, selectRealDomainPort, type VendorAdapterBundle } from "./vendors/factory.js";
 import type { EngineClientConfig } from "./vendors/real/email-port.js";
 import type { InboxKitClientConfig } from "./vendors/real/inboxkit-client.js";
+import { deriveInboxKitRegistrant, isInboxKitRegistrarArmed, readRegistrarArming } from "./vendors/registrar-arming.js";
 
 export interface InitTenantInput {
   tenantId: string;
@@ -225,6 +227,11 @@ export class TenantDO extends DurableObject<Env> {
     this.addColumnIfMissing("tenant_profile", "mailbox_qty_synced", "INTEGER NOT NULL DEFAULT 0");
     this.addColumnIfMissing("tenant_profile", "billing_interval", "TEXT NOT NULL DEFAULT 'month'");
     this.addColumnIfMissing("tenant_profile", "checkout_discount_pct", "INTEGER NOT NULL DEFAULT 0");
+    // G5 gate (a) follow-up — InboxKit-as-registrar per-tenant opt-in (see schema.ts).
+    this.addColumnIfMissing("tenant_profile", "register_domains", "INTEGER NOT NULL DEFAULT 0");
+    // Registrar-arming follow-up (2026-07-28) — the tenant's structured
+    // registrant-of-record, persisted as JSON (see schema.ts).
+    this.addColumnIfMissing("tenant_profile", "registrant_json", "TEXT");
     // Created here, not in TENANT_DO_SCHEMA, so they run only after the columns
     // above are guaranteed to exist (safe for DOs that predate the column). Each
     // collapses any pre-existing rows that would violate the unique key BEFORE
@@ -384,9 +391,18 @@ export class TenantDO extends DurableObject<Env> {
     // preserved: demo/free is foreclosed above, `activated` (isTenantActivated:
     // paid + billing active + not frozen + screening clear) still gates, and the
     // domain port stays the G5 gate-(a) hard-block (RegistrarUnarmedDomainPort)
-    // regardless of InboxKit. Everything downstream (withSpendCeiling, G3) exists
-    // to make this flip SPEND-SAFE.
-    const real = createVendorAdapters(this.plan, this.clock, activated, this.engineConfig(), this.inboxKitConfig());
+    // UNLESS this tenant ALSO cleared the 2026-07-27 registrar-arming two-leg
+    // check (registrarArming() below) — see vendors/factory.ts's three-way
+    // domain branch. Everything downstream (withSpendCeiling, G3) exists to
+    // make this flip SPEND-SAFE.
+    const real = createVendorAdapters(
+      this.plan,
+      this.clock,
+      activated,
+      this.engineConfig(),
+      this.inboxKitConfig(),
+      readRegistrarArming(this.env, this.ctx.storage.sql, this.tenantId),
+    );
     if (real.kind === "real") return real;
     // InboxKit NOT armed (the common state, and every test): only the EmailPort
     // may go real; every OTHER port stays the SAME cached sandbox instance (its
@@ -427,12 +443,53 @@ export class TenantDO extends DurableObject<Env> {
   // --- The facade intents (bearer-token-authed, tenant-scoped) ---
 
   async setupInfrastructure(input: SetupInfrastructureInput, idempotencyKey?: string) {
-    const ctx = this.requireContext();
+    const base = this.requireContext();
+    // B1 (docs/adversarial/registrar-arming-review-2026-07-28.md): the domain
+    // port buildAdapters() baked reflects the PRE-call persisted
+    // register_domains/registrant_json — register_domains has no writer other
+    // than runSetupInfrastructure's own UPDATE, which runs AFTER
+    // requireContext(). For setup_infrastructure THIS call's validated opt-in +
+    // registrant are authoritative at buy time in BOTH directions (orchestrator
+    // ruling 2026-07-28): re-select ONLY the domain port from this call's input,
+    // so a fresh single-call opt-in buys in the SAME call (no false
+    // registrar_unarmed 503/alert) and an opt-out never fires a stale-persisted
+    // buy. Every OTHER port stays byte-identical, and every OTHER flow that
+    // selects a domain port (REPLACE_DOMAIN etc.) keeps reading persisted state.
+    const ctx: TenantContext = {
+      ...base,
+      adapters: { ...base.adapters, domain: this.selectSetupDomainPort(base.adapters, input) },
+    };
     return withRequestIdempotency(
       ctx,
       idempotencyKey ? `setup_infrastructure:${idempotencyKey}` : undefined,
       () => runSetupInfrastructure(ctx, input),
     );
+  }
+
+  // The domain port for THIS setup_infrastructure call, chosen from the call's
+  // own opt-in + registrant instead of the stale persisted profile (B1 fix). A
+  // sandbox-eligible tenant's SandboxDomainPort is returned unchanged —
+  // register_domains never selects it, and its cached in-memory search/release
+  // state must persist across the request (see `sandboxAdapters`). A
+  // real-eligible tenant re-runs the factory's two-leg gate via
+  // selectRealDomainPort (the decouple guard stays inviolable: env leg absent →
+  // hard-block regardless of what the call says). The registrant is derived
+  // from this call's input exactly as readRegistrarOptInState derives it from
+  // the just-persisted row (deriveInboxKitRegistrant — organization falls back
+  // to brand), so the port's baked registrant and provisionDomainWithMailboxes's
+  // post-UPDATE completeness pre-flight can never disagree.
+  private selectSetupDomainPort(bundle: VendorAdapterBundle, input: SetupInfrastructureInput): DomainPort {
+    if (bundle.kind !== "real") return bundle.domain;
+    return selectRealDomainPort(this.inboxKitConfig(), {
+      armed: isInboxKitRegistrarArmed(this.env),
+      optIn: input.registerDomains,
+      registrant: deriveInboxKitRegistrant({
+        brand: input.brand,
+        physicalAddress: input.physicalAddress,
+        senderIdentity: input.senderIdentity,
+        registrantJson: input.registrant ? JSON.stringify(input.registrant) : null,
+      }),
+    });
   }
 
   infrastructureStatus() {

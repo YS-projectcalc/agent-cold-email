@@ -30,20 +30,29 @@ export interface InboxKitDomainRegistrant {
  * as `real/mailbox-port.ts`'s `RealMailboxPort` — activation-gated via
  * `InboxKitClient`, never reachable from the deployed default.
  *
- * ⚠ RESOLVED by G5 gate (a) (ROADMAP.md:19,33,43; adversary B1 2026-07-23),
- * SUPERSEDING the note this replaced: the Porkbun-vs-InboxKit registrar
- * question this doc comment used to flag as open is now moot — InboxKit is
- * NOT the registrar for ANY tenant. Cloudflare Registrar is the founder-ruled
- * default (Namecheap fallback), armed by its OWN `registrarConfig`
- * (`REGISTRAR_PROVIDER`/`CLOUDFLARE_REGISTRAR_API_TOKEN`, env.ts) —
- * `vendors/factory.ts` never wires THIS class in for `domain` regardless of
- * `inboxKitConfig`; every real-eligible tenant's domain port hard-blocks via
- * `real/domain-port.ts`'s `RegistrarUnarmedDomainPort` until the Cloudflare
- * purchase adapter itself lands (deferred to the GA wave — its public API's
- * new-domain-purchase coverage is unverified). This class remains
- * coded-and-contract-tested (real-inboxkit-domain-port.test.ts exercises it
- * directly) for the DNS-connect step of the BYO-domain flow — its own doc
- * comment above — but it is not currently reachable via the factory.
+ * ⚠ G5 gate (a) (ROADMAP.md:19,33,43; adversary B1 2026-07-23) RESOLVED the
+ * Porkbun-vs-InboxKit registrar question this doc comment used to flag as
+ * open: InboxKit is NOT the DEFAULT registrar for any tenant, and arming
+ * InboxKit for MAILBOXES (`inboxKitConfig`) alone can never wire this class
+ * in for `domain` — that welding was the exact bug the gate closed.
+ *
+ * 2026-07-27 follow-up: this class IS now reachable, but ONLY through its OWN
+ * dedicated, two-leg arming (`vendors/registrar-arming.ts`,
+ * `vendors/factory.ts`'s `registrarArming` param) — BOTH
+ * `REGISTRAR_PROVIDER=inboxkit` (env, the operator's global switch) AND the
+ * tenant's own persisted `SetupInfrastructureInput.registerDomains` opt-in
+ * (founder ruling 2026-07-21: "per-tenant opt-in only, never a default") must
+ * be true. It reuses the SAME InboxKit credentials as the mailbox port (one
+ * vendor account) but the ARMING decision is entirely separate. Absent either
+ * leg, every real-eligible tenant's domain port still hard-blocks via
+ * `real/domain-port.ts`'s `RegistrarUnarmedDomainPort` — byte-identical to
+ * gate (a)'s original shipped behavior. The `buy()` registrant-contact-details
+ * argument is a best-effort object derived from `tenant_profile` (brand/
+ * physicalAddress/senderIdentity — `vendors/registrar-arming.ts`'s
+ * `deriveInboxKitRegistrant`); its COMPLETENESS is validated at the actual
+ * call site (`engine/provisioning.ts`), never here — this class's own
+ * coarse `if (!this.registrant)` check below is the last-resort fail-loud
+ * backstop, not the primary validation.
  *
  * Endpoint coverage (verified live/doc-captured 2026-07-20,
  * https://docs.inboxkit.com/):

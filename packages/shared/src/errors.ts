@@ -101,6 +101,27 @@ export class CapacityPendingError extends VendorError {
   }
 }
 
+/**
+ * Thrown by `registrar-arming.ts`'s `assertCompleteRegistrant` — the
+ * fail-loud defense-in-depth boundary at the ACTUAL domain-buy call site
+ * (`provisioning.ts`'s `provisionDomainWithMailboxes`) when a tenant cleared
+ * both registrar-arming legs (armed + opted in) but the registrant this
+ * platform has on file for them is missing required fields. Unlike
+ * `RegistrarUnarmedError` (an operator-fixable arming gap, generic customer
+ * message), this is a TENANT-fixable data gap — `missingFields` names exactly
+ * what's absent so the calling agent can re-submit `setup_infrastructure` with
+ * a complete `registrant`. `retryable: false` (VendorError) since retrying
+ * without supplying the missing fields can't succeed. The Worker's onError
+ * maps this to a 4xx naming the fields (index.ts), never a generic 500 —
+ * same graceful-surface pattern as `RegistrarUnarmedError`.
+ */
+export class IncompleteRegistrantError extends VendorError {
+  constructor(message: string, public readonly missingFields: string[]) {
+    super(message, false);
+    this.name = "IncompleteRegistrantError";
+  }
+}
+
 export class TenantIsolationError extends Error {
   constructor(message: string) {
     super(message);

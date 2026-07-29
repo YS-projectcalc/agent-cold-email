@@ -11,20 +11,87 @@ export const SignupInput = z.object({
 });
 export type SignupInput = z.infer<typeof SignupInput>;
 
-export const SetupInfrastructureInput = z.object({
-  brand: z.string().min(1).max(200),
-  primaryDomain: z.string().min(3).max(253),
-  domains: z.number().int().min(1).max(20),
-  inboxesEach: z.number().int().min(1).max(10),
-  persona: z.string().min(1).max(200),
-  physicalAddress: z.string().min(1).max(500),
-  senderIdentity: z.string().min(1).max(200),
-  // Quote-before-add (SPEC §18 "no silent capacity addition", design §2):
-  // `quoteOnly: true` returns the proposed new mailbox count + projected monthly
-  // price WITHOUT provisioning, so the agent can preview the bill impact before
-  // committing. Default false = provision as normal (backward-compatible).
-  quoteOnly: z.boolean().default(false),
+// Registrant-of-record contact details required to actually buy a domain
+// through InboxKit (mirrors apps/platform/src/vendors/real/inboxkit-domain-port.ts's
+// `InboxKitDomainRegistrant` field-for-field — that port's `.buy()` is
+// adversary-shipped/frozen and must never be modified to fit this input; this
+// schema conforms to IT). `organization` is the one field that stays optional:
+// `deriveInboxKitRegistrant` (vendors/registrar-arming.ts) may default it from
+// the tenant's own `brand` — a direct 1:1 mapping, not invention — every other
+// field is a real legal fact this platform has no other source for, so it must
+// come from the calling agent explicitly.
+export const Registrant = z.object({
+  firstName: z.string().min(1).max(200),
+  lastName: z.string().min(1).max(200),
+  email: z.string().email(),
+  phone: z.string().min(1).max(50),
+  addressLine1: z.string().min(1).max(500),
+  city: z.string().min(1).max(200),
+  state: z.string().min(1).max(200),
+  country: z.string().min(1).max(100),
+  postalCode: z.string().min(1).max(20),
+  organization: z.string().min(1).max(200).optional(),
 });
+export type Registrant = z.infer<typeof Registrant>;
+
+// The Registrant fields this platform has no fallback source for — used to
+// compose the boundary error message below when `registrant` is omitted
+// entirely. Kept in one place so the message and the schema's required set
+// can't drift apart.
+const REGISTRANT_REQUIRED_FIELD_NAMES = [
+  "firstName",
+  "lastName",
+  "email",
+  "phone",
+  "addressLine1",
+  "city",
+  "state",
+  "country",
+  "postalCode",
+] as const;
+
+export const SetupInfrastructureInput = z
+  .object({
+    brand: z.string().min(1).max(200),
+    primaryDomain: z.string().min(3).max(253),
+    domains: z.number().int().min(1).max(20),
+    inboxesEach: z.number().int().min(1).max(10),
+    persona: z.string().min(1).max(200),
+    physicalAddress: z.string().min(1).max(500),
+    senderIdentity: z.string().min(1).max(200),
+    // Quote-before-add (SPEC §18 "no silent capacity addition", design §2):
+    // `quoteOnly: true` returns the proposed new mailbox count + projected
+    // monthly price WITHOUT provisioning, so the agent can preview the bill
+    // impact before committing. Default false = provision as normal (backward-compatible).
+    quoteOnly: z.boolean().default(false),
+    // G5 gate (a) follow-up — InboxKit-as-registrar per-tenant opt-in (founder
+    // ruling 2026-07-21: "InboxKit-as-registrar is per-tenant opt-in only, never
+    // a default"). The tenant's informed consent to real domain purchases on
+    // their behalf (our wallet/COGS — their bill is unchanged, mailbox-count-
+    // based only). Persisted onto tenant_profile alongside brand/primaryDomain/
+    // physicalAddress/senderIdentity above, so it also governs the
+    // deliverability control loop's REPLACE_DOMAIN burn-replacement buys (which
+    // never go through this input body directly). Default false = today's
+    // behavior unchanged (RegistrarUnarmedDomainPort hard-blocks) even when the
+    // REGISTRAR_PROVIDER env is armed — arming the env alone is deliberately
+    // insufficient (apps/platform/src/vendors/factory.ts).
+    registerDomains: z.boolean().default(false),
+    // The structured registrant-of-record — REQUIRED (see the refinement
+    // below) whenever `registerDomains` is true, since that's the tenant's
+    // consent to a REAL domain purchase InboxKit will file real contact
+    // details for. Optional here only so a `registerDomains: false` call
+    // (the default, and every pre-existing caller) stays byte-identical.
+    registrant: Registrant.optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.registerDomains && !data.registrant) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["registrant"],
+        message: `registrant is required when registerDomains is true (missing: ${REGISTRANT_REQUIRED_FIELD_NAMES.join(", ")})`,
+      });
+    }
+  });
 export type SetupInfrastructureInput = z.infer<typeof SetupInfrastructureInput>;
 
 export const SequenceStepInput = z.object({
