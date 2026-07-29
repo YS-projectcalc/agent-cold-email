@@ -10,3 +10,5 @@
 - 2026-07-22-golive-program/ — go-live program handoff: prior-HANDOFF.md snapshot; scratch-rescue/promo-e2e/ = live Stripe test-mode promo-checkout E2E evidence (browser script + $0.00/100%-off/final screenshots, 2026-07-22); ROADMAP [x] lines drained to ROADMAP-done.md
 - 2026-07-28-mordy-golive-wave/scratch-rescue/dmhadvisor-dns-snapshot-pre-probe.json — dmhadvisor.com full DNS snapshot BEFORE the probe deleted its mail records + kwong CNAME (restore source; rescued from session scratchpad)
 - 2026-07-28-mordy-golive-wave/prior-HANDOFF.md — HANDOFF as of the 07-28 wave-close bookkeeping, pre-Mordy-purchase
+- 2026-07-29-cf-connect-crack/prior-HANDOFF.md — HANDOFF snapshot before the cf-connect-crack/registrar-armed handoff
+- ROADMAP-done.md — appended 3 drained [x] entries (token-rotation, registrar-arming, CF-connect UI crack) 2026-07-29
