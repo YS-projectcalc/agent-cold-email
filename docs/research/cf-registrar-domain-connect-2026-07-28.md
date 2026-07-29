@@ -2,7 +2,28 @@
 
 > Two parallel research lanes (InboxKit connect-wall + industry CF-Registrar workarounds), frozen. Feeds the domain-onboarding-matrix copy order (ROADMAP `## Open` 2026-07-27) and the InboxKit support escalation.
 
-## Question 1 — what gates InboxKit's `cloudflare-domains/connect` 400 "domain is not allowed"?
+## ✅✅ Q1 ROOT CAUSE FOUND + LIVE-CORROBORATED (2026-07-29) — stale blog schema, no support ticket needed
+
+**The 400 "domain is not allowed" was OUR malformed request, not a vendor gate.** The `inboxkit.com/learn/inboxkit-api-integration-guide` body we followed (`{zone_id, domain, api_token}`) is STALE. InboxKit's real production contract — their official Apidog-generated OpenAPI spec at `docs.inboxkit.com/connect-cloudflare-domains-28724829e0` — has **no `zone_id` and no singular `domain` field at all**. `connect` takes `domains` (ARRAY of domain-name strings, max 500) OR `connect_all` (boolean, mutually exclusive), plus `auth_type` (`api_token`|`global_api_key`) and `api_token`. Sending `zone_id`/`domain` → both ignored → zero valid targets → generic reject. "domain is not allowed" appears NOWHERE in their documented error set (which is specific: "Invalid API token", "does not have DNS access", "No zones found", "connect_all and domains are mutually exclusive", 409 ACCOUNT_ALREADY_USED / CREDENTIAL_CONFLICT) — consistent with a malformed-target symptom, not a business rule. The account-scope-token hypothesis (a) is DEAD (a zone-scoped token connected fine via the UI). No support ticket required.
+
+**Corrected request (HIGH confidence — OpenAPI schema + live corroboration):**
+```
+POST https://api.inboxkit.com/v1/api/cloudflare-domains/connect
+Headers: Authorization: Bearer <IK key> · X-Workspace-Id: <ws> · Content-Type: application/json
+Body:   {"auth_type":"api_token","api_token":"<CF zone-scoped token>","domains":["<domain>"]}
+        (use "connect_all":true INSTEAD of "domains" to connect every zone the token sees; never both)
+        (optional "validateDNS":true → per-domain dns_conflict object instead of erroring the batch)
+```
+
+**Live corroboration (2026-07-29, read-only):** `GET /v1/api/cloudflare-domains/zones` (Bearer + `X-Workspace-Id`, NO token param — reads the stored credential) → **HTTP 200**, returned `dmhadvisor.com` zone with `already_connected:true, reconnectable:false, domain_uid:b2e2a063…`. This proves the docs source is REAL (the endpoint the researcher found in the OpenAPI spec exists and behaves exactly as documented, including the credential-on-file model), so the `connect` schema from that same source is trustworthy. The dashboard's two-screen UX = (1) `connect` with just `auth_type`+`api_token` saves/validates the credential, (2) `GET .../zones` lists zones from the stored credential (documented 404 if none: "No Cloudflare credentials found. Use the /connect endpoint first to save credentials."), (3) `connect` again with `domains:[…]`.
+
+**Two incidentals the probe exposed (ledgered 2026-07-29, NOT part of this research):** (i) the founder's zone-scoped CF token is now STORED server-side at InboxKit (from the UI connect) — revoking the CF token invalidates it, and the stray dmhadvisor zone/credential should be cleared from the workspace before Mordy provisions; (ii) whether all Coldrig tenants share ONE InboxKit workspace (`c5188ced…`) vs one-per-tenant is a tenant-isolation question worth confirming — out of scope here.
+
+_Source: cf-connect-researcher (Sonnet, 2026-07-29), verbatim from docs.inboxkit.com/connect-cloudflare-domains-28724829e0 + /list-cloudflare-zones-28724833e0; caveat: docs came via WebFetch's lossy HTML→markdown pipeline (which fabricated nav paths once), so treated as strong-secondary until the live GET /zones 200 corroborated it. Frontend JS bundles could NOT be inspected (SPA; WebFetch strips scripts)._
+
+---
+
+## Question 1 (ORIGINAL, superseded by the root-cause finding above) — what gates InboxKit's `cloudflare-domains/connect` 400 "domain is not allowed"?
 
 **Unresolved from public sources; support-only territory.** Empirically ruled out (live probes 2026-07-27/28): workspace-ID mismatch (single workspace `c5188ced…`, header correct on every call; `/domains/nameservers` succeeded under it), internal ban (`GET /domains/available?domain=dmhadvisor.com` → `banned:false`), DNS content (zone completely bare at failure time), missing domain entity (entity created via nameservers flow → workspace shows `domains:1, assignable_domains:1` — failure identical before AND after), `zone_id` param, wallet credits (documented only on the register/purchase endpoint, not connect), plan gating (no public evidence; low confidence). Documented request shape (inboxkit.com/learn/inboxkit-api-integration-guide): `zone_id, domain, api_token` (+ empirically `auth_type`) — matched. Rate limit (10/5min) — wrong error shape.
 
