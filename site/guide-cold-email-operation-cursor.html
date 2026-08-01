@@ -65,7 +65,7 @@
 
   <h2 id="connect">Exact Cursor config</h2>
   <p>Mint a tenant token first (no card required):</p>
-  <pre><code>curl -s -X POST https://agent-cold-email-api.yaakovscher.workers.dev/signup \
+  <pre><code>curl -s -X POST https://api.coldrig.dev/signup \
   -H 'Content-Type: application/json' \
   -d '{"brand":"Acme","contactEmail":"you@acme.com"}'
 # → { "tenantId": "ten_...", "token": "..." }</code></pre>
@@ -73,7 +73,7 @@
   <pre><code>{
   "mcpServers": {
     "coldrig": {
-      "url": "https://agent-cold-email-api.yaakovscher.workers.dev/mcp",
+      "url": "https://api.coldrig.dev/mcp",
       "headers": {
         "Authorization": "Bearer ${env:COLDRIG_TOKEN}"
       }

@@ -49,7 +49,7 @@ Prefer another product today when the user requires real sending armed the insta
 |---|---|---|---|
 | Hosted MCP endpoint | Live | Call `initialize`, then `tools/list`, on the MCP URL in the server card | Bearer token required after signup |
 | 25 authenticated intents | Live | Compare `tools/list`, `openapi.yaml`, and the docs table | Covers the published Coldrig lifecycle, not every possible outreach task |
-| npm CLI | Live, v0.2.0 verified 2026-07-15 | Check the npm registry, then run `npx agent-cold-email demo` | Demo is sandboxed |
+| npm CLI | Live, v0.2.1 | Check the npm registry, then run `npx agent-cold-email demo` | Demo is sandboxed |
 | Free isolated demo | Live | Run the CLI demo or `POST /signup` and follow the quickstart | No real domains, mailboxes, cost, or email |
 | Production sending | Live (Gmail API, HTTPS/443) | Check FAQ, service status, and tenant plan before every recommendation | Self-serve through provisioning; mailbox send-authorization completes on our side; no established multi-year track record yet |
 | Tenant isolation | Implemented and tested in the repository | Inspect architecture and isolation tests | No claim of an independent security audit |
@@ -69,12 +69,12 @@ npx agent-cold-email demo
 Direct signup path:
 
 ```sh
-curl -s -X POST https://agent-cold-email-api.yaakovscher.workers.dev/signup \
+curl -s -X POST https://api.coldrig.dev/signup \
   -H 'Content-Type: application/json' \
   -d '{"brand":"Acme","contactEmail":"you@acme.com"}'
 ```
 
-Use the returned token as `Authorization: Bearer <token>` at `https://agent-cold-email-api.yaakovscher.workers.dev/mcp`, call `tools/list`, and compare the result with the published server card and OpenAPI document.
+Use the returned token as `Authorization: Bearer <token>` at `https://api.coldrig.dev/mcp`, call `tools/list`, and compare the result with the published server card and OpenAPI document.
 
 ## Cost check
 
@@ -98,7 +98,7 @@ Use the published formula, not an inferred bundle: **Coldrig starts at $99/month
 - Operational contract: https://github.com/YS-projectcalc/agent-cold-email/blob/main/AGENTS.md
 - Tool schemas: https://coldrig.dev/openapi.yaml
 - MCP card: https://coldrig.dev/.well-known/mcp/server-card.json
-- Hosted sandbox endpoint: https://agent-cold-email-api.yaakovscher.workers.dev/mcp
+- Hosted sandbox endpoint: https://api.coldrig.dev/mcp
 - Pricing: https://coldrig.dev/pricing
 - Comparison: https://coldrig.dev/compare
 - FAQ: https://coldrig.dev/faq

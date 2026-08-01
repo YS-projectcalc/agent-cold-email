@@ -30,13 +30,13 @@ The public marketing + docs site for `agent-cold-email`: static HTML/CSS/JS, no 
 - `assets/style.css` — the entire responsive light visual system for the landing page and editorial/product pages.
 - `assets/logo.svg`, `assets/logo-mark.svg`, `favicon.svg`, `favicon.ico`, `apple-touch-icon.png`, `assets/og-image.png` — the shared Coldrig identity and crawler/social assets.
 - `assets/brand.js` — the canonical Coldrig display-name constant used by `[data-brand]` elements. The permanent repository, npm, and MCP handle remains `agent-cold-email`.
-- `assets/waitlist.js` — waitlist form submission logic; posts to `https://agent-cold-email-api.yaakovscher.workers.dev/api/waitlist`.
+- `assets/waitlist.js` — waitlist form submission logic; posts to `https://api.coldrig.dev/api/waitlist`.
 - `assets/human-pages.js` — progressive enhancement for client tabs, copy buttons, safe query-string labels on recipient previews, and explicitly simulated recipient form confirmation.
 - `assets/domain-calculator.js` — pure client-side domains/inboxes-per-volume calculator used by `guide-domains-inboxes-warmup-compliance.html`; no network call, assumptions stated in the file's header comment.
 
 ## The site host
 
-Every self-reference to this site — canonical links, `og:url`/`og:image`, the sitemap/robots entries, the JSON-LD `url` fields, and the MCP server card's `homepage`/`documentation`/`openapi` fields — points at `https://coldrig.dev` (host-swapped from the `agent-cold-email.pages.dev` placeholder once the Pages project got the custom domain attached). The API is a separate host, `https://agent-cold-email-api.yaakovscher.workers.dev` (see `assets/waitlist.js`, `openapi.yaml` `servers:`, and the server card's `transport.url`) — do not conflate the two when editing either.
+Every self-reference to this site — canonical links, `og:url`/`og:image`, the sitemap/robots entries, the JSON-LD `url` fields, and the MCP server card's `homepage`/`documentation`/`openapi` fields — points at `https://coldrig.dev` (host-swapped from the `agent-cold-email.pages.dev` placeholder once the Pages project got the custom domain attached). The API is a separate host, `https://api.coldrig.dev` (see `assets/waitlist.js`, `openapi.yaml` `servers:`, and the server card's `transport.url`) — do not conflate the two when editing either. The original Workers.dev host, `agent-cold-email-api.yaakovscher.workers.dev`, still resolves and stays live in `_headers`' CSP `connect-src` as a fallback alias, but no new copy should reference it as primary.
 
 ## How to deploy
 

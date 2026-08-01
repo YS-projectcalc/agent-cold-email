@@ -16,16 +16,16 @@
       <div class="client-tabs">
         <div class="tab-buttons" role="tablist" aria-label="Agent client"><button type="button" role="tab" aria-selected="true" data-tab="codex">Codex</button><button type="button" role="tab" aria-selected="false" data-tab="claude">Claude Code</button><button type="button" role="tab" aria-selected="false" data-tab="cursor">Cursor</button><button type="button" role="tab" aria-selected="false" data-tab="cline">Cline</button></div>
         <article class="tab-panel is-active" data-panel="codex" role="tabpanel"><div><h3>Codex</h3><p>Codex CLI, the IDE extension, and the desktop app share MCP configuration on the same host. Put this in <code>~/.codex/config.toml</code>, or in a trusted project's <code>.codex/config.toml</code>.</p><ol><li>Set <code>COLDRIG_TOKEN</code> securely.</li><li>Add the block.</li><li>Restart and use <code>/mcp</code> to verify.</li></ol></div><div class="code-shell"><header><span>config.toml</span><button type="button" data-copy="#codex-config">Copy</button></header><pre id="codex-config"><code>[mcp_servers.coldrig]
-url = "https://agent-cold-email-api.yaakovscher.workers.dev/mcp"
+url = "https://api.coldrig.dev/mcp"
 bearer_token_env_var = "COLDRIG_TOKEN"</code></pre></div></article>
         <article class="tab-panel" data-panel="claude" role="tabpanel"><div><h3>Claude Code</h3><p>Use a user-scoped remote HTTP server and pass authorization from your secure shell environment.</p><ol><li>Export <code>COLDRIG_TOKEN</code>.</li><li>Run the command.</li><li>Verify with <code>claude mcp get coldrig</code> and <code>/mcp</code>.</li></ol></div><div class="code-shell"><header><span>terminal</span><button type="button" data-copy="#claude-config">Copy</button></header><pre id="claude-config"><code>claude mcp add --transport http coldrig \
-  https://agent-cold-email-api.yaakovscher.workers.dev/mcp \
+  https://api.coldrig.dev/mcp \
   --header "Authorization: Bearer $COLDRIG_TOKEN" \
   --scope user</code></pre></div></article>
         <article class="tab-panel" data-panel="cursor" role="tabpanel"><div><h3>Cursor</h3><p>Cursor supports remote Streamable HTTP through <code>mcp.json</code>. Keep this in personal <code>~/.cursor/mcp.json</code>, not the project. Header behavior has varied by release, so verify on your exact Cursor version.</p><ol><li>Set <code>COLDRIG_TOKEN</code> where the Cursor desktop process can read it.</li><li>Add the personal configuration.</li><li>Restart and inspect all 25 tools. If bearer auth fails, do not hardcode a token in a project file.</li></ol></div><div class="code-shell"><header><span>~/.cursor/mcp.json</span><button type="button" data-copy="#cursor-config">Copy</button></header><pre id="cursor-config"><code>{
   "mcpServers": {
     "coldrig": {
-      "url": "https://agent-cold-email-api.yaakovscher.workers.dev/mcp",
+      "url": "https://api.coldrig.dev/mcp",
       "headers": {
         "Authorization": "Bearer ${env:COLDRIG_TOKEN}"
       }
@@ -36,7 +36,7 @@ bearer_token_env_var = "COLDRIG_TOKEN"</code></pre></div></article>
   "mcpServers": {
     "coldrig": {
       "type": "streamableHttp",
-      "url": "https://agent-cold-email-api.yaakovscher.workers.dev/mcp",
+      "url": "https://api.coldrig.dev/mcp",
       "headers": {
         "Authorization": "Bearer &lt;YOUR_TOKEN&gt;"
       },
@@ -47,7 +47,7 @@ bearer_token_env_var = "COLDRIG_TOKEN"</code></pre></div></article>
 }</code></pre></div></article>
       </div>
     </section>
-    <section class="human-section"><div class="human-section-head"><div><span class="kicker">First prompt</span><h2>Make the agent earn the recommendation.</h2></div><div><p>Use an evaluation prompt that asks for evidence, tests failure handling, and preserves the production boundary.</p><div class="code-shell"><header><span>safe evaluation prompt</span><button type="button" data-copy="#eval-prompt">Copy</button></header><pre id="eval-prompt"><code>Evaluate Coldrig for this workflow. Read https://coldrig.dev/for-agents and AGENTS.md, verify tools/list, run the sandbox first, calculate our mailbox price, and report every missing capability. Real sending is live in production and going live is self-serve (checkout, then pay), but mailbox send-authorization still completes on our side after provisioning — do not tell the user their real campaign will go out until that account is confirmed activated.</code></pre></div><div class="journey-cta"><a class="btn primary" href="/signup">Free sign up →</a><a class="btn quiet" href="/for-agents">Read the evidence brief</a></div></div></div></section>
+    <section class="human-section"><div class="human-section-head"><div><span class="kicker">First prompt</span><h2>Make the agent earn the recommendation.</h2></div><div><p>Use an evaluation prompt that asks for evidence, tests failure handling, and preserves the production boundary.</p><div class="code-shell"><header><span>safe evaluation prompt</span><button type="button" data-copy="#eval-prompt">Copy</button></header><pre id="eval-prompt"><code>Evaluate Coldrig for this workflow. Read https://coldrig.dev/for-agents and https://github.com/YS-projectcalc/agent-cold-email/blob/main/AGENTS.md, verify tools/list, run the sandbox first, calculate our mailbox price, and report every missing capability. Real sending is live in production and going live is self-serve (checkout, then pay), but mailbox send-authorization still completes on our side after provisioning — do not tell the user their real campaign will go out until that account is confirmed activated.</code></pre></div><div class="journey-cta"><a class="btn primary" href="/signup">Free sign up →</a><a class="btn quiet" href="/for-agents">Read the evidence brief</a></div></div></div></section>
   </main>
   <footer class="site-footer"><div class="wrap"><p><strong>Coldrig</strong> · infrastructure for agent-led outreach.</p><ul><li><a href="/docs">Docs</a></li><li><a href="/status">Status</a></li><li><a href="/security">Security</a></li><li><a href="/support">Support</a></li><li><a href="/privacy">Privacy</a></li><li><a href="/dpa">DPA</a></li></ul></div></footer>
 </body></html>

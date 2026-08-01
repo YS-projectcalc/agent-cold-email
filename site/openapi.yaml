@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: agent-cold-email API
-  version: "0.1.0"
+  version: "0.2.2"
   description: >
     Agent-native cold-email infrastructure, live in production. 25 curated
     intents behind one bearer token per tenant (a subset — the /dashboard/*
@@ -21,8 +21,8 @@ info:
   license:
     name: MIT
 servers:
-  - url: https://agent-cold-email-api.yaakovscher.workers.dev
-    description: Placeholder — substituted with the deployed API host post-deploy.
+  - url: https://api.coldrig.dev
+    description: Production API host.
 
 security:
   - bearerAuth: []
@@ -332,6 +332,42 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: >
+            Reply refused by send governance, non-retryable: the recipient
+            is suppressed, or the sending mailbox is deliverability-paused.
+            Both need a state change before a retry can succeed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+                  code: { type: string, enum: [send_blocked] }
+                  reason:
+                    type: string
+                    enum: [suppressed, mailbox_paused]
+                    description: "suppressed = recipient opted out or bounced; mailbox_paused = deliverability control loop paused this mailbox."
+                  retryable: { type: boolean, enum: [false] }
+                required: [error, code, reason, retryable]
+        '429':
+          description: >
+            Reply refused by send governance, retryable: the sending
+            mailbox has used its full daily send allowance. Retry after the
+            daily counter rolls over.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+                  code: { type: string, enum: [send_blocked] }
+                  reason:
+                    type: string
+                    enum: [daily_cap_reached]
+                    description: "daily_cap_reached = the mailbox's warmup-ramp daily cap is used up for today."
+                  retryable: { type: boolean, enum: [true] }
+                required: [error, code, reason, retryable]
 
   /threads/{id}/mark:
     post:

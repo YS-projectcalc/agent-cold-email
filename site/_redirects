@@ -3,3 +3,6 @@
 /mcp-server-card  /.well-known/mcp/server-card.json  200
 /start  /signup  302
 /help  /support  302
+# AGENTS.md is published in the repo root, not on the site — redirect the
+# convention path an agent guesses instead of leaving it a 404.
+/AGENTS.md  https://raw.githubusercontent.com/YS-projectcalc/agent-cold-email/main/AGENTS.md  301

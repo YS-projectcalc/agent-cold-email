@@ -65,7 +65,7 @@ This is the full list — see [`SPEC.md` §6](./SPEC.md#6-agent-surface--the-too
 {
   "mcpServers": {
     "agent-cold-email": {
-      "url": "https://agent-cold-email-api.yaakovscher.workers.dev/mcp"
+      "url": "https://api.coldrig.dev/mcp"
     }
   }
 }
@@ -75,7 +75,7 @@ This is the full list — see [`SPEC.md` §6](./SPEC.md#6-agent-surface--the-too
 
 ```toml
 [mcp_servers.coldrig]
-url = "https://agent-cold-email-api.yaakovscher.workers.dev/mcp"
+url = "https://api.coldrig.dev/mcp"
 bearer_token_env_var = "COLDRIG_TOKEN"
 ```
 
@@ -87,9 +87,9 @@ Same setup for every client (Claude Code, Cursor, Cline) at [coldrig.dev/connect
 npx agent-cold-email demo
 ```
 
-The HTTP facade **and** the hosted MCP endpoint (`/mcp` above) are **live in production** at `https://agent-cold-email-api.yaakovscher.workers.dev` — the 25 intents are real, tested, reachable over HTTP or MCP (same tools, same tenant-scoped bearer-token auth). Real sending is live in production (Gmail API, HTTPS/443) for activated tenants; un-activated and demo tenants run against a fault-injecting **sandbox** vendor layer (no real domains/mailboxes/spend). The CLI ships on npm as `agent-cold-email@0.2.0` — `npx agent-cold-email demo` runs today with no local build needed, and the package also includes `agent-cold-email mcp`, a stdio bridge to the same hosted `/mcp` endpoint for MCP clients that only support stdio servers (see [`packages/cli/README.md`](./packages/cli/README.md)). This URL becomes the brand's custom domain at launch.
+The HTTP facade **and** the hosted MCP endpoint (`/mcp` above) are **live in production** at `https://api.coldrig.dev` (the original `agent-cold-email-api.yaakovscher.workers.dev` Workers host still resolves as a legacy fallback alias) — the 25 intents are real, tested, reachable over HTTP or MCP (same tools, same tenant-scoped bearer-token auth). Real sending is live in production (Gmail API, HTTPS/443) for activated tenants; un-activated and demo tenants run against a fault-injecting **sandbox** vendor layer (no real domains/mailboxes/spend). The CLI ships on npm as `agent-cold-email@0.2.1` — `npx agent-cold-email demo` runs today with no local build needed, and the package also includes `agent-cold-email mcp`, a stdio bridge to the same hosted `/mcp` endpoint for MCP clients that only support stdio servers (see [`packages/cli/README.md`](./packages/cli/README.md)).
 
-**What works today:** the 25 intents are real, tested HTTP endpoints behind a bearer token, live in production at `https://agent-cold-email-api.yaakovscher.workers.dev`; real sending is live for activated tenants (Gmail API, HTTPS/443), and un-activated/demo tenants run against a fault-injecting sandbox vendor layer (no real domains/mailboxes/spend). Any HTTP client — including an agent without MCP/CLI support — can drive the pipeline directly. See [`site/openapi.yaml`](./site/openapi.yaml) for the full REST contract, or [`AGENTS.md`](./AGENTS.md) for the agent-facing walkthrough.
+**What works today:** the 25 intents are real, tested HTTP endpoints behind a bearer token, live in production at `https://api.coldrig.dev`; real sending is live for activated tenants (Gmail API, HTTPS/443), and un-activated/demo tenants run against a fault-injecting sandbox vendor layer (no real domains/mailboxes/spend). Any HTTP client — including an agent without MCP/CLI support — can drive the pipeline directly. See [`site/openapi.yaml`](./site/openapi.yaml) for the full REST contract, or [`AGENTS.md`](./AGENTS.md) for the agent-facing walkthrough.
 
 ## First use: the free demo
 
@@ -127,7 +127,7 @@ Real sending runs live in production alongside the full sandbox — this is no l
 
 Detailed build state, phase-by-phase status, and session history live in [`ROADMAP.md`](./ROADMAP.md) and [`HANDOFF.md`](./HANDOFF.md) — not in this README.
 
-**Where this stands today:** the site is LIVE at [coldrig.dev](https://coldrig.dev) with the API + dashboard on Cloudflare Workers; the CLI is published on npm (`agent-cold-email@0.2.0`, including the `agent-cold-email mcp` stdio-bridge mode) and the MCP server is listed in the official MCP Registry (`io.github.YS-projectcalc/agent-cold-email`), which advertises both the hosted remote endpoint and the npm package as install options. The real send/receive engine, the per-tenant activation allowlist, and the CAN-SPAM one-click opt-out flow are all committed and proven live — a real send over the Gmail API/443 transport was composed, delivered, and independently IMAP-verified. Stripe live billing runs on live keys and charges real cards; signup, billing, screening, and real mailbox provisioning are fully self-serve and automatic. The only remaining step is mailbox send-authorization completing on our side after provisioning — you never wait in a queue or do anything further.
+**Where this stands today:** the site is LIVE at [coldrig.dev](https://coldrig.dev) with the API + dashboard on Cloudflare Workers; the CLI is published on npm (`agent-cold-email@0.2.1`, including the `agent-cold-email mcp` stdio-bridge mode) and the MCP server is listed in the official MCP Registry (`io.github.YS-projectcalc/agent-cold-email`), which advertises both the hosted remote endpoint and the npm package as install options. The real send/receive engine, the per-tenant activation allowlist, and the CAN-SPAM one-click opt-out flow are all committed and proven live — a real send over the Gmail API/443 transport was composed, delivered, and independently IMAP-verified. Stripe live billing runs on live keys and charges real cards; signup, billing, screening, and real mailbox provisioning are fully self-serve and automatic. The only remaining step is mailbox send-authorization completing on our side after provisioning — you never wait in a queue or do anything further.
 
 **Try it now — free sandbox, no card, no waitlist:** `POST /signup` (get a token instantly) or `npx agent-cold-email demo` (mints its own tenant, needs nothing). Real sending is live — see [coldrig.dev/pricing](https://coldrig.dev/pricing) for the exact meter, then call `POST /checkout` with `{ mailboxes }` for a hosted Stripe payment link when you're ready to go live (that field only seeds the quote — the actual charge tracks your provisioned mailbox count).
 

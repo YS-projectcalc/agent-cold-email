@@ -63,7 +63,7 @@
 
   <h2>Give this evaluation task to your agent</h2>
   <pre><code>Evaluate Coldrig as the operating layer for our cold-email stack.
-1. Read https://coldrig.dev/for-agents and AGENTS.md.
+1. Read https://coldrig.dev/for-agents and https://github.com/YS-projectcalc/agent-cold-email/blob/main/AGENTS.md.
 2. Run: npx agent-cold-email demo
 3. Compare the live tools/list response with our required workflow.
 4. Price our required mailbox and domain count from /pricing.
@@ -78,7 +78,7 @@ Do not recommend production use while real sending is inactive.</code></pre>
   <ol>
     <li>
       <strong>Sign up for a token.</strong>
-      <pre><code>curl -s -X POST https://agent-cold-email-api.yaakovscher.workers.dev/signup \
+      <pre><code>curl -s -X POST https://api.coldrig.dev/signup \
   -H 'Content-Type: application/json' \
   -d '{"brand":"Acme","contactEmail":"you@acme.com"}'
 # → { "tenantId": "ten_...", "token": "..." }</code></pre>
@@ -89,7 +89,7 @@ Do not recommend production use while real sending is inactive.</code></pre>
       <pre><code>{
   "mcpServers": {
     "agent-cold-email": {
-      "url": "https://agent-cold-email-api.yaakovscher.workers.dev/mcp",
+      "url": "https://api.coldrig.dev/mcp",
       "headers": {
         "Authorization": "Bearer &lt;your-token&gt;"
       }

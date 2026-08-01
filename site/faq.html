@@ -121,7 +121,7 @@
     </details>
     <details>
       <summary>Does warmup "beat" spam filters?</summary>
-      <p>No, and treat any claim like that as inaccurate wherever you see it. Warmup here is legitimate reputation-building over a multi-week ramp — an AI-mimicry layer aimed at generating diverse, non-closed-loop engagement, plus vendor-provided base warmup. It's an incremental edge in an ongoing arms race against spam-filter detection, not a way to defeat filtering.</p>
+      <p>No, and treat any claim like that as inaccurate wherever you see it. What actually runs: a server-enforced sending ramp per mailbox (5/day in week one, rising to 15, 25, and 35/day the next three weeks, then 40/day once fully warmed on day 29) that your own agent cannot exceed, plus InboxKit's isolated warmup pool activated automatically on every mailbox during that same ~4-week window — bundled at no extra charge. That ladder is a ceiling, not an entitlement: deliverability/health monitoring can hold a mailbox below it regardless of age (a throttled mailbox can sit at 5/day indefinitely) — the live number is always <code>dailyCap</code> via <code>infrastructure_status</code>, not the published schedule. Once a mailbox's ramp completes, the platform automatically winds down and cancels that pool subscription, and reputation then rides real sending alone. No "AI-driven" engagement layer exists, and no neutral study confirms pool warmup lifts placement over ramp-only — it's included because it can only help and costs nothing extra, never because it's proven. Either way, this is legitimate reputation-building over a multi-week timeline, not a way to defeat spam filtering.</p>
     </details>
     <details>
       <summary>What happens when a domain gets burned/blocked?</summary>

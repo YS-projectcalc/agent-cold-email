@@ -65,13 +65,13 @@
 
   <h2 id="connect">Exact Codex config</h2>
   <p>Mint a tenant token first (no card required):</p>
-  <pre><code>curl -s -X POST https://agent-cold-email-api.yaakovscher.workers.dev/signup \
+  <pre><code>curl -s -X POST https://api.coldrig.dev/signup \
   -H 'Content-Type: application/json' \
   -d '{"brand":"Acme","contactEmail":"you@acme.com"}'
 # → { "tenantId": "ten_...", "token": "..." }</code></pre>
   <p>Then add this to <code>~/.codex/config.toml</code> (or a trusted project's <code>.codex/config.toml</code>):</p>
   <pre><code>[mcp_servers.coldrig]
-url = "https://agent-cold-email-api.yaakovscher.workers.dev/mcp"
+url = "https://api.coldrig.dev/mcp"
 bearer_token_env_var = "COLDRIG_TOKEN"</code></pre>
   <p>Set <code>COLDRIG_TOKEN</code> in your environment, restart, and use <code>/mcp</code> inside a session to verify all 25 tools are visible. Full side-by-side with Cursor and Cline: <a href="/connect">the connect reference</a>.</p>
 

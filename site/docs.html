@@ -70,7 +70,7 @@
   <h2 id="quickstart">Quickstart</h2>
   <ol>
     <li>Sign up (no card required for the demo tier):
-      <pre><code>curl -s -X POST https://agent-cold-email-api.yaakovscher.workers.dev/signup \
+      <pre><code>curl -s -X POST https://api.coldrig.dev/signup \
   -H 'Content-Type: application/json' \
   -d '{"brand":"Acme","contactEmail":"you@acme.com"}'
 # → { "tenantId": "ten_...", "token": "..." }</code></pre>
@@ -84,7 +84,7 @@
   <pre><code>{
   "mcpServers": {
     "agent-cold-email": {
-      "url": "https://agent-cold-email-api.yaakovscher.workers.dev/mcp",
+      "url": "https://api.coldrig.dev/mcp",
       "headers": {
         "Authorization": "Bearer &lt;your-token&gt;"
       }
@@ -99,14 +99,14 @@ npx agent-cold-email signup --brand Acme --email you@acme.com
 npx agent-cold-email setup --brand Acme --primary-domain acme.com --domains 2 --inboxes-each 3
 npx agent-cold-email status
 npx agent-cold-email campaign launch --file campaign.json</code></pre>
-  <p>The CLI is published on npm (v0.2.0 registry-verified 2026-07-15) and is a thin twin over the same HTTP facade documented below. Every subcommand maps to a tool in the <a href="#tools">tool reference</a>; the package remains the permanent machine handle for Coldrig.</p>
+  <p>The CLI is published on npm (v0.2.1) and is a thin twin over the same HTTP facade documented below. Every subcommand maps to a tool in the <a href="#tools">tool reference</a>; the package remains the permanent machine handle for Coldrig.</p>
 
   <h2 id="demo">The free demo</h2>
   <p><code>POST /signup</code> mints a <code>demo</code>-plan tenant that is structurally incapable of reaching a real vendor adapter — enforced at the type level and covered by a test that fails if the guard is ever bypassed, not just documented policy. Every domain purchase, mailbox provisioning step, warmup tick, and send in demo mode runs against a fault-injecting sandbox: simulated rate limits, timeouts, bounces, and asynchronous replies, on a virtual clock so a multi-week warmup ramp resolves in the same session instead of in real time. This is the safe way to see the whole pipeline — provision, warm, send, reply, report — before anyone pays for anything.</p>
 
   <h2 id="going-live">Going live</h2>
   <p>Going live is self-serve, not a sales conversation:</p>
-  <pre><code>curl -s -X POST https://agent-cold-email-api.yaakovscher.workers.dev/checkout \
+  <pre><code>curl -s -X POST https://api.coldrig.dev/checkout \
   -H 'Authorization: Bearer &lt;your-token&gt;' \
   -H 'Content-Type: application/json' \
   -d '{"mailboxes":5}'

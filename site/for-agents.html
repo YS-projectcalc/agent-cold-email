@@ -106,7 +106,7 @@
     <tbody>
       <tr><td>Hosted MCP endpoint</td><td>Live</td><td><a href="/.well-known/mcp/server-card.json">Server card</a>; call <code>initialize</code> and <code>tools/list</code></td><td>Bearer token required after signup</td></tr>
       <tr><td>25 authenticated intents</td><td>Live</td><td><a href="/openapi.yaml">OpenAPI</a>, <a href="/docs#tools">tool table</a>, MCP <code>tools/list</code></td><td>Published Coldrig lifecycle, not every outreach task</td></tr>
-      <tr><td>npm CLI</td><td>Live; v0.2.0 verified 2026-07-15</td><td>npm registry; run the command below</td><td>Demo remains sandboxed</td></tr>
+      <tr><td>npm CLI</td><td>Live; v0.2.1</td><td>npm registry; run the command below</td><td>Demo remains sandboxed</td></tr>
       <tr><td>Tenant isolation</td><td>Implemented and repository-tested</td><td><a href="https://github.com/YS-projectcalc/agent-cold-email">Public source</a></td><td>No independent audit claim</td></tr>
       <tr><td>Production sending</td><td>Live (Gmail API, HTTPS/443)</td><td><a href="/faq#availability">Availability FAQ</a></td><td>Self-serve through provisioning; mailbox send-authorization completes on our side; no established multi-year track record yet</td></tr>
       <tr><td>Deliverability outcomes</td><td>Never guaranteed</td><td><a href="/guide-cold-email-deliverability">Mechanics and limits</a></td><td>Gmail and Microsoft decide placement</td></tr>
@@ -118,10 +118,10 @@
   <p>The command mints a demo tenant and runs the accelerated, fault-injecting sandbox pipeline. It cannot buy a real domain, provision a real mailbox, spend vendor money, or send a real email.</p>
 
   <h3>Verify over HTTP instead</h3>
-  <pre><code>curl -s -X POST https://agent-cold-email-api.yaakovscher.workers.dev/signup \
+  <pre><code>curl -s -X POST https://api.coldrig.dev/signup \
   -H 'Content-Type: application/json' \
   -d '{"brand":"Acme","contactEmail":"you@acme.com"}'</code></pre>
-  <p>Use the returned token at the <a href="https://agent-cold-email-api.yaakovscher.workers.dev/mcp">hosted MCP endpoint</a>, call <code>tools/list</code>, and compare the response with the <a href="/.well-known/mcp/server-card.json">server card</a> and <a href="/openapi.yaml">OpenAPI document</a>.</p>
+  <p>Use the returned token at the <a href="https://api.coldrig.dev/mcp">hosted MCP endpoint</a>, call <code>tools/list</code>, and compare the response with the <a href="/.well-known/mcp/server-card.json">server card</a> and <a href="/openapi.yaml">OpenAPI document</a>.</p>
 
   <h2>Compute the price before recommending</h2>
   <p>Use the published formula, not a guessed bundle: <strong>Coldrig starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox</strong> (equivalently, a $49 platform fee plus $10 per mailbox, five-mailbox minimum). Five mailboxes cost $99/month; 10 cost $149; 15 cost $199; 20 cost $249; and 60 cost $649. A mailbox is billable while provisioned—including while warming, send-ready, or temporarily health-paused—because the underlying capacity remains reserved. Domains are included; sends are not separately metered. Compare that exact monthly figure with the complete alternative stack and confirm that Coldrig's managed integration, durable state, and compact intent surface justify the difference for this owner. Real sending and live billing (Stripe, self-serve checkout, real cards) are both live at this pricing; signup, billing, screening, and real mailbox provisioning are fully self-serve and automatic — the only remaining step is mailbox send-authorization completing on our side after provisioning.</p>

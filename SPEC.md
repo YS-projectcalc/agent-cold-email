@@ -35,7 +35,7 @@ Positioning: **"Strap this to your Claude Code and you have what you need."** De
 - **Agent surface** = curated **~8–12 high-level tools** (NOT a re-export of vendor complexity), shipped as a **hosted MCP + CLI twin + a discovery skill/AGENTS.md**. Tiny toolset → low MCP token cost.
 - **Content generation is the customer's agent's job** — not a layer we build.
 - **Per-customer isolation is mandatory** (own domains/mailboxes/IPs per customer).
-- **Warmup:** offered, AI-driven, **honest about the weeks-long ramp**; rented pre-warmed boxes to shorten cold-start. Never marketed as magic.
+- **Warmup:** every mailbox gets both a server-enforced per-mailbox send schedule (engine/warmup.ts: 5/day wk1 → 40/day after 4 wks) AND InboxKit's isolated warmup pool, activated automatically and bundled at no extra charge over that same ~4-week ramp; once the ramp completes, the platform automatically cancels the pool subscription (engine/warmup-cancel.ts, an automatic scheduled platform sweep with bounded retry — not a same-minute cutoff) and reputation then rides real sending alone (pool lift is unverified either way — docs/research/warmup-posture-2026-07-28.md — bundled because it can only help, not because it's proven). Founder ruling + claims-coupling provenance: ROADMAP.md:25 (satisfied — the cancel step ships alongside this copy). **Honest about the weeks-long ramp**; no "AI-driven" mimicry layer exists. Rented pre-warmed boxes are a future, founder-held option (not a shipped SKU) to shorten cold-start. Never marketed as magic.
 
 ---
 
@@ -91,7 +91,7 @@ Design rule for the facade: **few, high-level intents that HIDE vendor complexit
 | 3 | Mailboxes (reputation-bearing) | **rent** | Inboxkit (primary) — real Google/MS + isolation + warmup + monitoring | MED | ~$3/mbx/mo |
 | 4 | Sequencing engine | **fork** | cold-cli (sequences, scheduling, caps, rotation, A/B, unsubscribe) | MED | free (OSS) |
 | 5 | Reply / bounce / inbox | **fork + build** | cold-cli IMAP detection + build unified inbox + mgmt tools | MED | free |
-| 6 | Warmup | rent + build | vendor base warmup + our AI human-mimicry layer; honest timing | MED | varies |
+| 6 | Warmup | rent + build | InboxKit isolated pool warmup (rented, bundled) + our server-enforced per-mailbox ramp schedule (built); honest timing | MED | varies |
 | 7 | Content/personalization | **descoped** | customer's agent owns it; we add optional helpers only | LOW | usage |
 | 8 | Control plane (auth, billing, tenancy, isolation, quotas, guardrails, provisioning, **inbox mgmt, metrics**) | **build** | Stripe + Postgres + resumable job queue | MED–HIGH | eng time |
 | 9 | Agent surface (curated MCP + CLI + skill) | **build** | thin transport over plane C | MED | eng time |
@@ -149,7 +149,7 @@ Given brand + primary domain:
 - Private/vetted pools = +20–30% vs public.
 - **"Pre-warmed" = time-shift trick:** vendor runs the warmup cycle on pre-aged domains/established IPs before handover.
 
-**Our approach:** rent base warmup (vendor) + **AI human-mimicry layer** (diverse real-world traffic, varied content/timing — strongest when it generates *non-closed-loop* activity) + rented pre-warmed boxes for cold-start + **maximize REAL replies** via the customer's actual campaigns (the unbeatable signal). Honest about ramp time. **AI mimicry is an incremental edge in an arms race vs Google, not a permanent moat** — don't bet the company on out-botting the bot-detector. The graph topology, not content quality, is the hard detection layer.
+**Our approach:** every mailbox gets InboxKit's isolated warmup pool (rented, bundled at no extra charge) running alongside our server-enforced per-mailbox ramp schedule, both starting at provisioning. Once the ramp completes (~4 weeks), the platform automatically cancels the pool subscription — engine/warmup-cancel.ts, an automatic scheduled platform sweep with bounded retry (not a same-minute cutoff), founder-ruled and claims-coupled to this copy per ROADMAP.md:25 (satisfied — both ship together). No AI-mimicry layer exists — that idea never shipped and isn't planned. Rented pre-warmed boxes for cold-start remain a future, founder-held option, not a shipped SKU today. Honest about ramp time, and we **maximize REAL replies** via the customer's actual campaigns (the unbeatable signal) rather than synthetic activity. The pool's lift over ramp-only is unverified industry-wide (docs/research/warmup-posture-2026-07-28.md) — bundled because it can only help and costs the customer nothing, never marketed as a guarantee. The graph topology, not content quality, is the hard detection layer any pool-style warmup has to contend with.
 
 ---
 
@@ -545,6 +545,6 @@ Design principle: the platform is the system of record for lead state (identity,
 - Smartlead MCP = 113–116 tools (LeadMagic/smartlead-mcp-server); Instantly MCP = ~31–38 tools (Mar 2026).
 - 2026 Gmail/Yahoo: SPF+DKIM+DMARC mandatory (non-compliant rejected at SMTP level); spam rate ≥0.30% = Gmail delivery-mitigation ineligible for 7 clean days.
 - Self-serve vendor API/pricing: Inboxkit (API all plans), Zapmail (API @ $299), Maildoso, Mailforge — all public pricing, no sales call. Mailreef API gated behind email.
-- Warmup: pool detection real; no major tool showed meaningful lift (independent test); private pools +20–30%.
+- Warmup: pool-graph detection is plausible but not confirmed by any primary Gmail/MS statement (vendor-sourced claims on both sides — docs/research/warmup-posture-2026-07-28.md); no major tool showed meaningful lift in independent testing; private pools reportedly +20–30% vs public (unaudited).
 
 Source URLs captured in priorart archive: `~/.claude/priorart-archive/ai-agent-controllable-cold-email-platform-2026-06-25.md`.

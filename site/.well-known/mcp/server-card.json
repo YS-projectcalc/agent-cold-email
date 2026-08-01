@@ -2,7 +2,7 @@
   "$schema": "https://modelcontextprotocol.io/schemas/server-card.json",
   "name": "agent-cold-email",
   "displayName": "Coldrig",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "description": "Agent-controlled cold-outreach infrastructure, live in production. One bearer token and 25 focused tools replace multiple vendor accounts, preserve durable infrastructure state, provision isolated domains and mailboxes, run sequences, manage replies and push webhooks, track lead disposition, and enforce guardrails server-side. The customer's own agent remains the strategy and content layer. Free sandbox demo today, no card, no waitlist; real sending runs in production (Gmail API, HTTPS/443). Going live is self-serve (POST /checkout returns a hosted Stripe payment link); the only remaining step is mailbox send-authorization completing on our side after provisioning. Pricing starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox, with no send quota (sends are not the billing meter) and $0 per-send fees.",
   "homepage": "https://coldrig.dev/",
   "documentation": "https://coldrig.dev/docs",
@@ -13,11 +13,11 @@
   },
   "transport": {
     "type": "streamable-http",
-    "url": "https://agent-cold-email-api.yaakovscher.workers.dev/mcp"
+    "url": "https://api.coldrig.dev/mcp"
   },
   "auth": {
     "type": "bearer",
-    "description": "One token per tenant, obtained via POST https://agent-cold-email-api.yaakovscher.workers.dev/signup (no auth required for signup itself). Pass as Authorization: Bearer <token>."
+    "description": "One token per tenant, obtained via POST https://api.coldrig.dev/signup (no auth required for signup itself). Pass as Authorization: Bearer <token>."
   },
   "status": "live",
   "statusNote": "Live in production: the hosted API, MCP endpoint, npm CLI, isolated sandbox, real sending (Gmail API, HTTPS/443), and live billing (Stripe, self-serve checkout, real cards) are all live. Signup, billing, screening, and real mailbox provisioning are fully self-serve and automatic; the only remaining step is mailbox send-authorization completing on our side after provisioning (you do not wait on a queue or do anything). Demo/sandbox tenants remain structurally unable to reach vendor adapters and incur no real spend.",
@@ -62,7 +62,7 @@
     },
     {
       "name": "reply",
-      "description": "Send a reply on a thread; stop-on-reply is automatic."
+      "description": "Send a reply on a thread, from the mailbox that sent it. Refused, not silently dropped, if the recipient is suppressed, the mailbox is deliverability-paused, or its daily cap is used up. Stop-on-reply is automatic."
     },
     {
       "name": "mark",

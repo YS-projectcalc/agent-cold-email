@@ -1,7 +1,7 @@
-// Waitlist form submission. Posts to https://agent-cold-email-api.yaakovscher.workers.dev/api/waitlist — the API
+// Waitlist form submission. Posts to https://api.coldrig.dev/api/waitlist — the API
 // host token is substituted post-deploy (see site/README.md). On a network
 // failure this degrades to a clear status rather than pretending success.
-const WAITLIST_ENDPOINT = "https://agent-cold-email-api.yaakovscher.workers.dev/api/waitlist";
+const WAITLIST_ENDPOINT = "https://api.coldrig.dev/api/waitlist";
 
 document.addEventListener("DOMContentLoaded", () => {
   const form = document.querySelector("form.waitlist");
