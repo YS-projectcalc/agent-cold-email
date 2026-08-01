@@ -6,15 +6,18 @@
 // reachable by directly invoking `scheduled()` (e.g. `wrangler dev --test-scheduled`).
 //
 // What runs each tick: (1) the deliverability control loop for every
-// tenant, (2) the dunning sweep for every 'past_due' tenant (now emailing a
-// suspend notice via the OpsMailer), (3) the owner digest, logged, and (4) the
-// watchtower — health probes + the founder-alert state machine. The OpsMailer
+// tenant, (2) the warmup-pool auto-cancel sweep for every tenant (founder
+// ruling 2026-08-02 — this cron is its ONLY production driver; see
+// runWarmupCancelSweepAllTenants), (3) the dunning sweep for every 'past_due'
+// tenant (now emailing a suspend notice via the OpsMailer), (4) the owner
+// digest, logged, and (5) the watchtower — health probes + the founder-alert
+// state machine. The OpsMailer
 // is built ONCE and shared by the dunning sweep + watchtower; it is real in
 // production (dark until the domain is onboarded) and degrades gracefully — an
 // unsendable alert can never take down the sweep.
 import { RealClock } from "./clock.js";
 import type { Env } from "./env.js";
-import { buildOpsDigest, runDeliverabilitySweepAllTenants, runDunningSweep, runWebhookDeliveriesAllTenants } from "./admin/ops-sweep.js";
+import { buildOpsDigest, runDeliverabilitySweepAllTenants, runDunningSweep, runWarmupCancelSweepAllTenants, runWebhookDeliveriesAllTenants } from "./admin/ops-sweep.js";
 import { runWatchtower } from "./admin/watchtower.js";
 import { createOpsMailer } from "./ops-mail/ops-mailer.js";
 import { reapStaleReservations } from "./engine/spend-ceiling.js";
@@ -26,6 +29,14 @@ export async function runScheduledOpsSweep(env: Env): Promise<void> {
   const mailer = createOpsMailer(env);
 
   const deliverability = await runDeliverabilitySweepAllTenants(env);
+  // Warmup-pool auto-cancel at ramp completion (founder ruling 2026-08-02,
+  // ROADMAP.md:25). THIS is the sweep's only production driver — it is not
+  // reachable from the tick, which nothing in production calls (adversary A1).
+  // Its own lane rather than part of the tick, so cron never arms automatic
+  // campaign sending. Runs after the deliverability loop and before dunning;
+  // its own try/catch inside the runner means a vendor hiccup can neither
+  // abort the remaining legs nor delay any tenant's mail.
+  const warmupCancel = await runWarmupCancelSweepAllTenants(env);
   const dunning = await runDunningSweep(env, now, mailer);
   const digest = await buildOpsDigest(env, now, 24);
   const watchtower = await runWatchtower(env, mailer, now);
@@ -52,6 +63,6 @@ export async function runScheduledOpsSweep(env: Env): Promise<void> {
 
   console.log(
     "scheduled ops sweep",
-    JSON.stringify({ deliverability, dunning, digest, watchtower, webhooks, spendReservations, sdnRefresh, sdnRecovery }),
+    JSON.stringify({ deliverability, warmupCancel, dunning, digest, watchtower, webhooks, spendReservations, sdnRefresh, sdnRecovery }),
   );
 }

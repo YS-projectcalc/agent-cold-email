@@ -43,6 +43,7 @@ import { cancelTenant, terminateTenant, type CancelResult, type TerminateResult 
 import { getInfrastructureStatus, runSetupInfrastructure } from "./engine/provisioning.js";
 import { launchCampaign, listCampaigns, pauseAllCampaigns, pauseCampaign, type CampaignListItem } from "./engine/campaigns.js";
 import { runTick } from "./engine/tick.js";
+import { runWarmupCancellationSweep } from "./engine/warmup-cancel.js";
 import { withRequestIdempotency } from "./engine/idempotency.js";
 import { reconcileMailboxCredentialPushes } from "./engine/mailbox-credential-push.js";
 import { runDeliverabilitySweep } from "./engine/deliverability-actions.js";
@@ -193,6 +194,13 @@ export class TenantDO extends DurableObject<Env> {
     // is a no-op then); see schema.ts's poll_cursor comment for the -1/0
     // distinction and the finding this closes.
     this.addColumnIfMissing("mailboxes", "poll_cursor", "INTEGER NOT NULL DEFAULT -1");
+    // Warmup-pool auto-cancel at ramp completion (founder ruling 2026-08-02,
+    // ROADMAP.md:25). NULL default = "not cancelled yet", so any mailbox in an
+    // existing DO that is ALREADY past day 28 is picked up by the sweep's
+    // catch-up pass on the next tick rather than being silently skipped.
+    this.addColumnIfMissing("mailboxes", "warmup_cancelled_at", "INTEGER");
+    this.addColumnIfMissing("mailboxes", "warmup_cancel_attempts", "INTEGER NOT NULL DEFAULT 0");
+    this.addColumnIfMissing("mailboxes", "warmup_cancel_gave_up_at", "INTEGER");
     // SPEC.md §20 BYO domains & mailboxes — every default below reproduces an
     // EXISTING provisioned domain/mailbox's implicit state exactly (flag-dark:
     // see schema.ts's TENANT_DO_SCHEMA comment on these same columns).
@@ -759,6 +767,24 @@ export class TenantDO extends DurableObject<Env> {
 
   opsSummary(sinceMs: number): TenantOpsSummary {
     return getOpsSummary(this.requireContext(), sinceMs);
+  }
+
+  /**
+   * Cron-triggerable: cancels the InboxKit warmup-pool subscription of every
+   * mailbox whose ramp has completed (founder ruling 2026-08-02,
+   * ROADMAP.md:25). Its OWN cron lane, deliberately not folded into `tick()`.
+   *
+   * A1 (adversary warmup-wave review 2026-08-02): the sweep originally ran only
+   * inside `runTick`, and nothing in production calls `tick()` — no cron entry,
+   * no route, no MCP tool, no DO alarm (alarm-driven scheduling is still B2
+   * backlog). So the shipped code could never have cancelled anything, while
+   * the site claimed in the present tense that it does. Wiring `tick()` into
+   * the cron instead would have armed automatic CAMPAIGN SENDING, a separate
+   * founder-gated arc — hence a dedicated lane that carries no send scheduling,
+   * exactly like `deliverabilitySweep` above.
+   */
+  async warmupCancelSweep() {
+    return runWarmupCancellationSweep(this.requireContext());
   }
 
   /** Cron-triggerable: runs just the monitor->decide->act loop (no send scheduling — that's tick()/B2). */

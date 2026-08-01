@@ -151,6 +151,44 @@ export async function runDeliverabilitySweepAllTenants(env: Env): Promise<Delive
   return { tenantsSwept: tenantIds.length, errors };
 }
 
+export interface WarmupCancelSweepAllSummary {
+  tenantsSwept: number;
+  cancelled: number;
+  errors: number;
+}
+
+/**
+ * Cancels ramp-complete warmup subscriptions for EVERY tenant — the cron lane
+ * for the founder's 2026-08-02 auto-cancel ruling (ROADMAP.md:25).
+ *
+ * A1 (adversary warmup-wave review): this runner is what makes the sweep
+ * REACHABLE in production. It previously ran only inside `runTick`, which no
+ * scheduler, route, MCP tool, or DO alarm invokes — so no subscription would
+ * ever have been cancelled while the site claimed otherwise. Kept out of
+ * `tick()` on purpose: driving the full tick from cron would arm automatic
+ * campaign sending, a separate founder-gated decision. Carries no send
+ * scheduling, exactly like `runDeliverabilitySweepAllTenants`.
+ *
+ * One tenant's failure never aborts the sweep for the rest, and the per-tenant
+ * sweep itself grades each mailbox independently and never throws.
+ */
+export async function runWarmupCancelSweepAllTenants(env: Env): Promise<WarmupCancelSweepAllSummary> {
+  const tenantIds = await listAllTenantIds(env);
+  let cancelled = 0;
+  let errors = 0;
+  for (const tenantId of tenantIds) {
+    try {
+      const stub = env.TENANT.get(env.TENANT.idFromName(tenantId));
+      const result = await stub.warmupCancelSweep();
+      cancelled += result.cancelled;
+    } catch (err) {
+      errors++;
+      console.error(`warmup cancel sweep failed for tenant ${tenantId}`, err);
+    }
+  }
+  return { tenantsSwept: tenantIds.length, cancelled, errors };
+}
+
 export interface WebhookDeliverySweepSummary {
   tenantsSwept: number;
   errors: number;
@@ -186,6 +224,11 @@ export interface OpsDigest {
   totalUsageCents: number;
   provisioningFailureCount: number;
   deliverability: { pausedMailboxesTotal: number; burningDomainsTotal: number; actionsInWindow: number };
+  /** Warmup-pool cancellations the platform GAVE UP on in the window (adversary
+   * N-b) — each one is an InboxKit subscription that may still be billing. Its
+   * own field, never folded into `deliverability.actionsInWindow`: a pause is
+   * routine control-loop work, this is money leaking. */
+  gaveUpWarmupCancels: number;
   support: { open: number; escalated: number };
   pastDueCount: number;
   /** D5 lifecycle health — canceled/terminated/disputed tenant counts + total annual-domain liability (integer cents). */
@@ -210,6 +253,7 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
   let pausedMailboxesTotal = 0;
   let burningDomainsTotal = 0;
   let deliverabilityActionsInWindow = 0;
+  let gaveUpWarmupCancels = 0;
   let canceledCount = 0;
   let disputedCount = 0;
   let annualDomainLiabilityCents = 0;
@@ -227,6 +271,7 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
     pausedMailboxesTotal += s.deliverability.pausedMailboxes;
     burningDomainsTotal += s.deliverability.burningDomains;
     deliverabilityActionsInWindow += s.actionsInWindow.paused + s.actionsInWindow.replaced;
+    gaveUpWarmupCancels += s.actionsInWindow.gaveUpWarmupCancels;
   }
 
   // Terminated tenants come from the D1 enforcement_actions audit log (an
@@ -253,6 +298,11 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
   if (disputedCount > 0) {
     watchdogAlerts.push(`${disputedCount} tenant(s) frozen by an open chargeback dispute`);
   }
+  if (gaveUpWarmupCancels > 0) {
+    watchdogAlerts.push(
+      `${gaveUpWarmupCancels} warmup-pool cancellation(s) GAVE UP after retries — those InboxKit subscriptions may still be billing; verify in the vendor console`,
+    );
+  }
 
   return {
     windowHours,
@@ -261,6 +311,7 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
     totalUsageCents,
     provisioningFailureCount: 0,
     deliverability: { pausedMailboxesTotal, burningDomainsTotal, actionsInWindow: deliverabilityActionsInWindow },
+    gaveUpWarmupCancels,
     support,
     pastDueCount,
     lifecycle: { canceled: canceledCount, terminated: terminatedCount, disputed: disputedCount, annualDomainLiabilityCents },

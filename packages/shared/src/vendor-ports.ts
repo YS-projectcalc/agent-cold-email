@@ -29,6 +29,12 @@ export interface ReleaseResult {
   releasedAt: number;
 }
 
+/** Outcome of `MailboxPort.cancelWarmup` — the warmup-pool subscription is gone. */
+export interface CancelWarmupResult {
+  cancelled: boolean;
+  cancelledAt: number;
+}
+
 export interface DomainPort {
   searchLookalikes(brand: string, primaryDomain: string, count: number): Promise<LookalikeCandidate[]>;
   buy(domain: string, idempotencyKey: string): Promise<PurchasedDomain>;
@@ -60,6 +66,22 @@ export interface MailboxPort {
   provision(domain: string, localPart: string, idempotencyKey: string): Promise<ProvisionedMailbox>;
   getHealth(email: string): Promise<MailboxHealth>;
   startWarmup(email: string, idempotencyKey: string): Promise<{ started: boolean; startedAt: number }>;
+  /**
+   * Cancels the vendor-side warmup-pool subscription started by `startWarmup`
+   * — founder ruling 2026-08-02 (ROADMAP.md:25, option b): the pool runs during
+   * the ~28-day ramp and the platform cancels it at ramp completion, so the
+   * add-on's recurring per-mailbox cost stops after roughly one month instead
+   * of billing for the life of the mailbox.
+   *
+   * DISTINCT from `release`, which tears down the MAILBOX itself. A mailbox
+   * whose warmup is cancelled keeps sending at its full post-ramp cap; only the
+   * synthetic warmup traffic stops.
+   *
+   * Called by the engine's ramp-completion sweep, which retries on failure, so
+   * an implementation must be safe to invoke more than once for the same
+   * mailbox.
+   */
+  cancelWarmup(email: string, idempotencyKey: string): Promise<CancelWarmupResult>;
   /**
    * Releases a mailbox back to the vendor on tenant teardown/reclaim (D5).
    * Idempotency-keyed. Real adapter calls Inboxkit's delete-mailbox endpoint at

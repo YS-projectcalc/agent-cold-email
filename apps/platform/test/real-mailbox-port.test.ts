@@ -11,6 +11,10 @@ import {
   IK_MAILBOX_LIST_EMPTY,
   IK_MAILBOX_LIST_SUCCESS,
   IK_WARMUP_ADD_SUCCESS,
+  IK_WARMUP_CANCEL_NONE,
+  IK_WARMUP_CANCEL_SUCCESS,
+  IK_WARMUP_LIST_ACTIVE,
+  IK_WARMUP_LIST_EMPTY,
   IK_WORKSPACE_ID,
 } from "./fixtures/inboxkit.js";
 
@@ -36,6 +40,7 @@ describe("RealMailboxPort — dark until configured", () => {
     await expect(port.provision("example.com", "john.doe", "k1")).rejects.toBeInstanceOf(NotActivatedError);
     await expect(port.getHealth("john.doe@example.com")).rejects.toBeInstanceOf(NotActivatedError);
     await expect(port.startWarmup("john.doe@example.com", "k1")).rejects.toBeInstanceOf(NotActivatedError);
+    await expect(port.cancelWarmup("john.doe@example.com", "k1")).rejects.toBeInstanceOf(NotActivatedError);
     await expect(port.release("john.doe@example.com", "k1")).rejects.toBeInstanceOf(NotActivatedError);
     await expect(port.showMailboxCredentials("john.doe@example.com")).rejects.toBeInstanceOf(NotActivatedError);
   });
@@ -164,5 +169,76 @@ describe("RealMailboxPort — configured (InboxKit)", () => {
     const result = await new RealMailboxPort(CONFIG).release("john.doe@example-lookalike.com", "k1");
     expect(result.released).toBe(true);
     expect(spy.mock.calls).toHaveLength(2); // list + cancel
+  });
+});
+
+// Adversary N-d (2026-08-02): `MailboxPort.cancelWarmup`'s own contract says an
+// implementation "must be safe to invoke more than once for the same mailbox",
+// because the engine sweep retries. An already-cancelled subscription will not
+// appear in /warmup/cancel's results.success, so treating that absence as
+// failure made the retry burn its whole attempt budget and file a FALSE
+// "may still be billing" give-up. Absence is disambiguated by ASKING the vendor
+// (/warmup/list), never by matching error text.
+describe("RealMailboxPort — cancelWarmup (warmup-pool auto-cancel, N-d idempotency)", () => {
+  const EMAIL = "john.doe@example-lookalike.com";
+
+  it("cancels on the happy path: resolve uid -> POST /warmup/cancel, no list lookup needed", async () => {
+    const spy = stubFetchSequence([{ status: 200, body: IK_MAILBOX_LIST_SUCCESS }, { status: 200, body: IK_WARMUP_CANCEL_SUCCESS }]);
+    const result = await new RealMailboxPort(CONFIG).cancelWarmup(EMAIL, "k1");
+
+    expect(result.cancelled).toBe(true);
+    expect(spy.mock.calls).toHaveLength(2); // mailboxes/list + warmup/cancel — no extra round trip
+    const [cancelUrl, init] = spy.mock.calls[1]!;
+    expect(cancelUrl).toBe("https://ik.example.internal/v1/api/warmup/cancel");
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({
+      mailbox_uids: ["mbx-11111111-2222-3333-4444-555555555555"],
+    });
+  });
+
+  it("REPEAT cancel succeeds: nothing in results.success, and /warmup/list proves no active subscription", async () => {
+    const spy = stubFetchSequence([
+      { status: 200, body: IK_MAILBOX_LIST_SUCCESS },
+      { status: 200, body: IK_WARMUP_CANCEL_NONE },
+      { status: 200, body: IK_WARMUP_LIST_EMPTY },
+    ]);
+    const result = await new RealMailboxPort(CONFIG).cancelWarmup(EMAIL, "k1");
+
+    // The goal state holds regardless of who achieved it — this is what makes
+    // the crash-between-vendor-200-and-marker-write retry converge.
+    expect(result.cancelled).toBe(true);
+    expect(spy.mock.calls).toHaveLength(3);
+    const [listUrl, listInit] = spy.mock.calls[2]!;
+    expect(listUrl).toBe("https://ik.example.internal/v1/api/warmup/list");
+    expect(JSON.parse((listInit as RequestInit).body as string)).toMatchObject({ status: "active", include_cancelled: false });
+  });
+
+  it("a GENUINE failure still throws (retryable) when the subscription is verifiably still active", async () => {
+    const spy = stubFetchSequence([
+      { status: 200, body: IK_MAILBOX_LIST_SUCCESS },
+      { status: 200, body: IK_WARMUP_CANCEL_NONE },
+      { status: 200, body: IK_WARMUP_LIST_ACTIVE },
+    ]);
+    const err = await new RealMailboxPort(CONFIG).cancelWarmup(EMAIL, "k1").catch((e) => e);
+
+    expect(err).toBeInstanceOf(VendorError);
+    expect((err as VendorError).retryable).toBe(true);
+    expect((err as VendorError).message).toMatch(/still active/i);
+    void spy;
+  });
+
+  it("an INCONCLUSIVE lookup throws rather than reporting a cancel that may not have happened", async () => {
+    // The lookup itself failing proves nothing. Reporting success here would
+    // mark a possibly-live subscription as cancelled and leak the charge — the
+    // one outcome worth failing loudly for.
+    const spy = stubFetchSequence([
+      { status: 200, body: IK_MAILBOX_LIST_SUCCESS },
+      { status: 200, body: IK_WARMUP_CANCEL_NONE },
+      { status: 500, body: { error: true, message: "internal" } },
+    ]);
+    const err = await new RealMailboxPort(CONFIG).cancelWarmup(EMAIL, "k1").catch((e) => e);
+
+    expect(err).toBeInstanceOf(VendorError);
+    expect((err as VendorError).retryable).toBe(true);
+    void spy;
   });
 });

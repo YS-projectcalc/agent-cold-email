@@ -8,6 +8,23 @@ into a god file:
 - `mailbox-state.ts` — persists live warmup day/cap/status + resets daily
   send counters on a virtual-day rollover. Called before anything that
   reads/enforces mailbox capacity.
+- `warmup-cancel.ts` — `runWarmupCancellationSweep`: cancels a mailbox's
+  InboxKit warmup-pool subscription once its ramp completes (day 29), per the
+  founder ruling 2026-08-02 (ROADMAP.md:25) that the recurring add-on bills for
+  the ramp month only. Driven by the **cron** (`scheduled.ts` ->
+  `runWarmupCancelSweepAllTenants` -> the `warmupCancelSweep` DO method), which
+  is its only production driver — adversary A1 caught it wired solely into
+  `runTick`, which nothing in production calls (alarm-driven scheduling is still
+  B2). Deliberately its own cron lane rather than part of the tick: driving the
+  full tick from cron would arm automatic campaign sending. It also cannot live
+  inside the synchronous `mailbox-state.ts` refresh, since it makes a vendor
+  call and the send path calls that refresh mid-guard-sequence.
+  Exactly-once via the `mailboxes.warmup_cancelled_at` marker; a give-up at the
+  attempt cap records `warmup_cancel_gave_up_at` INSTEAD, keeping "the vendor
+  confirmed" distinguishable from "we stopped trying", and surfaces in the owner
+  digest. Skips BYO-connected mailboxes (never had a subscription) and released
+  ones. Failure-isolated — it can never delay a send. Cancelling changes nothing
+  about send capacity: the ramp is ours.
 - `scheduler.ts` — pure send-window + least-loaded-mailbox-with-capacity
   helpers used by `tick.ts` (`isWithinSendWindow` is wired into the tick).
 - `brand-guard.ts` — the lookalike third-party-brand hard-reject validator
@@ -75,9 +92,18 @@ into a god file:
   rate-capped per window so a replacement that also burns can't spawn forever.
 - `demo.ts` — `demo_run`: the sandbox accelerated pipeline. Resets prior demo
   state each run so DO storage stays bounded; per-tenant throttled in `tenant-do.ts`.
+- `guarded-send.ts` — `sendWithGuards`: the shared GUARDED single-send
+  primitive every one-off (non-campaign) send goes through, so a manual reply
+  is subject to the same governance the tick enforces inline — suppression
+  re-check, deliverability-pause refusal, and an atomically-reserved
+  per-mailbox daily cap that meters `sent_today`. Refuses with a structured
+  `SendBlockedError` (named reason + retryable) rather than dropping silently.
+  Warm-lead Q3 (ROADMAP.md:76) / adversary R1-R2 named this as the required
+  reuse target; `schedule_followup`'s drain is its next caller when built.
 - `threads.ts` — `thread(id)` / `reply(thread, body)` / `mark(thread,
   status)` + `lookupThreadRef` (shared by `reply-processor.ts`,
-  `thread-labels.ts`, and `inbox.ts`). `listInbox()` (v1) used to live here —
+  `thread-labels.ts`, and `inbox.ts`). `reply` sends via `guarded-send.ts`,
+  never the vendor port directly. `listInbox()` (v1) used to live here —
   moved to `inbox.ts` (below) for SPEC.md §19.4's v2 rewrite.
 - `inbox.ts` — SPEC.md §19.4 (M1 dashboard+inbox brief) `GET /inbox` v2 /
   the MCP `inbox` tool: a single JOINed+CTE query (kills v1's per-row N+1),

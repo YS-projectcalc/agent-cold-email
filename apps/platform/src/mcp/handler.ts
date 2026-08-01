@@ -164,6 +164,21 @@ export async function handleMcpRequest(
             isError: true,
           });
         }
+        // Warm-lead Q3 / adversary R1-R2 — a send refused by the guarded
+        // single-send primitive gets the SAME structured treatment, for the
+        // same reason: the calling agent has to BRANCH on it (back off until
+        // the cap rolls over vs stop contacting this address entirely vs
+        // surface a paused mailbox to its human), and a flattened message
+        // string forces it to regex prose to decide. `reason`/`retryable`
+        // survive the RPC boundary as own properties, exactly like
+        // currentRev/currentLayout above.
+        if (name === "SendBlockedError") {
+          const blocked = err as Error & { reason: string; retryable: boolean };
+          return result(id, {
+            content: [{ type: "text", text: JSON.stringify({ error: blocked.message, code: "send_blocked", reason: blocked.reason, retryable: blocked.retryable }) }],
+            isError: true,
+          });
+        }
         const message = err instanceof Error ? err.message : String(err);
         return result(id, { content: [{ type: "text", text: message }], isError: true });
       }

@@ -7,6 +7,7 @@ import { runDeliverabilitySweep } from "./deliverability-actions.js";
 import { refreshMailboxWarmupState } from "./mailbox-state.js";
 import { isWithinSendWindow, pickMailboxWithCapacity, type SendWindow } from "./scheduler.js";
 import { renderTemplate } from "./template.js";
+import { runWarmupCancellationSweep } from "./warmup-cancel.js";
 
 interface DueSend {
   id: string;
@@ -160,6 +161,18 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
   // more from a degrading mailbox this tick. Paused mailboxes are excluded from
   // the capacity picker query, which realizes the ROTATE reroute.
   await runDeliverabilitySweep(ctx);
+  // Warmup-pool auto-cancel at ramp completion (founder ruling 2026-08-02,
+  // ROADMAP.md:25). Runs from the tick because it makes a VENDOR call, which
+  // cannot live in the synchronous refreshMailboxWarmupState above (the send
+  // path calls that one mid-guard-sequence — see engine/warmup-cancel.ts).
+  // Wrapped: this is a COGS optimization, and a vendor hiccup cancelling a
+  // warmup subscription must never stop this tenant's mail from going out. The
+  // sweep already grades each mailbox internally; this is the outer belt.
+  try {
+    await runWarmupCancellationSweep(ctx);
+  } catch (err) {
+    console.error("warmup cancellation sweep failed (sends unaffected)", err);
+  }
   const now = ctx.clock.now();
 
   // Reclaim rows orphaned in 'sending' — a DO that died between the claim and

@@ -32,7 +32,10 @@ import { ONE_DAY_MS } from "./warmup.js";
 const MAX_REPLACEMENTS_PER_WINDOW = 3;
 const REPLACEMENT_WINDOW_MS = 30 * ONE_DAY_MS;
 
-function logAction(ctx: TenantContext, action: string, target: string, detail: Record<string, unknown>): void {
+/** Appends one ops-visible system action (activity feed + infrastructure_status).
+ * Exported for engine/warmup-cancel.ts, which records ramp-completion warmup
+ * cancellations through this SAME writer rather than a second insert. */
+export function logAction(ctx: TenantContext, action: string, target: string, detail: Record<string, unknown>): void {
   ctx.sql.exec(
     `INSERT INTO deliverability_actions (id, tenant_id, action, target, detail_json, ts) VALUES (?, ?, ?, ?, ?, ?)`,
     newId("dact"),

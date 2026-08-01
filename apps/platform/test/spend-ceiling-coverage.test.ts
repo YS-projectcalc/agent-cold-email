@@ -21,7 +21,10 @@ const SPEND_SOURCES: { file: string; source: string }[] = [{ file: "engine/provi
 
 // The money-out vendor calls (design §0 inventory). Reads/config calls
 // (getHealth, release, searchLookalikes, setDns) are NOT money-out and are
-// deliberately absent.
+// deliberately absent — as is `cancelWarmup` (ramp-completion warmup-pool
+// cancellation, founder ruling 2026-08-02): it STOPS a recurring charge, so
+// reserving against the ceiling for it would be backwards. Same category as
+// `release`, the other vendor-side cancellation.
 const SPEND_CALL_PATTERNS = [
   "adapters.mailbox.provision(",
   "adapters.mailbox.startWarmup(",

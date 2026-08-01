@@ -122,6 +122,33 @@ export class IncompleteRegistrantError extends VendorError {
   }
 }
 
+/** Which send guard refused — one member per check in `engine/guarded-send.ts`. */
+export type SendBlockedReason = "suppressed" | "mailbox_paused" | "daily_cap_reached";
+
+/**
+ * Thrown by the shared guarded single-send primitive (`engine/guarded-send.ts`)
+ * when a one-off send is refused by send governance — warm-lead Q3
+ * (ROADMAP.md:76) / adversary R1/R2, `docs/adversarial/
+ * warm-lead-thin-layer-design-2026-07-16.md`. A refusal is a normal, expected
+ * outcome an agent must be able to branch on, never a silent drop and never an
+ * opaque 500: `reason` names the guard that tripped and `retryable` says
+ * whether waiting alone can clear it (a daily cap rolls over; a deliverability
+ * pause and a suppression do not — both need a state change first). The
+ * Worker's onError maps this to 429 when retryable and 409 otherwise, with a
+ * `send_blocked` code (index.ts) — the same structured-4xx treatment
+ * `IncompleteRegistrantError` gets.
+ */
+export class SendBlockedError extends Error {
+  constructor(
+    public readonly reason: SendBlockedReason,
+    message: string,
+    public readonly retryable: boolean,
+  ) {
+    super(message);
+    this.name = "SendBlockedError";
+  }
+}
+
 export class TenantIsolationError extends Error {
   constructor(message: string) {
     super(message);

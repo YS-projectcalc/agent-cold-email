@@ -1,4 +1,4 @@
-import type { Clock, MailboxHealth, MailboxPort, ProvisionedMailbox, ReleaseResult } from "@coldstart/shared";
+import type { CancelWarmupResult, Clock, MailboxHealth, MailboxPort, ProvisionedMailbox, ReleaseResult } from "@coldstart/shared";
 
 // Sandbox MailboxPort — deterministic, healthy-by-default mailboxes. Actual
 // warmup ramp math lives in engine/warmup.ts (per-tenant, clock-driven); this
@@ -18,6 +18,15 @@ export class SandboxMailboxPort implements MailboxPort {
 
   async startWarmup(_email: string, _idempotencyKey: string): Promise<{ started: boolean; startedAt: number }> {
     return { started: true, startedAt: this.clock.now() };
+  }
+
+  async cancelWarmup(_email: string, _idempotencyKey: string): Promise<CancelWarmupResult> {
+    // Idempotent no-op success — there is no sandbox warmup subscription to
+    // cancel (the ramp math is ours, engine/warmup.ts). The real adapter posts
+    // InboxKit's /warmup/cancel here. Returning success means the engine's
+    // ramp-completion sweep marks a sandbox mailbox cancelled on the first
+    // pass and never re-fires, exactly as it would against a live vendor.
+    return { cancelled: true, cancelledAt: this.clock.now() };
   }
 
   async release(email: string, idempotencyKey: string): Promise<ReleaseResult> {

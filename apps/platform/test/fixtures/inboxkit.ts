@@ -93,6 +93,70 @@ export const IK_WARMUP_ADD_SUCCESS = {
   skipped: 0,
 };
 
+// POST /warmup/cancel — the mailbox's uid comes back under results.success.
+// Shape captured from docs.inboxkit.com/cancel-warmup-for-mailboxes-28170231e0.
+export const IK_WARMUP_CANCEL_SUCCESS = {
+  error: false,
+  message: "Processed 1 mailbox(es): 1 cancelled, 0 failed",
+  results: {
+    success: [
+      {
+        mailbox_uid: "mbx-11111111-2222-3333-4444-555555555555",
+        subscription_uid: "warm-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        action: "cancelled",
+      },
+    ],
+  },
+};
+
+/** A cancel that reports NOTHING cancelled — ambiguous between "it failed" and
+ * "there was nothing left to cancel" (adversary N-d). Only /warmup/list resolves it. */
+export const IK_WARMUP_CANCEL_NONE = {
+  error: false,
+  message: "Processed 1 mailbox(es): 0 cancelled, 1 failed",
+  results: { success: [] },
+};
+
+// POST /warmup/list — contract captured from
+// docs.inboxkit.com/list-warmup-subscriptions-28170226e0 (2026-08-02).
+export const IK_WARMUP_LIST_ACTIVE = {
+  error: false,
+  message: "Warmup subscriptions retrieved successfully",
+  subscriptions: [
+    {
+      uid: "warm-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      status: "active",
+      mailbox_email: "john.doe@example-lookalike.com",
+      price_per_month: 3,
+      started_at: "2026-01-15T10:30:00.000Z",
+      next_billing_date: "2026-02-15T10:30:00.000Z",
+      mailbox: {
+        uid: "mbx-11111111-2222-3333-4444-555555555555",
+        username: "john.doe",
+        domain_name: "example-lookalike.com",
+        platform: "GOOGLE",
+        status: "active",
+      },
+      createdAt: "2026-01-15T10:30:00.000Z",
+    },
+  ],
+  total: 1,
+  pages: 1,
+  current_page: 1,
+  limit: 100,
+};
+
+/** No ACTIVE subscription for our mailbox — the already-cancelled proof. */
+export const IK_WARMUP_LIST_EMPTY = {
+  error: false,
+  message: "Warmup subscriptions retrieved successfully",
+  subscriptions: [],
+  total: 0,
+  pages: 0,
+  current_page: 1,
+  limit: 100,
+};
+
 export const IK_MAILBOX_CANCEL_SUCCESS = {
   error: false,
   message: "Mailbox scheduled for cancellation",

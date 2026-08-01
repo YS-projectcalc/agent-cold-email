@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { MailboxHealth, MailboxPort, ProvisionedMailbox, ReleaseResult } from "@coldstart/shared";
+import type { CancelWarmupResult, MailboxHealth, MailboxPort, ProvisionedMailbox, ReleaseResult } from "@coldstart/shared";
 import { VirtualClock } from "../src/clock.js";
 import { readActivationState } from "../src/engine/activation.js";
 import { provisionMailboxesForDomain } from "../src/engine/provisioning.js";
@@ -25,6 +25,9 @@ function countingMailbox(): { port: MailboxPort; provisionCalls: () => number } 
     },
     async startWarmup(): Promise<{ started: boolean; startedAt: number }> {
       return { started: true, startedAt: Date.now() };
+    },
+    async cancelWarmup(): Promise<CancelWarmupResult> {
+      return { cancelled: true, cancelledAt: Date.now() };
     },
     async getHealth(email: string): Promise<MailboxHealth> {
       return { email, reputationScore: 90, bounceRate: 0.01, complaintRate: 0, placementRate: 0.99 };

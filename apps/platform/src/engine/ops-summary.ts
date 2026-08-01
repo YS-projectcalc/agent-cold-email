@@ -32,7 +32,7 @@ export interface TenantOpsSummary {
   /** All-time deliverability rollup — same shape account() surfaces to the tenant. */
   deliverability: { pausedMailboxes: number; throttledMailboxes: number; burningDomains: number; domainsReplaced: number };
   /** Deliverability actions logged strictly since `sinceMs` — what the D6 digest windows over. */
-  actionsInWindow: { paused: number; replaced: number };
+  actionsInWindow: { paused: number; replaced: number; gaveUpWarmupCancels: number };
   /** Watchtower failure-signal scan — terminal-'failed' sends (includes CAN-SPAM
    * compliance refusals, engine/tick.ts) + spam-complaint events (engine/
    * reply-processor.ts) with `events`.ts >= sinceMs. Windowed so the watchtower
@@ -162,6 +162,12 @@ export function getOpsSummary(ctx: TenantContext, sinceMs: number): TenantOpsSum
     actionsInWindow: {
       paused: countActionsInWindow(ctx, "PAUSE", sinceMs),
       replaced: countActionsInWindow(ctx, "REPLACE_DOMAIN", sinceMs),
+      // Adversary N-b (2026-08-02): a warmup-cancel give-up means an InboxKit
+      // subscription that may STILL BE BILLING. It is written to
+      // deliverability_actions, but that table is read by the tenant's activity
+      // feed and report — surfaces the CUSTOMER sees and cannot act on. This is
+      // our COGS, so the owner digest is where it has to land.
+      gaveUpWarmupCancels: countActionsInWindow(ctx, "WARMUP_CANCEL_GAVE_UP", sinceMs),
     },
     failureSignalsInWindow: {
       failed: failureSignals.failed ?? 0,

@@ -175,6 +175,19 @@ app.onError((err, c) => {
     const incomplete = err as Error & { missingFields: string[] };
     return c.json({ error: err.message, missingFields: incomplete.missingFields, code: "incomplete_registrant" }, 400);
   }
+  // Warm-lead Q3 (ROADMAP.md:76) / adversary R1-R2 — a send refused by the
+  // guarded single-send primitive (engine/guarded-send.ts) is a normal,
+  // agent-actionable outcome, never a 500 and never a silent drop. `reason`
+  // names the guard that tripped so the caller can branch (back off vs stop
+  // contacting this address vs escalate the paused mailbox); `retryable`
+  // splits the status, since only the daily cap clears with time.
+  if (name === "SendBlockedError") {
+    const blocked = err as Error & { reason: string; retryable: boolean };
+    return c.json(
+      { error: err.message, code: "send_blocked", reason: blocked.reason, retryable: blocked.retryable },
+      blocked.retryable ? 429 : 409,
+    );
+  }
   // SPEC.md §19.4 [F5] — a stale dashboard-view rev is a STRUCTURED 409: the
   // agent needs currentRev + currentLayout to rebase its edit, not just an
   // opaque "conflict" string.

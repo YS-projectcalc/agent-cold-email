@@ -1,5 +1,5 @@
 import { VendorError } from "@coldstart/shared";
-import type { MailboxHealth, MailboxPort, ProvisionedMailbox, ReleaseResult } from "@coldstart/shared";
+import type { CancelWarmupResult, MailboxHealth, MailboxPort, ProvisionedMailbox, ReleaseResult } from "@coldstart/shared";
 import { InboxKitClient, type InboxKitClientConfig } from "./inboxkit-client.js";
 
 /**
@@ -18,6 +18,7 @@ import { InboxKitClient, type InboxKitClientConfig } from "./inboxkit-client.js"
  *  - getHealth   -> POST /mailboxes/list (resolve email->uid) then
  *                   GET /email-insights/mailbox/{uid}/health
  *  - startWarmup -> POST /mailboxes/list (resolve uid) then POST /warmup/add
+ *  - cancelWarmup-> POST /mailboxes/list (resolve uid) then POST /warmup/cancel
  *  - release     -> POST /mailboxes/list (resolve uid) then POST /mailboxes/cancel
  *
  * PROVISION IDEMPOTENCY (gate (c), adversary finding 3): InboxKit's
@@ -97,6 +98,93 @@ export class RealMailboxPort implements MailboxPort {
     }
     const startedAt = subscription.started_at ?? subscription.createdAt;
     return { started: true, startedAt: Date.parse(startedAt) };
+  }
+
+  /**
+   * Cancels the mailbox's warmup-pool subscription at ramp completion (founder
+   * ruling 2026-08-02, ROADMAP.md:25) — POST /warmup/cancel, documented at
+   * docs.inboxkit.com/cancel-warmup-for-mailboxes-28170231e0 (contract captured
+   * 2026-08-02): body `{mailbox_uids: [...]}` (1-100), and "active warmups will
+   * be stopped before cancellation" so no separate pause call is needed. The
+   * sibling pause/resume/list endpoints are deliberately NOT wired — this
+   * platform only ever cancels.
+   *
+   * PARTIAL FAILURE: the endpoint answers 200 for a BATCH and reports per-
+   * mailbox outcomes ("Processed N mailbox(es): N cancelled, N failed"), so a
+   * 200 alone does not mean OUR mailbox was cancelled. We send exactly one uid
+   * and require it back in `results.success`.
+   *
+   * IDEMPOTENCY (adversary N-d, 2026-08-02). Absence from `results.success` is
+   * AMBIGUOUS: it covers both "the cancel failed" and "there was nothing left
+   * to cancel because a previous attempt already succeeded". Treating it as
+   * failure broke this method's own port contract ("safe to invoke more than
+   * once") and mis-graded the crash-between-vendor-200-and-marker-write retry —
+   * the engine would burn its whole attempt budget and file a FALSE
+   * "may still be billing" give-up for an already-cancelled subscription.
+   * Disambiguated by ASKING the vendor (`hasActiveWarmupSubscription` below)
+   * rather than by matching error text — this adapter already deleted one
+   * `/already exists/i` substring match for being fragile. No active
+   * subscription for this mailbox means the goal state holds, whoever achieved
+   * it, so we report success. Only a still-ACTIVE subscription (or an
+   * inconclusive lookup) throws, and RETRYABLE — a batch-level failure is far
+   * more likely transient than permanent, and the engine's sweep re-attempts on
+   * the next cron pass without blocking sends.
+   */
+  async cancelWarmup(email: string, _idempotencyKey: string): Promise<CancelWarmupResult> {
+    const uid = await this.resolveMailboxUid(email);
+    const body = await this.client.request<CancelWarmupResponse>("cancelWarmup", "POST", "/warmup/cancel", {
+      body: { mailbox_uids: [uid] },
+    });
+    if (!body.error && (body.results?.success?.some((r) => r.mailbox_uid === uid) ?? false)) {
+      return { cancelled: true, cancelledAt: Date.now() };
+    }
+
+    const state = await this.warmupSubscriptionState(uid, email);
+    if (state === "absent") return { cancelled: true, cancelledAt: Date.now() };
+    throw new VendorError(
+      `inboxkit warmup/cancel did not cancel ${email} (uid ${uid}), and its subscription is still ${state}: ${body.message ?? "no message"}`,
+      true,
+    );
+  }
+
+  /**
+   * Whether this mailbox still has an ACTIVE warmup subscription — the
+   * disambiguator for `cancelWarmup` above. POST /v1/api/warmup/list, contract
+   * captured from docs.inboxkit.com/list-warmup-subscriptions-28170226e0
+   * (2026-08-02): body `{page, limit, status, include_cancelled}`, response
+   * `{error, message, subscriptions[], total, pages, current_page, limit}`,
+   * each subscription carrying `mailbox_email` and a nested `mailbox.uid`.
+   *
+   * The documented body params expose no per-mailbox filter, so this pages
+   * through the workspace's ACTIVE subscriptions and matches on either
+   * identifier. `"inconclusive"` (a vendor error, or more pages than
+   * MAX_SUBSCRIPTION_PAGES) is deliberately NOT folded into `"absent"`: an
+   * unfinished search proves nothing, and reporting a cancel that never
+   * happened would silently leak a recurring charge — the one outcome worth
+   * failing loudly for. Caller retries on anything but a definite `"absent"`.
+   */
+  private async warmupSubscriptionState(uid: string, email: string): Promise<"active" | "absent" | "inconclusive"> {
+    for (let page = 1; page <= MAX_SUBSCRIPTION_PAGES; page++) {
+      let body: ListWarmupSubscriptionsResponse;
+      try {
+        body = await this.client.request<ListWarmupSubscriptionsResponse>("warmupSubscriptionState", "POST", "/warmup/list", {
+          body: { page, limit: SUBSCRIPTION_PAGE_SIZE, status: "active", include_cancelled: false },
+        });
+      } catch {
+        return "inconclusive"; // the lookup itself failed — prove nothing
+      }
+      if (body.error) return "inconclusive";
+
+      const subscriptions = body.subscriptions ?? [];
+      const match = subscriptions.some(
+        (s) => s.mailbox?.uid === uid || (s.mailbox_email ?? "").toLowerCase() === email.toLowerCase(),
+      );
+      if (match) return "active";
+      // Last page reached (or the vendor returned a short/empty page): the
+      // active set has been fully walked without a match.
+      if (subscriptions.length === 0 || page >= (body.pages ?? 1)) return "absent";
+    }
+    return "inconclusive"; // more pages than we are willing to walk
   }
 
   async release(email: string, _idempotencyKey: string): Promise<ReleaseResult> {
@@ -236,6 +324,36 @@ interface CancelMailboxesResponse {
   error: boolean;
   message?: string;
 }
+
+// POST /warmup/cancel (contract captured from docs.inboxkit.com 2026-08-02).
+// `message` is a human summary ("Processed 1 mailbox(es): 1 cancelled, 0
+// failed"); the machine-readable per-mailbox outcome is `results.success[]`,
+// which is what cancelWarmup actually branches on — never the message text
+// (this adapter already removed one message-substring match, see the class doc).
+interface CancelWarmupResponse {
+  error: boolean;
+  message?: string;
+  results?: { success?: Array<{ mailbox_uid: string; subscription_uid: string; action: string }> };
+}
+
+// POST /warmup/list (contract captured from docs.inboxkit.com 2026-08-02) —
+// the already-cancelled disambiguator for cancelWarmup. Paginated; each entry
+// carries the subscription's own `uid` plus the owning mailbox's email and uid.
+interface ListWarmupSubscriptionsResponse {
+  error: boolean;
+  message?: string;
+  subscriptions?: Array<{ uid: string; status: string; mailbox_email?: string; mailbox?: { uid?: string } }>;
+  total?: number;
+  pages?: number;
+  current_page?: number;
+}
+
+// Page size + walk ceiling for warmupSubscriptionState. The ceiling exists so a
+// very large workspace can never turn one cancel into an unbounded crawl; at
+// 100/page it covers 1,000 active subscriptions, far beyond the InboxKit plan
+// sizes this platform provisions against (INBOXKIT_PLAN_SLOTS).
+const SUBSCRIPTION_PAGE_SIZE = 100;
+const MAX_SUBSCRIPTION_PAGES = 10;
 
 /**
  * Derives InboxKit's required `first_name`/`last_name` mailbox-buy fields

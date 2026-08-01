@@ -203,6 +203,27 @@ CREATE TABLE IF NOT EXISTS mailboxes (
   -- loop, semantically distinct). Teardown also sets deliv_status='paused' so
   -- the tick's capacity picker stops sending from it immediately.
   released_at INTEGER,
+  -- Founder ruling 2026-08-02 (ROADMAP.md:25): the InboxKit warmup-pool
+  -- subscription is cancelled once this mailbox's ramp completes (day 29), so
+  -- the add-on's recurring cost stops after ~one month. Set only after the
+  -- vendor confirms; its presence is what makes the sweep fire exactly once
+  -- (engine/warmup-cancel.ts). Its own column, NOT the warmup status column above
+  -- (recomputed from the ramp every tick — a marker there would be wiped) and
+  -- NOT released_at (that is full mailbox teardown; a warmup-cancelled mailbox
+  -- keeps sending at its full post-ramp cap).
+  warmup_cancelled_at INTEGER,
+  -- Failed cancel attempts so far. A vendor failure leaves warmup_cancelled_at
+  -- NULL so a later tick retries; this bounds that retry the same way
+  -- scheduled_sends.attempts bounds send retries (tick.ts's MAX_SEND_ATTEMPTS,
+  -- A4 CLASS A: no infinite-retry path survives).
+  warmup_cancel_attempts INTEGER NOT NULL DEFAULT 0,
+  -- Set when the sweep hits the attempt cap and STOPS trying. Deliberately a
+  -- SEPARATE column from warmup_cancelled_at (adversary N-d/N-c, 2026-08-02):
+  -- writing the confirmed-cancellation marker on give-up would have broken that
+  -- column's stated invariant, so "is this pool still billing?" would read as
+  -- "no" from a row that actually means "we gave up asking". Both columns stop
+  -- the sweep; only warmup_cancelled_at asserts the vendor confirmed.
+  warmup_cancel_gave_up_at INTEGER,
   -- Consumer-owned IMAP poll cursor (high-water UID). The engine is cursor-
   -- stateless; runPollInbox passes this as EmailPort.poll's sinceCursor and,
   -- AFTER transactionally processing the returned events, advances it to the

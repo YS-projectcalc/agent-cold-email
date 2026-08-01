@@ -1,6 +1,7 @@
 import { NotFoundError } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
+import { sendWithGuards } from "./guarded-send.js";
 
 // sent_message_keys rows are evicted at write time once older than this — the
 // same unbounded-growth guard request_idempotency uses (NB1). After the TTL an
@@ -61,7 +62,7 @@ export function getThread(ctx: TenantContext, threadId: string): ThreadDetail {
     .exec<{ email: string }>(`SELECT email FROM leads WHERE id = ? AND tenant_id = ?`, ref.lead_id, ctx.tenantId)
     .one().email;
 
-  const mailboxEmail = resolveSendingMailboxEmail(ctx, threadId) ?? null;
+  const mailboxEmail = resolveSendingMailbox(ctx, threadId)?.email ?? null;
 
   const events = ctx.sql
     .exec<{ type: string; ts: number; message_id: string | null; metadata_json: string }>(
@@ -88,17 +89,19 @@ export function getThread(ctx: TenantContext, threadId: string): ThreadDetail {
 
 /** The mailbox that sent this thread's last step so far — shared by
  * `getThread` (mailboxEmail, backend gaps brief item 2) and `replyToThread`
- * (its own "reply from" address), so there's exactly one join, not two. */
-function resolveSendingMailboxEmail(ctx: TenantContext, threadId: string): string | undefined {
+ * (its own "reply from" address), so there's exactly one join, not two. Both
+ * `id` and `email` are returned: the guarded send primitive meters capacity by
+ * mailbox id, `getThread` surfaces only the address. */
+function resolveSendingMailbox(ctx: TenantContext, threadId: string): { id: string; email: string } | undefined {
   return ctx.sql
-    .exec<{ email: string }>(
-      `SELECT m.email as email FROM scheduled_sends ss
+    .exec<{ id: string; email: string }>(
+      `SELECT m.id as id, m.email as email FROM scheduled_sends ss
        JOIN mailboxes m ON m.id = ss.mailbox_id
        WHERE ss.thread_id = ? AND ss.tenant_id = ? AND ss.mailbox_id IS NOT NULL LIMIT 1`,
       threadId,
       ctx.tenantId,
     )
-    .toArray()[0]?.email;
+    .toArray()[0];
 }
 
 /** SHA-256 hex of a UTF-8 string — the stable content component of a manual
@@ -121,8 +124,8 @@ export async function replyToThread(
     .exec<{ email: string }>(`SELECT email FROM leads WHERE id = ? AND tenant_id = ?`, ref.lead_id, ctx.tenantId)
     .one().email;
 
-  const mailboxEmail = resolveSendingMailboxEmail(ctx, threadId);
-  if (!mailboxEmail) throw new NotFoundError(`no sending mailbox on record for thread ${threadId}`);
+  const mailbox = resolveSendingMailbox(ctx, threadId);
+  if (!mailbox) throw new NotFoundError(`no sending mailbox on record for thread ${threadId}`);
 
   // B3 (CLASS B): the vendor-send idempotency key must derive from STABLE
   // inputs so a retried reply reuses it (email.send returns the cached result,
@@ -144,10 +147,22 @@ export async function replyToThread(
     .toArray()[0];
   if (persisted) return { messageId: persisted.message_id };
 
-  const result = await ctx.adapters.email.send(
-    { fromEmail: mailboxEmail, toEmail: leadEmail, subject: "Re:", body, threadId, inReplyToMessageId: null },
+  // Warm-lead Q3 / adversary R1-R2: a manual reply is REAL sending volume, so
+  // it goes through the shared guarded primitive (suppression re-check ->
+  // deliverability pause -> daily cap reserve -> metered increment) instead of
+  // calling the vendor port directly. A refused send throws SendBlockedError,
+  // which surfaces as a structured 4xx naming the guard that tripped (index.ts
+  // onError) — the caller is never told a blocked reply succeeded.
+  //
+  // Placed AFTER the durable send-key lookup above deliberately: a retry of a
+  // reply that ALREADY went out must keep returning that recorded messageId
+  // (B3's whole guarantee), not be refused because the mailbox has since hit
+  // its cap. Nothing new is sent on that path, so it consumes no capacity.
+  const result = await sendWithGuards(ctx, {
+    mailbox,
+    message: { fromEmail: mailbox.email, toEmail: leadEmail, subject: "Re:", body, threadId, inReplyToMessageId: null },
     sendKey,
-  );
+  });
 
   // Persist the mapping so the dedupe survives DO eviction. OR IGNORE: a
   // concurrent same-key send that already recorded its id wins — never clobbered.
@@ -172,7 +187,7 @@ export async function replyToThread(
     result.messageId,
     threadId,
     result.sentAt,
-    JSON.stringify({ fromEmail: mailboxEmail, toEmail: leadEmail, body, manual: true }),
+    JSON.stringify({ fromEmail: mailbox.email, toEmail: leadEmail, body, manual: true }),
   );
 
   return { messageId: result.messageId };

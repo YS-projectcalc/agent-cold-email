@@ -83,8 +83,18 @@ export function spendCostCents(env: Env, kind: SpendKind): number {
       // provision site (design cost-table rationale: "slot amortized + warmup
       // add-on"), so wrapping startWarmup reserves 0 — it routes through the
       // choke-point for inventory-completeness (no money-out vendor call escapes
-      // the enumerated sites) without double-reserving. A future standalone
-      // warmup SKU flips this to a real founder-tunable cost here.
+      // the enumerated sites) without double-reserving.
+      //
+      // LIFECYCLE (founder ruling 2026-08-02, ROADMAP.md:25 option b): the
+      // add-on is a RECURRING monthly per-mailbox charge, but the platform now
+      // cancels it once the mailbox's ramp completes (engine/warmup-cancel.ts),
+      // so it bills for roughly the one ramp month rather than the life of the
+      // mailbox. COST_MAILBOX_CENTS stays as-is and stays overestimate-biased by
+      // design — it charges the full ramp-month add-on against month one, which
+      // over-reserves slightly in later months rather than under-reserving. The
+      // cancel itself is NOT money-out (it STOPS spend), so it is deliberately
+      // absent from the money-out inventory, exactly like `release`. A future
+      // standalone warmup SKU flips this to a real founder-tunable cost here.
       return 0;
   }
 }
