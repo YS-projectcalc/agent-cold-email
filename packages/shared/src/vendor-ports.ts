@@ -35,8 +35,26 @@ export interface CancelWarmupResult {
   cancelledAt: number;
 }
 
+/** One domain the vendor account already owns — `listOwnedDomains`'s element. */
+export interface OwnedDomain {
+  domain: string;
+  /** Vendor-side lifecycle, e.g. 'active' | 'pending' | 'expired'. */
+  status: string;
+  /** Mailboxes already attached to it vendor-side; 0 means nothing depends on it. */
+  assignedMailboxes: number;
+}
+
 export interface DomainPort {
   searchLookalikes(brand: string, primaryDomain: string, count: number): Promise<LookalikeCandidate[]>;
+  /**
+   * Every domain this vendor account already owns — the ADOPT-BEFORE-BUY input
+   * (INCIDENT 2026-08-05, H3). A registrar purchase that succeeded vendor-side
+   * but never reached our DB leaves a domain we own and cannot see; asking the
+   * vendor what it holds is the only way to recover it WITHOUT matching on
+   * error strings ("already owned by your team"), which is the fragile pattern
+   * this codebase has removed twice.
+   */
+  listOwnedDomains(): Promise<OwnedDomain[]>;
   buy(domain: string, idempotencyKey: string): Promise<PurchasedDomain>;
   setDns(domain: string, idempotencyKey: string): Promise<DnsRecordSet>;
   /**

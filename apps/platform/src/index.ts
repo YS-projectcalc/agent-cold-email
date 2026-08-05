@@ -1,5 +1,7 @@
 import { Hono } from "hono";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { Env } from "./env.js";
+import { toErrorResponse } from "./error-response.js";
 import { requireAdminAuth } from "./require-admin-auth.js";
 import { requireAuth, type AuthedVariables } from "./require-auth.js";
 import { csrfGuard } from "./csrf-guard.js";
@@ -147,56 +149,13 @@ app.route("/", authed);
 app.notFound((c) => c.json({ error: "not found" }, 404));
 
 app.onError((err, c) => {
-  const name = err instanceof Error ? err.name : "";
-  if (name === "ValidationError") return c.json({ error: err.message }, 400);
-  if (name === "NotFoundError") return c.json({ error: err.message }, 404);
-  if (name === "TenantIsolationError") return c.json({ error: err.message }, 403);
-  if (name === "RateLimitError") return c.json({ error: err.message }, 429);
-  if (name === "RequestInProgressError") return c.json({ error: err.message }, 409);
-  // G5 gate (a) (ROADMAP.md:19,33,43; adversary B1 2026-07-23) — a domain
-  // purchase blocked because the registrar isn't armed (or its adapter isn't
-  // built yet) is a graceful, retry-later state, never an opaque internal
-  // error: a `registrar_unarmed` code lets a caller/agent distinguish "try
-  // again once armed" from a real 500. Customer body stays GENERIC (N-G5-1):
-  // err.message names internal env vars + arming docs — that detail belongs
-  // in the founder ops alert (registrar-alert.ts), never in a tenant response.
-  if (name === "RegistrarUnarmedError")
-    return c.json(
-      { error: "Domain registration is not yet enabled for this account. No purchase was made. The operator has been notified.", code: "registrar_unarmed" },
-      503,
-    );
-  // Registrar-arming follow-up (2026-07-28) — a tenant cleared both arming
-  // legs but the registrant on file for them is missing required fields
-  // (registrar-arming.ts's assertCompleteRegistrant). Unlike
-  // RegistrarUnarmedError above, this IS tenant-fixable (resubmit
-  // setup_infrastructure with a complete `registrant`), so the body names the
-  // missing fields — same graceful-4xx-not-500 treatment, distinguishable code.
-  if (name === "IncompleteRegistrantError") {
-    const incomplete = err as Error & { missingFields: string[] };
-    return c.json({ error: err.message, missingFields: incomplete.missingFields, code: "incomplete_registrant" }, 400);
-  }
-  // Warm-lead Q3 (ROADMAP.md:76) / adversary R1-R2 — a send refused by the
-  // guarded single-send primitive (engine/guarded-send.ts) is a normal,
-  // agent-actionable outcome, never a 500 and never a silent drop. `reason`
-  // names the guard that tripped so the caller can branch (back off vs stop
-  // contacting this address vs escalate the paused mailbox); `retryable`
-  // splits the status, since only the daily cap clears with time.
-  if (name === "SendBlockedError") {
-    const blocked = err as Error & { reason: string; retryable: boolean };
-    return c.json(
-      { error: err.message, code: "send_blocked", reason: blocked.reason, retryable: blocked.retryable },
-      blocked.retryable ? 429 : 409,
-    );
-  }
-  // SPEC.md §19.4 [F5] — a stale dashboard-view rev is a STRUCTURED 409: the
-  // agent needs currentRev + currentLayout to rebase its edit, not just an
-  // opaque "conflict" string.
-  if (name === "RevConflictError") {
-    const conflict = err as Error & { currentRev: number; currentLayout: unknown };
-    return c.json({ error: err.message, currentRev: conflict.currentRev, currentLayout: conflict.currentLayout }, 409);
-  }
-  console.error(err);
-  return c.json({ error: "internal error" }, 500);
+  // H6 (INCIDENT 2026-08-05) — ONE translator shared with the MCP transport
+  // (mcp/handler.ts), so a class can never be mapped on one surface and fall
+  // through to an opaque 500 (REST) or a raw internal message (MCP) on the
+  // other. Add new classes in error-response.ts, not here.
+  const { status, body } = toErrorResponse(err);
+  if (status >= 500) console.error(err);
+  return c.json(body, status as ContentfulStatusCode);
 });
 
 export default {

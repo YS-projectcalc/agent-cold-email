@@ -33,6 +33,10 @@ export interface TenantOpsSummary {
   deliverability: { pausedMailboxes: number; throttledMailboxes: number; burningDomains: number; domainsReplaced: number };
   /** Deliverability actions logged strictly since `sinceMs` — what the D6 digest windows over. */
   actionsInWindow: { paused: number; replaced: number; gaveUpWarmupCancels: number };
+  /** H-alert (pipeline F5) — mailboxes still awaiting a successful engine
+   * credential push. Non-zero means those mailboxes cannot actually send/poll
+   * yet, regardless of how healthy `infrastructure_status` reports them. */
+  pendingCredentialPushes: number;
   /** Watchtower failure-signal scan — terminal-'failed' sends (includes CAN-SPAM
    * compliance refusals, engine/tick.ts) + spam-complaint events (engine/
    * reply-processor.ts) with `events`.ts >= sinceMs. Windowed so the watchtower
@@ -169,6 +173,22 @@ export function getOpsSummary(ctx: TenantContext, sinceMs: number): TenantOpsSum
       // our COGS, so the owner digest is where it has to land.
       gaveUpWarmupCancels: countActionsInWindow(ctx, "WARMUP_CANCEL_GAVE_UP", sinceMs),
     },
+    // H-alert (INCIDENT 2026-08-05, pipeline F5) — mailboxes whose engine
+    // credential push has never succeeded. The push CANNOT succeed on a first
+    // provisioning by construction (the manual OAuth minter is keyed by mailbox
+    // emails that do not exist until the provisioning that needs them has run),
+    // and the failure is swallowed by design and retried forever with no cap
+    // and no alert. `mailbox_cred_pushes.status` is read by nothing but the
+    // reconcile sweep, so the customer sees healthy mailboxes that have no
+    // credentials on the engine and nobody is told. Surfacing the count is the
+    // narrow slice: it tells the founder the manual-grant moment has arrived.
+    // Rewiring the minter is the class wave, deliberately not done here.
+    pendingCredentialPushes: ctx.sql
+      .exec<{ n: number }>(
+        `SELECT COUNT(*) as n FROM mailbox_cred_pushes WHERE tenant_id = ? AND status = 'pending'`,
+        ctx.tenantId,
+      )
+      .one().n,
     failureSignalsInWindow: {
       failed: failureSignals.failed ?? 0,
       complaints: failureSignals.complaints ?? 0,

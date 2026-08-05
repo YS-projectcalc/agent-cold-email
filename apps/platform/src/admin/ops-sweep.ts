@@ -229,6 +229,9 @@ export interface OpsDigest {
    * own field, never folded into `deliverability.actionsInWindow`: a pause is
    * routine control-loop work, this is money leaking. */
   gaveUpWarmupCancels: number;
+  /** H-alert (pipeline F5) — mailboxes across all tenants whose engine
+   * credential push has never landed; they cannot send or poll yet. */
+  pendingCredentialPushes: number;
   support: { open: number; escalated: number };
   pastDueCount: number;
   /** D5 lifecycle health — canceled/terminated/disputed tenant counts + total annual-domain liability (integer cents). */
@@ -254,6 +257,7 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
   let burningDomainsTotal = 0;
   let deliverabilityActionsInWindow = 0;
   let gaveUpWarmupCancels = 0;
+  let pendingCredentialPushes = 0;
   let canceledCount = 0;
   let disputedCount = 0;
   let annualDomainLiabilityCents = 0;
@@ -272,6 +276,7 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
     burningDomainsTotal += s.deliverability.burningDomains;
     deliverabilityActionsInWindow += s.actionsInWindow.paused + s.actionsInWindow.replaced;
     gaveUpWarmupCancels += s.actionsInWindow.gaveUpWarmupCancels;
+    pendingCredentialPushes += s.pendingCredentialPushes;
   }
 
   // Terminated tenants come from the D1 enforcement_actions audit log (an
@@ -298,6 +303,11 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
   if (disputedCount > 0) {
     watchdogAlerts.push(`${disputedCount} tenant(s) frozen by an open chargeback dispute`);
   }
+  if (pendingCredentialPushes > 0) {
+    watchdogAlerts.push(
+      `${pendingCredentialPushes} mailbox(es) still awaiting an engine credential push — they cannot send or poll until an OAuth grant is minted for them (manual-grant step)`,
+    );
+  }
   if (gaveUpWarmupCancels > 0) {
     watchdogAlerts.push(
       `${gaveUpWarmupCancels} warmup-pool cancellation(s) GAVE UP after retries — those InboxKit subscriptions may still be billing; verify in the vendor console`,
@@ -312,6 +322,7 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
     provisioningFailureCount: 0,
     deliverability: { pausedMailboxesTotal, burningDomainsTotal, actionsInWindow: deliverabilityActionsInWindow },
     gaveUpWarmupCancels,
+    pendingCredentialPushes,
     support,
     pastDueCount,
     lifecycle: { canceled: canceledCount, terminated: terminatedCount, disputed: disputedCount, annualDomainLiabilityCents },

@@ -167,7 +167,13 @@ describe("createVendorAdapters — registrar arming two-leg decoupling", () => {
 
 describe("SetupInfrastructureInput — registerDomains backward compatibility", () => {
   // (e) absent field parses to false (existing callers unaffected).
-  it("(e) omitting registerDomains defaults to false", () => {
+  // H8b (INCIDENT 2026-08-05, pipeline F2) changed this contract deliberately.
+  // The field is now OPTIONAL with no default, so absent is DISTINGUISHABLE
+  // from an explicit false: absent leaves the tenant's persisted consent alone,
+  // where the old `.default(false)` silently WIPED it on any call that merely
+  // omitted the field. Port selection still treats absent as not-opted-in (the
+  // B1 money direction, asserted separately below) — only the WRITE changed.
+  it("(e) omitting registerDomains leaves it UNDEFINED (absent is not false — H8b)", () => {
     const parsed = SetupInfrastructureInput.parse({
       brand: "Acme",
       primaryDomain: "acme.com",
@@ -177,7 +183,7 @@ describe("SetupInfrastructureInput — registerDomains backward compatibility", 
       physicalAddress: "1 Main St, Anytown, ST 00000",
       senderIdentity: "Sales Team",
     });
-    expect(parsed.registerDomains).toBe(false);
+    expect(parsed.registerDomains).toBeUndefined();
   });
 
   // Mechanical fix (registrant-capture follow-up): registerDomains:true now
@@ -327,6 +333,7 @@ describe("provisionDomainWithMailboxes — registrant completeness fail-loud bou
           domainIndex: 0,
           personaSlug: "sales",
           inboxesEach: 1,
+          intentKey: "registrar-arming-test#0",
         }).catch((e) => e);
         expect(err).toBeInstanceOf(VendorError);
         expect((err as VendorError).message).toContain("firstName");

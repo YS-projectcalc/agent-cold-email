@@ -101,7 +101,7 @@ import { clearScreeningStatus, LIST_UNAVAILABLE_VERSION, screenTenant } from "./
 import { createVendorAdapters, selectRealDomainPort, type VendorAdapterBundle } from "./vendors/factory.js";
 import type { EngineClientConfig } from "./vendors/real/email-port.js";
 import type { InboxKitClientConfig } from "./vendors/real/inboxkit-client.js";
-import { deriveInboxKitRegistrant, isInboxKitRegistrarArmed, readRegistrarArming } from "./vendors/registrar-arming.js";
+import { deriveInboxKitRegistrant, isInboxKitRegistrarArmed, readRegistrarArming, readRegistrarOptInState } from "./vendors/registrar-arming.js";
 
 export interface InitTenantInput {
   tenantId: string;
@@ -201,6 +201,10 @@ export class TenantDO extends DurableObject<Env> {
     this.addColumnIfMissing("mailboxes", "warmup_cancelled_at", "INTEGER");
     this.addColumnIfMissing("mailboxes", "warmup_cancel_attempts", "INTEGER NOT NULL DEFAULT 0");
     this.addColumnIfMissing("mailboxes", "warmup_cancel_gave_up_at", "INTEGER");
+    // INCIDENT 2026-08-05 (H2). DEFAULT 'ready' so every pre-existing domain row
+    // — provisioned before DNS state was tracked, and whose setDns did succeed
+    // (it was a precondition of the row existing at all) — keeps its meaning.
+    this.addColumnIfMissing("domains", "dns_status", "TEXT NOT NULL DEFAULT 'ready'");
     // SPEC.md §20 BYO domains & mailboxes — every default below reproduces an
     // EXISTING provisioned domain/mailbox's implicit state exactly (flag-dark:
     // see schema.ts's TENANT_DO_SCHEMA comment on these same columns).
@@ -255,6 +259,19 @@ export class TenantDO extends DurableObject<Env> {
     // is unique per real inbound message; NULLs are distinct in SQLite, so the
     // few event rows without a message id never collide.
     this.ensureDedupeIndex("idx_events_dedupe", "events", ["tenant_id", "type", "message_id"], "message_id");
+    // H4 (INCIDENT 2026-08-05) — at most ONE LIVE mailbox per (tenant, email).
+    // A replayed provision used to re-INSERT the row, and syncMailboxQuantity
+    // BILLS by row count, so the duplicate became a real customer charge for a
+    // mailbox that does not exist.
+    //
+    // PARTIAL (`WHERE released_at IS NULL`) on purpose: a full unique index
+    // would also block legitimate RE-provisioning after a cancel, since the
+    // released row keeps its address forever. Only live rows must be unique.
+    // Goes through the partial-index helper (B3) — it collapses pre-existing
+    // duplicate LIVE rows first and swallows a failure, so a tenant DO already
+    // carrying duplicates boots instead of throwing out of the constructor and
+    // bricking itself permanently.
+    this.ensurePartialDedupeIndex("idx_mailboxes_live_email", "mailboxes", ["tenant_id", "email"], "released_at IS NULL");
   }
 
   // G1 (ga-gates-design-2026-07-22.md, Founder Q2 ADOPTED — "already-active
@@ -312,6 +329,39 @@ export class TenantDO extends DurableObject<Env> {
       this.ctx.storage.sql.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ${indexName} ON ${table}(${cols})`);
     } catch (err) {
       console.error(`ensureDedupeIndex(${indexName}) failed; continuing without it this boot`, err);
+    }
+  }
+
+  /**
+   * The PARTIAL-index sibling of `ensureDedupeIndex`, with both of its safeties
+   * intact (B3, gate 2026-08-05).
+   *
+   * The H4 index was originally exec'd RAW in this constructor because the
+   * helper above "has no partial-index form" — which dropped the two things
+   * that make it safe. Against a DO already carrying duplicate live rows (the
+   * deep-dive's F12 proves those are producible today) the CREATE throws, the
+   * throw escapes the constructor, and that tenant's DO can never instantiate
+   * again — every request fails permanently with no API repair path. A phantom
+   * billable row is recoverable; an unbootable DO is not, so the collapse and
+   * the try/catch are mandatory, not decorative.
+   *
+   * Collapses duplicates within the PREDICATE's row set only (rows outside it
+   * are not covered by the index and must not be touched), keeping the lowest
+   * rowid — the original — and dropping the later replay artifacts.
+   */
+  private ensurePartialDedupeIndex(indexName: string, table: string, keyColumns: string[], predicate: string): void {
+    const cols = keyColumns.join(", ");
+    try {
+      this.ctx.storage.sql.exec(
+        `DELETE FROM ${table} WHERE ${predicate} AND rowid NOT IN (
+           SELECT MIN(rowid) FROM ${table} WHERE ${predicate} GROUP BY ${cols}
+         )`,
+      );
+      this.ctx.storage.sql.exec(
+        `CREATE UNIQUE INDEX IF NOT EXISTS ${indexName} ON ${table}(${cols}) WHERE ${predicate}`,
+      );
+    } catch (err) {
+      console.error(`ensurePartialDedupeIndex(${indexName}) failed; continuing without it this boot`, err);
     }
   }
 
@@ -470,7 +520,12 @@ export class TenantDO extends DurableObject<Env> {
     return withRequestIdempotency(
       ctx,
       idempotencyKey ? `setup_infrastructure:${idempotencyKey}` : undefined,
-      () => runSetupInfrastructure(ctx, input),
+      // H1 — the same key seeds the durable domain-intent rows, so a retry that
+      // arrives AFTER the outer claim was cleared (the incident's exact path:
+      // idempotency.ts deletes the claim on throw so the saga re-runs) still
+      // resolves to the intent the first attempt recorded, and adopts instead
+      // of re-buying.
+      () => runSetupInfrastructure(ctx, input, undefined, idempotencyKey),
     );
   }
 
@@ -488,9 +543,20 @@ export class TenantDO extends DurableObject<Env> {
   // post-UPDATE completeness pre-flight can never disagree.
   private selectSetupDomainPort(bundle: VendorAdapterBundle, input: SetupInfrastructureInput): DomainPort {
     if (bundle.kind !== "real") return bundle.domain;
+    // H8b does NOT change this. Two adversary rulings meet here and they are
+    // about different things:
+    //   B1 (money)  — the port for THIS call is chosen from THIS call's own
+    //                 explicit opt-in. Absent reads as NOT opted in, so a stale
+    //                 persisted `register_domains=1` can never fire a real buy
+    //                 for a call that didn't ask for one.
+    //   H8b (state) — the persisted consent must not be ERASED by a call that
+    //                 merely omitted the field (runSetupInfrastructure's write).
+    // Falling back to the persisted opt-in here would have satisfied H8b and
+    // broken B1 in the money direction, so the fallback lives only in the write
+    // path. `?? false` makes the now-optional field's absence explicit.
     return selectRealDomainPort(this.inboxKitConfig(), {
       armed: isInboxKitRegistrarArmed(this.env),
-      optIn: input.registerDomains,
+      optIn: input.registerDomains ?? false,
       registrant: deriveInboxKitRegistrant({
         brand: input.brand,
         physicalAddress: input.physicalAddress,

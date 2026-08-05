@@ -195,6 +195,11 @@ async function applyReplaceDomain(
         domainIndex,
         personaSlug: slugify(profile.brand),
         inboxesEach,
+        // H1 — REPLACE_DOMAIN has no caller idempotency key, so its intents key
+        // off the burned domain being replaced: a re-swept replacement for the
+        // SAME burn resolves to the same intent row (and so adopts a stranded
+        // buy) rather than minting a fresh one each sweep.
+        intentKey: `replace:${ctx.tenantId}:${action.domain}#${domainIndex}`,
       });
 
       logAction(ctx, "REPLACE_DOMAIN", action.domain, {

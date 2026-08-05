@@ -46,6 +46,16 @@ export interface ScreenTenantOptions {
    * collected — this is honestly best-effort, never assumed present.
    */
   billingName?: string | null;
+  /**
+   * The brand to screen, overriding the PERSISTED one. H8 (INCIDENT
+   * 2026-08-05) moved setup_infrastructure's re-screen to BEFORE the
+   * tenant_profile write, so the incoming brand is not on the row yet — without
+   * this the screen would check the OLD brand and G1b's whole purpose (catch a
+   * tenant who screens clean at checkout then sets a sanctioned brand here)
+   * would silently evaporate. Absent, the persisted brand is screened, exactly
+   * as every other trigger does.
+   */
+  brand?: string;
   /** Injectable (default a real/dark-per-env OpsMailer) — same pattern as
    * runSetupInfrastructure's/alertRegistrarUnarmed's `mailer` param, so a test
    * can assert the screening-hit alert content with a SandboxOpsMailer without
@@ -71,7 +81,10 @@ export interface ScreenTenantResult {
 export async function screenTenant(ctx: TenantContext, opts: ScreenTenantOptions): Promise<ScreenTenantResult> {
   const listVersion = await getActiveSdnListVersion(ctx.env);
 
-  const profile = ctx.sql.exec<{ brand: string }>(`SELECT brand FROM tenant_profile WHERE id = ?`, ctx.tenantId).one();
+  const persisted = ctx.sql.exec<{ brand: string }>(`SELECT brand FROM tenant_profile WHERE id = ?`, ctx.tenantId).one();
+  // The INCOMING brand when the caller supplies one (see opts.brand) — a
+  // pre-write screen must judge what is about to be persisted, not what is.
+  const profile = { brand: opts.brand ?? persisted.brand };
 
   const screenedFields: Record<string, string | null> = { brand: profile.brand };
   const candidates: ScreenCandidate[] = [{ field: "brand", text: profile.brand }];

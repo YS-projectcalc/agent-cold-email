@@ -1,5 +1,5 @@
 import { RegistrarUnarmedError } from "@coldstart/shared";
-import type { DnsRecordSet, DomainPort, LookalikeCandidate, PurchasedDomain, ReleaseResult } from "@coldstart/shared";
+import type { DnsRecordSet, DomainPort, LookalikeCandidate, OwnedDomain, PurchasedDomain, ReleaseResult } from "@coldstart/shared";
 
 /**
  * The domain port handed out whenever a paid+activated tenant's bundle would
@@ -35,6 +35,10 @@ export class RegistrarUnarmedDomainPort implements DomainPort {
 
   async searchLookalikes(_brand: string, _primaryDomain: string, _count: number): Promise<LookalikeCandidate[]> {
     this.fail("searchLookalikes");
+  }
+
+  async listOwnedDomains(): Promise<OwnedDomain[]> {
+    this.fail("listOwnedDomains");
   }
 
   async buy(_domain: string, _idempotencyKey: string): Promise<PurchasedDomain> {

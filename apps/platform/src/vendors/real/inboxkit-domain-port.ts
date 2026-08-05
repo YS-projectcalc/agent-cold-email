@@ -1,5 +1,5 @@
 import { VendorError } from "@coldstart/shared";
-import type { DnsRecordSet, DomainPort, LookalikeCandidate, PurchasedDomain, ReleaseResult } from "@coldstart/shared";
+import type { DnsRecordSet, DomainPort, LookalikeCandidate, OwnedDomain, PurchasedDomain, ReleaseResult } from "@coldstart/shared";
 import { InboxKitClient, type InboxKitClientConfig } from "./inboxkit-client.js";
 
 /**
@@ -81,7 +81,19 @@ export class RealInboxKitDomainPort implements DomainPort {
     // unlike the sandbox's free synthetic list — kept to .com only per
     // SPEC.md §12's no-renewal-cliff default).
     const prefixes = ["go", "the", "my", "get", "try"];
-    const candidates = prefixes.slice(0, Math.max(1, count)).map((prefix) => `${prefix}${slug}.com`);
+    const wanted = Math.max(1, count);
+    const candidates = prefixes.slice(0, wanted).map((prefix) => `${prefix}${slug}.com`);
+    // N5 (gate 2026-08-05) — numbered spillover past the fixed prefix list,
+    // matching the sandbox. Callers legitimately ask for MORE than 5: H3b
+    // over-requests `domains + owned + buffer` so its not-owned/available
+    // filters have room to discard. `slice(0, count)` silently capped at 5, so
+    // a real request the generator could have served instead hit the
+    // exhaustion 400 — a customer blamed for our generator's shape. The
+    // availability probe below is one real network call per candidate, so this
+    // only ever generates exactly what was asked for.
+    for (let i = 1; candidates.length < wanted; i++) {
+      candidates.push(`${slug}${i}.com`);
+    }
 
     const results: LookalikeCandidate[] = [];
     for (const domain of candidates) {
@@ -91,6 +103,40 @@ export class RealInboxKitDomainPort implements DomainPort {
       results.push({ domain, available: body.available === true });
     }
     return results;
+  }
+
+  /**
+   * Every domain the workspace already owns — POST /v1/api/domains/list
+   * (contract live-verified 2026-08-05): body `{page, limit}`, response
+   * `domains[]` with `{uid, name, status, connection_type, assigned_mailboxes}`.
+   * The adopt-before-buy input (H1/H3): it is what lets a retry RECOVER a
+   * domain the vendor registered for us but that never reached our DB, instead
+   * of re-attempting a buy the vendor answers with "already owned by your
+   * team". Paged like the warmup-subscription lookup, with the same ceiling —
+   * an unfinished walk must not be read as "not owned", so an incomplete or
+   * failed page throws rather than under-reporting.
+   */
+  async listOwnedDomains(): Promise<OwnedDomain[]> {
+    const owned: OwnedDomain[] = [];
+    for (let page = 1; page <= MAX_DOMAIN_PAGES; page++) {
+      const body = await this.client.request<ListDomainsResponse>("listOwnedDomains", "POST", "/domains/list", {
+        body: { page, limit: DOMAIN_PAGE_SIZE },
+      });
+      if (body.error) {
+        throw new VendorError(`inboxkit domains/list failed: ${body.message ?? "no message"}`, true);
+      }
+      const rows = body.domains ?? [];
+      for (const row of rows) {
+        if (!row.name) continue;
+        owned.push({
+          domain: row.name,
+          status: row.status ?? "unknown",
+          assignedMailboxes: row.assigned_mailboxes ?? 0,
+        });
+      }
+      if (rows.length === 0 || page >= (body.pages ?? 1)) return owned;
+    }
+    throw new VendorError("inboxkit domains/list has more pages than this adapter will walk", true);
   }
 
   async buy(domain: string, _idempotencyKey: string): Promise<PurchasedDomain> {
@@ -188,3 +234,16 @@ interface RemoveDomainsResponse {
   error: boolean;
   message?: string;
 }
+
+// POST /domains/list — contract live-verified 2026-08-05 against the workspace
+// holding the stranded goauthorpitchdesk.com.
+interface ListDomainsResponse {
+  error: boolean;
+  message?: string;
+  domains?: Array<{ uid?: string; name?: string; status?: string; connection_type?: string; assigned_mailboxes?: number }>;
+  total?: number;
+  pages?: number;
+}
+
+const DOMAIN_PAGE_SIZE = 100;
+const MAX_DOMAIN_PAGES = 10;

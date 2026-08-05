@@ -122,6 +122,13 @@ CREATE TABLE IF NOT EXISTS domains (
   domain TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'active',
   purchased_at INTEGER NOT NULL,
+  -- INCIDENT 2026-08-05 (H2) — DNS setup is a FOLLOW-UP, not a precondition of
+  -- owning the domain. The row is now inserted the instant buy() returns, with
+  -- dns_status 'pending'; setDns flips it 'ready' (or leaves it 'pending' to be
+  -- re-driven). Previously setDns ran BEFORE the INSERT, so the vendor's ~32s
+  -- async registration racing our immediate nameservers call threw and stranded
+  -- a domain we had already paid for.
+  dns_status TEXT NOT NULL DEFAULT 'ready',
   -- 'provisioned' (the existing lookalike-domain flow, unchanged) | 'byo'
   -- (SPEC.md §20 — the customer brought this domain).
   source TEXT NOT NULL DEFAULT 'provisioned',
@@ -699,6 +706,32 @@ CREATE INDEX IF NOT EXISTS idx_webhook_delivery_attempts_delivery
 -- (one push record per mailbox). Inert until arming (rows only ever written by
 -- the config-gated push flow). Always a new table (no DO predates it), so the
 -- reconcile index lives inline.
+-- INCIDENT 2026-08-05 (H1) — the durable domain-buy INTENT record. A registrar
+-- purchase is a cross-boundary effect with no vendor idempotency key: the row
+-- is written BEFORE domain.buy and flipped 'committed' after it returns, so a
+-- crash/throw anywhere in between leaves a 'dangling' row naming EXACTLY which
+-- domain we may already own. It is NEVER deleted — a deleted intent is
+-- indistinguishable from one that never ran, which is precisely how the live
+-- incident stranded goauthorpitchdesk.com ($12.50, invisible to our DB).
+--
+-- The key column is derived from the caller's setup idempotency key + the domain
+-- ordinal, NOT from searchLookalikes output: the generator is deterministic, so
+-- keying on its output would have looked stable right up until it wasn't, and a
+-- retry must resolve to the SAME row even if candidate generation ever drifts.
+CREATE TABLE IF NOT EXISTS domain_intents (
+  key TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  -- The RESOLVED candidate name this intent authorized buying. On a retry this
+  -- is what we verify/adopt, instead of regenerating a candidate.
+  candidate_domain TEXT NOT NULL,
+  -- 'intent' (written, buy not yet confirmed) | 'committed' (we own it, and the
+  -- domains row exists) | 'dangling' (the buy leg threw — we MAY own it).
+  status TEXT NOT NULL DEFAULT 'intent',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_domain_intents_tenant ON domain_intents(tenant_id, status);
+
 CREATE TABLE IF NOT EXISTS mailbox_cred_pushes (
   email TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL,

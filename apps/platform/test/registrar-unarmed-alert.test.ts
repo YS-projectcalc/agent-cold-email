@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { RegistrarUnarmedError, type DnsRecordSet, type DomainPort, type LookalikeCandidate, type PurchasedDomain, type ReleaseResult } from "@coldstart/shared";
+import { RegistrarUnarmedError, type DnsRecordSet, type DomainPort, type LookalikeCandidate, type OwnedDomain, type PurchasedDomain, type ReleaseResult } from "@coldstart/shared";
 import { VirtualClock } from "../src/clock.js";
 import { readActivationState } from "../src/engine/activation.js";
 import { runSetupInfrastructure } from "../src/engine/provisioning.js";
@@ -25,6 +25,9 @@ function alwaysRegistrarUnarmed(): DomainPort {
   return {
     async searchLookalikes(): Promise<LookalikeCandidate[]> {
       throw new RegistrarUnarmedError("searchLookalikes");
+    },
+    async listOwnedDomains(): Promise<OwnedDomain[]> {
+      throw new RegistrarUnarmedError("listOwnedDomains");
     },
     async buy(): Promise<PurchasedDomain> {
       throw new RegistrarUnarmedError("buy");

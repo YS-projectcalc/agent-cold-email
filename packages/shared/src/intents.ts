@@ -75,7 +75,14 @@ export const SetupInfrastructureInput = z
     // behavior unchanged (RegistrarUnarmedDomainPort hard-blocks) even when the
     // REGISTRAR_PROVIDER env is armed — arming the env alone is deliberately
     // insufficient (apps/platform/src/vendors/factory.ts).
-    registerDomains: z.boolean().default(false),
+    // H8b (INCIDENT 2026-08-05, pipeline F2): OPTIONAL, deliberately WITHOUT a
+    // default. With `.default(false)` an absent field was indistinguishable
+    // from an explicit `false`, so a routine later call that simply omitted it
+    // silently WIPED the tenant's persisted consent — disabling
+    // burn-replacement and making the founder's registrar alert name the wrong
+    // cause. Three distinct meanings now survive to the engine: `true` opts in,
+    // `false` opts OUT, absent leaves the persisted value alone.
+    registerDomains: z.boolean().optional(),
     // The structured registrant-of-record — REQUIRED (see the refinement
     // below) whenever `registerDomains` is true, since that's the tenant's
     // consent to a REAL domain purchase InboxKit will file real contact

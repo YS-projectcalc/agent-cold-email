@@ -14,6 +14,7 @@ import { z } from "zod";
 import type { Env } from "../env.js";
 import { resolveRequestToken } from "../auth.js";
 import { resolveTenantFromToken } from "../require-auth.js";
+import { toErrorResponse } from "../error-response.js";
 import { MCP_TOOLS } from "./tools.js";
 // Single-source the served MCP version from the deployed worker's own
 // package.json (set to the real published release, 0.2.2 — the Glama registry
@@ -164,20 +165,17 @@ export async function handleMcpRequest(
             isError: true,
           });
         }
-        // Warm-lead Q3 / adversary R1-R2 — a send refused by the guarded
-        // single-send primitive gets the SAME structured treatment, for the
-        // same reason: the calling agent has to BRANCH on it (back off until
-        // the cap rolls over vs stop contacting this address entirely vs
-        // surface a paused mailbox to its human), and a flattened message
-        // string forces it to regex prose to decide. `reason`/`retryable`
-        // survive the RPC boundary as own properties, exactly like
-        // currentRev/currentLayout above.
-        if (name === "SendBlockedError") {
-          const blocked = err as Error & { reason: string; retryable: boolean };
-          return result(id, {
-            content: [{ type: "text", text: JSON.stringify({ error: blocked.message, code: "send_blocked", reason: blocked.reason, retryable: blocked.retryable }) }],
-            isError: true,
-          });
+        // H6 (INCIDENT 2026-08-05) — every other class goes through the SAME
+        // translator the REST surface uses (error-response.ts), so the two can
+        // never diverge. This ALSO closes a leak: the fallthrough below used to
+        // return `err.message` verbatim, handing a tenant internal env-var
+        // names and ACTIVATION.md runbook text straight out of a vendor error.
+        // toErrorResponse emits a customer-safe body for every class it knows
+        // and a generic `internal` for everything it doesn't.
+        if (name !== "") {
+          const translated = toErrorResponse(err);
+          if (translated.status >= 500) console.error(err);
+          return result(id, { content: [{ type: "text", text: JSON.stringify(translated.body) }], isError: true });
         }
         const message = err instanceof Error ? err.message : String(err);
         return result(id, { content: [{ type: "text", text: message }], isError: true });

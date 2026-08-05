@@ -21,6 +21,7 @@
 // no money-out call site bypasses this wrapper.
 
 import { CapacityPendingError } from "@coldstart/shared";
+import { RealClock } from "../clock.js";
 import type { Env } from "../env.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import { newId } from "../schema.js";
@@ -99,13 +100,34 @@ export function spendCostCents(env: Env, kind: SpendKind): number {
   }
 }
 
-/** period_key = 'YYYY-MM' (per-calendar-month, founder Q1). Only real/paid tenants
- *  reach the ledger (sandbox no-op below), and paid tenants run on a real-time
- *  clock (multiplier 1 — advanceClock is demo/free-only), so this is real wall-clock. */
+/**
+ * period_key = 'YYYY-MM' (per-calendar-month, founder Q1).
+ *
+ * H7 (INCIDENT 2026-08-05) — the previous comment here claimed paid tenants run
+ * on a real-time clock so this was "real wall-clock". That was FALSE: the
+ * VirtualClock is per-tenant and carries whatever offset/multiplier that DO has
+ * accumulated (a tenant that was demo before upgrading keeps its skew), which
+ * time-warped the incident's ledger rows into the wrong period entirely. The
+ * ledger is CROSS-TENANT D1 state, so every one of its timestamps now comes
+ * from `ledgerNow()` below, never from `ctx.clock`.
+ */
 export function periodKey(nowMs: number): string {
   const d = new Date(nowMs);
   const month = `${d.getUTCMonth() + 1}`.padStart(2, "0");
   return `${d.getUTCFullYear()}-${month}`;
+}
+
+/**
+ * Wall-clock for every ledger write — a DELIBERATE, documented exception to the
+ * injected-clock rule (ARCHITECTURE.md #4). That rule exists so per-tenant
+ * simulation is deterministic; the vendor spend ledger is the opposite kind of
+ * state: ONE cross-tenant row per calendar month, reconciled against real
+ * invoices. Stamping it from a tenant's virtual clock lets any single tenant's
+ * time skew corrupt shared accounting. Mirrors how `scheduled.ts` uses
+ * `RealClock` for the same reason.
+ */
+function ledgerNow(): number {
+  return new RealClock().now();
 }
 
 function setCapacityPendingMarker(ctx: TenantContext): boolean {
@@ -211,7 +233,7 @@ export async function withSpendCeiling<T>(
   if (ctx.adapters.kind === "sandbox") return fn();
 
   const db = ctx.env.DB;
-  const now = ctx.clock.now();
+  const now = ledgerNow();
   const pk = periodKey(now);
   const estCents = spendCostCents(ctx.env, kind);
   const isSlot = kind === "mailbox";
@@ -283,7 +305,7 @@ export async function withSpendCeiling<T>(
     // Commit: move est from reserved to committed (slots_used stays — the slot is
     // really used now). Entry -> committed. A real spend went through, so clear
     // any stale capacity_pending marker.
-    const committedAt = ctx.clock.now();
+    const committedAt = ledgerNow();
     await db
       .prepare(
         `UPDATE vendor_spend_ledger
@@ -292,16 +314,45 @@ export async function withSpendCeiling<T>(
       )
       .bind(estCents, estCents, committedAt, pk)
       .run();
-    await db
-      .prepare(`UPDATE vendor_spend_entries SET status = 'committed', actual_cents = ?, updated_at = ? WHERE id = ?`)
+    // H7 (INCIDENT 2026-08-05) — guard the transition on the entry still being
+    // 'reserved'. The stale-reservation reaper can fire between our reserve and
+    // this commit; it flips the row to 'released' AND subtracts the reservation
+    // from the ledger. The unguarded UPDATE then flipped that same row to
+    // 'committed' while the ledger had already been decremented once — the
+    // double-subtract that shows up live as 2026-07 reserved_cents=0 (clamped
+    // by MAX(0,...)) against committed_cents=1500.
+    const committed = await db
+      .prepare(`UPDATE vendor_spend_entries SET status = 'committed', actual_cents = ?, updated_at = ? WHERE id = ? AND status = 'reserved'`)
       .bind(estCents, committedAt, entryId)
       .run();
+    if (!committed.meta.changes) {
+      // The reaper (or anything else) already resolved this row, so its
+      // reservation is no longer counted. Money DID move — the vendor call
+      // above succeeded — so restore an accurate committed record rather than
+      // leaving spend that happened unrecorded. INSERT OR REPLACE, not a second
+      // UPDATE: the row may have been deleted outright.
+      await db
+        .prepare(
+          `INSERT OR REPLACE INTO vendor_spend_entries (id, tenant_id, kind, est_cents, actual_cents, status, period_key, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 'committed', ?, ?, ?)`,
+        )
+        .bind(entryId, ctx.tenantId, kind, estCents, estCents, pk, committedAt, committedAt)
+        .run();
+      // The ledger's committed_cents was already incremented above, but its
+      // reserved_cents was decremented TWICE (once by the reaper, once by us).
+      // MAX(0,...) clamps rather than going negative, so no correction is
+      // possible from here — record it for reconciliation instead of pretending.
+      console.error(
+        "vendor spend: entry was resolved out from under a successful commit; committed record restored",
+        JSON.stringify({ entryId, tenantId: ctx.tenantId, kind, estCents, periodKey: pk }),
+      );
+    }
     clearCapacityPendingMarker(ctx);
     return result;
   } catch (err) {
     // Vendor call failed — RELEASE the reservation (subtract est + any slot).
     // Entry -> released. Never leaks a reservation on a failed vendor call.
-    const releasedAt = ctx.clock.now();
+    const releasedAt = ledgerNow();
     await db
       .prepare(`UPDATE vendor_spend_ledger SET reserved_cents = MAX(0, reserved_cents - ?), updated_at = ? WHERE period_key = ?`)
       .bind(estCents, releasedAt, pk)
