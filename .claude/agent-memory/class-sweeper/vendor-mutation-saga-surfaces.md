@@ -1,0 +1,16 @@
+---
+name: vendor-mutation-saga-surfaces
+description: Search-coverage ledger — surfaces that UNDER-COUNT when sweeping the "vendor mutation succeeds, local record never lands" (stranded-saga) class in coldstart. Read FIRST.
+metadata:
+  type: reference
+---
+
+Sweeping the "vendor-side mutation succeeded, local durable record never landed, no compensation/reconciliation" class in `~/dev/coldstart`. Cover these FIRST — each hides members that `grep adapters.` alone misses:
+
+1. **The wrapper that DELETES its own record on throw.** `engine/idempotency.ts`'s `withRequestIdempotency` clears the 'pending' claim in its catch ("failures are never cached"). That is correct for local failures and WRONG for a lost vendor response: the vendor mutated, the claim is gone, the retry re-mutates. Always read the catch block of any "idempotency" wrapper before crediting it as protection.
+2. **Adapters that IGNORE the idempotencyKey parameter.** `_idempotencyKey` (underscore-prefixed) in `vendors/real/*.ts` means the port signature promises retry-safety the vendor cannot deliver (InboxKit has no idempotency primitive on buy/register/cancel). Grep `_idempotencyKey` — every hit is a site whose only protection is local.
+3. **The "absent means success" disambiguation applied to ONE method only.** `RealMailboxPort.cancelWarmup` asks the vendor whether the subscription is still active and treats absence as success; the sibling `release`/`domains/remove` did NOT get the same treatment and hard-fail on a re-run via `resolveMailboxUid`. When a fix lands on one adapter method, sweep its siblings in the same class.
+4. **The money ledger is NOT an intent record.** D1 `vendor_spend_entries` (migration 0011) records tenant/kind/cents/status but NO RESOURCE IDENTITY (no domain, no email, no idempotency key) — so a committed entry proves money moved but cannot say WHAT was bought. Reconciliation is impossible from it. Check for an identity column before calling an audit table a saga log.
+5. **The compliant exemplars, so a proposal isn't reinvented:** `engine/mailbox-credential-push.ts` (record 'pending' → push → mark 'pushed', + reconcile sweep) and `engine/warmup-cancel.ts` (persist-after-confirm + bounded retry + separate gave-up column). And `apps/engine/src/engine.ts` + `store.ts` ALREADY implement a full write-ahead intent log with boot reconciliation, park-on-unverified, and `POST /v1/intents/resolve`. The platform has no analogue — the guard to propose is "port the engine's discipline", not a new invention.
+6. **Reconcile sweeps ride on an unrelated RPC.** `syncMailboxQuantity` + `reconcileMailboxCredentialPushes` are only reachable via `TenantDO.deliverabilitySweep()` (tenant-do.ts) which cron drives. Never assume "the sweep retries it" from a doc comment — trace the RPC to `scheduled.ts`/`admin/ops-sweep.ts` or it does not run. `tick()` still has NO production driver (only demo.ts), so anything living only in runTick is dead in prod.
+7. **`.claude/worktrees/agent-*/` hold stale full copies of the tree** (migrations, src). `find`/`grep` without `-not -path` triple-counts every file and can make a sweep report obsolete paths. Always exclude them and report the live-tree path.
