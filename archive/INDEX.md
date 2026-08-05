@@ -13,3 +13,4 @@
 - 2026-07-29-cf-connect-crack/prior-HANDOFF.md — HANDOFF snapshot before the cf-connect-crack/registrar-armed handoff
 - ROADMAP-done.md — appended 3 drained [x] entries (token-rotation, registrar-arming, CF-connect UI crack) 2026-07-29
 - ROADMAP-done.md — appended 1 drained [x] entry (2026-08-05 provisioning incident: diagnosis + 14-member hotfix, R2 SHIP, shipped+deployed) 2026-08-05; deferred class-wave inventory NOT drained, stays live in `ROADMAP.md ## Open` as a new PROVISIONING CLASS WAVE entry
+- 2026-08-05-full-boundary-audit-msgchannel/prior-HANDOFF.md — HANDOFF.md as of the incident-hotfix handoff, before this session's `## Resume` rewrite (full boundary audit round-1 + msgchannel Inc1 gate).
