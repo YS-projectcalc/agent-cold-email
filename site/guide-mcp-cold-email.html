@@ -76,7 +76,7 @@
   <p>Verified directly against the live <code>tools/list</code> response and <a href="openapi.yaml">openapi.yaml</a>. Two additional helpers described in the design spec (<code>write_sequence</code>, <code>suggest_domains</code>) are <strong>not implemented</strong> — don't assume they exist.</p>
 
   <h3><code>setup_infrastructure</code></h3>
-  <p>Buy branded lookalike domains, provision mailboxes, and start the warmup ramp. Returns immediately (async job); poll <code>infrastructure_status</code> for progress.</p>
+  <p>Buy branded lookalike domains, provision mailboxes, and start the warmup ramp. Returns immediately (async job); poll <code>infrastructure_status</code> for progress. Resend the same idempotencyKey (or omit it identically) to retry safely — the call converges onto what's already provisioned rather than buying again; a distinct idempotencyKey provisions additional infrastructure instead.</p>
   <pre><code>{
   brand: string (1-200 chars),
   primaryDomain: string (3-253 chars),
@@ -84,9 +84,12 @@
   inboxesEach: integer (1-10),
   persona: string (1-200 chars),
   physicalAddress: string (1-500 chars),   // CAN-SPAM footer address
-  senderIdentity: string (1-200 chars)     // legal sender identity, captured at setup
+  senderIdentity: string (1-200 chars),    // legal sender identity, captured at setup
+  quoteOnly?: boolean,                     // true previews the new count + price, provisions nothing
+  registerDomains?: boolean,               // omit = leave prior consent unchanged; true = opt in (requires registrant); false = revoke
+  registrant?: { firstName, lastName, email, phone, addressLine1, city, state, country, postalCode, organization? }
 }
-// all 7 fields required</code></pre>
+// the first 7 fields are required; quoteOnly/registerDomains/registrant are optional</code></pre>
 
   <h3><code>infrastructure_status</code></h3>
   <p>Provisioning + warmup progress, per-mailbox health, and send-readiness. No parameters.</p>

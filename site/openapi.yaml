@@ -82,6 +82,41 @@ paths:
         for progress. In demo/free plans this runs entirely against a
         fault-injecting sandbox — no real domain purchase or mailbox
         provisioning occurs.
+
+
+        Idempotency-Key contract: an identical retry — the same key resent,
+        or the key omitted both times — CONVERGES onto the domains/mailboxes
+        already provisioned rather than buying again. Provisioning
+        ADDITIONAL infrastructure beyond what a prior call already
+        provisioned requires a NEW, distinct Idempotency-Key; reusing an old
+        one (or omitting the header twice) is indistinguishable from a retry
+        and returns the existing result, not a second purchase.
+
+
+        `registerDomains` (real domain purchases on the platform's own
+        account — the customer's bill is unchanged, mailbox-count-based
+        only): omitting it leaves any previously-given consent UNCHANGED;
+        `true` opts in and requires `registrant`; an explicit `false`
+        revokes it. There is no default.
+
+
+        If fewer available, not-already-owned lookalike domains exist than
+        `domains` requests, the call fails with 400 naming how many were
+        found — never a silent partial provision or a repeat purchase of one
+        domain.
+
+
+        A domain's DNS setup may still be completing when this call returns
+        — the domain is recorded either way and is never lost. There is no
+        autonomous background retry: completing it is the caller's job.
+        Retry the SAME call — same Idempotency-Key, or omitted identically
+        both times — to converge onto that domain and finish its DNS setup;
+        a distinct key is for provisioning genuinely new infrastructure, not
+        for completing DNS on infrastructure this call already started.
+        There is no per-domain DNS field to poll: GET /infrastructure-status
+        reports a domain count, not per-domain detail.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
         required: true
         content:
@@ -104,6 +139,12 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/RequestInProgress'
+        '502':
+          $ref: '#/components/responses/VendorError'
+        '503':
+          $ref: '#/components/responses/NotActivated'
 
   /infrastructure-status:
     get:
@@ -965,6 +1006,12 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/CapacityPending'
+        '502':
+          $ref: '#/components/responses/VendorError'
+        '503':
+          $ref: '#/components/responses/NotActivated'
 
   /byo-domains/{id}/connect-mailbox:
     post:
@@ -1266,6 +1313,65 @@ components:
           schema:
             type: object
             properties: { error: { type: string } }
+    RequestInProgress:
+      description: >
+        A request with this Idempotency-Key is already executing — a
+        concurrent retry arrived before the first call finished. Retryable
+        by design: retry shortly, once the first call has recorded its result.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties: { error: { type: string } }
+    VendorError:
+      description: >
+        A real vendor call failed (domain registrar or mailbox provider) —
+        materially different from a bug in this service. `step` names the
+        vendor operation that failed when derivable; `retryable` is the
+        adapter's own grade, so a caller can back off instead of guessing.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string }
+              code: { type: string, enum: [vendor_error] }
+              step:
+                type: string
+                nullable: true
+                description: The vendor operation that failed, when derivable from the underlying error message.
+              retryable: { type: boolean }
+            required: [error, code, retryable]
+    NotActivated:
+      description: >
+        A required vendor integration is not yet enabled for this account.
+        Nothing was charged; the operator has been notified.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string }
+              code: { type: string, enum: [not_activated] }
+              step: { type: string, nullable: true }
+            required: [error, code]
+    CapacityPending:
+      description: >
+        Vendor-account capacity (the monthly spend ceiling or the InboxKit
+        plan-slot count) is temporarily exhausted — a graceful back-pressure
+        signal, not a failure. The reserve was released; any
+        domains/mailboxes provisioned before this point stay provisioned.
+        `reason` names which limit was hit; a later retry (once the operator
+        raises the ceiling or the account frees a slot) starts clean.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string }
+              code: { type: string, enum: [capacity_pending] }
+              reason: { type: string, enum: [spend_ceiling, slot_capacity] }
+            required: [error, code, reason]
 
   schemas:
     SignupInput:
@@ -1301,6 +1407,43 @@ components:
             SPEC §18 quote-before-add. true previews the new mailbox count +
             projected monthly (returns 200 { quoteOnly, billing }) WITHOUT
             provisioning. false (default) provisions and returns { jobId, billing }.
+        registerDomains:
+          type: boolean
+          description: >
+            This tenant's opt-in consent to real domain purchases made on
+            the platform's own account (COGS — the customer's bill is
+            unchanged, mailbox-count-based only). Omitting this field
+            entirely leaves any previously-given consent UNCHANGED; `true`
+            opts in and requires `registrant`; an explicit `false` revokes
+            it. There is no default — an absent field is never treated as
+            `false`.
+        registrant:
+          $ref: '#/components/schemas/Registrant'
+
+    Registrant:
+      type: object
+      description: >
+        The domain registrant-of-record. Required whenever `registerDomains`
+        is true — this platform never invents a domain registrant's legal
+        identity, so a `registerDomains:true` call without a complete
+        `registrant` is rejected at the boundary (400) naming the missing
+        fields.
+      required: [firstName, lastName, email, phone, addressLine1, city, state, country, postalCode]
+      properties:
+        firstName: { type: string, minLength: 1, maxLength: 200 }
+        lastName: { type: string, minLength: 1, maxLength: 200 }
+        email: { type: string, format: email }
+        phone: { type: string, minLength: 1, maxLength: 50 }
+        addressLine1: { type: string, minLength: 1, maxLength: 500 }
+        city: { type: string, minLength: 1, maxLength: 200 }
+        state: { type: string, minLength: 1, maxLength: 200 }
+        country: { type: string, minLength: 1, maxLength: 100 }
+        postalCode: { type: string, minLength: 1, maxLength: 20 }
+        organization:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Optional; defaults to the tenant's own brand if omitted.
 
     SequenceStepInput:
       type: object
