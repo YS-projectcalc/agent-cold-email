@@ -3,6 +3,7 @@ import {
   isPaidPlan,
   RegistrarUnarmedError,
   ValidationError,
+  VendorError,
   type LookalikeCandidate,
   type OwnedDomain,
   type PurchasedDomain,
@@ -23,6 +24,7 @@ import { assertWithinProvisioningCap } from "./quota.js";
 import { screenTenant } from "../ofac/screening.js";
 import { alertRegistrarUnarmed } from "./registrar-alert.js";
 import { withSpendCeiling } from "./spend-ceiling.js";
+import { emitTenantMessage } from "./tenant-messages.js";
 import { RealInboxKitDomainPort } from "../vendors/real/inboxkit-domain-port.js";
 import { assertCompleteRegistrant, readRegistrarOptInState } from "../vendors/registrar-arming.js";
 
@@ -107,7 +109,20 @@ export async function findAdoptableDomain(ctx: TenantContext, candidate: string)
  */
 export async function provisionDomainWithMailboxes(
   ctx: TenantContext,
-  opts: { domain: string; domainIndex: number; personaSlug: string; inboxesEach: number; intentKey: string },
+  opts: {
+    domain: string;
+    domainIndex: number;
+    personaSlug: string;
+    inboxesEach: number;
+    intentKey: string;
+    // N2 (gate 2026-08-05, wire-A F1 fix) — fired the instant the domain THIS
+    // call is actually going to operate on is known (the resume branch's
+    // `existing.domain`, or the buy/adopt branch's `purchased.domain`), before
+    // any operation past that point can throw. Lets the caller's wire-A
+    // catch name the REAL domain instead of `opts.domain` — which, on a
+    // resume, is a fresh unrelated candidate this call never touches.
+    onDomainResolved?: (domain: string) => void;
+  },
 ): Promise<{ domainId: string; domain: string; mailboxEmails: string[] }> {
   const domainKey = `${opts.domain}#${opts.domainIndex}`;
 
@@ -160,6 +175,10 @@ export async function provisionDomainWithMailboxes(
     // it propagate — deliberately BEFORE any mailbox spend. A domain with no
     // working nameservers must never carry paid mailboxes; the domain row and
     // the intent both survive, so the next retry resumes from here.
+    // N2 — this call operates on `existing.domain` (the intent-resolved name),
+    // NEVER on `opts.domain` (this call's fresh candidate) — report it before
+    // the one operation below that can throw retryably.
+    opts.onDomainResolved?.(existing.domain);
     if (existing.dns_status !== "ready") {
       await setDnsWithRetry(ctx, existing.domain, `dns:${ctx.tenantId}:${existing.domain}#${opts.domainIndex}`, existing.id);
     }
@@ -228,6 +247,11 @@ export async function provisionDomainWithMailboxes(
       throw err;
     }
   }
+
+  // N2 — `purchased.domain` is now the resource genuinely acquired this call
+  // (bought or adopted); report it before setDnsWithRetry below, the next
+  // operation that can throw retryably.
+  opts.onDomainResolved?.(purchased.domain);
 
   // H2 — PERSIST THE INSTANT IT IS OURS, before any DNS work. This INSERT used
   // to sit AFTER setDns, so a setDns throw discarded a domain we had already
@@ -451,12 +475,18 @@ export async function runSetupInfrastructure(
     );
   }
 
+  // Wire point A (system->agent message channel, increment 1) — tracks which
+  // domain the loop below was working on when it threw, so the catch can name
+  // it in the retry_setup message without needing the error itself to carry
+  // structured detail.
+  let inFlightDomain: string | undefined;
   try {
     const personaSlug = slugify(input.persona);
 
     for (let domainIndex = 0; domainIndex < input.domains; domainIndex++) {
       const candidate = usable[domainIndex];
       if (!candidate) continue;
+      inFlightDomain = candidate.domain;
       await provisionDomainWithMailboxes(ctx, {
         domain: candidate.domain,
         domainIndex,
@@ -468,6 +498,16 @@ export async function runSetupInfrastructure(
         // intent row even if candidate generation ever changes, which is the
         // whole point of recording the resolved name rather than deriving it.
         intentKey: `${setupKey ?? `tenant:${ctx.tenantId}`}#${domainIndex}`,
+        // N2 (gate 2026-08-05, F1) — `candidate.domain` above is only a correct
+        // guess for a FIRST attempt. On a resume, provisionDomainWithMailboxes
+        // actually operates on the intent-resolved domain, which can differ
+        // from this call's fresh `usable[domainIndex]` candidate (the prior
+        // candidate is now excluded from `usable` because it's already owned).
+        // This callback corrects `inFlightDomain` to the real one the instant
+        // it's known, before the catch below ever names it in a customer message.
+        onDomainResolved: (domain) => {
+          inFlightDomain = domain;
+        },
       });
     }
   } catch (err) {
@@ -486,6 +526,24 @@ export async function runSetupInfrastructure(
     }
     if (err instanceof RegistrarUnarmedError) {
       await alertRegistrarUnarmed(ctx, input.primaryDomain, err, mailer);
+    }
+    // Wire point A — a RETRYABLE VendorError here is H2's exact shape
+    // (setDnsWithRetry exhausted its in-call backoff): the domain is bought
+    // and recorded (dns_status 'pending'), nothing was lost, and the caller's
+    // OWN error text already says so — but until now that only reached a
+    // human via a relayed alert. Surface it directly to the agent instead.
+    // Deliberately composed prose, never `err.message` (GUARDRAIL B — the
+    // vendor error can carry upstream detail this message must not repeat).
+    if (err instanceof VendorError && err.retryable) {
+      emitTenantMessage(ctx, {
+        kind: "retry_setup",
+        severity: "action_required",
+        body: inFlightDomain
+          ? `Setup for ${inFlightDomain} has not finished yet — its DNS registration is still completing at the vendor. Nothing was lost; retry setup_infrastructure with the same idempotency key to finish it.`
+          : `Your last setup_infrastructure call has not finished yet. Nothing was lost; retry it with the same idempotency key to finish it.`,
+        actionHint: { tool: "setup_infrastructure", idempotencyKey: setupKey ?? null },
+        dedupKey: inFlightDomain ?? `tenant:${ctx.tenantId}`,
+      });
     }
     throw err;
   }

@@ -12,6 +12,7 @@ import { customerSafeVendorDetail, logVendorFailure } from "../vendor-failure.js
 import { gatherMailboxHealth } from "./deliverability.js";
 import { logAction } from "./deliverability-actions.js";
 import { computeMailboxWarmupSnapshot } from "./mailbox-state.js";
+import { listSurfacedTenantMessages, type TenantMessage } from "./tenant-messages.js";
 
 // The one sentence a customer surface says when a mailbox's health lookup fails.
 // Deliberately identical in the report field and the activity row so the two
@@ -69,6 +70,12 @@ export interface InfrastructureStatus {
   mailboxes: number;
   mailboxHealth: MailboxHealthReport[];
   sendReady: boolean;
+  // System->agent message channel, increment 1 (founder-approved 2026-08-05,
+  // engine/tenant-messages.ts) — system notices (a retryable setup step, a
+  // credential going live) surfaced here so the customer's agent sees them
+  // without a human relay. Unread-first, newest-first, capped at 5, expired
+  // rows filtered out.
+  messages: TenantMessage[];
 }
 
 export async function getInfrastructureStatus(ctx: TenantContext): Promise<InfrastructureStatus> {
@@ -152,5 +159,7 @@ export async function getInfrastructureStatus(ctx: TenantContext): Promise<Infra
     // Send-readiness ignores paused/throttled state (it's a warmup concept);
     // a paused mailbox still counts as warmed. delivStatus surfaces the pause.
     sendReady: mailboxHealth.length > 0 && mailboxHealth.every((m) => m.sendReady),
+    // Pure SELECT (GUARDRAIL: never inserts) — see listSurfacedTenantMessages.
+    messages: listSurfacedTenantMessages(ctx),
   };
 }

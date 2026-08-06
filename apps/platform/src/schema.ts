@@ -780,6 +780,45 @@ CREATE TABLE IF NOT EXISTS mailbox_cred_pushes (
 );
 CREATE INDEX IF NOT EXISTS idx_mailbox_cred_pushes_pending
   ON mailbox_cred_pushes(tenant_id, status, created_at);
+
+-- System->agent message channel (increment 1) — a DO-local mailbox our OWN
+-- system writes (engine/tenant-messages.ts's emitTenantMessage) and the
+-- customer's agent reads (infrastructure_status's messages field), so a
+-- system notice (a retryable setup step, a credential going live) reaches the
+-- agent without a human relay. DO-local, not D1 (ARCHITECTURE.md decision #3
+-- + CLAUDE.md rule h — tenant-scoped, one tenant per DO, never cross-tenant).
+-- 'kind' + 'source' are free-form/enum-by-convention exactly like
+-- deliverability_actions.action/events.type above (no DB-level enum
+-- shorthand in this codebase; the emit helper is the one writer). 'source' is
+-- 'system' (every row this increment writes) | 'operator' (increment 2, not
+-- built here). 'action_hint' is JSON (a structured hint the agent can act on,
+-- e.g. { tool, idempotencyKey }), NULL when there is none. 'dedup_key' backs
+-- the emit helper's no-spam guardrail: a re-triggered path (e.g. every
+-- provisioning retry hitting the same stuck state) refreshes its existing
+-- UNREAD, UNEXPIRED (tenant_id, kind, dedup_key) row instead of inserting a
+-- new one — the exact unbounded-action-row class the incident gate caught
+-- twice (ROADMAP PROVISIONING CLASS WAVE). 'read_at' is NULL until an
+-- increment-2 ack_message tool sets it (schema-only here, like followups'
+-- idempotency_key). 'expires_at' bounds how long a message stays surfaced;
+-- reads filter it out and the prune sweep (engine/tenant-messages.ts,
+-- TenantDO.deliverabilitySweep) deletes it.
+CREATE TABLE IF NOT EXISTS tenant_messages (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  body TEXT NOT NULL,
+  action_hint TEXT,
+  source TEXT NOT NULL,
+  dedup_key TEXT,
+  created_at INTEGER NOT NULL,
+  read_at INTEGER,
+  expires_at INTEGER
+);
+-- The read surface's hot query: unread-first (NULLs sort first via
+-- read_at IS NULL DESC in the emit-side SELECT), newest first, per tenant.
+CREATE INDEX IF NOT EXISTS idx_tenant_messages_unread
+  ON tenant_messages(tenant_id, read_at, created_at);
 `;
 
 export function newId(prefix: string): string {
