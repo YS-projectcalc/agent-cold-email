@@ -12,9 +12,18 @@ this directory is Worker-level Stripe plumbing used directly by
   Stripe TEST key is an `ACTIVATION.md` step). Coded fully against Stripe's
   documented REST shape so the swap is a provable no-op at activation.
 - `stripe-webhook.ts` — inbound: the (loose) event zod schema, HMAC-SHA256
-  `Stripe-Signature` verification, and tenant-id resolution from an event
-  (`client_reference_id` / `metadata.tenantId`). No business logic — what an
-  event DOES to a tenant lives in `../engine/billing.ts`.
+  `Stripe-Signature` verification (timestamp tolerance + every `v1` in the
+  header), and the tenant-resolution LADDER — our own `metadata.tenantId` /
+  `client_reference_id` first, then an invoice's `subscription_details.metadata`,
+  then the D1 customer index (`migrations/0016`), then a dispute's charge.
+  Resolving from metadata alone left the dunning and chargeback lanes inert in
+  production (`docs/adversarial/audit-stripe-webhook-2026-08-06.md` finding 1):
+  Stripe does not decorate Invoices or Disputes with our metadata. No business
+  logic — what an event DOES to a tenant lives in `../engine/billing.ts`.
+- `webhook-routing-alert.ts` — best-effort founder alert when a signed event of
+  a type we act on cannot be routed to any tenant. The route answers 200 to such
+  an event (a 500 is retried for ~3 days and counts toward endpoint
+  auto-disable), so this is what keeps that 200 from being silent.
 
 ## How to run
 

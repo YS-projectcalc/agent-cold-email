@@ -7,6 +7,7 @@ import { readActivationState } from "../src/engine/activation.js";
 import { normalizeName, tokenize } from "../src/ofac/normalize.js";
 import { swapInSdnList } from "../src/ofac/sdn-list.js";
 import { newId } from "../src/schema.js";
+import { checkoutSessionCompleted, invoicePaymentFailed, stripeCustomerIdFor } from "./stripe-fixtures.js";
 import type { TenantContext } from "../src/tenant-context.js";
 import type { TenantDO } from "../src/tenant-do.js";
 import { createVendorAdapters } from "../src/vendors/factory.js";
@@ -144,19 +145,45 @@ export async function adminApi<T = unknown>(
 }
 
 /**
+ * Delivers a REAL-shaped `charge.dispute.*` event. A Dispute carries
+ * `metadata: {}` and NO `customer` field, so the route resolves it
+ * charge -> customer -> D1 customer index (src/billing/stripe-webhook.ts) —
+ * the one webhook path that needs a Stripe round trip. This arms a test key
+ * and stubs that single fetch for exactly the duration of the delivery, then
+ * restores both: a set `STRIPE_SECRET_KEY` also arms `isRealSpendArmed`, so it
+ * must never be left on around a tick or a provisioning call. The tenant must
+ * have been through `activatePaidPlan` first — that is what records its
+ * customer id in the index.
+ */
+export async function postDisputeWebhook<T = unknown>(event: unknown, tenantId: string): Promise<ApiResult<T>> {
+  const savedKey = env.STRIPE_SECRET_KEY;
+  const savedFetch = globalThis.fetch;
+  (env as { STRIPE_SECRET_KEY?: string }).STRIPE_SECRET_KEY = "sk_test_dispute_fixture";
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).includes("/charges/")) {
+      return new Response(JSON.stringify({ object: "charge", customer: stripeCustomerIdFor(tenantId) }), { status: 200 });
+    }
+    return savedFetch(input, init);
+  }) as typeof fetch;
+  try {
+    return await postWebhook<T>(event);
+  } finally {
+    globalThis.fetch = savedFetch;
+    (env as { STRIPE_SECRET_KEY?: string }).STRIPE_SECRET_KEY = savedKey;
+  }
+}
+
+/**
  * Drives a tenant's billing_state to 'past_due' via the SAME
  * `invoice.payment_failed` Stripe webhook path B1 exercises
  * (test/webhook.test.ts) — each call is one more recorded failure (the
  * dunning "cycle", src/admin/dunning.ts), matching how a real Stripe account
- * would redeliver a fresh event id per failed invoice attempt.
+ * would redeliver a fresh event id per failed invoice attempt. The payload is
+ * a REAL invoice shape (test/stripe-fixtures.ts): empty `metadata`, tenant
+ * reference under `subscription_details`.
  */
 export async function failPayment(tenantId: string): Promise<void> {
-  const event = {
-    id: `evt_${crypto.randomUUID()}`,
-    type: "invoice.payment_failed",
-    data: { object: { metadata: { tenantId } } },
-  };
-  const res = await postWebhook(event);
+  const res = await postWebhook(invoicePaymentFailed({ tenantId, customerId: stripeCustomerIdFor(tenantId) }));
   if (res.status !== 200) throw new Error(`failPayment webhook failed: ${JSON.stringify(res)}`);
 }
 
@@ -165,22 +192,12 @@ export async function failPayment(tenantId: string): Promise<void> {
  * `checkout.session.completed` Stripe webhook path B1 exercises
  * (test/webhook.test.ts) — the real path a Stripe checkout success uses to
  * set `plan` + `billing_state = 'active'` together, which is what
- * MRR (src/engine/ops-summary.ts) requires.
+ * MRR (src/engine/ops-summary.ts) requires. Also what seeds this tenant's
+ * customer id into the D1 routing index, so its LATER invoice/dispute events
+ * resolve the way real ones do.
  */
 export async function activatePaidPlan(tenantId: string, plan: TenantPlan): Promise<void> {
-  const event = {
-    id: `evt_${crypto.randomUUID()}`,
-    type: "checkout.session.completed",
-    data: {
-      object: {
-        customer: "cus_test_admin",
-        subscription: "sub_test_admin",
-        client_reference_id: tenantId,
-        metadata: { tenantId, plan },
-      },
-    },
-  };
-  const res = await postWebhook(event);
+  const res = await postWebhook(checkoutSessionCompleted({ tenantId, plan }));
   if (res.status !== 200) throw new Error(`activatePaidPlan webhook failed: ${JSON.stringify(res)}`);
 }
 

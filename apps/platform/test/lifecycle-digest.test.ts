@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { activatePaidPlan, adminApi, api, mintTenant, postWebhook } from "./helpers.js";
+import { activatePaidPlan, adminApi, api, mintTenant, postDisputeWebhook } from "./helpers.js";
+import { disputeCreated } from "./stripe-fixtures.js";
 
 interface OpsDigestResponse {
   lifecycle: { canceled: number; terminated: number; disputed: number; annualDomainLiabilityCents: number };
@@ -47,11 +48,12 @@ describe("GET /admin/ops/digest — D5 lifecycle wiring", () => {
     // 1 disputed (chargeback).
     const disputed = await mintTenant("Digest Disputed Co", "managed");
     await activatePaidPlan(disputed.tenantId, "managed");
-    await postWebhook({
-      id: `evt_${crypto.randomUUID()}`,
-      type: "charge.dispute.created",
-      data: { object: { id: "dp_digest_1", amount: 9900, metadata: { tenantId: disputed.tenantId } } },
-    });
+    // A REAL Dispute carries no tenant metadata and no customer — it routes
+    // through its charge (test/stripe-fixtures.ts).
+    await postDisputeWebhook(
+      disputeCreated({ chargeId: "ch_test_digest_1", disputeId: "dp_digest_1" }),
+      disputed.tenantId,
+    );
 
     const digest = await adminApi<OpsDigestResponse>("/admin/ops/digest");
     expect(digest.status).toBe(200);

@@ -498,6 +498,68 @@ CREATE TABLE IF NOT EXISTS webhook_events (
   ts INTEGER NOT NULL
 );
 
+-- Guard-before-effect marker for the webhook handler
+-- (audit-stripe-webhook-2026-08-06.md finding 2). The dedup claim above commits
+-- BEFORE the handler's effects run, and checkout.session.completed awaits a
+-- Stripe round trip partway through — so a 429/500/timeout there threw with the
+-- claim already durable, Stripe's retry short-circuited on it, and the tenant
+-- was left HALF-APPLIED forever: billing_state='active' but the OFAC screening
+-- gate never run (fail-OPEN on a compliance control) and quantity billing dead
+-- (stripe_mailbox_item_id NULL, which syncMailboxQuantity bails on).
+--
+-- A row here exists ONLY while an event's effects are in flight. Present on a
+-- redelivery == the previous attempt died mid-handler, so the handler is re-run
+-- to completion instead of being no-op'd as a duplicate. Every handler is
+-- written to be idempotent (the checkout ledger row is keyed on the EVENT id
+-- for exactly this reason), so a re-run cannot double-apply. Deleting the
+-- marker is the LAST thing an attempt does, so the failure direction is
+-- "re-run something already done" (safe) and never "skip something undone".
+CREATE TABLE IF NOT EXISTS webhook_event_inflight (
+  event_id TEXT PRIMARY KEY,
+  started_at INTEGER NOT NULL
+);
+
+-- Event-ordering watermark for billing-state transitions
+-- (audit-stripe-webhook-2026-08-06.md finding 3). Stripe does not guarantee
+-- delivery ORDER, and anything that 500s is redelivered hours later — so
+-- last-write-wins let a STALE invoice.payment_failed land on a RECOVERED
+-- payer, regress billing_state to 'past_due', fail isTenantActivated (which
+-- swaps the tenant's real vendor adapters for sandbox ones mid-campaign), and
+-- hand the dunning sweep a legitimate-looking past_due to suspend on.
+--
+-- The event's own "created" (unix SECONDS, stamped when STRIPE emitted it) is the
+-- only ordering fact a webhook carries, so it is the watermark. Single row,
+-- id pinned to 1 like watchtower_cursor/demo_run_state. See
+-- engine/billing.ts's applyStripeWebhookEvent for the exact apply/refuse rule.
+-- Where the CURRENT dunning cycle starts (audit-stripe-webhook-2026-08-06.md
+-- finding 6). The dunning "cycle" is the number of invoice.payment_failed rows
+-- in webhook_events, and nothing ever windowed it — so it was a LIFETIME count
+-- that survived a full recovery. A customer who had a rough month a year ago
+-- was suspended on their FIRST failure thereafter, skipping the entire
+-- four-strike grace period the design specifies.
+--
+-- The basis is a webhook_events ROWID, not a timestamp: rowids are assigned in
+-- insertion order and can never tie, so "failures recorded after the recovery"
+-- is exact, with no dependence on clock granularity or on the tenant's virtual
+-- clock (which advanceClock can move). Written at every billing RECOVERY
+-- transition (engine/billing.ts), read by engine/ops-summary.ts.
+CREATE TABLE IF NOT EXISTS dunning_cycle_basis (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  -- MAX(rowid) of webhook_events at the moment billing recovered. Failures at
+  -- or below it belong to a CLOSED cycle and no longer count.
+  basis_rowid INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS billing_event_order (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  -- The emission time of the newest billing event this tenant has APPLIED.
+  last_event_created INTEGER NOT NULL,
+  -- Which event set it — for audit when a refusal needs explaining.
+  last_event_id TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
 -- Deliverability control-loop audit log (B6). Every action the loop takes
 -- (THROTTLE / PAUSE / ROTATE / REPLACE_DOMAIN + the capped/no-op variants) is
 -- appended here so account()/infrastructure_status() can surface what the AI
