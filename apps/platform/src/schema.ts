@@ -769,6 +769,43 @@ CREATE TABLE IF NOT EXISTS mailbox_intents (
 );
 CREATE INDEX IF NOT EXISTS idx_mailbox_intents_tenant ON mailbox_intents(tenant_id, status);
 
+-- The BUY-DISPATCH claim behind the guarded re-buy (founder ruling 2026-08-06:
+-- one automatic re-buy per stuck purchase, only after the provider confirms the
+-- first one produced nothing). One row per mailbox intent, claimed BEFORE every
+-- /mailboxes/buy call, so a crash at any point after the claim leaves a durable
+-- record that a buy MAY have landed.
+--
+-- WHY mailbox_intents.status alone cannot carry this: status is written AFTER
+-- the vendor answers, so a kill between the accepted buy and the status write
+-- leaves 'intent' — indistinguishable from "never dispatched", which is what
+-- bought a second paid mailbox (wave-integration gate finding #3). attempts
+-- is written BEFORE the call instead, and is also the cap: 2 dispatches (the
+-- original + the ONE authorized re-buy), enforced crash-safely because the
+-- increment precedes the spend.
+--
+-- WHY A SEPARATE TABLE rather than columns on mailbox_intents: (1) this DDL runs
+-- on EVERY DO construction, so a new TABLE reaches already-provisioned tenants
+-- automatically, while a new COLUMN would need a tenant-do.ts back-fill; and
+-- (2) last_dispatched_at is REAL wall clock (never ctx.clock) — it measures
+-- how long the PROVIDER has had to catch up, a real-world duration that a
+-- tenant's virtual clock offset must not be able to shorten. Same reasoning as
+-- engine/spend-ceiling.ts's ledgerNow(). Rows are dropped at teardown alongside
+-- the intent and the idempotency claim (markMailboxIntentsReleased).
+CREATE TABLE IF NOT EXISTS mailbox_buy_dispatches (
+  intent_key TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  email TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  -- REAL wall clock (RealClock), NOT ctx.clock — see the comment above.
+  last_dispatched_at INTEGER NOT NULL,
+  -- 1 when this row was reconstructed from an intent status that pre-dates the
+  -- table (the original dispatch time is unknowable, so the absence clock
+  -- restarts at reconstruction — never earlier, so it can only delay a re-buy).
+  reconstructed INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS mailbox_cred_pushes (
   email TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL,

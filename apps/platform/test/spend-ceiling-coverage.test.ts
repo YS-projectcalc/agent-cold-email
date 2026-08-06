@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 // behavior test happens to exercise it.
 import provisioningSource from "../src/engine/provisioning.ts?raw";
 import mailboxProvisioningSource from "../src/engine/mailbox-provisioning.ts?raw";
+import mailboxAcquisitionSource from "../src/engine/mailbox-acquisition.ts?raw";
 
 // G0/G2 systemic guard (ga-gates-design-2026-07-22.md §"Systemic guards") — the
 // spend-bypass class, sibling of spend-armed-env-coverage.test.ts. Every
@@ -25,6 +26,11 @@ import mailboxProvisioningSource from "../src/engine/mailbox-provisioning.ts?raw
 const SPEND_SOURCES: { file: string; source: string }[] = [
   { file: "engine/provisioning.ts", source: provisioningSource },
   { file: "engine/mailbox-provisioning.ts", source: mailboxProvisioningSource },
+  // Scanned with ZERO sites today, deliberately. The guarded re-buy put the
+  // decision to buy in this file while the buy itself stayed in the saga; the
+  // obvious next refactor moves the call here too, which is precisely the
+  // "moved call goes unscanned" hole this list's own warning describes.
+  { file: "engine/mailbox-acquisition.ts", source: mailboxAcquisitionSource },
 ];
 
 // The money-out vendor calls (design §0 inventory). Reads/config calls

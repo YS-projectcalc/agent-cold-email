@@ -15,6 +15,7 @@ import {
   type ReleaseResult,
 } from "@coldstart/shared";
 import { billableMailboxCount, releaseMailboxes } from "../src/engine/lifecycle.js";
+import { ABSENCE_MIN_AGE_MS } from "../src/engine/mailbox-acquisition.js";
 import { runSetupInfrastructure } from "../src/engine/provisioning.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
 import { activatePaidPlan, mintTenant, tenantStub, withTenantContext } from "./helpers.js";
@@ -149,6 +150,22 @@ function readMailboxIntents(tenantId: string): Promise<{ email: string; status: 
   );
 }
 
+/**
+ * Ages the durable buy-dispatch record past the window in which the provider is
+ * still allowed to be catching up (engine/mailbox-acquisition.ts). Its timestamp
+ * is REAL wall clock by design — the provider's lag is a real-world duration —
+ * so a test moves the record rather than a tenant clock.
+ */
+function ageDispatchBeyondAbsenceWindow(tenantId: string, email: string): Promise<void> {
+  return runInDurableObject(tenantStub(tenantId), (_i, s) => {
+    s.storage.sql.exec(
+      `UPDATE mailbox_buy_dispatches SET last_dispatched_at = ? WHERE email = ?`,
+      Date.now() - ABSENCE_MIN_AGE_MS - 60_000,
+      email,
+    );
+  });
+}
+
 function readIdempotencyKeys(tenantId: string): Promise<string[]> {
   return runInDurableObject(tenantStub(tenantId), (_i, s) =>
     s.storage.sql
@@ -218,17 +235,33 @@ describe("L2 — the mailbox buy is followed by a readiness gate, and never repe
     expect(await readMailboxRows(tenantId)).toEqual([{ email: "sender11@danglingbuy0.com" }]);
   });
 
-  it("a dangling buy the vendor does NOT hold is bought — the throw really did precede the order", async () => {
+  it("a dangling buy the vendor does NOT hold is bought — but only once the absence means something", async () => {
     const { tenantId } = await mintTenant("Lost Buy Co", "managed");
     await activatePaidPlan(tenantId, "managed");
+    const email = "sender11@lostbuy0.com";
 
     const failing = asyncMailboxVendor({ buyThrows: new VendorError("inboxkit mailboxes/buy -> HTTP 503: upstream", true) });
     await runSetup(tenantId, failing.port, "lostbuy.com", "lost-1");
 
+    // A throw is not proof the order never landed — it is proof we do not know.
+    // A buy call that timed out AFTER the provider processed it looks identical
+    // from here, and the provider's list lags a just-accepted order, so a
+    // seconds-old "absent" would re-buy a mailbox we own. Under the guarded
+    // re-buy (founder ruling 2026-08-06) this second dispatch waits for the
+    // absence to be corroborated, exactly as the 'intent' case does.
+    const tooSoon = asyncMailboxVendor();
+    const held = await runSetup(tenantId, tooSoon.port, "lostbuy.com", "lost-1");
+    expect(tooSoon.log.buys).toEqual([]);
+    expect((held as VendorError).retryable).toBe(true);
+
+    await ageDispatchBeyondAbsenceWindow(tenantId, email);
+
+    // Now the throw really is established as having preceded the order, and
+    // buying is the only way forward.
     const retry = asyncMailboxVendor();
     await runSetup(tenantId, retry.port, "lostbuy.com", "lost-1");
-    expect(retry.log.buys).toEqual(["sender11@lostbuy0.com"]);
-  });
+    expect(retry.log.buys).toEqual([email]);
+  }, 30_000);
 });
 
 describe("N4 — teardown invalidates the record that says we already own the mailbox", () => {

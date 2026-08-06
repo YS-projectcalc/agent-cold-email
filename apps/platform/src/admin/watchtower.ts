@@ -60,7 +60,40 @@ const CHECK_LABELS: Record<string, string> = {
   failure_signals: "Failure signals",
 };
 
+/**
+ * Per-mailbox check-name prefixes (founder ruling 2026-08-06 — a stuck mailbox
+ * purchase alerts on entering the stuck state AND on the re-buy's outcome).
+ *
+ * TWO names, not one, because `reconcileAlerts` suppresses a repeat alert for the
+ * same check inside WATCHTOWER_COOLDOWN_MS: a failed re-buy reported under the
+ * stuck check would be swallowed seconds after the stuck alert that preceded it.
+ * Splitting them makes both outcomes reportable while keeping each one deduped:
+ *  - `mailbox_provisioning:<email>` — unhealthy on entering the stuck state;
+ *    healthy again once the mailbox is resolved, which sends the RECOVERY email
+ *    that reports a SUCCESSFUL re-buy.
+ *  - `mailbox_rebuy:<email>` — unhealthy when the re-buy itself failed, or when
+ *    the one-re-buy budget is spent and the address is being abandoned.
+ */
+const MAILBOX_PROVISIONING_CHECK = "mailbox_provisioning:";
+const MAILBOX_REBUY_CHECK = "mailbox_rebuy:";
+
+/** The watchtower check tracking whether ONE mailbox address is provisioning-stuck. */
+export function mailboxProvisioningCheckName(email: string): string {
+  return `${MAILBOX_PROVISIONING_CHECK}${email}`;
+}
+
+/** The watchtower check tracking the OUTCOME of a guarded re-buy for one address. */
+export function mailboxRebuyCheckName(email: string): string {
+  return `${MAILBOX_REBUY_CHECK}${email}`;
+}
+
 function labelFor(name: string): string {
+  if (name.startsWith(MAILBOX_PROVISIONING_CHECK)) {
+    return `Mailbox provisioning ${name.slice(MAILBOX_PROVISIONING_CHECK.length)}`;
+  }
+  if (name.startsWith(MAILBOX_REBUY_CHECK)) {
+    return `Mailbox re-buy ${name.slice(MAILBOX_REBUY_CHECK.length)}`;
+  }
   return CHECK_LABELS[name] ?? name;
 }
 
@@ -211,6 +244,50 @@ export async function runWatchtower(env: Env, mailer: OpsMailer, nowMs: number):
   const outcomes = await reconcileAlerts(env, mailer, results, nowMs);
   await writeWatchtowerCursor(env, nowMs);
   return outcomes;
+}
+
+/**
+ * The persisted status of one check, or null when it has never been reported.
+ *
+ * Lets an event-driven caller stay silent about a check it never raised: without
+ * it, every successful mailbox provision would file a "healthy" row for an
+ * address that was never in trouble, burying the handful of real platform checks
+ * this table exists for.
+ */
+export async function readCheckStatus(env: Env, checkName: string): Promise<"healthy" | "unhealthy" | null> {
+  const row = await env.DB.prepare(`SELECT status FROM watchtower_state WHERE check_name = ?`)
+    .bind(checkName)
+    .first<{ status: "healthy" | "unhealthy" }>();
+  return row?.status ?? null;
+}
+
+/**
+ * Reports ONE event-driven check through the same state machine the cron sweep
+ * uses, so an alert raised from inside a TenantDO inherits its dedup, its 6h
+ * cooldown and its recovery email rather than growing a parallel notifier.
+ *
+ * Unlike `evaluateHealthChecks`'s probes, these checks are raised by whatever
+ * observed the condition (engine/mailbox-provisioning.ts) — the cron never
+ * produces them, so they stay at whatever state their last report left them.
+ *
+ * NEVER THROWS. The caller is mid-saga around real vendor spend; a D1 hiccup in
+ * the notifier must not decide whether a purchase happens or a customer's setup
+ * fails. A failure to alert is logged and swallowed, exactly as `trySend` already
+ * swallows a dark mail channel.
+ */
+export async function reportCheck(
+  env: Env,
+  mailer: OpsMailer,
+  result: CheckResult,
+  nowMs: number,
+): Promise<AlertOutcome | null> {
+  try {
+    const [outcome] = await reconcileAlerts(env, mailer, [result], nowMs);
+    return outcome ?? null;
+  } catch (err) {
+    console.error(`watchtower: failed to report check "${result.name}"`, err);
+    return null;
+  }
 }
 
 // --- Email bodies --------------------------------------------------------

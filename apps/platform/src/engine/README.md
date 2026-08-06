@@ -39,7 +39,18 @@ into a god file:
     BEFORE the purchase and never deleted, because the request-idempotency claim
     is deleted on a throw: that is what made a retry re-buy. `markMailboxIntentsReleased`
     is teardown's invalidation hook — a claim about a released mailbox must not
-    outlive the mailbox (N4).
+    outlive the mailbox (N4). It also owns the `mailbox_buy_dispatches` claim
+    (`claimBuyDispatch` / `readBuyDispatch`), written BEFORE each `/mailboxes/buy`
+    on a REAL wall clock: an intent status is written AFTER the vendor answers, so
+    only a pre-call claim can tell "nothing was sent" apart from "an accepted buy
+    whose status write was lost".
+  - `mailbox-acquisition.ts` — the guarded re-buy (founder ruling 2026-08-06).
+    Decides whether a mailbox may be bought at all: any dispatch on record means
+    ASK the provider, and only a corroborated absence (repeated lookups, plus a
+    minimum real age since the dispatch) authorizes the ONE automatic re-buy. A
+    failed lookup authorizes nothing. Raises the founder's stuck / re-buy-outcome
+    alerts through the watchtower state machine so they inherit its dedup and
+    cooldown.
   - `domain-dns.ts` — `setDnsWithRetry`, the only export. Runs the DNS operation
     the domain's `connection_type` calls for (INCIDENT 2026-08-05: the
     connect-an-existing-domain nameserver handshake was being run against
