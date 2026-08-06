@@ -1,0 +1,37 @@
+# Forward-path landmine audit — full provisioning→send→reply lifecycle (2026-08-05)
+
+**Ref** `0d48fbe` main, read-only. Mordy ten_91aab24a. Frozen by orchestrator from forward-path-audit's read-only report (agent can't write .md).
+
+## VERDICT
+The setDns fix (sweep-domain-type) unblocks step 0 ONLY. SEVEN more landmines sit downstream and are NOT independent — arming one without the others produces a new silent failure. Two systemic classes dominate: **(A) "buy accepted == resource usable"** (no async gating anywhere) and **(B) the VirtualClock is FROZEN for paid tenants.**
+
+## ORDERED LANDMINE LIST (fix-wave)
+**L1 · DNS 'ready' is a lie, buy not gated on real propagation · CODE.** setDnsWithRetry marks dns_status='ready' whenever setDns() doesn't THROW, discarding the returned DnsRecordSet flags (provisioning.ts:387-388). setDns only throws on HTTP error; check-propagation returning propagated=false is NOT an error → mailbox buy proceeds onto a non-propagated domain. Distinct from the wrong-operation bug and survives its fix. The fix must gate the mailbox-buy loop on propagated==true / a real check-mailbox-status precondition.
+
+**L2 · Async mailbox buy vs immediate resolveMailboxUid — wedge + non-idempotent re-buy · CODE · THE NEXT "one issue per step."** No check-mailbox-status poll anywhere (grep: zero wiring), yet the tool desc says "Async — poll for progress." provision() returns on buy-accept (mailbox-port.ts:47-63); provisionMailboxesForDomain calls startWarmup IMMEDIATELY (provisioning.ts:114) → startWarmup does resolveMailboxUid (mailbox-port.ts:90/243). If InboxKit provisions in background, the mailbox isn't listable yet → resolveMailboxUid throws PERMANENT → exits fn inside withRequestIdempotency → the pending claim is DELETED on throw (idempotency.ts:121-124). /mailboxes/buy has NO vendor idempotency key → retry re-runs fn → buy() FIRES AGAIN → double-charge or "already exists" (the /already exists/i handling was REMOVED at gate c) → permanent wedge + orphaned vendor mailbox. Same race as the H2 domain incident, for mailboxes, UNHANDLED. Also hits showMailboxCredentials + getHealth (resolveMailboxUid-first). Fix: poll-until-listable/ready gate between buy and every uid consumer + real buy-idempotency (record the bought email BEFORE startWarmup so a retry resumes at warmup, never re-buys).
+
+**L3 · Sending needs a per-mailbox OAuth refresh token from a MANUAL mailbox-email-keyed minter; vendor shapes UNVERIFIED · FOUNDER-MANUAL + CODE-VERIFY-LIVE.** buildCredentialPushDeps wires ManualOAuthMinter only (mailbox-credential-push.ts:65); programmatic InboxKitOAuthMinter is a "DOCUMENTED-SHAPE GUESS" (oauth-mint.ts:62-67), not wired. Manual grants keyed by exact mailbox email in GMAIL_OAUTH_GRANTS — emails don't exist until provisioning picks local parts, and minting requires Google consent AS that mailbox (must already exist at vendor). showMailboxCredentials is also an UNVERIFIED shape guess (mailbox-port.ts:210-217). Even after L2, credential push fails at mint → row stuck 'pending' (never throws into provision) → Mordy cannot SEND. Strictly manual, per-mailbox, operator-in-loop, on two unverified contracts.
+
+**L4 · No production driver calls runTick → scheduled_sends never drain · CODE + FOUNDER-GATE.** runTick is DO-RPC-only; cron runScheduledOpsSweep does NOT call it; cron trigger commented out in wrangler.toml (tenant-do.ts:845-847 says so). Campaigns sit forever. Wiring tick into cron ALSO arms auto-sending (separate founder-gated arc).
+
+**L5 · VirtualClock FROZEN for paid tenants → 5 lifetime sends/mailbox, warmup never ramps/cancels · CODE (systemic).** ctx.clock always a VirtualClock (tenant-context.ts:11); advances ONLY via advanceClock/runDemo, both gated/throwing for non-demo/free (tenant-do.ts:976,:935); runTick never advances it; DO-alarm tick unbuilt. So clock.now()==signup time forever. Cascade: computeWarmupDay clamps day 1 → daily_cap 5; rolledOver = sent_today_epoch_day !== epochDay(now) ALWAYS false (mailbox-state.ts:44) → sent_today NEVER resets → each mailbox sends 5 emails TOTAL then permanently capped (5 mailboxes ≈ 25 sends ever, then send-dead); warmup never reaches 40/day, never flips sendReady, warmup-cancel's isSendReady gate never trips → warmup pool bills forever. (The "negative warmup day" framing was imprecise — Math.max(1,...) clamps; the real mechanism is "now frozen → stuck at day 1.") **Bites once L4 armed → L4 and L5 must ship together** (driver without clock = 25 sends then silence).
+
+**L6 · No production driver polls inboxes → replies never fetched · CODE + FOUNDER-GATE.** Symmetric to L4. runPollInbox DO-RPC-only (tenant-do.ts:824); nothing drives it. Also depends on L2/L3 pushing IMAP creds. Reply detection/threads/suppression-on-reply dead until a poll driver + creds.
+
+**L7 · Billing counts locally-inserted rows regardless of vendor completion · CODE.** syncMailboxQuantity bills desired=max(5, COUNT rows WHERE released_at IS NULL) (billing.ts:521-557); row inserted synchronously after buy-accept (provisioning.ts:137) → a mailbox that buy-accepts but whose background provisioning FAILS (L2) is still billed. Plus N4 (re-provision after teardown inserts a billable row with no vendor mailbox). Quantity drift / over-bill. Same wave, lower urgency.
+
+**L8 · The cron is commented out in wrangler.toml · ARM-TIME.** Even existing sweeps (deliverability, warmup-cancel, dunning, cred-push reconcile, spend-reap) have no live driver until crons=[...] is uncommented. Second, arming-level blocker on L3's reconcile + L5's warmup-cancel.
+
+## IS MORDY'S DOMAIN RECOVERABLE IN PLACE? — LIKELY YES
+goauthorpitchdesk.com has 0 mailboxes → structurally adoptable; == "go"+slug → the first candidate a retry regenerates → adopt-before-buy recovers it at zero spend once L1/L2 fixed. NO clean re-provision needed. CAVEAT: findAdoptableDomain requires vendor status=="active" (provisioning.ts:343). **Orchestrator live-check 2026-08-05: /domains/list reports his domain status="active" → caveat RESOLVED, adopt path viable** (nameserver_match/propagation pending is separate — L1's gate handles it).
+
+## ATTACKS THAT FAILED (PASS)
+- platform/same-platform rule: provision() hardcodes platform:"GOOGLE", buys one at a time → rule can't be violated.
+- Double-charge on a SUCCESSFUL run's replay: withRequestIdempotency returns the recorded mailbox, re-runs nothing (H4). The gap is ONLY partial-failure-after-buy (L2).
+- syncMailboxQuantity math: set-to-N absolute, active-only, self-healing. Only drift is upstream row-count reality (L7).
+
+## UNVERIFIABLE (need live/creds — resolve with read-only GETs against Mordy's workspace)
+(a) is /mailboxes/buy truly async/background; (b) admin-mailbox requirement (code sends no admin flag, buys sequentially — first buy on a fresh purchased domain is the untested boundary); (c) real 5-per-domain cap vs our plan-quota; (d) showMailboxCredentials + programmatic OAuth response shapes vs code's guesses. All need the first live mailbox.
+
+## NEW (out of scope)
+setup_infrastructure tool desc claims "Async — returns {jobId}; poll for progress" but provisioning runs fully SYNCHRONOUS inline; jobId backed by no tracked record (provisioning.ts:570-577); infrastructure_status can't report vendor progress (getHealth is resolveMailboxUid-first → degrades for a not-yet-listable mailbox). The "poll for progress" contract is unimplemented.
