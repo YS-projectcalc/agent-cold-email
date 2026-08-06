@@ -65,13 +65,34 @@ export type SuspendReason = "dunning" | "terminate";
  * D1 from inside the DO (the DO/D1 write boundary invariant — see the file
  * header). Called by the D2 dunning sweep (reason='dunning') and the abuse
  * terminate lane (reason='terminate').
+ *
+ * Adversarial audit F3 (2026-08-05, docs/adversarial/audit-dunning-2026-08-05.md):
+ * a dunning suspend races an async billing-recovery webhook (engine/billing.ts's
+ * checkout.session.completed / subscription.updated / dispute.closed handlers)
+ * that can flip billing_state to 'active' in the gap between the sweep's read
+ * (opsSummary) and this write (two separate DO RPCs, admin/ops-sweep.ts's
+ * runDunningSweep) — an unconditional UPDATE there clobbered a customer who
+ * had just paid. Re-checking `billing_state = 'past_due'` atomically here (the
+ * house conditional-UPDATE pattern — mirrors `resolveScreeningReview` +
+ * withSpendCeiling's reserve) makes a recovery that lands in that gap win: the
+ * suspend becomes a no-op (return false) instead of overwriting it. A
+ * 'terminate' suspend is abuse enforcement, not a billing race, so it stays
+ * unconditional. Returns true iff the suspend actually applied.
  */
-export function suspendTenant(ctx: TenantContext, reason: SuspendReason): void {
-  ctx.sql.exec(
-    `UPDATE tenant_profile SET status = 'suspended', suspend_reason = ? WHERE id = ?`,
-    reason,
-    ctx.tenantId,
-  );
+export function suspendTenant(ctx: TenantContext, reason: SuspendReason): boolean {
+  const result =
+    reason === "dunning"
+      ? ctx.sql.exec(
+          `UPDATE tenant_profile SET status = 'suspended', suspend_reason = ? WHERE id = ? AND billing_state = 'past_due'`,
+          reason,
+          ctx.tenantId,
+        )
+      : ctx.sql.exec(
+          `UPDATE tenant_profile SET status = 'suspended', suspend_reason = ? WHERE id = ?`,
+          reason,
+          ctx.tenantId,
+        );
+  return result.rowsWritten > 0;
 }
 
 /**

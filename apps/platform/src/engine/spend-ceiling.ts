@@ -387,7 +387,10 @@ export async function withSpendCeiling<T>(
  * commit that flipped the SAME entry to 'committed' first makes the reaper's
  * flip a no-op and the counters are left alone (no double-subtract).
  */
-export async function reapStaleReservations(env: Env, nowMs: number): Promise<{ reaped: number; releasedCents: number }> {
+export async function reapStaleReservations(
+  env: Env,
+  nowMs: number,
+): Promise<{ reaped: number; releasedCents: number; errors: number }> {
   const cutoff = nowMs - RESERVE_REAP_TTL_MS;
   const stale = await env.DB.prepare(
     `SELECT id, period_key, kind, est_cents FROM vendor_spend_entries WHERE status = 'reserved' AND created_at < ?`,
@@ -397,27 +400,37 @@ export async function reapStaleReservations(env: Env, nowMs: number): Promise<{ 
 
   let reaped = 0;
   let releasedCents = 0;
+  let errors = 0;
   for (const row of stale.results) {
-    const flip = await env.DB.prepare(
-      `UPDATE vendor_spend_entries SET status = 'released', updated_at = ? WHERE id = ? AND status = 'reserved'`,
-    )
-      .bind(nowMs, row.id)
-      .run();
-    if ((flip.meta.changes ?? 0) === 0) continue; // committed/released concurrently — leave the counters untouched
-    await env.DB.prepare(
-      `UPDATE vendor_spend_ledger SET reserved_cents = MAX(0, reserved_cents - ?), updated_at = ? WHERE period_key = ?`,
-    )
-      .bind(row.est_cents, nowMs, row.period_key)
-      .run();
-    if (row.kind === "mailbox") {
-      await env.DB.prepare(`UPDATE vendor_slot_state SET slots_used = MAX(0, slots_used - 1), updated_at = ? WHERE id = 1`)
-        .bind(nowMs)
+    try {
+      const flip = await env.DB.prepare(
+        `UPDATE vendor_spend_entries SET status = 'released', updated_at = ? WHERE id = ? AND status = 'reserved'`,
+      )
+        .bind(nowMs, row.id)
         .run();
+      if ((flip.meta.changes ?? 0) === 0) continue; // committed/released concurrently — leave the counters untouched
+      await env.DB.prepare(
+        `UPDATE vendor_spend_ledger SET reserved_cents = MAX(0, reserved_cents - ?), updated_at = ? WHERE period_key = ?`,
+      )
+        .bind(row.est_cents, nowMs, row.period_key)
+        .run();
+      if (row.kind === "mailbox") {
+        await env.DB.prepare(`UPDATE vendor_slot_state SET slots_used = MAX(0, slots_used - 1), updated_at = ? WHERE id = 1`)
+          .bind(nowMs)
+          .run();
+      }
+      reaped++;
+      releasedCents += row.est_cents;
+    } catch (err) {
+      // One row's transient D1 failure must never abort reaping the rest of
+      // the batch — the row stays 'reserved' and is retried next tick (audit
+      // class-sweep sibling fix, 2026-08-06, mirrors runDunningSweep's
+      // per-tenant try/catch).
+      errors++;
+      console.error(`reapStaleReservations: failed to reap entry ${row.id}`, err);
     }
-    reaped++;
-    releasedCents += row.est_cents;
   }
-  return { reaped, releasedCents };
+  return { reaped, releasedCents, errors };
 }
 
 /**

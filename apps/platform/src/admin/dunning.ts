@@ -1,7 +1,8 @@
 // D2 (brief) — the DECIDE half of the dunning / failed-payment sweep,
 // mirroring engine/deliverability.ts's pure-decision shape: no I/O, no
 // clock, unit-testable in isolation. The ACT half (idempotent per-tenant
-// application) lives in routes/admin-ops.ts, the one caller.
+// application) lives in admin/ops-sweep.ts's runDunningSweep, called from
+// both routes/admin-ops.ts (on-demand) and scheduled.ts (the live cron).
 
 export type DunningAction = "retry" | "escalate" | "suspend";
 
@@ -36,7 +37,7 @@ export function isPermanentDeclineCode(code: string | null | undefined): boolean
 
 /**
  * PURE decision function. `failureCount` IS the dunning "cycle" — the sweep
- * (routes/admin-ops.ts) records at most one dunning_events row per
+ * (admin/ops-sweep.ts's runDunningSweep) records at most one dunning_events row per
  * (tenantId, cycle), which is what makes re-running the sweep against an
  * unchanged failure count a no-op (idempotent per cycle, brief requirement).
  * `declineCode` is the most recent charge failure code (A5): a permanent code

@@ -870,9 +870,16 @@ export class TenantDO extends DurableObject<Env> {
     return result;
   }
 
-  /** D2 dunning sweep's "suspend after grace" action — a real local state transition (not a vendor call), armed now. */
-  suspendForDunning(): void {
-    suspendTenant(this.requireContext(), "dunning");
+  /**
+   * D2 dunning sweep's "suspend after grace" action — a real local state
+   * transition (not a vendor call), armed now. Returns false (a no-op) when
+   * billing_state is no longer 'past_due' at write time — a recovery webhook
+   * landed in the gap between the sweep's read and this write (F3, audit
+   * 2026-08-05); the caller must not record a suspend or notify one that
+   * didn't happen.
+   */
+  suspendForDunning(): boolean {
+    return suspendTenant(this.requireContext(), "dunning");
   }
 
   /** G1b admin resolution — POST /admin/tenants/:id/screening {decision:'clear'} (routes/admin-screening.ts). */

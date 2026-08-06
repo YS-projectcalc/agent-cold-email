@@ -253,6 +253,66 @@ describe("reapStaleReservations — reclaims reservations orphaned by a crash (d
     expect(result.reaped).toBe(0);
     expect((await ledgerRow(pk))?.reserved_cents).toBe(690); // still reserved
   });
+
+  // Adversarial audit 2026-08-05 (docs/adversarial/audit-dunning-2026-08-05.md)
+  // class-sweep sibling: the per-row loop had NO try/catch, so one row's
+  // transient D1 write failure aborted reaping the rest of that tick's batch.
+  it("one row's transient D1 write failure must not abort reaping a later stale row in the same batch", async () => {
+    const now = Date.now();
+    const pk = periodKey(now);
+    const staleAt = now - 60 * 60 * 1000; // 1h old — well past the 15-min reap TTL
+
+    await env.DB.prepare(
+      `INSERT INTO vendor_spend_ledger (period_key, reserved_cents, committed_cents, ceiling_cents, updated_at) VALUES (?, 1380, 0, 15000, ?)`,
+    )
+      .bind(pk, staleAt)
+      .run();
+    await env.DB.prepare(
+      `INSERT INTO vendor_spend_entries (id, period_key, tenant_id, kind, est_cents, actual_cents, status, created_at, updated_at)
+       VALUES ('vsp_wedged', ?, 'ten_wedged', 'domain', 690, NULL, 'reserved', ?, ?)`,
+    )
+      .bind(pk, staleAt, staleAt)
+      .run();
+    await env.DB.prepare(
+      `INSERT INTO vendor_spend_entries (id, period_key, tenant_id, kind, est_cents, actual_cents, status, created_at, updated_at)
+       VALUES ('vsp_healthy', ?, 'ten_healthy', 'domain', 690, NULL, 'reserved', ?, ?)`,
+    )
+      .bind(pk, staleAt, staleAt)
+      .run();
+
+    // Fault-inject the real path: patch env.DB.prepare so the flip UPDATE
+    // throws ONLY for the wedged row's bound id — everything else (including
+    // the healthy row's own flip) goes through the real D1 binding untouched.
+    const originalPrepare = env.DB.prepare.bind(env.DB);
+    (env.DB as any).prepare = (sql: string) => {
+      const stmt = originalPrepare(sql);
+      if (!sql.startsWith(`UPDATE vendor_spend_entries SET status = 'released'`)) return stmt;
+      const originalBind = stmt.bind.bind(stmt);
+      stmt.bind = (...args: unknown[]) => {
+        if (args[1] === "vsp_wedged") {
+          return { run: async () => { throw new Error("simulated transient D1 write failure"); } } as any;
+        }
+        return originalBind(...args);
+      };
+      return stmt;
+    };
+
+    try {
+      const result = await reapStaleReservations(env, now);
+      expect(result.errors).toBe(1);
+      expect(result.reaped).toBe(1); // the healthy row still reaped despite its sibling's failure
+    } finally {
+      env.DB.prepare = originalPrepare;
+    }
+
+    const wedged = await env.DB.prepare(`SELECT status FROM vendor_spend_entries WHERE id = 'vsp_wedged'`).first<{ status: string }>();
+    expect(wedged?.status).toBe("reserved"); // untouched — retries on the next tick
+
+    const healthy = await env.DB.prepare(`SELECT status FROM vendor_spend_entries WHERE id = 'vsp_healthy'`).first<{ status: string }>();
+    expect(healthy?.status).toBe("released"); // reaped
+
+    expect((await ledgerRow(pk))?.reserved_cents).toBe(690); // only the healthy row's 690 released, wedged's 690 stays reserved
+  });
 });
 
 describe("releaseMailboxSlots — teardown decrements the account slot counter", () => {
