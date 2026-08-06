@@ -37,9 +37,50 @@ import { loadJsonStateFile } from "./json-store.js";
  * F5 — a corrupt state file FAILS LOUD (loadJsonStateFile): the daemon refuses
  * to start rather than boot with an empty credential set and then overwrite the
  * only copy of the real refresh tokens on the next flush.
+ *
+ * F1 (Wave 2 CREDSTORE) — a Worker-owned monotonic `pushSeq` per mailbox closes
+ * the content-hash scheme's blind spot: content-hash is DEDUP, not ORDERING, so
+ * a stale-but-different push landing after a rotation used to silently revert
+ * it (the audit's proven attack — see mailbox-store.test.ts). `pushSeq` orders
+ * CLAIMS, not content: a push claimed earlier can never overwrite one claimed
+ * later, full stop, regardless of arrival order at the engine.
+ *   - incoming.pushSeq < stored.pushSeq          -> "stale", NO write.
+ *   - incoming.pushSeq === stored.pushSeq, same content  -> "unchanged".
+ *   - incoming.pushSeq === stored.pushSeq, different content -> REJECTED
+ *     (BadRequest) — two claims for one seq is a caller bug, surfaced loudly
+ *     rather than silently picking a winner.
+ *   - incoming.pushSeq is ABSENT (no live comparable seq on either side) ->
+ *     exact legacy content-hash-only behavior. Static-config and any caller
+ *     that never sends a seq is completely unaffected.
+ *
+ * TOMBSTONES (Wave 2 CREDSTORE, the in-flight resurrection case) — `remove()`
+ * deletes the credential record but retains `tombstones[email] = <last-seen
+ * pushSeq>`. A later upsert with no live record consults the tombstone:
+ *   - incoming.pushSeq <= tombstone  -> "stale", NO write (the removed mailbox
+ *     stays removed; a claim from before or at cancel time cannot resurrect it).
+ *   - incoming.pushSeq > tombstone   -> accepted ("created"), tombstone cleared
+ *     (legitimate re-provision: the Worker-side push_seq counter survives the
+ *     status flip, so a genuine revive always carries a strictly higher seq).
+ *   - a SEQLESS push against a tombstone -> "stale". Resurrection is the harm
+ *     being closed here, so an absent seq gets no special exemption post-cancel
+ *     (unlike the legacy-behavior carve-out for a LIVE record above) — every
+ *     prod push carries a seq after this wave.
+ *
+ * Recovery for a tombstoned email that legitimately needs credentials again:
+ *   (a) the droplet's static `MAILBOX_CREDENTIALS(_FILE)` config, which the
+ *       resolve-union checks BEFORE the pushed store and is entirely unaffected
+ *       by a tombstone (an operator can always pin credentials by hand), or
+ *   (b) a fresh seq-bearing push (the normal re-provision path).
+ * A manual seqless `curl` re-push against a tombstoned email has no escape
+ * hatch other than (a)/(b) above — by design.
+ *
+ * Tombstone retention tradeoff: entries are retained FOREVER (never pruned),
+ * so `tombstones` grows monotonically with mailbox churn across the life of
+ * the daemon's state file. Accepted for now — the state file is small JSON and
+ * churn volume is low; revisit with a retention/GC policy if it ever isn't.
  */
 
-export type UpsertOutcome = "created" | "replaced" | "unchanged" | "replayed";
+export type UpsertOutcome = "created" | "replaced" | "unchanged" | "replayed" | "stale";
 
 export interface UpsertResult {
   email: string;
@@ -58,6 +99,8 @@ interface MailboxRecord {
   credentials: MailboxCredentials;
   contentHash: string;
   updatedAt: number;
+  /** The claim sequence this record was last written under, if any (F1). Preserved across a legacy seqless overwrite so ordering stays enforceable. */
+  pushSeq?: number;
 }
 
 interface IdempotencyRecord {
@@ -72,9 +115,11 @@ interface MailboxStoreState {
   mailboxes: Record<string, MailboxRecord>;
   /** idempotencyKey -> the upsert it first produced (replay-safety). */
   idempotency: Record<string, IdempotencyRecord>;
+  /** email -> last-seen pushSeq at removal time (F1 tombstones — see doc comment above). */
+  tombstones: Record<string, number>;
 }
 
-const EMPTY: MailboxStoreState = { mailboxes: {}, idempotency: {} };
+const EMPTY: MailboxStoreState = { mailboxes: {}, idempotency: {}, tombstones: {} };
 
 export class MailboxCredentialStore {
   private state: MailboxStoreState;
@@ -89,6 +134,10 @@ export class MailboxCredentialStore {
     this.state = loadJsonStateFile<MailboxStoreState>(this.filePath, EMPTY, "pushed mailbox credentials", (parsed) => ({
       mailboxes: (parsed.mailboxes as MailboxStoreState["mailboxes"]) ?? {},
       idempotency: (parsed.idempotency as MailboxStoreState["idempotency"]) ?? {},
+      // A pre-wave2 state file has no `tombstones` key at all -- default to
+      // empty rather than throwing, so an old-shape file still loads (only a
+      // genuinely corrupt file, per loadJsonStateFile's own contract, throws).
+      tombstones: (parsed.tombstones as MailboxStoreState["tombstones"]) ?? {},
     }));
   }
 
@@ -103,12 +152,14 @@ export class MailboxCredentialStore {
   }
 
   /**
-   * Upsert (F4). Validates `rawCredentials` through the SAME schema the static
-   * config uses, so a pushed mailbox can never carry a shape the send path
-   * can't resolve. Returns the applied outcome; throws BadRequestError on
-   * invalid credentials or idempotency-key reuse with a different payload.
+   * Upsert (F4 + F1). Validates `rawCredentials` through the SAME schema the
+   * static config uses, so a pushed mailbox can never carry a shape the send
+   * path can't resolve. Returns the applied outcome; throws BadRequestError on
+   * invalid credentials, idempotency-key reuse with a different payload, or a
+   * `pushSeq` reused for different content (see class doc comment for the full
+   * F1/tombstone rule set).
    */
-  async upsert(email: string, rawCredentials: unknown, idempotencyKey?: string): Promise<UpsertResult> {
+  async upsert(email: string, rawCredentials: unknown, idempotencyKey?: string, pushSeq?: number): Promise<UpsertResult> {
     const parsed = mailboxCredentialsSchema.safeParse(rawCredentials);
     if (!parsed.success) {
       throw new BadRequestError(`invalid mailbox credentials for ${email}: ${parsed.error.issues.map((i) => i.message).join("; ")}`);
@@ -134,18 +185,65 @@ export class MailboxCredentialStore {
     const existing = this.state.mailboxes[email];
     let outcome: UpsertOutcome;
     let priorContentHash: string | undefined;
-    if (!existing) {
-      outcome = "created";
-    } else if (existing.contentHash === contentHash) {
-      outcome = "unchanged";
+
+    if (existing) {
+      if (pushSeq !== undefined && existing.pushSeq !== undefined) {
+        // F1 claim ordering: both sides carry a comparable seq.
+        if (pushSeq < existing.pushSeq) {
+          return { email, outcome: "stale", contentHash };
+        }
+        if (pushSeq === existing.pushSeq) {
+          if (existing.contentHash === contentHash) {
+            outcome = "unchanged";
+          } else {
+            throw new BadRequestError(
+              `push_seq ${pushSeq} for ${email} was already claimed with different content — two claims for one seq is a caller bug`,
+            );
+          }
+        } else if (existing.contentHash === contentHash) {
+          outcome = "unchanged";
+        } else {
+          outcome = "replaced";
+          priorContentHash = existing.contentHash;
+        }
+      } else {
+        // Absent pushSeq on either side -> exact legacy content-hash-only
+        // behavior (no ordering to enforce without a comparable seq on both
+        // sides).
+        if (existing.contentHash === contentHash) {
+          outcome = "unchanged";
+        } else {
+          outcome = "replaced";
+          priorContentHash = existing.contentHash;
+        }
+      }
     } else {
-      outcome = "replaced";
-      priorContentHash = existing.contentHash;
+      const tombstone = this.state.tombstones[email];
+      if (tombstone !== undefined) {
+        // A seqless push against a tombstone, or one at/below the tombstoned
+        // seq, cannot resurrect the removed mailbox.
+        if (pushSeq === undefined || pushSeq <= tombstone) {
+          return { email, outcome: "stale", contentHash };
+        }
+        outcome = "created";
+        delete this.state.tombstones[email];
+      } else {
+        outcome = "created";
+      }
     }
 
     // "unchanged" still (re)writes an identical record — harmless and keeps
-    // updatedAt fresh — but the observable state is a no-op.
-    this.state.mailboxes[email] = { credentials, contentHash, updatedAt: this.now() };
+    // updatedAt fresh — but the observable state is a no-op. pushSeq is
+    // preserved from the existing record when the incoming push is seqless, so
+    // a legacy write never regresses a record's ordering metadata to
+    // unknown.
+    const nextPushSeq = pushSeq !== undefined ? pushSeq : existing?.pushSeq;
+    this.state.mailboxes[email] = {
+      credentials,
+      contentHash,
+      updatedAt: this.now(),
+      ...(nextPushSeq !== undefined ? { pushSeq: nextPushSeq } : {}),
+    };
     if (idempotencyKey) {
       this.state.idempotency[idempotencyKey] = { email, contentHash, outcome, appliedAt: this.now() };
     }
@@ -159,10 +257,16 @@ export class MailboxCredentialStore {
    * `removed: false` and is not an error, so a retried teardown is safe. Only
    * the PUSHED store is affected — a mailbox pinned in the operator's static
    * config is not removable via this API (see the resolve-union precedence).
+   *
+   * F1 tombstone: retains the removed record's last-seen `pushSeq` (0 if the
+   * record never carried one) so a push claimed before or at cancel time can
+   * never resurrect it — see the class doc comment for the full rule.
    */
   async remove(email: string): Promise<RemoveResult> {
-    if (!this.state.mailboxes[email]) return { email, removed: false };
+    const existing = this.state.mailboxes[email];
+    if (!existing) return { email, removed: false };
     delete this.state.mailboxes[email];
+    this.state.tombstones[email] = existing.pushSeq ?? 0;
     await this.flush();
     return { email, removed: true };
   }

@@ -105,3 +105,100 @@ describe("MailboxCredentialStore — remove (revoke path)", () => {
     expect((await store.remove(EMAIL)).removed).toBe(false);
   });
 });
+
+// F1 (wave 2, CREDSTORE) — the audit's proven rotation-revert attack, closed by
+// a Worker-owned monotonic push_seq. pushSeq orders CLAIMS, not content: a push
+// CLAIMED earlier (lower seq) can never overwrite one claimed later, regardless
+// of arrival order at the engine.
+describe("MailboxCredentialStore — F1 pushSeq ordering", () => {
+  it("audit's exact attack: v1(seq1) -> rotate v2(seq2) -> replay stale v1(seq1) stays v2, outcome 'stale'", async () => {
+    const store = new MailboxCredentialStore(dir);
+    await store.upsert(EMAIL, GMAIL_CREDS, undefined, 1);
+    await store.upsert(EMAIL, GMAIL_CREDS_ROTATED, undefined, 2);
+    const replay = await store.upsert(EMAIL, GMAIL_CREDS, undefined, 1);
+    expect(replay.outcome).toBe("stale");
+    expect(store.get(EMAIL)).toMatchObject({ send: { refreshToken: "refresh-token-v2" } });
+  });
+
+  it("equal seq + same content -> 'unchanged'", async () => {
+    const store = new MailboxCredentialStore(dir);
+    await store.upsert(EMAIL, GMAIL_CREDS, undefined, 1);
+    const replay = await store.upsert(EMAIL, GMAIL_CREDS, undefined, 1);
+    expect(replay.outcome).toBe("unchanged");
+  });
+
+  it("equal seq + DIFFERENT content -> BadRequest (two claims for one seq is a caller bug), original content untouched", async () => {
+    const store = new MailboxCredentialStore(dir);
+    await store.upsert(EMAIL, GMAIL_CREDS, undefined, 1);
+    await expect(store.upsert(EMAIL, GMAIL_CREDS_ROTATED, undefined, 1)).rejects.toThrow(/seq/i);
+    expect(store.get(EMAIL)).toMatchObject({ send: { refreshToken: "refresh-token-v1" } });
+  });
+
+  it("absent pushSeq is exact legacy behavior: content-hash rotation still overwrites, unaffected by any stored seq", async () => {
+    const store = new MailboxCredentialStore(dir);
+    await store.upsert(EMAIL, GMAIL_CREDS, undefined, 5);
+    const legacyPush = await store.upsert(EMAIL, GMAIL_CREDS_ROTATED);
+    expect(legacyPush.outcome).toBe("replaced");
+    expect(store.get(EMAIL)).toMatchObject({ send: { refreshToken: "refresh-token-v2" } });
+  });
+});
+
+// F1/F2 tombstones — the audit's proven resurrection attack (push in flight
+// across a remove()), closed by retaining the last-seen pushSeq as a tombstone
+// so a late/stale push against a removed mailbox grades 'stale' instead of
+// resurrecting a revoked credential.
+describe("MailboxCredentialStore — tombstones (in-flight resurrection + revive)", () => {
+  it("audit's resurrection attack: push in flight when remove() lands grades 'stale', not 'created'", async () => {
+    const store = new MailboxCredentialStore(dir);
+    await store.upsert(EMAIL, GMAIL_CREDS, undefined, 1);
+    await store.remove(EMAIL);
+    // The in-flight push (same seq it was claimed with) lands after the remove.
+    const late = await store.upsert(EMAIL, GMAIL_CREDS, undefined, 1);
+    expect(late.outcome).toBe("stale");
+    expect(store.get(EMAIL)).toBeUndefined();
+  });
+
+  it("seqless push against a tombstone grades 'stale' (resurrection is the harm; no escape hatch via omitting the seq)", async () => {
+    const store = new MailboxCredentialStore(dir);
+    await store.upsert(EMAIL, GMAIL_CREDS, undefined, 1);
+    await store.remove(EMAIL);
+    const seqless = await store.upsert(EMAIL, GMAIL_CREDS);
+    expect(seqless.outcome).toBe("stale");
+    expect(store.get(EMAIL)).toBeUndefined();
+  });
+
+  it("seqless push against a LIVE record (no tombstone involved) keeps exact legacy behavior", async () => {
+    const store = new MailboxCredentialStore(dir);
+    await store.upsert(EMAIL, GMAIL_CREDS);
+    const secondSeqless = await store.upsert(EMAIL, GMAIL_CREDS_ROTATED);
+    expect(secondSeqless.outcome).toBe("replaced");
+    expect(store.get(EMAIL)).toMatchObject({ send: { refreshToken: "refresh-token-v2" } });
+  });
+
+  it("revive-after-cancel: a push with seq > tombstone is accepted and the tombstone clears", async () => {
+    const store = new MailboxCredentialStore(dir);
+    await store.upsert(EMAIL, GMAIL_CREDS, undefined, 1);
+    await store.remove(EMAIL);
+    const revived = await store.upsert(EMAIL, GMAIL_CREDS_ROTATED, undefined, 2);
+    expect(revived.outcome).toBe("created");
+    expect(store.get(EMAIL)).toMatchObject({ send: { refreshToken: "refresh-token-v2" } });
+    // The tombstone cleared -- a subsequent stale replay of the OLD seq must not
+    // be graded against the (now-gone) tombstone; it's ordinary live-record
+    // ordering against the revived record's seq 2.
+    const staleReplay = await store.upsert(EMAIL, GMAIL_CREDS, undefined, 1);
+    expect(staleReplay.outcome).toBe("stale");
+    expect(store.get(EMAIL)).toMatchObject({ send: { refreshToken: "refresh-token-v2" } });
+  });
+
+  it("old-shape state file (no tombstones key) loads fine -- shape tolerance for pre-wave2 state files", () => {
+    writeFileSync(join(dir, "pushed-mailboxes.json"), JSON.stringify({ mailboxes: {}, idempotency: {} }));
+    expect(() => new MailboxCredentialStore(dir)).not.toThrow();
+    const store = new MailboxCredentialStore(dir);
+    expect(store.get(EMAIL)).toBeUndefined();
+  });
+
+  it("a corrupt state file still FAILS LOUD (standing F5 rule, unaffected by the tombstones addition)", () => {
+    writeFileSync(join(dir, "pushed-mailboxes.json"), "{ not json");
+    expect(() => new MailboxCredentialStore(dir)).toThrow(/corrupt/i);
+  });
+});
