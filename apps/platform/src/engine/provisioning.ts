@@ -13,7 +13,7 @@ import { newId } from "../schema.js";
 import { logAction } from "./deliverability-actions.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { TenantContext } from "../tenant-context.js";
-import { customerSafeVendorDetail, logVendorFailure } from "../vendor-failure.js";
+import { customerSafeVendorDetail, customerSafeVendorFailure, logVendorFailure } from "../vendor-failure.js";
 import { buildMailboxBilling, syncMailboxQuantity, type MailboxBilling } from "./billing.js";
 import { assertNotLifecycleFrozen } from "./billing-state.js";
 import { assertBrandOwnership } from "./brand-guard.js";
@@ -24,7 +24,7 @@ import { assertWithinProvisioningCap } from "./quota.js";
 import { screenTenant } from "../ofac/screening.js";
 import { alertRegistrarUnarmed } from "./registrar-alert.js";
 import { withSpendCeiling } from "./spend-ceiling.js";
-import { emitTenantMessage } from "./tenant-messages.js";
+import { emitTenantMessage, retrySetupMessageBody } from "./tenant-messages.js";
 import { RealInboxKitDomainPort } from "../vendors/real/inboxkit-domain-port.js";
 import { assertCompleteRegistrant, readRegistrarOptInState } from "../vendors/registrar-arming.js";
 
@@ -528,19 +528,25 @@ export async function runSetupInfrastructure(
       await alertRegistrarUnarmed(ctx, input.primaryDomain, err, mailer);
     }
     // Wire point A — a RETRYABLE VendorError here is H2's exact shape
-    // (setDnsWithRetry exhausted its in-call backoff): the domain is bought
-    // and recorded (dns_status 'pending'), nothing was lost, and the caller's
+    // (setDnsWithRetry / awaitMailboxReady exhausted its in-call backoff):
+    // the domain is bought and recorded, nothing was lost, and the caller's
     // OWN error text already says so — but until now that only reached a
     // human via a relayed alert. Surface it directly to the agent instead.
     // Deliberately composed prose, never `err.message` (GUARDRAIL B — the
     // vendor error can carry upstream detail this message must not repeat).
+    //
+    // Gate finding #2 (docs/adversarial/wave-integration-gate-2026-08-05.md):
+    // more than one leg inside the try above can throw a retryable
+    // VendorError (DNS, mailbox purchase), so the prose must be STEP-AWARE —
+    // derived from the SAME `customerSafeVendorFailure` classification the
+    // REST error body (error-response.ts) uses, so the two customer surfaces
+    // can never disagree on which step failed.
     if (err instanceof VendorError && err.retryable) {
+      const { step } = customerSafeVendorFailure(err);
       emitTenantMessage(ctx, {
         kind: "retry_setup",
         severity: "action_required",
-        body: inFlightDomain
-          ? `Setup for ${inFlightDomain} has not finished yet — its DNS registration is still completing at the vendor. Nothing was lost; retry setup_infrastructure with the same idempotency key to finish it.`
-          : `Your last setup_infrastructure call has not finished yet. Nothing was lost; retry it with the same idempotency key to finish it.`,
+        body: retrySetupMessageBody(inFlightDomain, step),
         actionHint: { tool: "setup_infrastructure", idempotencyKey: setupKey ?? null },
         dedupKey: inFlightDomain ?? `tenant:${ctx.tenantId}`,
       });
