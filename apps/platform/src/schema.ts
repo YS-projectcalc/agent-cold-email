@@ -775,6 +775,17 @@ CREATE TABLE IF NOT EXISTS mailbox_cred_pushes (
   status TEXT NOT NULL DEFAULT 'pending',
   attempts INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
+  -- CREDSTORE F1 (wave2-design §"CREDSTORE F1") — Worker-owned monotonic push
+  -- claim sequence, distinct from content-hash dedup (which orders CONTENT,
+  -- not CLAIMS). Claimed via a synchronous UPDATE+SELECT before the first
+  -- await in pushRecordedMailbox (engine/mailbox-credential-push.ts) so a
+  -- provision-hook push racing a reconcile push against the same mailbox
+  -- always claims two distinct, ordered sequence numbers (the DO is
+  -- single-threaded). Sent on the wire; the engine can then reject a stale
+  -- replay without depending on request arrival order. Survives every
+  -- status flip (including 'revoked' -> revived 'pending'), so it is
+  -- monotonic per email forever, not just per push cycle.
+  push_seq INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );

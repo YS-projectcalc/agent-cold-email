@@ -76,6 +76,7 @@ describe("credential_ready tenant message — fires on the pending->pushed trans
     const { tenantId } = await signup("Cred Dup Co", "founder@creddup.test");
     const mailbox = { email: "seller1@creddup.test", domain: "creddup.test" };
 
+    await withTenantContext(tenantId, (ctx) => recordProvisionedMailboxForPush(ctx, mailbox.email));
     await withTenantContext(tenantId, (ctx) => pushRecordedMailbox(ctx, mailbox, WORKING));
     await withTenantContext(tenantId, (ctx) => pushRecordedMailbox(ctx, mailbox, WORKING));
 
@@ -87,6 +88,7 @@ describe("credential_ready tenant message — fires on the pending->pushed trans
     const { tenantId } = await signup("Cred Secret Co", "founder@credsecret.test");
     const mailbox = { email: "seller1@credsecret.test", domain: "credsecret.test" };
 
+    await withTenantContext(tenantId, (ctx) => recordProvisionedMailboxForPush(ctx, mailbox.email));
     await withTenantContext(tenantId, (ctx) => pushRecordedMailbox(ctx, mailbox, WORKING));
 
     const messages = await withTenantContext(tenantId, (ctx) => listSurfacedTenantMessages(ctx));
@@ -99,6 +101,7 @@ describe("credential_ready tenant message — fires on the pending->pushed trans
   it("F2 (gate 2026-08-05) — a SUSPENDED tenant's push completes but never claims 'sending is now enabled'", async () => {
     const { tenantId } = await signup("Cred Suspended Co", "founder@credsuspended.test");
     const mailbox = { email: "seller1@credsuspended.test", domain: "credsuspended.test" };
+    await withTenantContext(tenantId, (ctx) => recordProvisionedMailboxForPush(ctx, mailbox.email));
     await withTenantContext(tenantId, (ctx) =>
       ctx.sql.exec(`UPDATE tenant_profile SET status = 'suspended' WHERE id = ?`, tenantId),
     );

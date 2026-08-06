@@ -60,9 +60,14 @@ export class EngineMailboxClient {
    * deliberately does not, since a deterministic key would instead REJECT any
    * retry whose re-minted content differs (adversary
    * i3i4-build-review-2026-07-23 finding 1).
+   *
+   * `pushSeq` (CREDSTORE F1, also OPTIONAL) is the Worker-owned monotonic
+   * claim sequence — additive on the wire (the engine's wire.ts schema
+   * treats it as `.optional()`), so an omitted value is byte-identical to
+   * pre-F1 behavior.
    */
-  async pushMailbox(email: string, credentials: EnginePushCredentials, idempotencyKey?: string): Promise<PushResult> {
-    const body = await this.call("POST", { email, credentials, idempotencyKey });
+  async pushMailbox(email: string, credentials: EnginePushCredentials, idempotencyKey?: string, pushSeq?: number): Promise<PushResult> {
+    const body = await this.call("POST", { email, credentials, idempotencyKey, pushSeq });
     if (typeof body.email !== "string" || typeof body.outcome !== "string" || typeof body.contentHash !== "string") {
       throw new VendorError("engine POST /v1/mailboxes returned a malformed UpsertResult", false);
     }

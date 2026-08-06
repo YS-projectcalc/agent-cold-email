@@ -251,6 +251,10 @@ export class TenantDO extends DurableObject<Env> {
     // Registrar-arming follow-up (2026-07-28) — the tenant's structured
     // registrant-of-record, persisted as JSON (see schema.ts).
     this.addColumnIfMissing("tenant_profile", "registrant_json", "TEXT");
+    // CREDSTORE F1 (wave2-design §"CREDSTORE F1") — Worker-owned monotonic
+    // push claim sequence (see schema.ts's mailbox_cred_pushes comment).
+    // DEFAULT 0 so an existing row's first claim under the new code reads 1.
+    this.addColumnIfMissing("mailbox_cred_pushes", "push_seq", "INTEGER NOT NULL DEFAULT 0");
     // Created here, not in TENANT_DO_SCHEMA, so they run only after the columns
     // above are guaranteed to exist (safe for DOs that predate the column). Each
     // collapses any pre-existing rows that would violate the unique key BEFORE

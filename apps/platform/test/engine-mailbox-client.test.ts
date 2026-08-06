@@ -50,6 +50,15 @@ describe("EngineMailboxClient — configured", () => {
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({ email: "a@b.com", credentials: CREDS, idempotencyKey: "k1" });
   });
 
+  // CREDSTORE F1 — pushSeq is OPTIONAL/additive: omitted (the test above)
+  // leaves the wire body byte-identical to pre-F1; supplied, it rides along.
+  it("includes pushSeq on the wire when supplied (CREDSTORE F1)", async () => {
+    const spy = stubFetch({ status: 200, body: { email: "a@b.com", outcome: "created", contentHash: "abc" } });
+    await new EngineMailboxClient(CONFIG).pushMailbox("a@b.com", CREDS, undefined, 7);
+    const [, init] = spy.mock.calls[0]!;
+    expect(JSON.parse((init as RequestInit).body as string)).toEqual({ email: "a@b.com", credentials: CREDS, pushSeq: 7 });
+  });
+
   it("DELETEs /v1/mailboxes and reports removed", async () => {
     const spy = stubFetch({ status: 200, body: { email: "a@b.com", removed: true } });
     const result = await new EngineMailboxClient(CONFIG).removeMailbox("a@b.com", "k1");

@@ -76,17 +76,46 @@ export function engineConfigFromEnv(env: Env): EngineClientConfig | undefined {
   return env.ENGINE_BASE_URL && env.ENGINE_AUTH_SECRET ? { baseUrl: env.ENGINE_BASE_URL, authSecret: env.ENGINE_AUTH_SECRET } : undefined;
 }
 
-/** F6 step 1 — durable record BEFORE the push. INSERT OR IGNORE so a re-provision of the same mailbox doesn't reset a 'pushed' row. */
+/**
+ * F6 step 1 — durable record BEFORE the push. Revives a 'revoked' row
+ * (CREDSTORE F2 revive half, wave2-design §"CREDSTORE F2") back to 'pending'
+ * on a legitimate re-provision — the teardown tombstone (lifecycle.ts's
+ * releaseMailboxes) marks a released mailbox's row 'revoked'; a plain
+ * INSERT OR IGNORE would then silently swallow a later re-provision of the
+ * SAME address, leaving it stuck 'revoked' (uncredentialed) forever. The
+ * `WHERE ... status = 'revoked'` guard on the DO UPDATE makes this ONLY ever
+ * revive a terminal row — a live 'pushed' row's UPDATE clause evaluates
+ * false, so SQLite leaves it untouched (never resets attempts/last_error on
+ * a duplicate provision call for a mailbox that's already credentialed).
+ */
 export function recordProvisionedMailboxForPush(ctx: TenantContext, email: string): void {
   const now = ctx.clock.now();
   ctx.sql.exec(
-    `INSERT OR IGNORE INTO mailbox_cred_pushes (email, tenant_id, status, attempts, created_at, updated_at)
-     VALUES (?, ?, 'pending', 0, ?, ?)`,
+    `INSERT INTO mailbox_cred_pushes (email, tenant_id, status, attempts, created_at, updated_at)
+     VALUES (?, ?, 'pending', 0, ?, ?)
+     ON CONFLICT(email) DO UPDATE SET status = 'pending', attempts = 0, last_error = NULL, updated_at = excluded.updated_at
+     WHERE mailbox_cred_pushes.status = 'revoked'`,
     email,
     ctx.tenantId,
     now,
     now,
   );
+}
+
+/**
+ * CREDSTORE F1 (wave2-design §"CREDSTORE F1") — claims the next monotonic
+ * push_seq for this mailbox. MUST run synchronously, before the caller's
+ * first await: the DO is single-threaded, so an UPDATE immediately followed
+ * by a SELECT (no await between them) is race-free even when a
+ * provision-hook push and a reconcile push interleave on the same mailbox —
+ * each claim is a distinct statement pair that runs to completion before the
+ * DO can process anything else.
+ */
+function claimPushSeq(ctx: TenantContext, email: string): number {
+  ctx.sql.exec(`UPDATE mailbox_cred_pushes SET push_seq = push_seq + 1 WHERE email = ? AND tenant_id = ?`, email, ctx.tenantId);
+  return ctx.sql
+    .exec<{ push_seq: number }>(`SELECT push_seq FROM mailbox_cred_pushes WHERE email = ? AND tenant_id = ?`, email, ctx.tenantId)
+    .one().push_seq;
 }
 
 /** Assemble the engine credential shape: vendor IMAP endpoint + gmail_api OAuth grant. */
@@ -107,6 +136,9 @@ export async function assembleEngineCredentials(mailbox: MailboxRef, deps: Crede
  * for reconcile).
  */
 export async function pushRecordedMailbox(ctx: TenantContext, mailbox: MailboxRef, deps: CredentialPushDeps): Promise<PushOutcome> {
+  // CREDSTORE F1 — claim the monotonic push_seq BEFORE the first await
+  // (assembleEngineCredentials below is the first await in this function).
+  const pushSeq = claimPushSeq(ctx, mailbox.email);
   try {
     const credentials = await assembleEngineCredentials(mailbox, deps);
     // NO idempotency key: the store's content-hash replay-safety (F4) already
@@ -117,7 +149,14 @@ export async function pushRecordedMailbox(ctx: TenantContext, mailbox: MailboxRe
     // fresh OAuth re-mint (InboxKitOAuthMinter mints a NEW refresh token on
     // every call) produces — permanently stranding the row 'pending'
     // (adversary i3i4-build-review-2026-07-23 finding 1).
-    await deps.push.pushMailbox(mailbox.email, credentials);
+    //
+    // The engine may answer 'stale' (pushSeq <= a stored tombstone/newer
+    // claim) — that means the goal state (a newer credential) already holds,
+    // which is SUCCESS from the Worker's point of view. This function never
+    // branches on `outcome` at all, so a 'stale' response is already treated
+    // exactly like 'created'/'replaced'/'unchanged': the row is marked
+    // 'pushed' below. Never a reason to retry.
+    await deps.push.pushMailbox(mailbox.email, credentials, undefined, pushSeq);
     ctx.sql.exec(
       `UPDATE mailbox_cred_pushes SET status = 'pushed', attempts = attempts + 1, last_error = NULL, updated_at = ? WHERE email = ? AND tenant_id = ?`,
       ctx.clock.now(),
@@ -168,18 +207,28 @@ export async function pushRecordedMailbox(ctx: TenantContext, mailbox: MailboxRe
 }
 
 /**
- * The provisioning HOOK (called from provisionMailboxesForDomain). Inert unless
- * armed AND the mailbox was really provisioned at the vendor (provider
- * 'google'/'microsoft', never a sandbox mailbox). Records-then-pushes; a push
- * failure is swallowed (the row is 'pending', reconcile retries).
+ * The provisioning HOOK (called from provisionMailboxesForDomain). Records
+ * the durable "this mailbox needs credentials" row for every REAL vendor
+ * mailbox (never a sandbox one), independent of whether the push itself is
+ * armed — R1 (wave2-design-review round 2 finding): `recordProvisionedMailboxForPush`
+ * runs ABOVE the `!deps` guard so "every platform-provisioned real mailbox
+ * has a row" is true BY CONSTRUCTION, closing two blind spots a
+ * deps-gated record missed: (a) the window where INBOXKIT_* is armed (the
+ * mailbox is really bought) but ENGINE_* is not yet — the mailbox previously
+ * got no row and was invisible to reconcile forever once ENGINE_* later
+ * armed; (b) engine state-file loss — a Worker row exists to re-drive a
+ * push even if the engine's own store lost its record. The push itself
+ * stays gated on `deps` (still inert unless armed AND the mailbox is real);
+ * a push failure is swallowed (the row is 'pending', reconcile retries).
  */
 export async function maybePushProvisionedMailbox(
   ctx: TenantContext,
   mailbox: { email: string; provider: string },
   deps: CredentialPushDeps | undefined = buildCredentialPushDeps(ctx.env),
 ): Promise<PushOutcome | undefined> {
-  if (!deps || mailbox.provider === "sandbox") return undefined;
+  if (mailbox.provider === "sandbox") return undefined;
   recordProvisionedMailboxForPush(ctx, mailbox.email);
+  if (!deps) return undefined;
   return pushRecordedMailbox(ctx, { email: mailbox.email, domain: domainOf(mailbox.email) }, deps);
 }
 
