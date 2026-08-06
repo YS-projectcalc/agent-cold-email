@@ -316,19 +316,29 @@ CREATE TABLE IF NOT EXISTS mailboxes (
   -- WRITTEN AT INSERT by both mailbox creation paths — engine/
   -- mailbox-provisioning.ts records whatever the MailboxPort returned
   -- ('google' real / 'sandbox' sandbox), engine/byo-mailbox-composition.ts
-  -- writes 'byo' — and back-filled for rows predating the column by the
-  -- one-shot clock migration (engine/clock-migration.ts). Rows created before
-  -- BOTH of those read '' and are excluded from sending, deliberately.
+  -- writes 'byo'. The one-shot clock migration (engine/clock-migration.ts)
+  -- back-fills ONLY the two POSITIVE signals available on a row predating this
+  -- column — 'byo' from source='byo_connected', 'google' from
+  -- slot_counted=1 — and deliberately does NOT guess 'sandbox' for whatever
+  -- remains (wave2-integration-gate-2026-08-06 BLOCKING finding 1's sibling: a
+  -- REAL row that also predates slot_counted reads slot_counted=0 too, so a
+  -- catch-all guess retired it). A row created before the column existed AND
+  -- not caught by either positive rule reads '' and stays '' forever — the
+  -- migration is one-shot and never re-runs to reconsider it.
   --
-  -- '' IS LOAD-BEARING, NOT A BUG (adversary round-2, R8). The ALTER that adds
-  -- this column runs in ensureColumnMigrations(), OUTSIDE the migration's
-  -- transaction, and the backfill runs INSIDE it. So a rolled-back clock
-  -- migration leaves provider='' on every row while clock_mode stays 'virtual'.
-  -- The send-eligibility picker excludes '' precisely so those unclassified
-  -- rows can never be picked; that coheres with the clock_mode interlock, which
-  -- independently blocks the driver for the same tenant. Do NOT "fix" the ''
-  -- exclusion — removing it would un-gate unclassified rows in exactly the
-  -- state where nothing has classified them.
+  -- '' IS LOAD-BEARING, NOT A BUG (adversary round-2, R8; reaffirmed by the
+  -- 2026-08-06 gate). The ALTER that adds this column runs in
+  -- ensureColumnMigrations(), OUTSIDE the migration's transaction, and the
+  -- backfill runs INSIDE it. So a rolled-back clock migration leaves
+  -- provider='' on every row while clock_mode stays 'virtual'. The
+  -- send-eligibility picker excludes '' precisely so those unclassified rows
+  -- can never be picked or billed; that coheres with the clock_mode interlock,
+  -- which independently blocks the driver for the same tenant. Do NOT "fix"
+  -- the '' exclusion — removing it would un-gate unclassified rows in exactly
+  -- the state where nothing has classified them. The resolution path for a
+  -- genuinely-stuck '' row is the U2 pre-arm provenance read
+  -- (engine/ops-summary.ts's mailboxProvenance, ACTIVATION.md's arming-order
+  -- runbook) — a human reclassifies it by hand before real sending is armed.
   provider TEXT NOT NULL DEFAULT ''
 );
 
@@ -525,18 +535,6 @@ CREATE TABLE IF NOT EXISTS webhook_event_inflight (
   started_at INTEGER NOT NULL
 );
 
--- Event-ordering watermark for billing-state transitions
--- (audit-stripe-webhook-2026-08-06.md finding 3). Stripe does not guarantee
--- delivery ORDER, and anything that 500s is redelivered hours later — so
--- last-write-wins let a STALE invoice.payment_failed land on a RECOVERED
--- payer, regress billing_state to 'past_due', fail isTenantActivated (which
--- swaps the tenant's real vendor adapters for sandbox ones mid-campaign), and
--- hand the dunning sweep a legitimate-looking past_due to suspend on.
---
--- The event's own "created" (unix SECONDS, stamped when STRIPE emitted it) is the
--- only ordering fact a webhook carries, so it is the watermark. Single row,
--- id pinned to 1 like watchtower_cursor/demo_run_state. See
--- engine/billing.ts's applyStripeWebhookEvent for the exact apply/refuse rule.
 -- Where the CURRENT dunning cycle starts (audit-stripe-webhook-2026-08-06.md
 -- finding 6). The dunning "cycle" is the number of invoice.payment_failed rows
 -- in webhook_events, and nothing ever windowed it — so it was a LIFETIME count
@@ -557,9 +555,27 @@ CREATE TABLE IF NOT EXISTS dunning_cycle_basis (
   updated_at INTEGER NOT NULL
 );
 
+-- Event-ordering watermark, ONE ROW PER LANE
+-- (audit-stripe-webhook-2026-08-06.md finding 3, rescoped by
+-- wave2-integration-gate-2026-08-06.md BLOCKING 2). Stripe does not guarantee
+-- delivery ORDER, and anything that 500s is redelivered hours later — so
+-- last-write-wins let a STALE invoice.payment_failed land on a RECOVERED payer,
+-- regress billing_state to 'past_due', fail isTenantActivated (which swaps the
+-- tenant's real vendor adapters for sandbox ones mid-campaign), and hand the
+-- dunning sweep a legitimate-looking past_due to suspend on.
+--
+-- KEYED BY LANE, never globally: the six subscribed event types are independent
+-- Stripe state machines on independent objects. A single shared watermark meant
+-- a routine subscription renewal silenced a real chargeback emitted minutes
+-- earlier — the D5 freeze never fired, with no alert and no self-heal. A lane
+-- may only order ITS OWN events. See engine/billing.ts's isStaleBillingEvent
+-- for the full rule (lane ordering AND an actual state conflict are both
+-- required to refuse).
 CREATE TABLE IF NOT EXISTS billing_event_order (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  -- The emission time of the newest billing event this tenant has APPLIED.
+  -- 'billing' (checkout/subscription/invoice — one subscription's lifecycle)
+  -- or 'dispute' (chargebacks, orthogonal to it).
+  lane TEXT PRIMARY KEY,
+  -- The emission time of the newest event this tenant has APPLIED in this lane.
   last_event_created INTEGER NOT NULL,
   -- Which event set it — for audit when a refusal needs explaining.
   last_event_id TEXT NOT NULL,

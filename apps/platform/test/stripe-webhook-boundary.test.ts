@@ -11,6 +11,7 @@ import {
 } from "./helpers.js";
 import {
   checkoutSessionCompleted,
+  disputeClosed,
   disputeCreated,
   invoicePaymentFailed,
   stripeCustomerIdFor,
@@ -318,6 +319,73 @@ describe("finding 3 — a stale redelivered payment failure must not de-activate
     const recovered = await postWebhook<WebhookResponse>(subscriptionUpdated({ tenantId, status: "active", created: T0 + 100 }));
     expect(recovered.body.applied).toBe(true);
     expect((await readProfile(tenantId)).billing_state).toBe("active");
+  });
+});
+
+// wave2-integration-gate-2026-08-06.md BLOCKING 2. The F3 watermark was ONE
+// global row across all six subscribed event types, but those types are
+// independent Stripe state machines on independent objects — a Dispute, a
+// Subscription and an Invoice have no causal ordering with each other. Once any
+// event at time T applied, EVERY event emitted before T was refused forever, in
+// every lane: the D5 chargeback freeze silently never fired, and a paid checkout
+// could be dropped with `screened_at` NULL, reopening the exact compliance
+// fail-open finding 2 closed. A REGRESSION vs pre-watermark behavior.
+describe("finding 3 rescoped — ordering must protect a lane, never silence another one", () => {
+  it("freezes on a dispute emitted BEFORE a routine subscription event that was applied first", async () => {
+    const { tenantId } = await mintTenant("Late Dispute Co", "managed");
+    await seedBenignSdnList();
+    await postWebhook(checkoutSessionCompleted({ tenantId, created: T0 }));
+
+    // A routine renewal — the platform generates these on its own schedule.
+    const renewal = await postWebhook<WebhookResponse>(subscriptionUpdated({ tenantId, status: "active", created: T0 + 300 }));
+    expect(renewal.body.applied).toBe(true);
+
+    // A REAL cardholder chargeback, emitted earlier, delivered late. The
+    // subscription's status says nothing about whether a charge was disputed,
+    // so it cannot supersede this.
+    const dispute = await postDisputeWebhook<WebhookResponse>(
+      disputeCreated({ chargeId: "ch_test_late_dispute", created: T0 + 120 }),
+      tenantId,
+    );
+    expect(dispute.body).toMatchObject({ applied: true, frozen: true });
+    expect((await readProfile(tenantId)).billing_state).toBe("disputed");
+  });
+
+  it("applies a checkout emitted BEFORE a later subscription event, screening intact", async () => {
+    const { tenantId } = await mintTenant("Late Checkout Co", "managed");
+    await seedBenignSdnList();
+
+    // The subscription event lands first (Stripe gives no cross-object ordering).
+    await postWebhook(subscriptionUpdated({ tenantId, status: "active", created: T0 + 300 }));
+
+    // The checkout that PAID for it arrives after, emitted earlier. It writes the
+    // same billing_state the renewal already established, so there is nothing to
+    // regress — and its other effects (the OFAC gate, the ledger credit, the
+    // subscription-item capture) exist nowhere else.
+    const checkout = await postWebhook<WebhookResponse>(checkoutSessionCompleted({ tenantId, created: T0 }));
+    expect(checkout.body.applied).toBe(true);
+
+    const profile = await readProfile(tenantId);
+    expect(profile.screened_at).not.toBeNull();
+    expect(profile.billing_state).toBe("active");
+  });
+
+  it("still refuses a stale dispute.closed(won) that would lift a NEWER freeze", async () => {
+    const { tenantId } = await mintTenant("Stale Won Co", "managed");
+    await seedBenignSdnList();
+    await postWebhook(checkoutSessionCompleted({ tenantId, created: T0 }));
+
+    await postDisputeWebhook(disputeCreated({ chargeId: "ch_stale_won", disputeId: "dp_new", created: T0 + 300 }), tenantId);
+    expect((await readProfile(tenantId)).billing_state).toBe("disputed");
+
+    // An earlier-emitted resolution of an OLDER dispute must not unfreeze the
+    // tenant the newer one just froze — ordering WITHIN the dispute lane holds.
+    const staleWon = await postDisputeWebhook<WebhookResponse>(
+      disputeClosed({ chargeId: "ch_stale_won", disputeId: "dp_old", status: "won", created: T0 + 100 }),
+      tenantId,
+    );
+    expect(staleWon.body).toMatchObject({ applied: false, stale: true });
+    expect((await readProfile(tenantId)).billing_state).toBe("disputed");
   });
 });
 

@@ -101,5 +101,18 @@ export const webhooksRoute = new Hono<{ Bindings: Env }>().post("/webhooks/strip
 
   const stub = c.env.TENANT.get(c.env.TENANT.idFromName(resolution.tenantId));
   const result = await stub.handleStripeWebhook(parsed.data);
+  // A refused-as-stale event is a DROPPED state transition, and Stripe will not
+  // retry a 200 — so it must never be silent (wave2-integration-gate-2026-08-06.md
+  // BLOCKING 2 called out that the first version of this guard dropped a
+  // chargeback freeze with no alert and no self-heal). The refusal is usually
+  // correct (a late payment failure on a customer who already recovered), but
+  // "usually correct and invisible" is how the whole class started.
+  if (result.stale) {
+    await alertUnroutableStripeEvent(
+      c.env,
+      parsed.data,
+      `refused as out of order for tenant ${resolution.tenantId}: a newer event in the same lane already superseded this state transition`,
+    );
+  }
   return c.json({ received: true, ...result }, 200);
 });

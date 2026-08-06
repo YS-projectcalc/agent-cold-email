@@ -163,15 +163,43 @@ async function seedUnmigratedPaidTenant(
       tenantId,
       frozenNow,
     );
+    // Gate finding 1 (wave2-integration-gate-2026-08-06) — the Mordy-shaped
+    // domain: adopted via the shipped path (connection_type recorded), ZERO
+    // mailboxes ever attached. This is not a corner case, it is the paying
+    // customer's ACTUAL current row shape. Must never be retired.
+    sql.exec(
+      `INSERT INTO domains (id, tenant_id, domain, purchased_at, source, connection_type)
+       VALUES ('dom_mordy', ?, 'mordy-${slug}.com', ?, 'provisioned', 'purchased')`,
+      tenantId,
+      frozenNow,
+    );
+    // Gate finding 1 sibling shape — mid-saga: the domain row committed, but
+    // mailbox-provisioning.ts's insertProvisionedMailbox has not run yet (it
+    // only inserts AFTER the vendor confirms each mailbox). Same zero-mailbox
+    // predicate as dom_mordy, distinct row so both named scenarios have their
+    // own assertion.
+    sql.exec(
+      `INSERT INTO domains (id, tenant_id, domain, purchased_at, source) VALUES ('dom_midsaga', ?, 'midsaga-${slug}.com', ?, 'provisioned')`,
+      tenantId,
+      frozenNow,
+    );
 
     // --- mailboxes: one demo-era sandbox row, one real (slot_counted=1), one
     // BYO (all three on dom_prov, so a domain carrying a live real mailbox is
     // exercised too), plus a second sandbox row on dom_sandbox_only (NEW-4 —
-    // the domain with NOTHING but sandbox mailboxes on it).
-    const insertMailbox = (id: string, source: string, slotCounted: number, warmupStartedAt: number, domainId = "dom_prov") =>
+    // the domain with NOTHING but sandbox mailboxes on it), plus an ambiguous
+    // pre-slot-counted-column real row (gate finding 1 sibling).
+    const insertMailbox = (
+      id: string,
+      source: string,
+      slotCounted: number,
+      warmupStartedAt: number,
+      domainId = "dom_prov",
+      provider = "",
+    ) =>
       sql.exec(
-        `INSERT INTO mailboxes (id, tenant_id, domain_id, domain, email, daily_cap, warmup_started_at, created_at, source, slot_counted)
-         VALUES (?, ?, ?, '${slug}.com', ?, 5, ?, ?, ?, ?)`,
+        `INSERT INTO mailboxes (id, tenant_id, domain_id, domain, email, daily_cap, warmup_started_at, created_at, source, slot_counted, provider)
+         VALUES (?, ?, ?, '${slug}.com', ?, 5, ?, ?, ?, ?, ?)`,
         id,
         tenantId,
         domainId,
@@ -180,14 +208,27 @@ async function seedUnmigratedPaidTenant(
         warmupStartedAt,
         source,
         slotCounted,
+        provider,
       );
-    // Sandbox-origin: stamped on the frozen virtual clock.
-    insertMailbox("mb_sandbox", "provisioned", 0, frozenNow - 30 * ONE_DAY_MS);
-    insertMailbox("mb_sandbox_only", "provisioned", 0, frozenNow - 25 * ONE_DAY_MS, "dom_sandbox_only");
+    // Sandbox-origin, POSITIVELY stamped at insert (mailbox-provisioning.ts's
+    // insertProvisionedMailbox writes `provider` straight from the port's own
+    // answer today — 'sandbox' from SandboxMailboxPort). The migration's
+    // backfill no longer GUESSES 'sandbox' for an ambiguous row (gate finding
+    // 1 sibling, fixed below), so these fixtures model the row shape the
+    // current insert path actually produces.
+    insertMailbox("mb_sandbox", "provisioned", 0, frozenNow - 30 * ONE_DAY_MS, "dom_prov", "sandbox");
+    insertMailbox("mb_sandbox_only", "provisioned", 0, frozenNow - 25 * ONE_DAY_MS, "dom_sandbox_only", "sandbox");
     // Real InboxKit mailbox: the vendor stamps REAL wall time, not ctx.clock.
     insertMailbox("mb_real", "provisioned", 1, Date.now() - 10 * ONE_DAY_MS);
     // BYO: a genuine ramp part-way through, on real time.
     insertMailbox("mb_byo", "byo_connected", 0, Date.now() - 5 * ONE_DAY_MS);
+    // Gate finding 1 sibling (PRESLOT-MAILBOX) — a REAL mailbox row that
+    // predates BOTH the `provider` column AND (hypothetically) the
+    // `slot_counted` column: provider='' (never stamped) AND slot_counted=0
+    // (not because it's sandbox, but because it's simply older than that
+    // column too). Indistinguishable from a genuine unclassified row by any
+    // column available — the backfill must leave it alone, not guess.
+    insertMailbox("mb_preslot_real", "provisioned", 0, Date.now() - 12 * ONE_DAY_MS, "dom_prov");
 
     // --- campaigns: one real, one demo-seed
     const insertCampaign = (id: string, isDemo: number) =>
@@ -379,19 +420,35 @@ describe("clock migration — the DO constructor self-applies it, both delta sig
       expect(byo.provider).toBe("byo");
       expect(byo.released_at).toBeNull();
 
+      // --- gate finding 1 sibling (PRESLOT-MAILBOX): an ambiguous row (real,
+      // pre-column, indistinguishable from a genuine unclassified row) must
+      // stay '' — never guessed as 'sandbox', never released, never paused.
+      const preslot = byId(after.mailboxes, "mb_preslot_real");
+      expect(preslot.provider).toBe("");
+      expect(preslot.released_at).toBeNull();
+      expect(preslot.deliv_status).toBe("healthy");
+
       // --- warmup_started_at is NEVER shifted and NEVER reset, for any class
-      for (const id of ["mb_sandbox", "mb_real", "mb_byo"]) {
+      for (const id of ["mb_sandbox", "mb_real", "mb_byo", "mb_preslot_real"]) {
         expect(byId(after.mailboxes, id).warmup_started_at).toBe(byId(before.mailboxes, id).warmup_started_at);
       }
 
       // --- NEW-4: sandbox-origin `domains` rows are retired alongside their
-      // mailboxes. dom_sandbox_only carries NOTHING but a (now-retired)
-      // sandbox mailbox -> retired. dom_prov still carries mb_real, a live
-      // non-sandbox mailbox -> left 'active'. dom_byo (source='byo') is never
-      // a retirement candidate at all, regardless of what's attached to it.
+      // mailboxes. dom_sandbox_only carries NOTHING but a (now-retired,
+      // positively-classified) sandbox mailbox -> retired. dom_prov still
+      // carries mb_real, a live non-sandbox mailbox -> left 'active'. dom_byo
+      // (source='byo') is never a retirement candidate at all, regardless of
+      // what's attached to it.
       expect(byId(after.domains, "dom_sandbox_only").status).toBe("retired");
       expect(byId(after.domains, "dom_prov").status).toBe("active");
       expect(byId(after.domains, "dom_byo").status).toBe("active");
+
+      // --- gate finding 1 (BLOCKING) — a zero-mailbox `provisioned` domain
+      // has NO positive evidence of sandbox origin (nothing attached at all)
+      // and must never be retired: the Mordy-shaped adopted-but-empty domain,
+      // and the mid-saga (domain committed, mailbox not yet inserted) shape.
+      expect(byId(after.domains, "dom_mordy").status).toBe("active");
+      expect(byId(after.domains, "dom_midsaga").status).toBe("active");
     });
   }
 
@@ -479,7 +536,13 @@ describe("clock migration — atomicity (adversary finding 5)", () => {
       expect(byId(rolledBack.sends, send.id).status).toBe(send.status);
     }
     for (const mailbox of rolledBack.mailboxes) {
-      expect(mailbox.provider).toBe("");
+      // mb_sandbox/mb_sandbox_only are seeded with provider='sandbox' DIRECTLY
+      // (today's real insert-time stamp, gate finding 1 sibling fix) — this
+      // transaction never wrote that column for them (the backfill only ever
+      // targets provider=''), so a rollback correctly leaves it exactly as
+      // seeded. Every other row started '' and stays '' either way.
+      const expectedProvider = mailbox.id === "mb_sandbox" || mailbox.id === "mb_sandbox_only" ? "sandbox" : "";
+      expect(mailbox.provider).toBe(expectedProvider);
       expect(mailbox.released_at).toBeNull();
       expect(mailbox.deliv_status).toBe("healthy");
     }
@@ -540,7 +603,13 @@ describe("clock migration — atomicity (adversary finding 5)", () => {
     const after = await readSnapshot(tenantId);
     expect(after.profile.clock_mode).toBe("virtual");
     for (const send of before.sends) expect(byId(after.sends, send.id).send_at).toBe(send.send_at);
-    for (const mailbox of after.mailboxes) expect(mailbox.provider).toBe("");
+    for (const mailbox of after.mailboxes) {
+      // Same seeded-vs-written distinction as the constructor-context rollback
+      // test above: mb_sandbox/mb_sandbox_only carry provider='sandbox' from
+      // seed, untouched by this (rolled-back) transaction.
+      const expectedProvider = mailbox.id === "mb_sandbox" || mailbox.id === "mb_sandbox_only" ? "sandbox" : "";
+      expect(mailbox.provider).toBe(expectedProvider);
+    }
     expect(after.idempotency.find((r) => r.key === "setup:wedged")!.created_at).toBe(
       before.idempotency.find((r) => r.key === "setup:wedged")!.created_at,
     );

@@ -32,7 +32,7 @@ export interface ClockMigrationSummary {
   /** realNow - frozenNow. EITHER SIGN; negative means the frozen clock was ahead of real time. */
   deltaMs: number;
   migratedAt: number;
-  classified: { google: number; byo: number; sandbox: number };
+  classified: { google: number; byo: number };
   retiredMailboxes: number;
   retiredDomains: number;
   shiftedSends: number;
@@ -67,23 +67,43 @@ export function migrateTenantClockToReal(
   return storage.transactionSync(() => {
     const sql = storage.sql;
 
-    // --- 1. PROVENANCE BACKFILL (v2 §1b) ------------------------------------
-    // Order is load-bearing: 'byo' and 'google' claim their rows first, and
-    // 'sandbox' is the catch-all. That ordering is what guarantees every row
-    // the retirement below touches has slot_counted=0, so retiring it can never
-    // leak a real InboxKit plan slot. `provider = ''` scopes each statement to
-    // rows nothing has classified yet, so a row already stamped by the insert
-    // path is never reclassified.
+    // --- 1. PROVENANCE BACKFILL (v2 §1b; corrected by wave2-integration-gate-
+    // 2026-08-06 finding 1's sibling) -----------------------------------------
+    // 'byo' and 'google' are the only two POSITIVE signals a pre-existing
+    // (backfill-era) row can carry: `source = 'byo_connected'` can only ever be
+    // a customer's own connected mailbox, and `slot_counted = 1` is written
+    // ONLY by the real-adapter path (mailbox-provisioning.ts) at the instant it
+    // actually reserves a real InboxKit plan slot — nothing else ever sets it.
+    // Neither is guessed.
+    //
+    // THERE IS NO THIRD POSITIVE SIGNAL FOR 'sandbox', and this migration must
+    // not invent one. The prior version of this block resolved EVERY remaining
+    // `provider = ''` row to 'sandbox' as a catch-all, which the integration
+    // gate caught retiring a REAL mailbox whenever it predates BOTH the
+    // `provider` column and the `slot_counted` column — a real row that reads
+    // slot_counted=0 not because it is sandbox, but because it is simply older
+    // than that column too. A genuinely sandbox-created row is never actually
+    // ambiguous: `mailbox-provisioning.ts`'s `insertProvisionedMailbox` already
+    // stamps `provider` straight from the port's own answer at INSERT time
+    // ('sandbox' from SandboxMailboxPort, 'google' from RealMailboxPort), so a
+    // row that STILL reads `provider = ''` by the time this migration runs is,
+    // by construction, one this migration cannot safely classify.
+    //
+    // So: leave it `''`. Per `schema.ts`'s comment on this column, `''` is
+    // load-bearing, not a bug — the send-eligibility picker already excludes
+    // it, so an unclassified row can never be sent from (and, being unrelated
+    // to `slot_counted`, can never leak a billed slot either). The resolution
+    // path for a genuinely-stuck '' row is a HUMAN one: the U2 pre-arm
+    // provenance read (`engine/ops-summary.ts`'s `mailboxProvenance`,
+    // ACTIVATION.md's arming-order runbook) surfaces every row's raw columns
+    // for an operator to reclassify by hand before real sending is armed —
+    // never a guess baked into a one-shot, un-re-runnable migration.
     const byo = sql.exec(
       `UPDATE mailboxes SET provider = 'byo' WHERE tenant_id = ? AND provider = '' AND source = 'byo_connected'`,
       tenantId,
     ).rowsWritten;
     const google = sql.exec(
       `UPDATE mailboxes SET provider = 'google' WHERE tenant_id = ? AND provider = '' AND slot_counted = 1`,
-      tenantId,
-    ).rowsWritten;
-    const sandbox = sql.exec(
-      `UPDATE mailboxes SET provider = 'sandbox' WHERE tenant_id = ? AND provider = ''`,
       tenantId,
     ).rowsWritten;
 
@@ -94,6 +114,13 @@ export function migrateTenantClockToReal(
     // candidate the capacity picker sees. Retiring them at the flip is what
     // stops a newly-paid tenant routing every real send at a phantom mailbox.
     // No vendor call: there is nothing to release.
+    //
+    // `provider = 'sandbox'` here is ALWAYS positive evidence, never a guess
+    // (see step 1 above — nothing upstream of this statement writes 'sandbox'
+    // anymore; it can only already be there from the port's own insert-time
+    // stamp). That is what makes this UPDATE itself safe without any further
+    // change: it was never the retirement that misfired, only the backfill
+    // that fed it a false positive.
     //
     // BOTH columns, and `deliv_status='paused'` is NOT decorative (adversary
     // round-2, finding 1): the manual-reply path picks its mailbox from thread
@@ -122,35 +149,40 @@ export function migrateTenantClockToReal(
     // already non-'active') can reach a real REPLACE_DOMAIN/HARD_PAUSE_DOMAIN
     // decision for a domain the platform never actually owns.
     //
-    // DISCRIMINATOR. `source = 'byo'` is NEVER a candidate — a customer's own
+    // DISCRIMINATOR (corrected by wave2-integration-gate-2026-08-06 BLOCKING
+    // finding 1). `source = 'byo'` is NEVER a candidate — a customer's own
     // domain is never ours to retire, mirroring the mailbox retirement's own
-    // BYO carve-out one level down (provider backfill above never touches
-    // `byo_connected` rows either). Among `source = 'provisioned'` domains,
-    // retire one only if it now has ZERO currently-live (`released_at IS
-    // NULL`) NON-sandbox mailboxes attached — checked here, AFTER step 1's
-    // provenance backfill and the retirement directly above have both already
-    // run in THIS transaction, so `provider` is fully classified and every
-    // purely-sandbox domain's mailboxes are already released.
+    // BYO carve-out one level down. Among `source = 'provisioned'` domains,
+    // retirement requires POSITIVE EVIDENCE of sandbox-era origin — at least
+    // one `provider = 'sandbox'` mailbox row attached — AND zero currently-live
+    // (`released_at IS NULL`) NON-sandbox mailboxes attached. Checked here,
+    // AFTER step 1's provenance backfill and the mailbox retirement directly
+    // above have both already run in THIS transaction, so `provider` is fully
+    // resolved and every purely-sandbox domain's mailboxes are already
+    // released.
     //
-    // WHY THE MAILBOX-ATTACHMENT CHECK, NOT JUST `source = 'provisioned'`
-    // outright: by the time this migration can run at all (guarded by
-    // `clock_mode != 'real'`), `plan` has already flipped to a paid tier (its
-    // own precondition — vendors/factory.ts only ever selects real adapters
-    // for a paid plan), so ordinarily no real 'provisioned' domain could exist
-    // yet. But the plan-write and this flip are not the same SQL statement
-    // (tenant-do.ts's reconcileClockWithDurablePlan runs this AFTER awaiting
-    // the webhook handler that wrote `plan`), so a `setup_infrastructure` call
-    // landing in that narrow window would use real adapters and mint a
-    // genuinely real domain+mailboxes while `clock_mode` is still 'virtual'.
-    // That race is unconfirmed to ever have fired (production has never
-    // migrated a tenant with any real mailbox provisioned), but the asymmetric
-    // cost — wrongly retiring a domain carrying live customer sends is far
-    // worse than leaving a harmless phantom domain 'active' — means this must
-    // fail toward NOT retiring on that ambiguity. A domain with even one live
-    // non-sandbox mailbox is left alone.
+    // THE BUG THE GATE FOUND: the prior version of this predicate was
+    // `NOT EXISTS(a live non-sandbox mailbox)` alone — absence of contrary
+    // evidence, not presence of positive evidence. A domain with ZERO mailbox
+    // rows attached satisfies `NOT EXISTS` trivially, so it retired. That is
+    // exactly the real paying customer's shape (a domain adopted via the
+    // shipped path, no mailbox provisioned onto it yet) AND the documented
+    // mid-saga state of every provision (`mailbox-provisioning.ts`'s own
+    // invariant: the `mailboxes` row inserts ONLY AFTER the vendor confirms
+    // it, so the whole window between domain-buy and mailbox-ready is "real
+    // domain, zero mailbox rows"). `'retired'` is terminal — nothing anywhere
+    // writes a domain back to `'active'` — and this migration is one-shot, so
+    // that mistake was unrecoverable without hand-SQL. Requiring an EXISTS
+    // clause (at least one sandbox mailbox actually attached) closes it: a
+    // zero-mailbox domain now fails the EXISTS check and is left `'active'`,
+    // full stop, matching the "fail toward NOT retiring on ambiguity" rule
+    // this file already states rather than contradicting it.
     const retiredDomains = sql.exec(
       `UPDATE domains SET status = 'retired'
        WHERE tenant_id = ? AND source = 'provisioned' AND status = 'active'
+         AND EXISTS (
+           SELECT 1 FROM mailboxes m WHERE m.domain_id = domains.id AND m.provider = 'sandbox'
+         )
          AND NOT EXISTS (
            SELECT 1 FROM mailboxes m
            WHERE m.domain_id = domains.id AND m.provider != 'sandbox' AND m.released_at IS NULL
@@ -249,7 +281,7 @@ export function migrateTenantClockToReal(
     return {
       deltaMs,
       migratedAt: realNowMs,
-      classified: { google, byo, sandbox },
+      classified: { google, byo },
       retiredMailboxes,
       retiredDomains,
       shiftedSends,

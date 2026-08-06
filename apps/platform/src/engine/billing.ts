@@ -344,39 +344,114 @@ function mapStripeSubscriptionStatus(status: unknown): "active" | "past_due" | "
 }
 
 /**
- * True when Stripe emitted this event BEFORE the newest billing event we have
- * already applied — i.e. it is a delayed redelivery of something since
- * superseded, and applying it would REGRESS this tenant's billing state
- * (audit-stripe-webhook-2026-08-06.md finding 3: a stale `invoice.payment_failed`
- * landing on a recovered payer wrote 'past_due', which flipped
- * `isTenantActivated` false — swapping real vendor adapters for sandbox ones
- * mid-campaign — and then let the dunning sweep suspend a paying customer off
- * that poisoned state. A conditional write is only as good as the freshness of
- * what it conditions on).
+ * Which independent Stripe state machine an event belongs to. The six subscribed
+ * types are NOT one sequence: a Dispute, a Subscription and an Invoice are
+ * separate objects with no causal ordering between them, and Stripe guarantees
+ * no cross-object delivery order.
  *
- * THE RULE, and why it is written this way in both directions:
- *   - `created < watermark` -> REFUSE. Strictly older can only be a redelivery
- *     of a superseded transition.
- *   - `created >= watermark` -> APPLY, and advance. EQUAL must apply: Stripe's
- *     `created` has one-second granularity, so two genuinely distinct events
- *     can share a second, and refusing ties would drop real transitions. Within
- *     one second we keep today's last-writer-wins.
- *   - a genuinely NEW failure after a recovery therefore still applies (its
- *     `created` is later than the recovery's) — the guard must not turn a
- *     recovered tenant into one that can never go past_due again.
- *   - NO `created` at all -> UNORDERED: apply, and do NOT advance the
- *     watermark. Every real Stripe event carries `created`; only synthetic
- *     fixtures lack it, and an unordered event must never be able to poison
- *     the ordering of real ones by advancing the mark to "now".
- * Only the types we actually act on participate — an inert event type must not
- * move the watermark for the ones that matter.
+ *   'billing' — checkout.session.completed, customer.subscription.*,
+ *     invoice.payment_failed. These all report on the SAME subscription's
+ *     payment/status lifecycle, so a later one genuinely supersedes an earlier
+ *     one (a subscription that is 'active' now supersedes the invoice that
+ *     failed before it).
+ *   'dispute' — charge.dispute.*. A chargeback on a charge is orthogonal to the
+ *     subscription's status: a renewal succeeding says NOTHING about whether a
+ *     cardholder disputed an earlier charge, so it must never silence one.
+ */
+function stripeEventLane(type: string): "billing" | "dispute" | null {
+  if (type === "charge.dispute.created" || type === "charge.dispute.closed") return "dispute";
+  return HANDLED_STRIPE_EVENT_TYPES.has(type) ? "billing" : null;
+}
+
+/**
+ * The `billing_state` this event WANTS to write, or null when it writes none.
+ * The staleness rule compares this against the state already on the row — see
+ * isStaleBillingEvent's condition (2).
+ */
+function intendedBillingState(event: StripeEventInput): string | null {
+  const obj = event.data.object;
+  switch (event.type) {
+    case "checkout.session.completed":
+      return "active";
+    case "customer.subscription.updated":
+      return mapStripeSubscriptionStatus(obj.status);
+    case "customer.subscription.deleted":
+      return "canceled";
+    case "invoice.payment_failed":
+      return "past_due";
+    case "charge.dispute.created":
+      return "disputed";
+    case "charge.dispute.closed":
+      // Only a WON dispute writes state (it lifts the freeze); lost/other just
+      // record the outcome on the disputes row.
+      return obj.status === "won" ? "active" : null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * True when this event must be REFUSED as out of order
+ * (audit-stripe-webhook-2026-08-06.md finding 3, rescoped by
+ * wave2-integration-gate-2026-08-06.md BLOCKING 2).
+ *
+ * The original defect: a stale `invoice.payment_failed` landing on a RECOVERED
+ * payer wrote 'past_due', which flipped `isTenantActivated` false — swapping
+ * real vendor adapters for sandbox ones mid-campaign — and then let the dunning
+ * sweep suspend a paying customer off that poisoned state. A conditional write
+ * is only as good as the freshness of what it conditions on.
+ *
+ * The first fix over-reached: ONE global watermark across all six types, so once
+ * any event at time T applied, every event emitted before T was refused forever
+ * IN EVERY LANE. That silently dropped the D5 chargeback freeze (a routine
+ * renewal at T+300 made a real dispute emitted at T+120 a no-op, with no alert
+ * and no self-heal) and could drop a paid checkout with `screened_at` NULL,
+ * reopening the very compliance fail-open the guard-before-effect fix closed.
+ * Refusal is right for SAME-LANE supersession and wrong for cross-lane, where
+ * the older event carries information the newer one does not replace.
+ *
+ * THE RULE — refuse only when BOTH hold:
+ *   (1) the event is OLDER than the newest applied event IN ITS OWN LANE.
+ *       Strictly older; EQUAL applies, because Stripe's `created` has
+ *       one-second granularity and two genuinely distinct events can share a
+ *       second. A genuinely NEW failure after a recovery is therefore not
+ *       stale (its `created` is later) — the guard must not turn a recovered
+ *       tenant into one that can never go past_due again.
+ *   (2) applying it would actually CHANGE the billing_state a newer event has
+ *       already established. If the older event agrees with where the tenant
+ *       already is, there is nothing to regress — so let it through and let its
+ *       OTHER effects land. This is what saves a late checkout: it writes the
+ *       'active' the renewal already set, but it is also the only carrier of
+ *       the OFAC screen, the ledger credit and the subscription-item capture.
+ *       It is also what still refuses a stale checkout after a cancellation
+ *       (it would write 'active' over 'canceled'), and a stale dispute.closed
+ *       (won) that would lift a NEWER freeze.
+ *
+ * An event with NO `created` is UNORDERED: it applies, and never advances a
+ * watermark. Every real Stripe event carries `created`; only synthetic fixtures
+ * lack one, and an unordered event must not poison the ordering of real ones.
+ *
+ * Failure direction: a wrong APPLY here can only be an event whose state write
+ * agrees with the current state — i.e. it changes no state at all, and only its
+ * idempotent side effects run. A wrong REFUSE silently drops a control. The
+ * rule is deliberately biased toward applying.
  */
 function isStaleBillingEvent(ctx: TenantContext, event: StripeEventInput): boolean {
-  if (event.created === undefined || !HANDLED_STRIPE_EVENT_TYPES.has(event.type)) return false;
+  if (event.created === undefined) return false;
+  const lane = stripeEventLane(event.type);
+  if (!lane) return false;
+
   const row = ctx.sql
-    .exec<{ last_event_created: number }>(`SELECT last_event_created FROM billing_event_order WHERE id = 1`)
+    .exec<{ last_event_created: number }>(`SELECT last_event_created FROM billing_event_order WHERE lane = ?`, lane)
     .toArray()[0];
-  return row !== undefined && event.created < row.last_event_created;
+  if (row === undefined || event.created >= row.last_event_created) return false; // (1)
+
+  const intended = intendedBillingState(event);
+  if (intended === null) return false; // writes no state — nothing to regress
+  const current = ctx.sql
+    .exec<{ billing_state: string }>(`SELECT billing_state FROM tenant_profile WHERE id = ?`, ctx.tenantId)
+    .one().billing_state;
+  return intended !== current; // (2)
 }
 
 /**
@@ -404,17 +479,21 @@ function recordDunningCycleBasis(ctx: TenantContext, now: number): void {
   );
 }
 
-/** Advances the ordering watermark, monotonically — the conditional upsert
- *  means an out-of-order write can never pull it backwards. */
+/** Advances the watermark FOR THIS EVENT'S LANE ONLY, monotonically — the
+ *  conditional upsert means an out-of-order write can never pull it backwards,
+ *  and one lane can never move another lane's mark. */
 function recordBillingEventOrder(ctx: TenantContext, event: StripeEventInput, now: number): void {
-  if (event.created === undefined || !HANDLED_STRIPE_EVENT_TYPES.has(event.type)) return;
+  if (event.created === undefined) return;
+  const lane = stripeEventLane(event.type);
+  if (!lane) return;
   ctx.sql.exec(
-    `INSERT INTO billing_event_order (id, last_event_created, last_event_id, updated_at) VALUES (1, ?, ?, ?)
-     ON CONFLICT (id) DO UPDATE SET
+    `INSERT INTO billing_event_order (lane, last_event_created, last_event_id, updated_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT (lane) DO UPDATE SET
        last_event_created = excluded.last_event_created,
        last_event_id = excluded.last_event_id,
        updated_at = excluded.updated_at
      WHERE excluded.last_event_created >= billing_event_order.last_event_created`,
+    lane,
     event.created,
     event.id,
     now,
