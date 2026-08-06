@@ -323,13 +323,14 @@ export class EmailEngine {
 
   /**
    * Upsert PUSHED credentials for a mailbox (self-serve I3, POST /v1/mailboxes).
-   * Delegates idempotency + the overwrite policy to MailboxCredentialStore (F4).
-   * Throws if the daemon has no credential store wired (a static-only engine
-   * can't accept pushed mailboxes) — surfaced as a 500 by the router.
+   * Delegates idempotency + the overwrite policy (F4) and claim-ordering (F1)
+   * to MailboxCredentialStore. Throws if the daemon has no credential store
+   * wired (a static-only engine can't accept pushed mailboxes) — surfaced as a
+   * 500 by the router.
    */
   async upsertMailbox(req: MailboxWriteRequest): Promise<UpsertResult> {
     if (!this.credentialStore) throw new Error("internal: this engine has no pushed-credential store; POST /v1/mailboxes is unavailable");
-    return this.credentialStore.upsert(req.email, req.credentials, req.idempotencyKey);
+    return this.credentialStore.upsert(req.email, req.credentials, req.idempotencyKey, req.pushSeq);
   }
 
   /**

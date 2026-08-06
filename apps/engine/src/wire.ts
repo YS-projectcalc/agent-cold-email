@@ -45,10 +45,17 @@ export const pollRequestSchema = z.object({
 // `idempotencyKey` is optional (content-hash replay-safety is the primary
 // mechanism, MailboxCredentialStore) — when present it makes a replayed push
 // return the recorded outcome and rejects key reuse with a different payload.
+// `pushSeq` is optional (Wave 2 CREDSTORE F1) — the Worker's monotonic
+// per-mailbox claim sequence. It orders CLAIMS, not content: a push claimed
+// earlier can never overwrite one claimed later, closing the audit's proven
+// rotation-revert attack (see mailbox-store.ts). Absent -> exact legacy
+// content-hash-only behavior, so static-config and any current caller that
+// never sends a seq is unaffected.
 export const mailboxWriteRequestSchema = z.object({
   email: z.string().email(),
   credentials: mailboxCredentialsSchema,
   idempotencyKey: z.string().min(1).optional(),
+  pushSeq: z.number().int().nonnegative().optional(),
 });
 
 export const mailboxRemoveRequestSchema = z.object({
