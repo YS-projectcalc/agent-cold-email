@@ -2,6 +2,7 @@ import { VendorError, type SequenceStep } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
 import { buildUnsubscribeUrl, signUnsubscribeToken } from "../unsubscribe-token.js";
+import { customerSafeDetail, customerSafeVendorFailure, logVendorFailure } from "../vendor-failure.js";
 import { isLifecycleFrozen } from "./billing-state.js";
 import { runDeliverabilitySweep } from "./deliverability-actions.js";
 import { refreshMailboxWarmupState } from "./mailbox-state.js";
@@ -387,6 +388,7 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
         `send:${ctx.tenantId}:${row.id}`,
       );
     } catch (err) {
+      logVendorFailure(`email send ${picked.email}`, err);
       const retryable = err instanceof VendorError ? err.retryable : true;
       const nextAttempts = row.attempts + 1;
       if (retryable && nextAttempts < MAX_SEND_ATTEMPTS) {
@@ -416,7 +418,20 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
         row.step,
         row.thread_id,
         now,
-        JSON.stringify({ stage: "send", reason: err instanceof Error ? err.message : String(err), retryable, attempts: nextAttempts }),
+        // Customer-readable (campaign activity), so the abstract step only. The
+        // raw text named our INTERNAL engine host and its connection errors
+        // ("engine send unreachable at http://10.x.x.x:8787") — infrastructure
+        // detail a tenant should never see, on top of the vendor identity.
+        // `retryable` is the TICK's own decision (it treats an unclassified
+        // error as transient), so it is passed through rather than re-derived —
+        // the row must describe what actually happens next.
+        JSON.stringify(
+          customerSafeDetail(
+            { step: customerSafeVendorFailure(err).step, retryable },
+            retryable ? "delivery failed — will retry" : "delivery failed permanently",
+            { stage: "send", attempts: nextAttempts },
+          ),
+        ),
       );
       continue;
     }

@@ -40,7 +40,8 @@ import {
 } from "./engine/billing.js";
 import { runDemo, type DemoRunSummary } from "./engine/demo.js";
 import { cancelTenant, terminateTenant, type CancelResult, type TerminateResult } from "./engine/lifecycle.js";
-import { getInfrastructureStatus, runSetupInfrastructure } from "./engine/provisioning.js";
+import { getInfrastructureStatus } from "./engine/infrastructure-status.js";
+import { runSetupInfrastructure } from "./engine/provisioning.js";
 import { launchCampaign, listCampaigns, pauseAllCampaigns, pauseCampaign, type CampaignListItem } from "./engine/campaigns.js";
 import { runTick } from "./engine/tick.js";
 import { runWarmupCancellationSweep } from "./engine/warmup-cancel.js";
@@ -205,6 +206,11 @@ export class TenantDO extends DurableObject<Env> {
     // — provisioned before DNS state was tracked, and whose setDns did succeed
     // (it was a precondition of the row existing at all) — keeps its meaning.
     this.addColumnIfMissing("domains", "dns_status", "TEXT NOT NULL DEFAULT 'ready'");
+    // INCIDENT 2026-08-05 root cause — which DNS operation applies (see
+    // schema.ts). NULL for every pre-existing row: unknown, which the adapters
+    // treat as 'purchased' (the read-only poll), so a legacy row can never drive
+    // the connect-existing handshake that stranded the incident domain.
+    this.addColumnIfMissing("domains", "connection_type", "TEXT");
     // SPEC.md §20 BYO domains & mailboxes — every default below reproduces an
     // EXISTING provisioned domain/mailbox's implicit state exactly (flag-dark:
     // see schema.ts's TENANT_DO_SCHEMA comment on these same columns).

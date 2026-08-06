@@ -1,7 +1,17 @@
 /// <reference types="vite/client" />
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { NotActivatedError, VendorError, type DnsRecordSet, type DomainPort, type LookalikeCandidate, type OwnedDomain, type PurchasedDomain, type ReleaseResult } from "@coldstart/shared";
+import {
+  NotActivatedError,
+  VendorError,
+  type DnsRecordSet,
+  type DomainConnectionType,
+  type DomainPort,
+  type LookalikeCandidate,
+  type OwnedDomain,
+  type PurchasedDomain,
+  type ReleaseResult,
+} from "@coldstart/shared";
 import { runSetupInfrastructure } from "../src/engine/provisioning.js";
 import { toErrorResponse } from "../src/error-response.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
@@ -52,10 +62,10 @@ function realisticDomainPort(opts: { owned?: OwnedDomain[]; setDnsFailures?: num
     },
     async buy(domain: string): Promise<PurchasedDomain> {
       state.buys.push(domain);
-      return { domain, purchasedAt: Date.now(), registrar: "test" };
+      return { domain, purchasedAt: Date.now(), registrar: "test", connectionType: "purchased" };
     },
-    async setDns(domain: string): Promise<DnsRecordSet> {
-      state.setDns.push(domain);
+    async setDns(domain: string, _key: string, connectionType: DomainConnectionType): Promise<DnsRecordSet> {
+      state.setDns.push(`${domain}:${connectionType}`);
       if (dnsFailures-- > 0) throw new VendorError("inboxkit domains/nameservers failed: domain not found", true);
       return { mx: true, spf: true, dkim: true, dmarc: true, rdns: true };
     },
@@ -106,7 +116,7 @@ describe("B2 — adopt fires for a domain the vendor already owns (Mordy's live 
     const { tenantId } = await mintTenant("Author Pitch Desk", "managed");
     await activatePaidPlan(tenantId, "managed");
     const { port, state } = realisticDomainPort({
-      owned: [{ domain: "goauthorpitchdesk.com", status: "active", assignedMailboxes: 0 }],
+      owned: [{ domain: "goauthorpitchdesk.com", status: "active", assignedMailboxes: 0, connectionType: "purchased" }],
       candidates: ["goauthorpitchdesk.com", "theauthorpitchdesk.com", "myauthorpitchdesk.com"],
     });
 
@@ -130,7 +140,7 @@ describe("B2 — adopt fires for a domain the vendor already owns (Mordy's live 
     const { tenantId } = await mintTenant("Assigned Owned Co", "managed");
     await activatePaidPlan(tenantId, "managed");
     const { port, state } = realisticDomainPort({
-      owned: [{ domain: "goassignedownedco.com", status: "active", assignedMailboxes: 3 }],
+      owned: [{ domain: "goassignedownedco.com", status: "active", assignedMailboxes: 3, connectionType: "purchased" }],
       candidates: ["goassignedownedco.com", "theassignedownedco.com"],
     });
 
@@ -304,11 +314,14 @@ describe("N2 — no adapter internals reach a customer", () => {
     }
   });
 
-  it("drops junk step values and keeps allowlisted ones", () => {
+  it("drops junk step values and maps recognized ones to an ABSTRACT label", () => {
     // "unreachable" / "manually-minted" are the junk the old parse emitted.
     expect(toErrorResponse(new VendorError("engine send unreachable at http://10.0.0.7:8787", true)).body.step).toBeUndefined();
     expect(toErrorResponse(new VendorError("gmail oauth manually-minted grant missing", false)).body.step).toBeUndefined();
-    expect(toErrorResponse(new VendorError("inboxkit domains/register failed for x.com", false)).body.step).toBe("domains/register");
+    // The allowlist USED to pass the vendor's literal endpoint path through as
+    // `step` — its own leak (sweep-vendor-leak-2026-08-05): "domains/register"
+    // is a route you can curl to identify the provider. It is now prose.
+    expect(toErrorResponse(new VendorError("inboxkit domains/register failed for x.com", false)).body.step).toBe("domain registration");
   });
 
   it("preserves the retryable grade so an agent can still back off correctly", () => {

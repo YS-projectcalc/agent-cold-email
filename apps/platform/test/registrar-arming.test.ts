@@ -157,7 +157,14 @@ describe("createVendorAdapters — registrar arming two-leg decoupling", () => {
     );
     try {
       const result = await bundle.domain.buy("acme-lookalike.com", "k1");
-      expect(result).toEqual({ domain: "acme-lookalike.com", purchasedAt: expect.any(Number), registrar: "inboxkit" });
+      expect(result).toEqual({
+        domain: "acme-lookalike.com",
+        purchasedAt: expect.any(Number),
+        registrar: "inboxkit",
+        // A registered domain is one the vendor HOLDS — the discriminator that
+        // decides which DNS operation applies to it (INCIDENT 2026-08-05).
+        connectionType: "purchased",
+      });
       expect(spy).toHaveBeenCalledTimes(1);
     } finally {
       spy.mockRestore();

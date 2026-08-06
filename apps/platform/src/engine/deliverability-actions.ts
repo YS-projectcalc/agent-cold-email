@@ -9,6 +9,7 @@ import { lookupTenantContactEmail } from "../db.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
+import { customerSafeVendorDetail, logVendorFailure } from "../vendor-failure.js";
 import { syncMailboxQuantity } from "./billing.js";
 import { releaseMailboxes } from "./lifecycle.js";
 import { alertRegistrarUnarmed } from "./registrar-alert.js";
@@ -214,12 +215,21 @@ async function applyReplaceDomain(
       if (err instanceof RegistrarUnarmedError) {
         await alertRegistrarUnarmed(ctx, profile.primary_domain, err, mailer);
       }
-      logAction(ctx, "REPLACE_DOMAIN_FAILED", action.domain, {
-        burningDomainId: action.domainId,
-        reason: action.reason,
-        error: err.message,
-        note: "burning domain retired + mailboxes released; replacement withheld (vendor error) — isolated so the tick continues",
-      });
+      // The raw vendor text goes to the Worker log; this row is customer-readable
+      // (account().recentActions) so it carries the abstract step instead — an
+      // `error: err.message` here shipped the provider's name and endpoint
+      // straight into the activity feed.
+      logVendorFailure(`REPLACE_DOMAIN ${action.domain}`, err);
+      logAction(
+        ctx,
+        "REPLACE_DOMAIN_FAILED",
+        action.domain,
+        customerSafeVendorDetail(err, "automatic domain replacement is paused (provider issue)", {
+          burningDomainId: action.domainId,
+          burnReason: action.reason,
+          note: "burning domain retired + mailboxes released; replacement withheld — isolated so the tick continues",
+        }),
+      );
     }
   } finally {
     // §7.1 sync placement — the meter reflects reality in EVERY branch (success

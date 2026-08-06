@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 // a NEW unwrapped money-out call site trips RED by construction, not just when a
 // behavior test happens to exercise it.
 import provisioningSource from "../src/engine/provisioning.ts?raw";
+import mailboxProvisioningSource from "../src/engine/mailbox-provisioning.ts?raw";
 
 // G0/G2 systemic guard (ga-gates-design-2026-07-22.md §"Systemic guards") — the
 // spend-bypass class, sibling of spend-armed-env-coverage.test.ts. Every
@@ -13,11 +14,18 @@ import provisioningSource from "../src/engine/provisioning.ts?raw";
 // call and assert each is lexically wrapped by withSpendCeiling( within its own
 // statement.
 //
-// MAINTENANCE: all three money-out sites live in provisioning.ts today (the
-// shared provision loop both setup_infrastructure and REPLACE_DOMAIN reuse). A
-// new money-out vendor call in ANOTHER file must be added to SPEND_SOURCES below
-// AND wrapped — same discipline as KNOWN_NON_SPEND_ARMING in the sibling test.
-const SPEND_SOURCES: { file: string; source: string }[] = [{ file: "engine/provisioning.ts", source: provisioningSource }];
+// MAINTENANCE: the three money-out sites live in the domain leg
+// (provisioning.ts's domain.buy) and the per-mailbox saga
+// (mailbox-provisioning.ts's provision + startWarmup) — both reused by
+// setup_infrastructure, REPLACE_DOMAIN and the BYO managed-mailbox shape. A new
+// money-out vendor call in ANOTHER file must be added to SPEND_SOURCES below AND
+// wrapped — same discipline as KNOWN_NON_SPEND_ARMING in the sibling test.
+// (Splitting the saga out of provisioning.ts is exactly the move that would have
+// made this guard silently vacuous, which is what the count assertion catches.)
+const SPEND_SOURCES: { file: string; source: string }[] = [
+  { file: "engine/provisioning.ts", source: provisioningSource },
+  { file: "engine/mailbox-provisioning.ts", source: mailboxProvisioningSource },
+];
 
 // The money-out vendor calls (design §0 inventory). Reads/config calls
 // (getHealth, release, searchLookalikes, setDns) are NOT money-out and are

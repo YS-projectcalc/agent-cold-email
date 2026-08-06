@@ -12,6 +12,7 @@ import { pauseAllCampaigns } from "./campaigns.js";
 import { EngineMailboxClient } from "./engine-mailbox-client.js";
 import { engineConfigFromEnv, revokePushedMailboxCredentials } from "./mailbox-credential-push.js";
 import { suspendTenant } from "./ops-summary.js";
+import { markMailboxIntentsReleased } from "./provision-intents.js";
 import { releaseMailboxSlots } from "./spend-ceiling.js";
 import { ONE_DAY_MS } from "./warmup.js";
 
@@ -168,6 +169,12 @@ export async function releaseMailboxes(
       ctx.tenantId,
     );
   }
+  // N4 — a released mailbox no longer exists at the provider, so the durable
+  // records asserting "we already provisioned this address" must stop saying so.
+  // Without this, a cancel-then-resubscribe replayed the per-mailbox
+  // idempotency claim, skipped the vendor buy entirely, and still inserted a
+  // BILLABLE local row — a mailbox charged for monthly with nothing behind it.
+  markMailboxIntentsReleased(ctx, mailboxes.map((m) => m.email));
   // G4 — decrement the account slot counter by the REAL plan-slot mailboxes just
   // released (precise via slot_counted; no-op when none were slot-counted).
   await releaseMailboxSlots(ctx, slotCountedReleased, now);

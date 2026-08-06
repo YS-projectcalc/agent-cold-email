@@ -1,4 +1,12 @@
-import type { CancelWarmupResult, Clock, MailboxHealth, MailboxPort, ProvisionedMailbox, ReleaseResult } from "@coldstart/shared";
+import type {
+  CancelWarmupResult,
+  Clock,
+  MailboxHealth,
+  MailboxPort,
+  MailboxProvisioningState,
+  ProvisionedMailbox,
+  ReleaseResult,
+} from "@coldstart/shared";
 
 // Sandbox MailboxPort — deterministic, healthy-by-default mailboxes. Actual
 // warmup ramp math lives in engine/warmup.ts (per-tenant, clock-driven); this
@@ -10,6 +18,17 @@ export class SandboxMailboxPort implements MailboxPort {
 
   async provision(domain: string, localPart: string, _idempotencyKey: string): Promise<ProvisionedMailbox> {
     return { email: `${localPart}@${domain}`, provider: "sandbox", provisionedAt: this.clock.now() };
+  }
+
+  async provisioningState(_email: string): Promise<MailboxProvisioningState> {
+    // In-process and instantaneous: `provision()` returning IS the mailbox
+    // existing, so the async window a real vendor has simply does not exist
+    // here. Always 'ready' keeps every sandbox provision byte-identical to
+    // before the poll-until-ready gate. A test that needs the async window
+    // injects its own MailboxPort (test/mailbox-provisioning-gate.test.ts) —
+    // exactly the lesson of this incident: the always-succeeds sandbox is where
+    // the real vendor's contract goes to hide.
+    return "ready";
   }
 
   async getHealth(email: string): Promise<MailboxHealth> {

@@ -11,7 +11,8 @@ import type { TenantContext } from "../tenant-context.js";
 import { buildMailboxBilling, syncMailboxQuantity, type MailboxBilling } from "./billing.js";
 import { assertNotLifecycleFrozen } from "./billing-state.js";
 import { requireByoDomainRow } from "./byo-intake.js";
-import { provisionMailboxesForDomain, slugify } from "./provisioning.js";
+import { provisionMailboxesForDomain } from "./mailbox-provisioning.js";
+import { slugify } from "./provisioning.js";
 import { ONE_DAY_MS, warmupDailyCap } from "./warmup.js";
 
 export interface ManagedMailboxesResult {
@@ -53,7 +54,6 @@ export async function requestManagedByoMailboxes(
   const mailboxEmails = await provisionMailboxesForDomain(ctx, {
     domainId,
     domain: row.domain,
-    domainKey: `byo:${row.domain}#${domainId}`,
     domainOrdinal: 0,
     personaSlug,
     inboxesEach: input.count,

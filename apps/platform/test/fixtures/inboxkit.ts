@@ -248,6 +248,76 @@ export const IK_PROPAGATION_PENDING = {
   ],
 };
 
+/**
+ * POST /domains/list for a domain InboxKit ITSELF registered, whose registrar-
+ * side nameserver change has not propagated yet — the shape polled LIVE on
+ * 2026-08-05 from the workspace holding the stranded incident domain, field for
+ * field (only the uid is synthetic). This is the state three customer retries
+ * kept hitting, and the one no fixture in the suite could express before: the
+ * old adopt fixtures modelled a domain as `{name, status, assigned_mailboxes}`
+ * with no connection type and no DNS state at all, so "purchased, not yet
+ * propagated" — the actual production state — was unrepresentable.
+ */
+export const IK_DOMAINS_LIST_PURCHASED_PENDING = {
+  error: false,
+  message: "Domains retrieved successfully",
+  domains: [
+    {
+      uid: "dom-22222222-3333-4444-5555-666666666666",
+      name: "goauthorpitchdesk.com",
+      price: 12.5,
+      assigned_mailboxes: 0,
+      status: "active",
+      connection_type: "purchased",
+      dns_propagation_status: "pending",
+      nameserver_match_status: "pending",
+      last_nameserver_check: null,
+      actual_nameservers: [],
+      nameservers: ["alexandra.ns.cloudflare.com", "phil.ns.cloudflare.com"],
+    },
+  ],
+  total: 1,
+  pages: 1,
+};
+
+/** The same purchased domain once the registrar change has actually propagated:
+ * the assigned nameservers now appear in `actual_nameservers`, which is the
+ * FIRST-PARTY proof the readiness check prefers over any vendor status token. */
+export const IK_DOMAINS_LIST_PURCHASED_PROPAGATED = {
+  ...IK_DOMAINS_LIST_PURCHASED_PENDING,
+  domains: [
+    {
+      ...IK_DOMAINS_LIST_PURCHASED_PENDING.domains[0],
+      dns_propagation_status: "completed",
+      nameserver_match_status: "matched",
+      last_nameserver_check: "2026-08-05T12:00:00.000Z",
+      actual_nameservers: ["alexandra.ns.cloudflare.com", "phil.ns.cloudflare.com"],
+    },
+  ],
+};
+
+/** A domain CONNECTED to the workspace (registered elsewhere) — the other half
+ * of the discriminator, and the only shape the nameserver handshake applies to. */
+export const IK_DOMAINS_LIST_CONNECTED = {
+  error: false,
+  message: "Domains retrieved successfully",
+  domains: [
+    {
+      uid: "dom-77777777-8888-9999-aaaa-bbbbbbbbbbbb",
+      name: "connected-elsewhere.com",
+      assigned_mailboxes: 0,
+      status: "active",
+      connection_type: "connected",
+      dns_propagation_status: "pending",
+      nameserver_match_status: "pending",
+      actual_nameservers: [],
+      nameservers: ["alexandra.ns.cloudflare.com", "phil.ns.cloudflare.com"],
+    },
+  ],
+  total: 1,
+  pages: 1,
+};
+
 export const IK_DOMAIN_REMOVE_SUCCESS = {
   error: false,
   message: "Domains scheduled for deletion",

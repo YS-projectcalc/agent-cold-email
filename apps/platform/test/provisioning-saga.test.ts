@@ -1,6 +1,15 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { VendorError, type DnsRecordSet, type DomainPort, type LookalikeCandidate, type OwnedDomain, type PurchasedDomain, type ReleaseResult } from "@coldstart/shared";
+import {
+  VendorError,
+  type DnsRecordSet,
+  type DomainConnectionType,
+  type DomainPort,
+  type LookalikeCandidate,
+  type OwnedDomain,
+  type PurchasedDomain,
+  type ReleaseResult,
+} from "@coldstart/shared";
 import { provisionDomainWithMailboxes } from "../src/engine/provisioning.js";
 import { mintTenant, withTenantContext } from "./helpers.js";
 
@@ -35,10 +44,10 @@ function racingDomainPort(opts: { setDnsFailures: number; owned?: OwnedDomain[] 
     },
     async buy(domain: string): Promise<PurchasedDomain> {
       calls.buy.push(domain);
-      return { domain, purchasedAt: Date.now(), registrar: "test-registrar" };
+      return { domain, purchasedAt: Date.now(), registrar: "test-registrar", connectionType: "purchased" };
     },
-    async setDns(domain: string): Promise<DnsRecordSet> {
-      calls.setDns.push(domain);
+    async setDns(domain: string, _key: string, connectionType: DomainConnectionType): Promise<DnsRecordSet> {
+      calls.setDns.push(`${domain}:${connectionType}`);
       if (remaining-- > 0) {
         // The exact shape of the incident: the vendor has accepted the order but
         // has not finished registering, so the nameservers call is rejected.
@@ -157,7 +166,7 @@ describe("provisioning saga — a bought domain is never stranded (INCIDENT 2026
     // Attempt 2: same intent key, same candidate — and the vendor reports it owned.
     const second = racingDomainPort({
       setDnsFailures: 0,
-      owned: [{ domain: "tryacme.com", status: "active", assignedMailboxes: 0 }],
+      owned: [{ domain: "tryacme.com", status: "active", assignedMailboxes: 0, connectionType: "purchased" }],
     });
     await withTenantContext(tenantId, (base) =>
       provisionDomainWithMailboxes(
@@ -180,7 +189,7 @@ describe("provisioning saga — a bought domain is never stranded (INCIDENT 2026
     const { port, calls } = racingDomainPort({
       setDnsFailures: 0,
       // Owned, but in use elsewhere — adopting it would re-home someone's mail.
-      owned: [{ domain: "tryacme.com", status: "active", assignedMailboxes: 2 }],
+      owned: [{ domain: "tryacme.com", status: "active", assignedMailboxes: 2, connectionType: "purchased" }],
     });
 
     await withTenantContext(tenantId, (base) =>
@@ -206,8 +215,12 @@ describe("provisioning saga — a bought domain is never stranded (INCIDENT 2026
           adapters: {
             ...base.adapters,
             domain: port,
+            // Delegating explicitly, NOT spreading the port: a spread of a class
+            // instance copies own fields only, so every method left on the
+            // prototype silently vanishes — the counted overrides worked by
+            // luck, and the first un-overridden method call would have been an
+            // undefined-is-not-a-function at runtime.
             mailbox: {
-              ...base.adapters.mailbox,
               async provision(domain: string, localPart: string) {
                 buyCalls++;
                 return { email: `${localPart}@${domain}`, provider: "google" as const, provisionedAt: Date.now() };
@@ -216,6 +229,10 @@ describe("provisioning saga — a bought domain is never stranded (INCIDENT 2026
                 warmupCalls++;
                 return { started: true, startedAt: Date.now() };
               },
+              provisioningState: (email: string) => base.adapters.mailbox.provisioningState(email),
+              getHealth: (email: string) => base.adapters.mailbox.getHealth(email),
+              cancelWarmup: (email: string, key: string) => base.adapters.mailbox.cancelWarmup(email, key),
+              release: (email: string, key: string) => base.adapters.mailbox.release(email, key),
             },
           },
         };
