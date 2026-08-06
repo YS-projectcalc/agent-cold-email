@@ -13,8 +13,9 @@
 // the key is wedged forever.
 //
 // SHAPE (adversary finding 5). Everything below — the provider backfill, the
-// sandbox retirement, every SHIFT, the demo terminalization AND the
-// clock_mode='real' stamp — runs inside ONE `storage.transactionSync`. A throw
+// sandbox mailbox retirement, the sandbox domain retirement (NEW-4), every
+// SHIFT, the demo terminalization AND the clock_mode='real' stamp — runs
+// inside ONE `storage.transactionSync`. A throw
 // anywhere rolls back all of it INCLUDING the marker, so a retry re-enters a
 // genuinely virgin state and applying the delta twice is structurally
 // impossible. That is why the marker is written inside rather than first: this
@@ -33,6 +34,7 @@ export interface ClockMigrationSummary {
   migratedAt: number;
   classified: { google: number; byo: number; sandbox: number };
   retiredMailboxes: number;
+  retiredDomains: number;
   shiftedSends: number;
   shiftedSendingClaims: number;
   shiftedIdempotencyRows: number;
@@ -105,6 +107,54 @@ export function migrateTenantClockToReal(
       `UPDATE mailboxes SET released_at = ?, deliv_status = 'paused'
        WHERE tenant_id = ? AND provider = 'sandbox' AND released_at IS NULL`,
       realNowMs,
+      tenantId,
+    ).rowsWritten;
+
+    // --- 2b. RETIRE THE SANDBOX-ORIGIN `domains` ROWS (NEW-4, wave-2 design
+    // review round 2) ---------------------------------------------------------
+    // The mailbox retirement above has a sibling gap one table up: a tenant who
+    // explored before paying can also hold `domains` rows the SANDBOX registrar
+    // "purchased" (SandboxDomainPort.buy, vendors/sandbox/domain-port.ts,
+    // `purchasedAt: this.clock.now()`) — nothing is registered at any real
+    // registrar for them. Left at status='active' forever, gatherDomainStats
+    // (engine/deliverability.ts) folds it into per-domain aggregates and the
+    // evaluate() burn/breaker loop (which only skips a domain whose status is
+    // already non-'active') can reach a real REPLACE_DOMAIN/HARD_PAUSE_DOMAIN
+    // decision for a domain the platform never actually owns.
+    //
+    // DISCRIMINATOR. `source = 'byo'` is NEVER a candidate — a customer's own
+    // domain is never ours to retire, mirroring the mailbox retirement's own
+    // BYO carve-out one level down (provider backfill above never touches
+    // `byo_connected` rows either). Among `source = 'provisioned'` domains,
+    // retire one only if it now has ZERO currently-live (`released_at IS
+    // NULL`) NON-sandbox mailboxes attached — checked here, AFTER step 1's
+    // provenance backfill and the retirement directly above have both already
+    // run in THIS transaction, so `provider` is fully classified and every
+    // purely-sandbox domain's mailboxes are already released.
+    //
+    // WHY THE MAILBOX-ATTACHMENT CHECK, NOT JUST `source = 'provisioned'`
+    // outright: by the time this migration can run at all (guarded by
+    // `clock_mode != 'real'`), `plan` has already flipped to a paid tier (its
+    // own precondition — vendors/factory.ts only ever selects real adapters
+    // for a paid plan), so ordinarily no real 'provisioned' domain could exist
+    // yet. But the plan-write and this flip are not the same SQL statement
+    // (tenant-do.ts's reconcileClockWithDurablePlan runs this AFTER awaiting
+    // the webhook handler that wrote `plan`), so a `setup_infrastructure` call
+    // landing in that narrow window would use real adapters and mint a
+    // genuinely real domain+mailboxes while `clock_mode` is still 'virtual'.
+    // That race is unconfirmed to ever have fired (production has never
+    // migrated a tenant with any real mailbox provisioned), but the asymmetric
+    // cost — wrongly retiring a domain carrying live customer sends is far
+    // worse than leaving a harmless phantom domain 'active' — means this must
+    // fail toward NOT retiring on that ambiguity. A domain with even one live
+    // non-sandbox mailbox is left alone.
+    const retiredDomains = sql.exec(
+      `UPDATE domains SET status = 'retired'
+       WHERE tenant_id = ? AND source = 'provisioned' AND status = 'active'
+         AND NOT EXISTS (
+           SELECT 1 FROM mailboxes m
+           WHERE m.domain_id = domains.id AND m.provider != 'sandbox' AND m.released_at IS NULL
+         )`,
       tenantId,
     ).rowsWritten;
 
@@ -201,6 +251,7 @@ export function migrateTenantClockToReal(
       migratedAt: realNowMs,
       classified: { google, byo, sandbox },
       retiredMailboxes,
+      retiredDomains,
       shiftedSends,
       shiftedSendingClaims,
       shiftedIdempotencyRows,

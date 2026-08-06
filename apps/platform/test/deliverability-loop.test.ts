@@ -1,6 +1,8 @@
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import { gatherMailboxHealth } from "../src/engine/deliverability.js";
 import { ONE_DAY_MS, WARMUP_RAMP_DAYS } from "../src/engine/warmup.js";
+import type { TenantContext } from "../src/tenant-context.js";
 import { api, signup, tenantStub } from "./helpers.js";
 
 // Integration tests for the B6 deliverability control loop driven through the
@@ -251,5 +253,34 @@ describe("B6 deliverability loop — controlled scenarios", () => {
         .map((r) => r.mailbox_id),
     );
     expect(sendMailboxes).toEqual([boxes[1]!.id]); // all from the healthy mailbox, none from the paused one
+  });
+
+  // NEW-4 (docs/adversarial/wave2-design-review-2026-08-05.md round 2) — a
+  // retired mailbox (released_at set, e.g. by the clock-migration sandbox
+  // retirement) must stop contributing its all-time bounce/complaint history
+  // to gatherMailboxHealth's per-mailbox AND per-domain aggregates.
+  it("a retired mailbox's historical bounce/complaint events no longer feed the health aggregate", async () => {
+    const { tenantId } = await setupTenant("Retd", "retd.com", 1, 2); // 1 domain, 2 mailboxes
+    const boxes = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
+      state.storage.sql.exec<{ id: string }>(`SELECT id FROM mailboxes ORDER BY rowid`).toArray(),
+    );
+    await runInDurableObject(tenantStub(tenantId), async (_i, state) => {
+      // box0 built up a heavy complaint history, then got retired (released_at
+      // set + deliv_status paused, exactly what clock-migration.ts's sandbox
+      // retirement does) — its history must not survive the retirement.
+      injectSends(state.storage.sql, tenantId, boxes[0]!.id, { sends: 10, bounces: 0, complaints: 10 });
+      state.storage.sql.exec(`UPDATE mailboxes SET released_at = 1, deliv_status = 'paused' WHERE id = ?`, boxes[0]!.id);
+    });
+
+    const signals = await runInDurableObject(tenantStub(tenantId), (instance) =>
+      gatherMailboxHealth((instance as unknown as { requireContext(): TenantContext }).requireContext()),
+    );
+
+    // The retired mailbox itself must not appear in the returned signal set...
+    expect(signals.find((s) => s.mailboxId === boxes[0]!.id)).toBeUndefined();
+    // ...and its 10 complaints must not have leaked onto the still-live mailbox
+    // or into any per-domain aggregate built from this list.
+    const totalComplaints = signals.reduce((sum, s) => sum + s.complaints, 0);
+    expect(totalComplaints).toBe(0);
   });
 });

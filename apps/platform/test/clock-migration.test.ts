@@ -57,7 +57,7 @@ interface Snapshot {
   sends: SendRow[];
   campaigns: { id: string; status: string; is_demo: number }[];
   idempotency: { key: string; status: string; created_at: number }[];
-  domains: { id: string; first_send_eligible_at: number | null; dns_first_checked_at: number | null }[];
+  domains: { id: string; status: string; first_send_eligible_at: number | null; dns_first_checked_at: number | null }[];
 }
 
 function readSnapshot(tenantId: string): Promise<Snapshot> {
@@ -89,9 +89,13 @@ function readSnapshot(tenantId: string): Promise<Snapshot> {
         )
         .toArray(),
       domains: sql
-        .exec<{ id: string; first_send_eligible_at: number | null; dns_first_checked_at: number | null; [c: string]: SqlStorageValue }>(
-          `SELECT id, first_send_eligible_at, dns_first_checked_at FROM domains ORDER BY id`,
-        )
+        .exec<{
+          id: string;
+          status: string;
+          first_send_eligible_at: number | null;
+          dns_first_checked_at: number | null;
+          [c: string]: SqlStorageValue;
+        }>(`SELECT id, status, first_send_eligible_at, dns_first_checked_at FROM domains ORDER BY id`)
         .toArray(),
     };
   });
@@ -138,7 +142,9 @@ async function seedUnmigratedPaidTenant(
       .one();
     const frozenNow = profile.clock_base + profile.clock_offset;
 
-    // --- domains: one provisioned (no BYO gates), one BYO with both gates set
+    // --- domains: one provisioned (no BYO gates), one BYO with both gates set,
+    // one PURELY sandbox-origin (NEW-4 — no real mailbox is ever attached, so
+    // nothing protects it from retirement).
     sql.exec(
       `INSERT INTO domains (id, tenant_id, domain, purchased_at, source) VALUES ('dom_prov', ?, '${slug}.com', ?, 'provisioned')`,
       tenantId,
@@ -152,14 +158,23 @@ async function seedUnmigratedPaidTenant(
       frozenNow + 3 * ONE_DAY_MS,
       frozenNow - ONE_DAY_MS,
     );
+    sql.exec(
+      `INSERT INTO domains (id, tenant_id, domain, purchased_at, source) VALUES ('dom_sandbox_only', ?, 'sandboxonly-${slug}.com', ?, 'provisioned')`,
+      tenantId,
+      frozenNow,
+    );
 
-    // --- mailboxes: one demo-era sandbox row, one real (slot_counted=1), one BYO
-    const insertMailbox = (id: string, source: string, slotCounted: number, warmupStartedAt: number) =>
+    // --- mailboxes: one demo-era sandbox row, one real (slot_counted=1), one
+    // BYO (all three on dom_prov, so a domain carrying a live real mailbox is
+    // exercised too), plus a second sandbox row on dom_sandbox_only (NEW-4 —
+    // the domain with NOTHING but sandbox mailboxes on it).
+    const insertMailbox = (id: string, source: string, slotCounted: number, warmupStartedAt: number, domainId = "dom_prov") =>
       sql.exec(
         `INSERT INTO mailboxes (id, tenant_id, domain_id, domain, email, daily_cap, warmup_started_at, created_at, source, slot_counted)
-         VALUES (?, ?, 'dom_prov', '${slug}.com', ?, 5, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, '${slug}.com', ?, 5, ?, ?, ?, ?)`,
         id,
         tenantId,
+        domainId,
         `${id}@${slug}.com`,
         warmupStartedAt,
         warmupStartedAt,
@@ -168,6 +183,7 @@ async function seedUnmigratedPaidTenant(
       );
     // Sandbox-origin: stamped on the frozen virtual clock.
     insertMailbox("mb_sandbox", "provisioned", 0, frozenNow - 30 * ONE_DAY_MS);
+    insertMailbox("mb_sandbox_only", "provisioned", 0, frozenNow - 25 * ONE_DAY_MS, "dom_sandbox_only");
     // Real InboxKit mailbox: the vendor stamps REAL wall time, not ctx.clock.
     insertMailbox("mb_real", "provisioned", 1, Date.now() - 10 * ONE_DAY_MS);
     // BYO: a genuine ramp part-way through, on real time.
@@ -367,6 +383,15 @@ describe("clock migration — the DO constructor self-applies it, both delta sig
       for (const id of ["mb_sandbox", "mb_real", "mb_byo"]) {
         expect(byId(after.mailboxes, id).warmup_started_at).toBe(byId(before.mailboxes, id).warmup_started_at);
       }
+
+      // --- NEW-4: sandbox-origin `domains` rows are retired alongside their
+      // mailboxes. dom_sandbox_only carries NOTHING but a (now-retired)
+      // sandbox mailbox -> retired. dom_prov still carries mb_real, a live
+      // non-sandbox mailbox -> left 'active'. dom_byo (source='byo') is never
+      // a retirement candidate at all, regardless of what's attached to it.
+      expect(byId(after.domains, "dom_sandbox_only").status).toBe("retired");
+      expect(byId(after.domains, "dom_prov").status).toBe("active");
+      expect(byId(after.domains, "dom_byo").status).toBe("active");
     });
   }
 
@@ -388,6 +413,10 @@ describe("clock migration — the DO constructor self-applies it, both delta sig
       expect(afterSecond.idempotency.find((r) => r.key === row.key)!.created_at).toBe(row.created_at);
     }
     expect(byId(afterSecond.mailboxes, "mb_sandbox").released_at).toBe(byId(afterFirst.mailboxes, "mb_sandbox").released_at);
+    // NEW-4: the domain retirement is idempotent too — already-'retired' stays
+    // 'retired' (its WHERE clause only ever touches status='active' rows).
+    expect(byId(afterFirst.domains, "dom_sandbox_only").status).toBe("retired");
+    expect(byId(afterSecond.domains, "dom_sandbox_only").status).toBe("retired");
   });
 
   it("a demo tenant's DO construction runs NO migration (byte-identical)", async () => {
@@ -457,6 +486,9 @@ describe("clock migration — atomicity (adversary finding 5)", () => {
     expect(rolledBack.idempotency.find((r) => r.key === "setup:wedged")!.created_at).toBe(
       before.idempotency.find((r) => r.key === "setup:wedged")!.created_at,
     );
+    // NEW-4: domain retirement rolled back too — the throw lands during the
+    // mailbox retirement, BEFORE the domain-retirement step ever runs.
+    expect(byId(rolledBack.domains, "dom_sandbox_only").status).toBe("active");
 
     // The retry re-enters a genuinely virgin state, so the delta applies ONCE.
     await disarmRetirementFault(tenantId);
@@ -466,6 +498,8 @@ describe("clock migration — atomicity (adversary finding 5)", () => {
     expect(after.profile.clock_mode).toBe("real");
     const delta = after.profile.clock_migration_delta_ms as number;
     expect(byId(after.sends, "ss_pending_a").send_at).toBe(byId(before.sends, "ss_pending_a").send_at + delta);
+    // The clean re-run applies the domain retirement exactly once too.
+    expect(byId(after.domains, "dom_sandbox_only").status).toBe("retired");
     // Single application, not double: the rebased row lands ~1h out, not ~800 days.
     expect(Math.abs(byId(after.sends, "ss_pending_a").send_at - (Date.now() + 3600_000))).toBeLessThan(60_000);
     expect(byId(after.mailboxes, "mb_sandbox").released_at).not.toBeNull();
