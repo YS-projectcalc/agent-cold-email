@@ -33,6 +33,52 @@ export function parseBoolQueryParam(raw: string | undefined): boolean | undefine
   return undefined;
 }
 
+/**
+ * Reads a request body as text, stopping at `maxBytes` of ACTUAL bytes read.
+ *
+ * A declared-`Content-Length` check — what every cap in this file and in the
+ * routes does — only stops an HONEST client: a chunked/streamed request carries
+ * no such header, so
+ * `Number(undefined)` is NaN, `Number.isFinite` is false, and the cap is skipped
+ * entirely — the full body is materialised anyway
+ * (audit-stripe-webhook-2026-08-06.md finding 7). Enforcing on bytes read is the
+ * only cap a client cannot opt out of; the stream is CANCELLED at the ceiling,
+ * so an over-cap body is never fully buffered.
+ *
+ * Decoding happens once over the joined bytes, never per chunk — a multi-byte
+ * UTF-8 character can straddle a chunk boundary, and the result has to be the
+ * exact string the sender's signature was computed over.
+ */
+export async function readTextBodyWithCap(
+  c: Context,
+  maxBytes: number,
+): Promise<{ ok: true; text: string } | { ok: false; response: Response }> {
+  const body = c.req.raw.body;
+  if (!body) return { ok: true, text: "" };
+
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done || !value) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      return { ok: false, response: c.json({ error: "request body too large" }, 413) };
+    }
+    chunks.push(value);
+  }
+
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { ok: true, text: new TextDecoder().decode(joined) };
+}
+
 export async function parseJsonBody<T>(
   c: Context,
   schema: ZodType<T>,

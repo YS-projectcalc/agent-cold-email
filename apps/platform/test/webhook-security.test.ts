@@ -1,4 +1,4 @@
-import { env } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { runInDurableObject } from "cloudflare:test";
 import { api, mintTenant, postWebhook, signStripeEvent, tenantStub } from "./helpers.js";
@@ -107,5 +107,54 @@ describe("POST /webhooks/stripe — signature is mandatory (panel-03 finding #1)
       body: oversized,
     });
     expect(res.status).toBe(413);
+  });
+
+  // audit-stripe-webhook-2026-08-06.md finding 7 — the cap above read the
+  // DECLARED content-length, so a chunked/streamed request (which has none)
+  // skipped it entirely: `Number(undefined)` is NaN, `Number.isFinite` is
+  // false, and the full body was materialised and HMAC'd anyway. The guard as
+  // written only stopped honest clients.
+  it("rejects an over-cap body that declares NO content-length (finding 7)", async () => {
+    const oversized = JSON.stringify({ id: "evt_x", type: "noop", pad: "x".repeat(9 * 1024) });
+    const bytes = new TextEncoder().encode(oversized);
+    const res = await SELF.fetch("https://example.com/webhooks/stripe", {
+      method: "POST",
+      headers: { "content-type": "application/json", "stripe-signature": await signStripeEvent(oversized) },
+      // A ReadableStream body is sent chunked — no content-length header for
+      // the route to read, exactly like the audit's streamed attack.
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (let i = 0; i < bytes.length; i += 1024) controller.enqueue(bytes.slice(i, i + 1024));
+          controller.close();
+        },
+      }),
+    });
+    expect(res.headers.get("content-length")).toBeNull();
+    expect(res.status).toBe(413);
+  });
+
+  it("still accepts a signed event delivered chunked and UNDER the cap (control)", async () => {
+    const { tenantId } = await mintTenant("Chunked Under Cap Co", "demo");
+    const body = JSON.stringify({
+      id: `evt_${crypto.randomUUID()}`,
+      type: "checkout.session.completed",
+      data: { object: { metadata: { tenantId, plan: "managed" } } },
+    });
+    const bytes = new TextEncoder().encode(body);
+    const res = await SELF.fetch("https://example.com/webhooks/stripe", {
+      method: "POST",
+      headers: { "content-type": "application/json", "stripe-signature": await signStripeEvent(body) },
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          // Split mid-payload: the cap must reassemble the exact bytes the
+          // signature was computed over, not just the first chunk.
+          controller.enqueue(bytes.slice(0, 20));
+          controller.enqueue(bytes.slice(20));
+          controller.close();
+        },
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect((await readProfile(tenantId)).plan).toBe("managed");
   });
 });

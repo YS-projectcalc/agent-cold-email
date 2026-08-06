@@ -1,4 +1,4 @@
-import { env, runInDurableObject } from "cloudflare:test";
+import { env, evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   api,
@@ -386,6 +386,113 @@ describe("finding 3 rescoped — ordering must protect a lane, never silence ano
     );
     expect(staleWon.body).toMatchObject({ applied: false, stale: true });
     expect((await readProfile(tenantId)).billing_state).toBe("disputed");
+  });
+});
+
+// wave2-integration-gate-2026-08-06.md N-1 + N-2 — the two residuals the
+// per-lane rescoping above left behind. Both are the SAME shape as everything
+// before them: a guard keyed more broadly than the state it protects.
+describe("N-1 — one dispute's lifecycle must not silence a DIFFERENT chargeback", () => {
+  it("freezes on a second, distinct dispute whose event predates the first dispute's win", async () => {
+    const { tenantId } = await mintTenant("Two Disputes Co", "managed");
+    await seedBenignSdnList();
+    await postWebhook(checkoutSessionCompleted({ tenantId, created: T0 }));
+
+    // Dispute A opens, then the tenant WINS it — which puts the dispute lane's
+    // mark at A's resolution and the tenant back to 'active'.
+    await postDisputeWebhook(disputeCreated({ chargeId: "ch_a", disputeId: "dp_a", created: T0 + 200 }), tenantId);
+    expect((await readProfile(tenantId)).billing_state).toBe("disputed");
+    await postDisputeWebhook(disputeClosed({ chargeId: "ch_a", disputeId: "dp_a", status: "won", created: T0 + 800 }), tenantId);
+    expect((await readProfile(tenantId)).billing_state).toBe("active");
+
+    // Dispute B is a REAL second chargeback on a DIFFERENT charge, emitted
+    // between A's open and A's win and delivered late. Nothing about A's
+    // outcome says anything about B, so B must still freeze.
+    const b = await postDisputeWebhook<WebhookResponse>(
+      disputeCreated({ chargeId: "ch_b", disputeId: "dp_b", created: T0 + 400 }),
+      tenantId,
+    );
+    expect(b.body).toMatchObject({ applied: true, frozen: true });
+    expect((await readProfile(tenantId)).billing_state).toBe("disputed");
+  });
+});
+
+describe("N-2 — an event REFUSED as stale must not count as a dunning strike", () => {
+  it("a recovered payer is not suspended on their first genuine failure after three refused stale ones", async () => {
+    const { tenantId } = await mintTenant("Refused Strikes Co", "managed");
+    await seedBenignSdnList();
+    await postWebhook(checkoutSessionCompleted({ tenantId, created: T0 }));
+
+    // A real failure, then a real recovery — which closes the dunning cycle.
+    await postWebhook(invoicePaymentFailed({ tenantId, customerId: stripeCustomerIdFor(tenantId), created: T0 + 100 }));
+    await postWebhook(subscriptionUpdated({ tenantId, status: "active", created: T0 + 200 }));
+    expect((await readProfile(tenantId)).billing_state).toBe("active");
+
+    // Stripe lands three DISTINCT failures it had been retrying from before the
+    // recovery. Each is correctly refused and changes no state...
+    for (let i = 0; i < 3; i++) {
+      const stale = await postWebhook<WebhookResponse>(
+        invoicePaymentFailed({ tenantId, customerId: stripeCustomerIdFor(tenantId), created: T0 + 100 }),
+      );
+      expect(stale.body).toMatchObject({ applied: false, stale: true });
+    }
+    expect((await readProfile(tenantId)).billing_state).toBe("active");
+
+    // ...so a genuinely NEW failure is strike ONE of a new cycle, not strike
+    // four. The claim row exists for all four (dedup must stay claim-first);
+    // only the APPLIED one is a strike.
+    const fresh = await postWebhook<WebhookResponse>(
+      invoicePaymentFailed({ tenantId, customerId: stripeCustomerIdFor(tenantId), created: T0 + 300 }),
+    );
+    expect(fresh.body.applied).toBe(true);
+
+    const summary = await tenantStub(tenantId).opsSummary(Date.now());
+    expect(summary.billingState).toBe("past_due");
+    expect(summary.billingFailureCount).toBe(1);
+  });
+
+  // The gate's N-3 standing hazard: `CREATE TABLE IF NOT EXISTS` never alters
+  // an existing table, so a new column is unreachable on every DO that already
+  // exists unless the constructor back-fills it. Every test DO is created fresh
+  // from the current schema, which is exactly why that class is invisible here
+  // — so this test manufactures the pre-column shape and reconstructs for real.
+  it("back-fills `applied` on a DO that predates the column, without reclassifying its history", async () => {
+    const { tenantId } = await mintTenant("Pre-Column DO Co", "managed");
+    await seedBenignSdnList();
+    await postWebhook(checkoutSessionCompleted({ tenantId, created: T0 }));
+    await postWebhook(invoicePaymentFailed({ tenantId, customerId: stripeCustomerIdFor(tenantId), created: T0 + 100 }));
+
+    // Rewind this DO to the table it had before this change shipped, rows and
+    // all. (Rebuilt rather than `ALTER TABLE ... DROP COLUMN`: SQLite rewrites
+    // the stored CREATE TABLE text on a drop and chokes on the comments in it.)
+    await runInDurableObject(tenantStub(tenantId), async (_i, state) => {
+      const sql = state.storage.sql;
+      const rows = sql
+        .exec<{ event_id: string; type: string; ts: number }>(`SELECT event_id, type, ts FROM webhook_events`)
+        .toArray();
+      sql.exec(`DROP TABLE webhook_events`);
+      sql.exec(`CREATE TABLE webhook_events (event_id TEXT PRIMARY KEY, type TEXT NOT NULL, ts INTEGER NOT NULL)`);
+      for (const row of rows) {
+        sql.exec(`INSERT INTO webhook_events (event_id, type, ts) VALUES (?, ?, ?)`, row.event_id, row.type, row.ts);
+      }
+    });
+    const dropped = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
+      state.storage.sql.exec<{ name: string }>(`PRAGMA table_info(webhook_events)`).toArray(),
+    );
+    expect(dropped.some((c) => c.name === "applied")).toBe(false);
+
+    await evictDurableObject(tenantStub(tenantId));
+    // Any RPC re-instantiates the DO, running the real constructor.
+    const summary = await tenantStub(tenantId).opsSummary(Date.now());
+
+    // The column is back AND the pre-existing failure still counts: DEFAULT 1
+    // means "an event already recorded was applied", so no tenant's dunning
+    // cycle silently resets at deploy.
+    expect(summary.billingFailureCount).toBe(1);
+    const columns = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
+      state.storage.sql.exec<{ name: string }>(`PRAGMA table_info(webhook_events)`).toArray(),
+    );
+    expect(columns.some((c) => c.name === "applied")).toBe(true);
   });
 });
 

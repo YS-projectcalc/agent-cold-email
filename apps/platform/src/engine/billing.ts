@@ -21,13 +21,14 @@ import {
 import {
   createStripeCheckoutSession,
   ensureStripePrices,
+  getDeclineCode,
   getSubscription,
   setSubscriptionItemQuantity,
   STRIPE_PRICES,
   stripeMode,
   type StripePriceMap,
 } from "../billing/stripe-client.js";
-import { HANDLED_STRIPE_EVENT_TYPES, type StripeEventInput } from "../billing/stripe-webhook.js";
+import { HANDLED_STRIPE_EVENT_TYPES, readIdRef, type StripeEventInput } from "../billing/stripe-webhook.js";
 import type { Env } from "../env.js";
 import { newId } from "../schema.js";
 import { screenTenant } from "../ofac/screening.js";
@@ -315,24 +316,23 @@ function readStripeBillingName(obj: Record<string, unknown>): string | null {
 }
 
 /**
- * Reads the charge decline/failure code from an `invoice.payment_failed` event
- * object (A5). Stripe exposes it in a few shapes depending on expansion; we
- * check the documented locations and fall back to null (unknown -> transient,
- * the safe default). The exact real-Stripe path is verified at activation.
+ * The charge decline code behind a failed invoice (A5), resolved by ASKING
+ * STRIPE. The old parser read it off the event object and was dead on every
+ * real delivery: an unexpanded `invoice.payment_failed` carries `charge` and
+ * `payment_intent` as bare id STRINGS and no failure detail anywhere, so it
+ * always returned null, every real decline graded transient, and the
+ * permanent-decline fast path (lost/stolen/fraudulent -> immediate suspend)
+ * had never once executed against a real event.
+ *
+ * Unknown stays TRANSIENT in every failure direction — no key armed, no ids on
+ * the invoice, Stripe slow, Stripe erroring (getDeclineCode never throws). The
+ * four-strike grace cycle is the safe default; suspending a paying customer off
+ * a failed lookup would be worse than the bug.
  */
-function readDeclineCode(obj: Record<string, unknown>): string | null {
-  const asString = (v: unknown): string | null => (typeof v === "string" && v.length > 0 ? v : null);
-  const nested = (v: unknown, key: string): unknown =>
-    v && typeof v === "object" ? (v as Record<string, unknown>)[key] : undefined;
-
-  return (
-    asString(obj.decline_code) ??
-    asString(obj.failure_code) ??
-    asString(nested(obj.last_payment_error, "decline_code")) ??
-    asString(nested(obj.charge, "failure_code")) ??
-    asString(nested(nested(obj.payment_intent, "last_payment_error"), "decline_code")) ??
-    null
-  );
+async function resolveDeclineCode(ctx: TenantContext, obj: Record<string, unknown>): Promise<string | null> {
+  const secretKey = ctx.env.STRIPE_SECRET_KEY;
+  if (!secretKey) return null; // simulated / unarmed tenant — no Stripe to ask
+  return getDeclineCode(secretKey, readIdRef(obj.charge), readIdRef(obj.payment_intent));
 }
 
 function mapStripeSubscriptionStatus(status: unknown): "active" | "past_due" | "canceled" | null {
@@ -431,6 +431,17 @@ function intendedBillingState(event: StripeEventInput): string | null {
  * watermark. Every real Stripe event carries `created`; only synthetic fixtures
  * lack one, and an unordered event must not poison the ordering of real ones.
  *
+ * `charge.dispute.created` is EXEMPT from the whole rule (gate residual N-1).
+ * Even a per-lane mark is broader than the state it protects: the dispute lane
+ * carries every dispute OBJECT, so one dispute's WIN moved the mark past a
+ * DIFFERENT, genuine chargeback emitted earlier and condition (2) then read
+ * 'disputed' vs the 'active' the win had restored as a conflict — the second
+ * chargeback was refused and that tenant never froze. A freeze is never a
+ * regression: applying it can only lose time (until its own dispute.closed
+ * lifts it), while refusing it drops the D5 control outright. Ordering still
+ * governs `charge.dispute.closed`, which is the direction that can actually
+ * regress — a stale WON must not lift a newer freeze.
+ *
  * Failure direction: a wrong APPLY here can only be an event whose state write
  * agrees with the current state — i.e. it changes no state at all, and only its
  * idempotent side effects run. A wrong REFUSE silently drops a control. The
@@ -438,6 +449,7 @@ function intendedBillingState(event: StripeEventInput): string | null {
  */
 function isStaleBillingEvent(ctx: TenantContext, event: StripeEventInput): boolean {
   if (event.created === undefined) return false;
+  if (event.type === "charge.dispute.created") return false;
   const lane = stripeEventLane(event.type);
   if (!lane) return false;
 
@@ -554,6 +566,13 @@ export async function applyStripeWebhookEvent(ctx: TenantContext, event: StripeE
   }
 
   if (isStaleBillingEvent(ctx, event)) {
+    // The claim row stays (it is the replay guard, and a redelivery of this
+    // same event must keep short-circuiting) but is marked NOT applied, so a
+    // refused failure is not a dunning strike — gate residual N-2. Marking
+    // rather than reordering is deliberate: the claim has to precede the
+    // effects on the checkout lane, where skipping the OFAC screen is the
+    // fail-open that ordering was fixed to close.
+    ctx.sql.exec(`UPDATE webhook_events SET applied = 0 WHERE event_id = ?`, event.id);
     return { applied: false, duplicate: false, stale: true };
   }
   recordBillingEventOrder(ctx, event, now);
@@ -681,7 +700,9 @@ async function applyStripeEventEffects(ctx: TenantContext, event: StripeEventInp
       // grade it (permanent -> suspend immediately; transient -> count-based
       // grace). Stored even when the freeze guard below no-ops the state
       // change, so the LATEST code always reflects the most recent failure.
-      const declineCode = readDeclineCode(obj);
+      // The lookup is FIRST, before any durable write: it is the one awaited
+      // call in this branch, so nothing of this event has landed if it dies.
+      const declineCode = await resolveDeclineCode(ctx, obj);
       ctx.sql.exec(`UPDATE tenant_profile SET last_decline_code = ? WHERE id = ?`, declineCode, ctx.tenantId);
       // STICKY: a failed invoice must not overwrite a dispute/cancel freeze.
       ctx.sql.exec(

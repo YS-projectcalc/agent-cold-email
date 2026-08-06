@@ -284,6 +284,79 @@ export async function getChargeCustomerId(secretKey: string, chargeId: string): 
 }
 
 /**
+ * How long the decline-code lookup below may take. It runs INSIDE the webhook's
+ * own response, so it is bounded far below Stripe's delivery timeout: a slow
+ * Stripe must cost us an unknown decline code (which grades transient), never a
+ * webhook that times out and gets redelivered for three days.
+ */
+export const STRIPE_DECLINE_LOOKUP_TIMEOUT_MS = 5_000;
+
+/** One bounded GET, or `null` on ANY failure — see getDeclineCode's grading. */
+async function readStripeObject(secretKey: string, path: string): Promise<Record<string, unknown> | null> {
+  try {
+    const res = await fetch(`${STRIPE_API_BASE}/${path}`, {
+      method: "GET",
+      headers: stripeHeaders(secretKey),
+      signal: AbortSignal.timeout(STRIPE_DECLINE_LOOKUP_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      console.error(`stripe decline-code lookup failed for ${path}: ${res.status} ${await res.text()}`);
+      return null;
+    }
+    return (await res.json()) as Record<string, unknown>;
+  } catch (err) {
+    console.error(`stripe decline-code lookup errored for ${path} — the decline grades transient`, err);
+    return null;
+  }
+}
+
+function readNestedString(container: unknown, key: string): string | null {
+  if (!container || typeof container !== "object") return null;
+  const value = (container as Record<string, unknown>)[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/**
+ * The charge decline code behind a failed invoice (A5) — the second read the
+ * permanent-decline fast path needs. On a real `invoice.payment_failed` the
+ * invoice's `charge` and `payment_intent` are bare id STRINGS, so the payload
+ * itself carries no failure detail at all; without this call every real decline
+ * graded transient and `lost_card`/`stolen_card`/`fraudulent` never suspended.
+ *
+ * ONE round trip: the Charge when the invoice has one (`outcome.reason` is where
+ * Stripe puts the issuer's decline code, `failure_code` the generic card error),
+ * otherwise the PaymentIntent (`last_payment_error.decline_code`, the canonical
+ * field, then its `code`). An invoice that failed before any Charge existed has
+ * `charge: null` and only the intent.
+ *
+ * The error grading is the OPPOSITE of getChargeCustomerId's above, deliberately.
+ * There, losing the read loses the routing, so a transient failure must throw and
+ * be redelivered. Here the read only REFINES a decision that already has a safe
+ * default: unknown means transient, which keeps the four-strike grace cycle. So
+ * this never throws and never blocks the failure from applying — suspending a
+ * paying customer because Stripe 503'd would be strictly worse than the bug this
+ * closes.
+ */
+export async function getDeclineCode(
+  secretKey: string,
+  chargeId: string | null,
+  paymentIntentId: string | null,
+): Promise<string | null> {
+  if (chargeId) {
+    const charge = await readStripeObject(secretKey, `charges/${encodeURIComponent(chargeId)}`);
+    return readNestedString(charge?.outcome, "reason") ?? (charge ? readNestedString(charge, "failure_code") : null);
+  }
+  if (paymentIntentId) {
+    const intent = await readStripeObject(secretKey, `payment_intents/${encodeURIComponent(paymentIntentId)}`);
+    return (
+      readNestedString(intent?.last_payment_error, "decline_code") ??
+      readNestedString(intent?.last_payment_error, "code")
+    );
+  }
+  return null;
+}
+
+/**
  * Sets a licensed subscription item's quantity to an ABSOLUTE value (design
  * §8.2 — set-to-N, never increment, so a missed/duplicated push self-heals on
  * the next sync). `prorationBehavior` is the founder-ruled direction: increases
