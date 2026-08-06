@@ -179,10 +179,18 @@ export async function registerByoDomain(ctx: TenantContext, input: RegisterByoDo
   const scanJson = JSON.stringify({ scan, preflight, dnsModeRec });
   const abuseJson = JSON.stringify(abuse);
   const domainId = newId("dom");
+  // connection_type='connected' (ROADMAP.md:32, teardown founder ruling
+  // 2026-08-06) — a BYO domain is, by construction, registered elsewhere and
+  // pointed at us; that fact is known with certainty at THIS boundary. Leaving
+  // it NULL left every legitimate BYO domain riding lifecycle.ts's 'unknown'
+  // backstop (safe, but it fires a founder alert on a case that was never
+  // actually ambiguous). The backstop itself stays — it's still correct for a
+  // genuinely unclassified legacy row — this just stops manufacturing false
+  // positives against it.
   ctx.sql.exec(
     `INSERT INTO domains
-       (id, tenant_id, domain, status, purchased_at, source, is_primary, dns_mode, byo_status, scan_json, abuse_gate_json, reputation_branch, breaker_tier, first_send_eligible_at)
-     VALUES (?, ?, ?, 'active', ?, 'byo', ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, tenant_id, domain, status, purchased_at, connection_type, source, is_primary, dns_mode, byo_status, scan_json, abuse_gate_json, reputation_branch, breaker_tier, first_send_eligible_at)
+     VALUES (?, ?, ?, 'active', ?, 'connected', 'byo', ?, ?, ?, ?, ?, ?, ?, ?)`,
     domainId,
     ctx.tenantId,
     domain,
