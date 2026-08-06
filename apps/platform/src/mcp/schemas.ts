@@ -27,6 +27,12 @@ export const ThreadIdInput = z.object({
   threadId: z.string().min(1).describe("The thread id, e.g. from inbox() or campaign events."),
 });
 
+// msgchannel increment 3 — ack_message's id-in-URL arg (mirrors ThreadIdInput's
+// shape for the same id-becomes-an-argument reason: MCP tools have no URL).
+export const MessageIdInput = z.object({
+  messageId: z.string().min(1).describe("The message id, from list_messages or infrastructure_status's messages[]."),
+});
+
 // B2 (CLASS B) — optional request-idempotency key for MUTATING tools. An agent
 // that retries a dropped call SHOULD resend the same key: the first call runs,
 // a replay returns the recorded result without re-executing (no second

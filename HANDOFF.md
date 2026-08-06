@@ -1,6 +1,6 @@
 # ColdStart / coldrig — Handoff
 
-Agent-operated cold-email platform. **LIVE + has its FIRST PAYING CUSTOMER (Mordy, 2026-07-28); registrar ARMED, awaiting his first provisioning.** Site https://coldrig.dev · API+dashboard https://agent-cold-email-api.yaakovscher.workers.dev (`/app`) · branded API https://api.coldrig.dev · npm `agent-cold-email@0.2.1` · MCP Registry 0.2.2 (25 tools) · repo https://github.com/YS-projectcalc/agent-cold-email · Code: `~/dev/coldstart/`
+Agent-operated cold-email platform. **LIVE + has its FIRST PAYING CUSTOMER (Mordy, 2026-07-28); registrar ARMED, awaiting his first provisioning.** Site https://coldrig.dev · API+dashboard https://agent-cold-email-api.yaakovscher.workers.dev (`/app`) · branded API https://api.coldrig.dev · npm `agent-cold-email@0.2.1` · MCP Registry 0.2.2 (27 tools) · repo https://github.com/YS-projectcalc/agent-cold-email · Code: `~/dev/coldstart/`
 
 > **You are resuming coldrig with zero prior context. Re-orient from `## Resume` below, then VERIFY its preconditions still hold** (armed secret, latest deploy, whether Mordy has run setup yet). If they hold and the step is non-destructive, proceed — don't ask open-endedly what to work on. If anything CHANGED, surface exactly what and ask. **STOP and confirm before any destructive/irreversible/founder-owned step** — EXCEPT where the 2026-07-22 autonomy grant (merge/push/deploy/arm to customer-ready; browser-consent clicks excepted) covers it.
 

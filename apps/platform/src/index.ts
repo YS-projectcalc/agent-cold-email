@@ -21,6 +21,7 @@ import { adminSupportRoute } from "./routes/admin-support.js";
 import { adminOpsRoute } from "./routes/admin-ops.js";
 import { adminScreeningRoute } from "./routes/admin-screening.js";
 import { adminSdnIngestRoute } from "./routes/admin-sdn-ingest.js";
+import { adminMessagesRoute } from "./routes/admin-messages.js";
 import { statusRoute } from "./routes/status.js";
 import { dashboardSessionRoute } from "./routes/dashboard-session.js";
 import { loginRoute } from "./routes/login.js";
@@ -30,6 +31,7 @@ import { activityRoute } from "./routes/activity.js";
 import { webhookSubscriptionsRoute } from "./routes/webhook-subscriptions.js";
 import { byoDomainsRoute } from "./routes/byo-domains.js";
 import { leadsRoute } from "./routes/leads.js";
+import { messagesRoute } from "./routes/messages.js";
 import { runScheduledOpsSweep } from "./scheduled.js";
 import { handleInboundSupportEmail } from "./admin/support-inbound.js";
 
@@ -82,6 +84,7 @@ admin.route("/", adminSupportRoute);
 admin.route("/", adminOpsRoute);
 admin.route("/", adminScreeningRoute);
 admin.route("/", adminSdnIngestRoute);
+admin.route("/", adminMessagesRoute);
 app.route("/", admin);
 
 // Every literal top-level path this API exposes behind requireAuth (bearer OR
@@ -119,6 +122,8 @@ const AUTHED_PATH_PATTERNS = [
   "/byo-domains/*",
   "/leads",
   "/leads/*",
+  "/messages",
+  "/messages/*",
 ];
 
 const authed = new Hono<{ Bindings: Env; Variables: AuthedVariables }>();
@@ -140,6 +145,7 @@ authed.route("/", activityRoute);
 authed.route("/", webhookSubscriptionsRoute);
 authed.route("/", byoDomainsRoute);
 authed.route("/", leadsRoute);
+authed.route("/", messagesRoute);
 app.route("/", authed);
 
 // SPEC.md §19.1 (M1 serving spike) — Hono's default 404 is `text/plain`

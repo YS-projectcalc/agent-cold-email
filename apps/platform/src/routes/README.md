@@ -43,6 +43,12 @@ through the DO.
   thin layer, increments #1-#3). Authed (bearer OR cookie). Body-keyed on
   `email` (not URL-keyed) for the two mutating routes. Mirrors the MCP
   `suppress_lead`/`update_lead`/`list_leads` tools exactly (parity law).
+- `messages.ts` — `GET /messages` (cursor-paginated, unacked-first),
+  `POST /messages/:id/ack` (idempotent) — msgchannel increment 3. Authed
+  (bearer OR cookie). `:id`-keyed (not body-keyed) for the ack route, unlike
+  `leads.ts`'s email-keyed mutations — a message id has no reason to live in
+  the body. Mirrors the MCP `list_messages`/`ack_message` tools exactly
+  (parity law).
 - `checkout.ts` — `POST /checkout` (B1, authed): demo/free -> paid upgrade.
   Real Stripe TEST-mode Checkout Session if `env.STRIPE_SECRET_KEY` is set,
   else a simulated session. `GET /checkout/simulate` (UNAUTHENTICATED — the
@@ -69,6 +75,12 @@ through the DO.
   `../require-admin-auth.ts` (a SEPARATE `ADMIN_TOKEN` secret bearer, never
   a tenant token) — mounted as their own Hono group in `index.ts`, not
   behind `requireAuth`. See `../admin/README.md`.
+- `admin-messages.ts` — `POST /admin/tenants/:id/messages` (msgchannel
+  increment 2, the operator route): drops a structured, enumerated-`kind`
+  message into one tenant's own message store (`../engine/tenant-messages.ts`).
+  Same `ADMIN_TOKEN` gate + `getTenantIndexById` 404 pattern as
+  `admin-ops.ts`'s `/admin/tenants/:id/terminate`. Rejects (400) for a
+  lifecycle-frozen tenant unless the message kind is explicitly exempted.
 
 Most routes are mounted behind `../require-auth.ts` (`requireAuth`
 middleware — bearer token OR, since §19.1, a dashboard cookie session), which

@@ -1,16 +1,19 @@
-// The 25 MCP tools (tools 13-15 added by SPEC.md §19.5, tools 16-17 by the
+// The 27 MCP tools (tools 13-15 added by SPEC.md §19.5, tools 16-17 by the
 // §19.0 parity-gap follow-up, tools 18-19 by the ROADMAP.md WIN-THE-COMPARISON
 // (d) webhooks lane, tools 20-21 by SPEC.md §20's BYO domain intake, tools
 // 22-24 by SPEC.md §22's warm-lead thin layer (increments #1-#3, founder-gated
-// 2026-07-21), remove_mailboxes by the quantity-billing migration (design §11)
-// — AGENTS.md's public tool table is a canonical doc folded by the
-// orchestrator, not updated here).
+// 2026-07-21), remove_mailboxes by the quantity-billing migration (design §11),
+// tools 26-27 by the msgchannel system->agent message channel's increment 3
+// (list_messages/ack_message — increment 1 was the emit+read wiring behind
+// infrastructure_status's messages[] field, increment 2 the admin-only
+// operator route with no MCP tool of its own) — AGENTS.md's public tool table
+// is a canonical doc folded by the orchestrator, not updated here).
 // Each tool dispatches to the SAME TenantDO method the equivalent HTTP route
 // calls (src/routes/*.ts) — the MCP surface is a second transport onto the
 // exact same facade, never a parallel implementation (CLAUDE.md rule c).
 
 import type { ZodType } from "zod";
-import { ActivityQueryInput, InboxQueryInput, ListLeadsQueryInput, RemoveMailboxesInput, SuppressLeadInput, UpdateLeadInput } from "@coldstart/shared";
+import { ActivityQueryInput, InboxQueryInput, ListLeadsQueryInput, ListMessagesQueryInput, RemoveMailboxesInput, SuppressLeadInput, UpdateLeadInput } from "@coldstart/shared";
 import type { TenantDO } from "../tenant-do.js";
 import {
   CampaignIdInput,
@@ -23,6 +26,7 @@ import {
   GetWebhooksInput,
   LabelThreadInput,
   LaunchCampaignToolInput,
+  MessageIdInput,
   SetupInfrastructureToolInput,
   ThreadIdInput,
   ThreadMarkInput,
@@ -332,5 +336,27 @@ export const MCP_TOOLS: McpTool<any>[] = [
     ListLeadsQueryInput,
     { title: "List Leads", readOnlyHint: true },
     (stub, args) => stub.listLeads(args),
+  ),
+  // --- msgchannel increment 3 — tools 26-27. The full paginated surface onto
+  // the system->agent message channel infrastructure_status's messages[]
+  // field already previews (capped at 5, unread-first) — increment 1's read
+  // path and increment 2's admin-only operator route write into the SAME
+  // tenant_messages store these read/ack. ---
+  tool(
+    "list_messages",
+    "List this tenant's system + operator messages (a retryable setup step, a credential going live, an operator notice), cursor-paginated. Unacked messages sort first (newest first within that group), then acked ones (also newest first). Returns { messages[], nextCursor }; each message: id, kind, severity, body, actionHint (structured — e.g. which tool + idempotencyKey to retry with), source ('system'|'operator'), createdAt, readAt (null until acked). Use ack_message to acknowledge one by id so it stops resurfacing. infrastructure_status also inlines the newest 5 unacked messages for a quick glance — this is the full paginated surface.",
+    ListMessagesQueryInput,
+    { title: "List Messages", readOnlyHint: true },
+    (stub, args) => stub.listMessages(args),
+  ),
+  tool(
+    "ack_message",
+    "Acknowledge a message by id (from list_messages or infrastructure_status's messages[]) — sets it read so it stops surfacing as unacked. Idempotent: acking an already-acked id returns success with no second effect, never an error. 404 if the id doesn't exist for this tenant.",
+    MessageIdInput,
+    // Sets a read flag only — the message row itself is never destroyed, and
+    // re-acking is a safe no-op (mirrors mark/update_lead's honesty bar:
+    // nothing operational is destroyed, freely re-callable).
+    { title: "Acknowledge Message", destructiveHint: false },
+    (stub, args) => stub.ackMessage(args.messageId),
   ),
 ];
