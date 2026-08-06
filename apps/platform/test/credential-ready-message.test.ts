@@ -5,6 +5,7 @@ import {
   maybePushProvisionedMailbox,
   pushRecordedMailbox,
   reconcileMailboxCredentialPushes,
+  recordProvisionedMailboxForPush,
 } from "../src/engine/mailbox-credential-push.js";
 import { listSurfacedTenantMessages } from "../src/engine/tenant-messages.js";
 import { signup, withTenantContext } from "./helpers.js";
@@ -93,5 +94,40 @@ describe("credential_ready tenant message — fires on the pending->pushed trans
     for (const marker of ["imap.gmail.com", "imap-pass", "1//refresh", "csecret"]) {
       expect(body).not.toContain(marker);
     }
+  });
+
+  it("F2 (gate 2026-08-05) — a SUSPENDED tenant's push completes but never claims 'sending is now enabled'", async () => {
+    const { tenantId } = await signup("Cred Suspended Co", "founder@credsuspended.test");
+    const mailbox = { email: "seller1@credsuspended.test", domain: "credsuspended.test" };
+    await withTenantContext(tenantId, (ctx) =>
+      ctx.sql.exec(`UPDATE tenant_profile SET status = 'suspended' WHERE id = ?`, tenantId),
+    );
+
+    const outcome = await withTenantContext(tenantId, (ctx) => pushRecordedMailbox(ctx, mailbox, WORKING));
+    // The credential bookkeeping transition itself is unaffected by lifecycle
+    // state (dovetails with the credstore audit's own F2, a separate class) —
+    // only the customer-facing message is gated.
+    expect(outcome.pushed).toBe(true);
+
+    const messages = await withTenantContext(tenantId, (ctx) => listSurfacedTenantMessages(ctx));
+    expect(messages).toEqual([]);
+  });
+
+  it("F2 — a CANCELED tenant's reconcile sweep does NOT tell a frozen tenant its sending is enabled", async () => {
+    const { tenantId } = await signup("Cred Canceled Co", "founder@credcanceled.test");
+    const email = "seller1@credcanceled.test";
+    await withTenantContext(tenantId, (ctx) => recordProvisionedMailboxForPush(ctx, email));
+    await withTenantContext(tenantId, (ctx) =>
+      ctx.sql.exec(`UPDATE tenant_profile SET billing_state = 'canceled' WHERE id = ?`, tenantId),
+    );
+
+    // Mirrors the gate's exact scenario: a mailbox left mid-suspension (its
+    // credential push never released) gets swept by the reconcile sweep while
+    // the tenant is frozen.
+    const summary = await withTenantContext(tenantId, (ctx) => reconcileMailboxCredentialPushes(ctx, WORKING));
+    expect(summary.pushed).toBe(1);
+
+    const messages = await withTenantContext(tenantId, (ctx) => listSurfacedTenantMessages(ctx));
+    expect(messages).toEqual([]);
   });
 });

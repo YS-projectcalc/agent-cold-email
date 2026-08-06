@@ -1,6 +1,7 @@
 import type { Env } from "../env.js";
 import type { TenantContext } from "../tenant-context.js";
 import type { EngineClientConfig } from "../vendors/real/email-port.js";
+import { isLifecycleFrozen, readLifecycleState } from "./billing-state.js";
 import { EngineMailboxClient, type EnginePushCredentials } from "./engine-mailbox-client.js";
 import { type InboxKitMailboxCredentials, RealMailboxPort } from "../vendors/real/mailbox-port.js";
 import { ManualOAuthMinter, type GmailGrant, type MailboxRef, type OAuthMinter } from "../vendors/real/oauth-mint.js";
@@ -132,13 +133,26 @@ export async function pushRecordedMailbox(ctx: TenantContext, mailbox: MailboxRe
     // never a re-fire on an already-pushed mailbox. Composed prose only, never
     // `credentials`/vendor detail (GUARDRAIL B — the assembled credentials
     // carry the IMAP host/user/pass and the gmail_api refresh token).
-    emitTenantMessage(ctx, {
-      kind: "credential_ready",
-      severity: "action_required",
-      body: `Your mailbox ${mailbox.email} is authorized — sending is now enabled.`,
-      actionHint: { tool: "infrastructure_status" },
-      dedupKey: mailbox.email,
-    });
+    //
+    // F2 (gate 2026-08-05) — lifecycle gate. The push/store transition above
+    // always completes (credential bookkeeping is independent of billing
+    // state, and a suspended tenant's mailbox is never released, so the
+    // reconcile sweep can legitimately still reach a 'pending' row for one).
+    // Only the CUSTOMER-FACING "sending is now enabled" claim is suppressed:
+    // a suspended/disputed/canceling/canceled tenant cannot send regardless of
+    // credential state, so telling it otherwise is false. Reuses the same
+    // predicate as assertNotLifecycleFrozen (CLAUDE.md rule c) rather than a
+    // parallel status check.
+    const { status, billingState } = readLifecycleState(ctx);
+    if (!isLifecycleFrozen(status, billingState)) {
+      emitTenantMessage(ctx, {
+        kind: "credential_ready",
+        severity: "action_required",
+        body: `Your mailbox ${mailbox.email} is authorized — sending is now enabled.`,
+        actionHint: { tool: "infrastructure_status" },
+        dedupKey: mailbox.email,
+      });
+    }
     return { email: mailbox.email, pushed: true };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

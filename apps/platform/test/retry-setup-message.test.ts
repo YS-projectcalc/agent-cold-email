@@ -33,6 +33,41 @@ function stuckDnsDomainPort(setDnsMessage: string): DomainPort {
   };
 }
 
+/**
+ * F1 (gate 2026-08-05) — TWO stable candidates so a same-idempotency-key
+ * RETRY, which excludes the first-attempt domain from `usable` (it's already
+ * owned), still has a SECOND name to satisfy `usable.length >= input.domains`
+ * and reach the wire-A catch on the RESUME path — instead of the original
+ * single-candidate fixture's `usable=[]` short-circuiting on ValidationError
+ * BEFORE wire A is ever exercised (the gate's traced false-green cause).
+ * setDns ALWAYS fails (retryable) — exhausted retry on every call.
+ */
+function multiCandidateStuckDnsDomainPort(): { port: DomainPort; buyCalls: string[] } {
+  const buyCalls: string[] = [];
+  const port: DomainPort = {
+    async searchLookalikes(): Promise<LookalikeCandidate[]> {
+      return [
+        { domain: "resumelook1.com", available: true },
+        { domain: "resumelook2.com", available: true },
+      ];
+    },
+    async listOwnedDomains(): Promise<OwnedDomain[]> {
+      return [];
+    },
+    async buy(domain: string): Promise<PurchasedDomain> {
+      buyCalls.push(domain);
+      return { domain, purchasedAt: Date.now(), registrar: "test-registrar" };
+    },
+    async setDns(): Promise<DnsRecordSet> {
+      throw new VendorError("inboxkit domains/nameservers failed: domain not found", true);
+    },
+    async release(): Promise<ReleaseResult> {
+      return { released: true, releasedAt: Date.now() };
+    },
+  };
+  return { port, buyCalls };
+}
+
 const SETUP_INPUT = {
   brand: "Retry Setup Co",
   primaryDomain: "retrysetup.com",
@@ -120,5 +155,46 @@ describe("retry_setup tenant message — fires when setDns retry is exhausted", 
     for (const marker of ["http://", "https://", "10.4.2.9", "ACTIVATION.md", "ENGINE_BASE_URL", "sk_live_abcdef0123456789ZZZZ", "internal.inboxkit.example"]) {
       expect(stored).not.toContain(marker);
     }
+  });
+
+  it("F1 (gate 2026-08-05) — a multi-candidate RESUME names the domain the resume branch actually touches, never a fresh unrelated candidate", async () => {
+    const { tenantId } = await signup("Resume Multi Co", "founder@resumemulti.test");
+    const idempotencyKey = "resume-multi-key";
+    const { port, buyCalls } = multiCandidateStuckDnsDomainPort();
+    const run = () =>
+      withTenantContext(tenantId, (base) =>
+        runSetupInfrastructure(
+          { ...base, adapters: { ...base.adapters, domain: port } },
+          SETUP_INPUT,
+          undefined,
+          idempotencyKey,
+        ).catch((e: unknown) => e),
+      );
+
+    // Call 1: buys resumelook1.com; DNS is exhausted -> retry_setup fires
+    // naming resumelook1.com (the only candidate this call ever touches).
+    const err1 = await run();
+    expect(err1).toBeInstanceOf(VendorError);
+
+    // Call 2 — SAME idempotency key, a genuine retry. The ordinal-0 intent is
+    // already 'committed' to resumelook1.com (owned), so THIS call's `usable`
+    // excludes it and offers resumelook2.com instead — a fresh candidate the
+    // resume branch (which re-drives DNS on the committed intent's domain)
+    // never touches. DNS is still exhausted.
+    const err2 = await run();
+    expect(err2).toBeInstanceOf(VendorError);
+
+    // Only ONE real buy ever happened — the resume branch re-drives DNS on the
+    // already-owned domain rather than re-buying (H1/H2, unaffected by this fix).
+    expect(buyCalls).toEqual(["resumelook1.com"]);
+
+    const messages = await withTenantContext(tenantId, (ctx) => listSurfacedTenantMessages(ctx));
+    // GUARDRAIL A must collapse across the stuck domain: exactly ONE row, which
+    // only holds if both calls' dedupKey named the SAME (real) domain.
+    expect(messages).toHaveLength(1);
+    expect(messages[0]!.body).toContain("resumelook1.com");
+    // The phantom domain — genuinely never bought on either call — must never
+    // appear in a customer-facing message.
+    expect(messages[0]!.body).not.toContain("resumelook2.com");
   });
 });

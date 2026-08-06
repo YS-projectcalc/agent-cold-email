@@ -415,7 +415,20 @@ export async function setDnsWithRetry(
  */
 export async function provisionDomainWithMailboxes(
   ctx: TenantContext,
-  opts: { domain: string; domainIndex: number; personaSlug: string; inboxesEach: number; intentKey: string },
+  opts: {
+    domain: string;
+    domainIndex: number;
+    personaSlug: string;
+    inboxesEach: number;
+    intentKey: string;
+    // N2 (gate 2026-08-05, wire-A F1 fix) — fired the instant the domain THIS
+    // call is actually going to operate on is known (the resume branch's
+    // `existing.domain`, or the buy/adopt branch's `purchased.domain`), before
+    // any operation past that point can throw. Lets the caller's wire-A
+    // catch name the REAL domain instead of `opts.domain` — which, on a
+    // resume, is a fresh unrelated candidate this call never touches.
+    onDomainResolved?: (domain: string) => void;
+  },
 ): Promise<{ domainId: string; domain: string; mailboxEmails: string[] }> {
   const domainKey = `${opts.domain}#${opts.domainIndex}`;
 
@@ -468,6 +481,10 @@ export async function provisionDomainWithMailboxes(
     // it propagate — deliberately BEFORE any mailbox spend. A domain with no
     // working nameservers must never carry paid mailboxes; the domain row and
     // the intent both survive, so the next retry resumes from here.
+    // N2 — this call operates on `existing.domain` (the intent-resolved name),
+    // NEVER on `opts.domain` (this call's fresh candidate) — report it before
+    // the one operation below that can throw retryably.
+    opts.onDomainResolved?.(existing.domain);
     if (existing.dns_status !== "ready") {
       await setDnsWithRetry(ctx, existing.domain, `dns:${ctx.tenantId}:${existing.domain}#${opts.domainIndex}`, existing.id);
     }
@@ -528,6 +545,11 @@ export async function provisionDomainWithMailboxes(
       throw err;
     }
   }
+
+  // N2 — `purchased.domain` is now the resource genuinely acquired this call
+  // (bought or adopted); report it before setDnsWithRetry below, the next
+  // operation that can throw retryably.
+  opts.onDomainResolved?.(purchased.domain);
 
   // H2 — PERSIST THE INSTANT IT IS OURS, before any DNS work. This INSERT used
   // to sit AFTER setDns, so a setDns throw discarded a domain we had already
@@ -769,6 +791,16 @@ export async function runSetupInfrastructure(
         // intent row even if candidate generation ever changes, which is the
         // whole point of recording the resolved name rather than deriving it.
         intentKey: `${setupKey ?? `tenant:${ctx.tenantId}`}#${domainIndex}`,
+        // N2 (gate 2026-08-05, F1) — `candidate.domain` above is only a correct
+        // guess for a FIRST attempt. On a resume, provisionDomainWithMailboxes
+        // actually operates on the intent-resolved domain, which can differ
+        // from this call's fresh `usable[domainIndex]` candidate (the prior
+        // candidate is now excluded from `usable` because it's already owned).
+        // This callback corrects `inFlightDomain` to the real one the instant
+        // it's known, before the catch below ever names it in a customer message.
+        onDomainResolved: (domain) => {
+          inFlightDomain = domain;
+        },
       });
     }
   } catch (err) {
