@@ -22,7 +22,22 @@ Workers runtime with real `DB`/`TENANT` bindings, per `vitest.config.ts`.
   sandbox-only `advanceClock`/`tick`/`pollInbox` calls that aren't HTTP
   facade intents), `adminApi()` (same, but with the `ADMIN_TOKEN` bearer —
   see `setup.ts`), `failPayment()`/`activatePaidPlan()` (drive a tenant's
-  billing state via the same Stripe-webhook path `webhook.test.ts` uses).
+  billing state via the same Stripe-webhook path `webhook.test.ts` uses),
+  `postDisputeWebhook()` (a Dispute has no tenant metadata and no `customer`,
+  so it routes through its charge — this arms a test Stripe key and stubs that
+  one lookup for exactly the duration of the delivery).
+- `stripe-fixtures.ts` — the ONE place Stripe webhook payloads are built, in
+  Stripe's REAL object shapes. Every fixture in this suite used to hand-place
+  `metadata.tenantId` on the Invoice or Dispute, which Stripe never emits; the
+  dunning and chargeback lanes therefore passed their tests while resolving
+  nothing in production for weeks (`docs/adversarial/audit-stripe-webhook-2026-08-06.md`
+  finding 1). `stripe-webhook-guards.test.ts` fails if that shape comes back.
+- `stripe-webhook-boundary.test.ts` — the webhook boundary's own regression
+  set: real-payload tenant resolution, a mid-checkout Stripe crash leaving the
+  compliance screen done and the retry completing the capture once, a stale
+  redelivered payment failure refused against a recovered payer, signature
+  timestamp tolerance + multi-`v1` rotation safety, and an unknown tenant
+  answered 200 rather than 500.
 - `admin-auth.test.ts` — the required guardrail: every `/admin/*` route
   401s with no/wrong `ADMIN_TOKEN` (and rejects a valid TENANT token too),
   200s with the correct one.

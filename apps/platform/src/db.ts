@@ -71,6 +71,39 @@ export async function lookupTenantById(env: Env, id: string): Promise<TenantInde
   return row ?? null;
 }
 
+// --- Stripe customer -> tenant routing index (migrations/0016). See that
+// migration's header for WHY this lives in D1 and why it is a table rather
+// than a column on tenants_index. ---
+
+/**
+ * Records the `customer -> tenant` mapping the moment we learn both together —
+ * which is any event that resolves its tenant from OUR OWN metadata AND carries
+ * a Stripe customer id (`checkout.session.completed`, `customer.subscription.*`).
+ * INSERT OR IGNORE keyed on the customer id: re-learning the same pair is a
+ * silent no-op that preserves the original `created_at`, and a customer id can
+ * never be re-pointed at a different tenant by a later event (a mapping, once
+ * made, is a historical fact — see the migration header on re-subscribes).
+ */
+export async function recordStripeCustomerTenant(
+  env: Env,
+  stripeCustomerId: string,
+  tenantId: string,
+  createdAt: number,
+): Promise<void> {
+  await env.DB.prepare(`INSERT OR IGNORE INTO stripe_customer_index (stripe_customer_id, tenant_id, created_at) VALUES (?, ?, ?)`)
+    .bind(stripeCustomerId, tenantId, createdAt)
+    .run();
+}
+
+/** The fallback half of webhook tenant resolution: which tenant a Stripe
+ *  customer id belongs to, or null if we have never seen it. */
+export async function lookupTenantIdByStripeCustomer(env: Env, stripeCustomerId: string): Promise<string | null> {
+  const row = await env.DB.prepare(`SELECT tenant_id FROM stripe_customer_index WHERE stripe_customer_id = ?`)
+    .bind(stripeCustomerId)
+    .first<{ tenant_id: string }>();
+  return row?.tenant_id ?? null;
+}
+
 // --- SPEC.md §19.1 (M1) — dashboard cookie sessions (migrations/0006). The
 // opaque session id itself lives ONLY in the httpOnly cookie; only its
 // SHA-256(+pepper) hash (src/auth.ts) is ever persisted here — the same

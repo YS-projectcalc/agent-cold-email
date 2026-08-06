@@ -23,7 +23,8 @@ export interface TenantOpsSummary {
   annualDomainLiabilityCents: number;
   /** priceCents of the tenant's plan if it's a paid tier AND billing is 'active'; 0 otherwise (SPEC.md §18). */
   mrrCents: number;
-  /** Count of invoice.payment_failed webhook events this tenant's DO has recorded — the dunning "cycle" (admin/dunning.ts). */
+  /** Count of invoice.payment_failed webhook events recorded since this tenant's
+   *  last billing recovery — the dunning "cycle" (admin/dunning.ts). */
   billingFailureCount: number;
   /** A5 — the most recent charge decline code (permanent codes make the dunning sweep suspend immediately); null if none/unknown. */
   lastDeclineCode: string | null;
@@ -143,8 +144,19 @@ export function getOpsSummary(ctx: TenantContext, sinceMs: number): TenantOpsSum
 
   // webhook_events is scoped per-DO already (one tenant per DO instance) —
   // no tenant_id column/filter needed, same as engine/billing.ts's idempotency check.
+  // Scoped to the CURRENT dunning cycle (audit-stripe-webhook-2026-08-06.md
+  // finding 6): unwindowed, this was a lifetime count that survived a full
+  // recovery, so a customer who had a rough month a year ago was suspended on
+  // their FIRST failure thereafter — cycle 4 on one new failure, skipping the
+  // whole four-strike grace period. `dunning_cycle_basis` (schema.ts) holds the
+  // webhook_events rowid at the last billing recovery; 0 when a tenant has
+  // never recovered, which counts everything exactly as before.
   const billingFailureCount = ctx.sql
-    .exec<{ n: number }>(`SELECT COUNT(*) as n FROM webhook_events WHERE type = 'invoice.payment_failed'`)
+    .exec<{ n: number }>(
+      `SELECT COUNT(*) as n FROM webhook_events
+       WHERE type = 'invoice.payment_failed'
+         AND rowid > (SELECT COALESCE(MAX(basis_rowid), 0) FROM dunning_cycle_basis)`,
+    )
     .one().n;
 
   // MRR follows the per-mailbox curve on the LIVE provisioned count (design §9),

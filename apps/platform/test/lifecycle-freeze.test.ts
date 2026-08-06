@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { runInDurableObject } from "cloudflare:test";
 import { WARMUP_RAMP_DAYS, ONE_DAY_MS } from "../src/engine/warmup.js";
-import { activatePaidPlan, api, mintTenant, postWebhook, signup, tenantStub } from "./helpers.js";
+import { activatePaidPlan, api, mintTenant, postDisputeWebhook, postWebhook, signup, tenantStub } from "./helpers.js";
+import {
+  checkoutSessionCompleted,
+  disputeCreated,
+  invoicePaymentFailed,
+  stripeCustomerIdFor,
+  subscriptionUpdated,
+} from "./stripe-fixtures.js";
 
 interface WebhookResponse {
   applied: boolean;
@@ -43,12 +50,12 @@ async function provisionAndLaunch(token: string, brand = "Freeze Co", primaryDom
   });
 }
 
-function disputeCreated(tenantId: string) {
-  return {
-    id: `evt_${crypto.randomUUID()}`,
-    type: "charge.dispute.created",
-    data: { object: { id: `dp_${crypto.randomUUID()}`, charge: "ch_1", amount: 9900, reason: "fraudulent", metadata: { tenantId } } },
-  };
+// A REAL Dispute object carries `metadata: {}` and no `customer`, so it routes
+// through its charge (test/stripe-fixtures.ts + helpers.ts's postDisputeWebhook).
+const DISPUTED_CHARGE = "ch_test_freeze_1";
+
+function freezeByDispute(tenantId: string) {
+  return postDisputeWebhook<WebhookResponse>(disputeCreated({ chargeId: DISPUTED_CHARGE }), tenantId);
 }
 
 // Adversarial panel-03 finding #2 (LIVE-PROVEN): a chargeback freeze
@@ -63,16 +70,12 @@ describe("chargeback freeze is sticky against routine billing events (finding #2
     await activatePaidPlan(tenantId, "managed");
     await provisionAndLaunch(token);
 
-    const created = await postWebhook<WebhookResponse>(disputeCreated(tenantId));
+    const created = await freezeByDispute(tenantId);
     expect(created.body.frozen).toBe(true);
     expect(await billingStateOf(tenantId)).toBe("disputed");
 
     // A checkout completion arriving during the open dispute must NOT reactivate.
-    await postWebhook({
-      id: `evt_${crypto.randomUUID()}`,
-      type: "checkout.session.completed",
-      data: { object: { metadata: { tenantId, plan: "managed" } } },
-    });
+    await postWebhook(checkoutSessionCompleted({ tenantId, plan: "managed" }));
     expect(await billingStateOf(tenantId)).toBe("disputed"); // still frozen
 
     const tick = await tenantStub(tenantId).tick();
@@ -84,15 +87,11 @@ describe("chargeback freeze is sticky against routine billing events (finding #2
     await activatePaidPlan(tenantId, "managed");
     await provisionAndLaunch(token, "Freeze Sub Co", "freezesub.com");
 
-    await postWebhook<WebhookResponse>(disputeCreated(tenantId));
+    await freezeByDispute(tenantId);
     expect(await billingStateOf(tenantId)).toBe("disputed");
 
     // A routine renewal event (subscription stays 'active' at Stripe during a dispute).
-    await postWebhook({
-      id: `evt_${crypto.randomUUID()}`,
-      type: "customer.subscription.updated",
-      data: { object: { status: "active", metadata: { tenantId } } },
-    });
+    await postWebhook(subscriptionUpdated({ tenantId, status: "active" }));
     expect(await billingStateOf(tenantId)).toBe("disputed"); // still frozen
 
     const tick = await tenantStub(tenantId).tick();
@@ -102,14 +101,10 @@ describe("chargeback freeze is sticky against routine billing events (finding #2
   it("invoice.payment_failed does NOT overwrite a dispute freeze with past_due", async () => {
     const { tenantId } = await mintTenant("Freeze Inv Co", "managed");
     await activatePaidPlan(tenantId, "managed");
-    await postWebhook<WebhookResponse>(disputeCreated(tenantId));
+    await freezeByDispute(tenantId);
     expect(await billingStateOf(tenantId)).toBe("disputed");
 
-    await postWebhook({
-      id: `evt_${crypto.randomUUID()}`,
-      type: "invoice.payment_failed",
-      data: { object: { metadata: { tenantId } } },
-    });
+    await postWebhook(invoicePaymentFailed({ tenantId, customerId: stripeCustomerIdFor(tenantId) }));
     expect(await billingStateOf(tenantId)).toBe("disputed"); // not 'past_due'
   });
 });
