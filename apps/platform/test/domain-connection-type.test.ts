@@ -161,6 +161,32 @@ describe("purchased-domain readiness is derived from REAL propagation state", ()
     expect(result.mx).toBe(false);
   });
 
+  it("round-2 NEW #1 (2026-08-06) — 'active'/'ok' in a PROPAGATION field must not read ready", async () => {
+    // dns_propagation_status/nameserver_match_status are the vendor's
+    // PROPAGATION verdicts, not its domain `status` field. "active" is
+    // ambiguous there (it could plausibly mean "actively propagating", i.e.
+    // NOT finished) and has never been observed live — only "pending" has
+    // (purchasedDomainIsReady's own doc comment). "ok" is equally unobserved.
+    // Neither belongs in the ready-token allowlist.
+    for (const token of ["active", "ok"]) {
+      vi.restoreAllMocks();
+      installFetch({
+        list: {
+          ...IK_DOMAINS_LIST_PURCHASED_PENDING,
+          domains: [
+            {
+              ...IK_DOMAINS_LIST_PURCHASED_PENDING.domains[0],
+              dns_propagation_status: token,
+              nameserver_match_status: token,
+            },
+          ],
+        },
+      });
+      const result = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "purchased");
+      expect(result, `token "${token}" must read NOT ready`).toEqual({ mx: false, spf: false, dkim: false, dmarc: false, rdns: false });
+    }
+  });
+
   it("a domain the vendor has not listed yet is RETRYABLE (async registration, genuinely heals)", async () => {
     installFetch({ list: { error: false, domains: [], pages: 1 } });
     const err = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "purchased").catch((e: unknown) => e);
