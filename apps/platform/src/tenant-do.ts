@@ -23,8 +23,9 @@ import type {
 // Not type-only: demoRun()'s default parameter value needs the runtime
 // schema (`DemoRunInput.parse({})`), not just the inferred type.
 import { DemoRunInput } from "@coldstart/shared";
-import { RateLimitError, TenantIsolationError } from "@coldstart/shared";
-import { RealClock, VirtualClock } from "./clock.js";
+import { isPaidPlan, RateLimitError, TenantIsolationError, type Clock } from "@coldstart/shared";
+import { DelegatingClock, RealClock, requireVirtualClock, VirtualClock } from "./clock.js";
+import { migrateTenantClockToReal } from "./engine/clock-migration.js";
 import type { StripeEventInput } from "./billing/stripe-webhook.js";
 import type { Env } from "./env.js";
 import {
@@ -98,7 +99,7 @@ import {
 } from "./engine/byo-mailbox-composition.js";
 import { newId, TENANT_DO_SCHEMA } from "./schema.js";
 import type { TenantContext } from "./tenant-context.js";
-import { readActivationState } from "./engine/activation.js";
+import { readActivationState, readSendDriverGate } from "./engine/activation.js";
 import { clearScreeningStatus, LIST_UNAVAILABLE_VERSION, screenTenant } from "./ofac/screening.js";
 import { createVendorAdapters, selectRealDomainPort, type VendorAdapterBundle } from "./vendors/factory.js";
 import type { EngineClientConfig } from "./vendors/real/email-port.js";
@@ -109,6 +110,29 @@ export interface InitTenantInput {
   tenantId: string;
   brand: string;
   plan: TenantPlan;
+}
+
+/**
+ * What the cron's send-pipeline leg gets back from one tenant. `ran: false`
+ * with a `reason` is the NORMAL outcome for almost every tenant on the
+ * platform (63 tenants, one paying) — it is a quiet skip, not an error, and
+ * the counters are zero rather than absent so the leg's log line reads the
+ * same either way.
+ */
+export interface ScheduledTickResult {
+  ran: boolean;
+  reason: string;
+  sent: number;
+  skipped: number;
+  deferred: number;
+}
+
+export interface ScheduledPollResult {
+  ran: boolean;
+  reason: string;
+  replies: number;
+  bounces: number;
+  complaints: number;
 }
 
 const DEMO_RUN_MIN_INTERVAL_MS = 60_000; // at most 1 demo run / minute / tenant
@@ -123,7 +147,23 @@ const DEMO_RUN_LIFETIME_CAP = 20; // total demo runs a single sandbox tenant may
 export class TenantDO extends DurableObject<Env> {
   private tenantId: string | null = null;
   private plan: TenantPlan = "demo";
-  private clock: VirtualClock | null = null;
+  /**
+   * The tenant's CURRENT clock (wave-2 DECISION 2): VirtualClock for a
+   * demo/free tenant, RealClock once the one-shot migration has committed.
+   * Swapped in place by `switchToRealClock()`; never handed out directly — see
+   * `contextClock` below.
+   */
+  private currentClock: Clock | null = null;
+  /**
+   * The single clock instance every TenantContext (and the cached sandbox
+   * adapter bundle) receives. It resolves `currentClock` on each now(), so a
+   * mid-call flip is visible to a saga that captured its context before the
+   * flip, and the cached bundle needs no invalidation (design v2 §4).
+   */
+  private readonly contextClock: Clock = new DelegatingClock(() => {
+    if (!this.currentClock) throw new Error("tenant not initialized");
+    return this.currentClock;
+  });
   // Only the SANDBOX bundle instance is cached for the DO's lifetime — several
   // sandbox ports hold in-memory state (SandboxEmailPort's send/poll queues,
   // SandboxDomainPort/SandboxMailboxPort's seen/released sets,
@@ -141,15 +181,80 @@ export class TenantDO extends DurableObject<Env> {
     this.grandfatherActiveScreening();
 
     const row = this.ctx.storage.sql
-      .exec<{ id: string; plan: TenantPlan; clock_base: number; clock_offset: number; clock_multiplier: number }>(
-        `SELECT id, plan, clock_base, clock_offset, clock_multiplier FROM tenant_profile LIMIT 1`,
+      .exec<{ id: string; plan: TenantPlan; clock_base: number; clock_offset: number; clock_multiplier: number; clock_mode: string }>(
+        `SELECT id, plan, clock_base, clock_offset, clock_multiplier, clock_mode FROM tenant_profile LIMIT 1`,
       )
       .toArray()[0];
 
     if (row) {
       this.tenantId = row.id;
       this.plan = row.plan;
-      this.clock = new VirtualClock(row.clock_base, row.clock_offset, row.clock_multiplier);
+      this.currentClock = this.selectClockOnRehydrate(row);
+    }
+  }
+
+  /**
+   * Clock selection at rehydrate (wave-2 DECISION 2, swap site 1). A paid
+   * tenant that has not migrated yet is migrated HERE — synchronously, in this
+   * construction turn — so the flip self-applies to a live tenant DO on its
+   * first touch after deploy, with no operator step.
+   *
+   * FAILURE IS SAFE BY DESIGN. The migration's transaction rolls back
+   * everything (including the clock_mode marker) on any throw, so we simply
+   * log loudly and keep the virtual clock: status quo, no new harm, and the
+   * next construction retries against clean state. The clock_mode interlock
+   * keeps the auto-send driver off an unmigrated tenant in the meantime, so
+   * "still virtual" is a quiet hold, not a silent wrong-time send. Deliberately
+   * NOT rethrown — a throw out of this constructor would brick the tenant's DO
+   * permanently (every request 500s), which is strictly worse.
+   */
+  private selectClockOnRehydrate(row: {
+    id: string;
+    plan: TenantPlan;
+    clock_base: number;
+    clock_offset: number;
+    clock_multiplier: number;
+    clock_mode: string;
+  }): Clock {
+    if (row.clock_mode === "real") return new RealClock();
+
+    const virtual = new VirtualClock(row.clock_base, row.clock_offset, row.clock_multiplier);
+    if (!isPaidPlan(row.plan)) return virtual;
+
+    try {
+      const summary = migrateTenantClockToReal(this.ctx.storage, row.id, virtual.now(), new RealClock().now());
+      console.log(`clock migration applied for ${row.id}`, summary);
+      return new RealClock();
+    } catch (err) {
+      console.error(
+        `clock migration FAILED for ${row.id}; keeping the virtual clock this boot (clock_mode stays 'virtual', auto-send stays gated off) — will retry on next construction`,
+        err,
+      );
+      return virtual;
+    }
+  }
+
+  /**
+   * Swap sites 3 and 4 — called from both checkout completion paths after an
+   * upgrade to the paid plan. Same failure posture as the constructor: a throw
+   * has already rolled the migration back, so we keep the virtual clock and let
+   * the next construction retry rather than failing the customer's checkout.
+   */
+  private switchToRealClock(): void {
+    if (!this.tenantId || this.currentClock instanceof RealClock) return;
+    const frozenNow = this.currentClock ? this.currentClock.now() : new RealClock().now();
+    try {
+      const summary = migrateTenantClockToReal(this.ctx.storage, this.tenantId, frozenNow, new RealClock().now());
+      console.log(`clock migration applied at checkout for ${this.tenantId}`, summary);
+      // The cached sandbox bundle holds `contextClock`, which resolves this
+      // field on every now() — so swapping it here is the whole flip; there is
+      // no adapter cache to invalidate (design v2 §4).
+      this.currentClock = new RealClock();
+    } catch (err) {
+      console.error(
+        `clock migration FAILED at checkout for ${this.tenantId}; keeping the virtual clock (auto-send stays gated off) — will retry on next construction`,
+        err,
+      );
     }
   }
 
@@ -232,6 +337,17 @@ export class TenantDO extends DurableObject<Env> {
     this.addColumnIfMissing("mailboxes", "transport_json", "TEXT");
     // GA gate G4 — real-plan-slot marker for precise teardown slot accounting (see schema.ts).
     this.addColumnIfMissing("mailboxes", "slot_counted", "INTEGER NOT NULL DEFAULT 0");
+    // Wave-2 §1 — vendor provenance. DEFAULT '' ("unclassified") is deliberate:
+    // the clock migration's backfill classifies every existing row INSIDE its
+    // transaction, so a rolled-back migration leaves '' everywhere, which the
+    // send-eligibility picker excludes. See schema.ts's provider comment (R8).
+    this.addColumnIfMissing("mailboxes", "provider", "TEXT NOT NULL DEFAULT ''");
+    // Wave-2 DECISION 2 — the virtual->real clock interlock + its forensics
+    // (see schema.ts). DEFAULT 'virtual' keeps every existing DO byte-identical
+    // until its own migration commits.
+    this.addColumnIfMissing("tenant_profile", "clock_mode", "TEXT NOT NULL DEFAULT 'virtual'");
+    this.addColumnIfMissing("tenant_profile", "clock_migration_delta_ms", "INTEGER");
+    this.addColumnIfMissing("tenant_profile", "clock_migrated_at", "INTEGER");
     this.addColumnIfMissing("deliverability_actions", "alerted_at", "INTEGER");
     // G1 (ga-gates-design-2026-07-22.md §G1) — OFAC/SDN screening verdict
     // columns (see schema.ts's tenant_profile comment for the field contract).
@@ -251,6 +367,10 @@ export class TenantDO extends DurableObject<Env> {
     // Registrar-arming follow-up (2026-07-28) — the tenant's structured
     // registrant-of-record, persisted as JSON (see schema.ts).
     this.addColumnIfMissing("tenant_profile", "registrant_json", "TEXT");
+    // CREDSTORE F1 (wave2-design §"CREDSTORE F1") — Worker-owned monotonic
+    // push claim sequence (see schema.ts's mailbox_cred_pushes comment).
+    // DEFAULT 0 so an existing row's first claim under the new code reads 1.
+    this.addColumnIfMissing("mailbox_cred_pushes", "push_seq", "INTEGER NOT NULL DEFAULT 0");
     // Created here, not in TENANT_DO_SCHEMA, so they run only after the columns
     // above are guaranteed to exist (safe for DOs that predate the column). Each
     // collapses any pre-existing rows that would violate the unique key BEFORE
@@ -387,20 +507,26 @@ export class TenantDO extends DurableObject<Env> {
 
     const baseMs = new RealClock().now();
     const multiplier = input.plan === "demo" || input.plan === "free" ? 1440 : 1;
+    // Swap site 2 (wave-2 DECISION 2): a tenant minted DIRECTLY on the paid
+    // plan starts on real time — there is no demo-era state to rebase, so the
+    // migration is not needed and 'real' is stamped at insert. The clock_*
+    // columns are still written so the row shape stays uniform.
+    const paid = isPaidPlan(input.plan);
 
     this.tenantId = input.tenantId;
     this.plan = input.plan;
-    this.clock = new VirtualClock(baseMs, 0, multiplier);
+    this.currentClock = paid ? new RealClock() : new VirtualClock(baseMs, 0, multiplier);
 
     this.ctx.storage.sql.exec(
-      `INSERT INTO tenant_profile (id, brand, plan, status, created_at, clock_base, clock_offset, clock_multiplier)
-       VALUES (?, ?, ?, 'active', ?, ?, 0, ?)`,
+      `INSERT INTO tenant_profile (id, brand, plan, status, created_at, clock_base, clock_offset, clock_multiplier, clock_mode)
+       VALUES (?, ?, ?, 'active', ?, ?, 0, ?, ?)`,
       input.tenantId,
       input.brand,
       input.plan,
       baseMs,
       baseMs,
       multiplier,
+      paid ? "real" : "virtual",
     );
     this.ctx.storage.sql.exec(
       `INSERT INTO ledger_entries (id, tenant_id, kind, amount_cents, description, ts)
@@ -427,8 +553,11 @@ export class TenantDO extends DurableObject<Env> {
    * constructing a fresh one every call is cheap and correct.
    */
   private buildAdapters(): VendorAdapterBundle {
-    if (!this.tenantId || !this.clock) throw new Error("tenant not initialized");
-    this.sandboxAdapters ??= createVendorAdapters(this.plan, this.clock, false, this.engineConfig());
+    if (!this.tenantId || !this.currentClock) throw new Error("tenant not initialized");
+    // Every port gets `contextClock`, never the raw current clock: the cached
+    // sandbox bundle below outlives a virtual->real flip, and the delegate is
+    // what makes that safe (design v2 §4 — no cache invalidation needed).
+    this.sandboxAdapters ??= createVendorAdapters(this.plan, this.contextClock, false, this.engineConfig());
     // Demo/free plans can NEVER activate (isTenantActivated requires
     // isPaidPlanTier — ARCHITECTURE.md #8), so this skips the fresh SQL read
     // entirely for them: there is no billing-state transition to go stale
@@ -462,7 +591,7 @@ export class TenantDO extends DurableObject<Env> {
     // make this flip SPEND-SAFE.
     const real = createVendorAdapters(
       this.plan,
-      this.clock,
+      this.contextClock,
       activated,
       this.engineConfig(),
       this.inboxKitConfig(),
@@ -494,12 +623,12 @@ export class TenantDO extends DurableObject<Env> {
   }
 
   private requireContext(): TenantContext {
-    if (!this.tenantId || !this.clock) throw new Error("tenant not initialized");
+    if (!this.tenantId || !this.currentClock) throw new Error("tenant not initialized");
     return {
       sql: this.ctx.storage.sql,
       tenantId: this.tenantId,
       plan: this.plan,
-      clock: this.clock,
+      clock: this.contextClock,
       adapters: this.buildAdapters(),
       env: this.env,
     };
@@ -765,17 +894,52 @@ export class TenantDO extends DurableObject<Env> {
 
   async completeCheckoutSimulated(sessionId: string): Promise<CompleteCheckoutResult> {
     const result = await completeSimulatedCheckout(this.requireContext(), sessionId);
-    // Keep the in-memory plan in sync for the REST of this DO instance's
-    // lifetime (quota checks + the demo/free-only sandbox guards below both
-    // read `this.plan`, not a fresh SQL read, on every call).
-    if (result.upgraded) this.plan = result.plan;
+    this.reconcileClockWithDurablePlan(); // swap site 3
     return result;
   }
 
   async handleStripeWebhook(event: StripeEventInput): Promise<WebhookApplyResult> {
     const result = await applyStripeWebhookEvent(this.requireContext(), event);
-    if (result.plan) this.plan = result.plan;
+    this.reconcileClockWithDurablePlan(); // swap site 4 — the real Stripe path
     return result;
+  }
+
+  /**
+   * Swap sites 3 and 4 — reconciles the in-memory plan AND the clock against
+   * what is DURABLY on disk after a checkout/webhook call.
+   *
+   * WHY DURABLE STATE, NOT THE CALL'S RESULT (integration audit FINDING 1).
+   * Both paths used to gate the flip on a field of the result object
+   * (`upgraded` / `plan`), and one real path writes the upgrade to disk without
+   * ever populating those: a webhook delivery that FINISHES a previous attempt
+   * which died mid-handler returns `{applied:false, duplicate:true,
+   * completed:true}` with no `plan` at all (engine/billing.ts's completion
+   * pass). The upgrade is committed, the tenant is paid — and the clock stayed
+   * virtual until the DO happened to be evicted and reconstructed, so
+   * `clock_mode` stayed 'virtual' and the auto-send driver's interlock held
+   * that paying customer at zero sends for an unbounded time.
+   *
+   * Reading the row is also the honest way to keep `this.plan` current: it is
+   * cached for the DO instance's lifetime and read by every quota check and
+   * demo/free guard, so it must reflect disk rather than whichever field the
+   * last call chose to return.
+   *
+   * Idempotent and cheap: `switchToRealClock` is a no-op once the clock is
+   * real, and the migration itself is guarded by the `clock_mode` marker it
+   * writes inside its own transaction — so calling this after EVERY webhook
+   * (most of which change nothing) costs one indexed single-row read.
+   */
+  private reconcileClockWithDurablePlan(): void {
+    if (!this.tenantId) return;
+    const row = this.ctx.storage.sql
+      .exec<{ plan: TenantPlan; clock_mode: string }>(
+        `SELECT plan, clock_mode FROM tenant_profile WHERE id = ?`,
+        this.tenantId,
+      )
+      .toArray()[0];
+    if (!row) return;
+    this.plan = row.plan;
+    if (isPaidPlan(row.plan) && row.clock_mode !== "real") this.switchToRealClock();
   }
 
   // --- B4 opt-out: the hosted RFC 8058 one-click unsubscribe endpoint
@@ -829,6 +993,28 @@ export class TenantDO extends DurableObject<Env> {
 
   async pollInbox() {
     return runPollInbox(this.requireContext());
+  }
+
+  // --- Wave-2 auto-send drivers. The CRON's only entry points into the send
+  // pipeline (admin/ops-sweep.ts's runSendPipelineAllTenants). `tick()` and
+  // `pollInbox()` above are deliberately untouched: they carry no activation
+  // predicate and are what the demo path and the existing test surface drive.
+  // The gate lives HERE rather than in the cron so that no future caller can
+  // arm automatic sending by finding another door — engine/activation.ts's
+  // readSendDriverGate re-reads everything it needs on every call. ---
+
+  async runScheduledTick(): Promise<ScheduledTickResult> {
+    const ctx = this.requireContext();
+    const gate = readSendDriverGate(ctx.sql, ctx.tenantId, this.env);
+    if (!gate.allowed) return { ran: false, reason: gate.reason, sent: 0, skipped: 0, deferred: 0 };
+    return { ran: true, reason: "", ...(await runTick(ctx)) };
+  }
+
+  async runScheduledPoll(): Promise<ScheduledPollResult> {
+    const ctx = this.requireContext();
+    const gate = readSendDriverGate(ctx.sql, ctx.tenantId, this.env);
+    if (!gate.allowed) return { ran: false, reason: gate.reason, replies: 0, bounces: 0, complaints: 0 };
+    return { ran: true, reason: "", ...(await runPollInbox(ctx)) };
   }
 
   // --- D2/D6 admin surface RPCs (src/admin/README.md) — called ONLY from
@@ -989,8 +1175,11 @@ export class TenantDO extends DurableObject<Env> {
     if (this.plan !== "demo" && this.plan !== "free") {
       throw new Error("advanceClock is a sandbox-only control, unavailable for this tenant's plan");
     }
-    if (!this.clock || !this.tenantId) throw new Error("tenant not initialized");
-    const newOffset = this.clock.advanceVirtual(virtualMs);
+    if (!this.currentClock || !this.tenantId) throw new Error("tenant not initialized");
+    // Structural belt behind the plan gate above: a tenant on the real clock
+    // has no virtual offset to advance, and this throws rather than silently
+    // doing nothing if the two guards ever disagree (clock.ts).
+    const newOffset = requireVirtualClock(this.currentClock).advanceVirtual(virtualMs);
     this.ctx.storage.sql.exec(`UPDATE tenant_profile SET clock_offset = ? WHERE id = ?`, newOffset, this.tenantId);
     return newOffset;
   }

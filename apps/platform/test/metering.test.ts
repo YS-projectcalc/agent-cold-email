@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { api, mintTenant, tenantStub } from "./helpers.js";
+import { api, makeMailboxesSendEligible, mintTenant, tenantStub } from "./helpers.js";
 
 interface AccountResponse {
   usageCents: number;
@@ -45,6 +45,10 @@ describe("metering aggregates per-mailbox/mo fees for a paid tenant", () => {
         sequence: [{ step: 1, subject: "Hi", body: "Hi", delayDays: 0 }],
       }),
     });
+    // A paid tenant may not send from a sandbox-provider mailbox (wave-2 §1a);
+    // this test is about what a REAL send does to usageCents, so establish the
+    // armed shape the sandbox bundle cannot produce.
+    await makeMailboxesSendEligible(tenantId);
     const tick = await tenantStub(tenantId).tick();
     expect(tick.sent).toBe(1);
 

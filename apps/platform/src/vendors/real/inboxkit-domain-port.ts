@@ -351,13 +351,19 @@ function normalizeConnectionType(raw: string | undefined): DomainConnectionType 
 
 /**
  * Vendor status tokens that positively mean "propagation/matching finished".
- * BEST-EFFORT (only "pending" has been observed live), and deliberately an
+ * BEST-EFFORT — combined-diff gate round 2 (docs/adversarial/
+ * wave-integration-gate-2026-08-05.md, "NEW" #1, live-confirmed 2026-08-06):
+ * "propagated" and "matched" are the tokens actually observed live in this
+ * PROPAGATION field ("pending" is the only other one seen). Deliberately an
  * ALLOWLIST rather than "anything that isn't pending": an unrecognized token
  * must fall to NOT-ready, because the two failure directions are not
  * symmetrical. A false "not ready" leaves the domain 'pending' with a retryable
  * error — visible, recoverable, no money spent. A false "ready" provisions
  * billable mailboxes onto a domain whose mail DNS does not work, which is the
- * silent, monthly-billing failure this wave exists to prevent.
+ * silent, monthly-billing failure this wave exists to prevent. "active"/"ok"
+ * were dropped (round 2 finding): in a `status` field "active" means live, but
+ * in a *propagation* field it plausibly means "actively propagating" — i.e.
+ * NOT finished — and neither has ever been observed live here.
  */
 const READY_STATUS_TOKENS = new Set([
   "completed",
@@ -365,12 +371,10 @@ const READY_STATUS_TOKENS = new Set([
   "propagated",
   "matched",
   "match",
-  "active",
   "success",
   "successful",
   "verified",
   "done",
-  "ok",
 ]);
 
 /**

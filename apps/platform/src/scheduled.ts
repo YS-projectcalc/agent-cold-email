@@ -5,19 +5,26 @@
 // index.ts's `scheduled()` export wires it to this function) — this is NOT a
 // dormant/inert export.
 //
-// What runs each tick: (1) the deliverability control loop for every
-// tenant, (2) the warmup-pool auto-cancel sweep for every tenant (founder
-// ruling 2026-08-02 — this cron is its ONLY production driver; see
-// runWarmupCancelSweepAllTenants), (3) the dunning sweep for every 'past_due'
-// tenant (now emailing a suspend notice via the OpsMailer), (4) the owner
-// digest, logged, and (5) the watchtower — health probes + the founder-alert
-// state machine. The OpsMailer
-// is built ONCE and shared by the dunning sweep + watchtower; it is real in
-// production (dark until the domain is onboarded) and degrades gracefully — an
-// unsendable alert can never take down the sweep.
+// What runs each tick, in order: (1) the deliverability control loop for every
+// tenant, (2) the dunning sweep for every 'past_due' tenant (emailing a suspend
+// notice via the OpsMailer), (3) the owner digest, logged, (4) the watchtower —
+// health probes + the founder-alert state machine, (5) the warmup-pool
+// auto-cancel sweep for every tenant (founder ruling 2026-08-02 — this cron is
+// its ONLY production driver), (6) outbound webhook delivery, (7) the
+// spend-reservation reaper, (8/9) the OFAC list refresh + recovery, and (10)
+// the WAVE-2 SEND PIPELINE — poll then tick for every tenant whose DO-side
+// activation predicate allows it. That last leg is what makes real campaign
+// sends fire in production; everything before it is health/billing/ops work
+// that must not be delayed by a slow engine, which is why it is last.
+//
+// ORDERING RULE: health + alerting legs precede vendor-call-heavy lanes, so a
+// stalled vendor can never delay the founder learning the platform is
+// unhealthy. The OpsMailer is built ONCE and shared by the dunning sweep +
+// watchtower; it is real in production (dark until the domain is onboarded) and
+// degrades gracefully — an unsendable alert can never take down the sweep.
 import { RealClock } from "./clock.js";
 import type { Env } from "./env.js";
-import { buildOpsDigest, runDeliverabilitySweepAllTenants, runDunningSweep, runWarmupCancelSweepAllTenants, runWebhookDeliveriesAllTenants } from "./admin/ops-sweep.js";
+import { buildOpsDigest, runDeliverabilitySweepAllTenants, runDunningSweep, runSendPipelineAllTenants, runWarmupCancelSweepAllTenants, runWebhookDeliveriesAllTenants } from "./admin/ops-sweep.js";
 import { runWatchtower } from "./admin/watchtower.js";
 import { createOpsMailer } from "./ops-mail/ops-mailer.js";
 import { reapStaleReservations } from "./engine/spend-ceiling.js";
@@ -49,17 +56,20 @@ export async function runScheduledOpsSweep(env: Env): Promise<void> {
   const mailer = createOpsMailer(env);
 
   const deliverability = await runLeg("deliverability", null, () => runDeliverabilitySweepAllTenants(env));
-  // Warmup-pool auto-cancel at ramp completion (founder ruling 2026-08-02,
-  // ROADMAP.md:25). THIS is the sweep's only production driver — it is not
-  // reachable from the tick, which nothing in production calls (adversary A1).
-  // Its own lane rather than part of the tick, so cron never arms automatic
-  // campaign sending. Runs after the deliverability loop and before dunning;
-  // its own try/catch inside the runner means a vendor hiccup can neither
-  // abort the remaining legs nor delay any tenant's mail.
-  const warmupCancel = await runLeg("warmupCancel", null, () => runWarmupCancelSweepAllTenants(env));
   const dunning = await runLeg("dunning", null, () => runDunningSweep(env, now, mailer));
   const digest = await runLeg("digest", null, () => buildOpsDigest(env, now, 24));
   const watchtower = await runLeg("watchtower", null, () => runWatchtower(env, mailer, now));
+  // Warmup-pool auto-cancel at ramp completion (founder ruling 2026-08-02,
+  // ROADMAP.md:25). BELOW runWatchtower per this file's own ordering rule —
+  // the health/alerting legs come first so a slow vendor lane can never delay
+  // the founder learning the platform is unhealthy (warmup-wave round-2
+  // residual R2, landed here with the wave-2 send-pipeline edit as the design's
+  // §8/NEW-3 requires, since both edits touch this one file).
+  //
+  // Its own lane rather than part of the tick: the tick now DOES run from this
+  // cron (below), but the warmup sweep must keep running for every tenant,
+  // including the ones the send-pipeline's activation predicate skips.
+  const warmupCancel = await runLeg("warmupCancel", null, () => runWarmupCancelSweepAllTenants(env));
   // Outbound webhook delivery pump — the cron is the retry-queue wake
   // (ROADMAP.md WIN-THE-COMPARISON (d)). Last so a webhook fan-out failure
   // can't delay the health/dunning/watchtower legs above.
@@ -80,9 +90,16 @@ export async function runScheduledOpsSweep(env: Env): Promise<void> {
   // screening time, now that a refresh above may have just loaded one. Cheap
   // no-op whenever no list is available or nothing is stuck.
   const sdnRecovery = await runLeg("sdnRecovery", null, () => rescreenListUnavailableReviews(env));
+  // WAVE 2 — the auto-send driver: poll then tick, for every tenant whose DO
+  // says it may (admin/ops-sweep.ts). LAST on purpose. It is the only leg that
+  // sends customer mail and the only one carrying a wall-clock budget, so a
+  // stalled engine consumes leg time that no other concern was waiting on —
+  // every health, billing and alerting leg above has already completed by the
+  // time this one starts.
+  const sendPipeline = await runLeg("sendPipeline", null, () => runSendPipelineAllTenants(env, now));
 
   console.log(
     "scheduled ops sweep",
-    JSON.stringify({ deliverability, warmupCancel, dunning, digest, watchtower, webhooks, spendReservations, sdnRefresh, sdnRecovery }),
+    JSON.stringify({ deliverability, dunning, digest, watchtower, warmupCancel, webhooks, spendReservations, sdnRefresh, sdnRecovery, sendPipeline }),
   );
 }

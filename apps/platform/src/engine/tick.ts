@@ -5,6 +5,7 @@ import { buildUnsubscribeUrl, signUnsubscribeToken } from "../unsubscribe-token.
 import { customerSafeDetail, customerSafeVendorFailure, logVendorFailure } from "../vendor-failure.js";
 import { isLifecycleFrozen } from "./billing-state.js";
 import { runDeliverabilitySweep } from "./deliverability-actions.js";
+import { sendEligibleMailboxSql } from "./mailbox-eligibility.js";
 import { refreshMailboxWarmupState } from "./mailbox-state.js";
 import { isWithinSendWindow, pickMailboxWithCapacity, type SendWindow } from "./scheduler.js";
 import { renderTemplate } from "./template.js";
@@ -40,7 +41,7 @@ const MAX_SEND_ATTEMPTS = 5;
 // 'pending' (send is idempotent on its key, so a re-send is a no-op). Sized far
 // above a legitimate in-flight send yet well under the idempotency 'pending'
 // reclaim window, so a genuinely orphaned row unblocks promptly.
-const SEND_CLAIM_TTL_MS = 5 * 60 * 1000;
+export const SEND_CLAIM_TTL_MS = 5 * 60 * 1000;
 
 // B4 — the deployed API's own https origin, embedded in the hosted one-click
 // unsubscribe URL below. `env.PUBLIC_BASE_URL` (wrangler.toml `[vars]`, not a
@@ -174,6 +175,10 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
   } catch (err) {
     console.error("warmup cancellation sweep failed (sends unaffected)", err);
   }
+  // Fresh as of here, and used ONLY for the two statements below (the reclaim
+  // scan and the due query) — no await runs between this read and them. Every
+  // per-row comparison inside the send loop re-reads the clock instead: see
+  // `rowNow` there and N7 in the wave-2 design.
   const now = ctx.clock.now();
 
   // Reclaim rows orphaned in 'sending' — a DO that died between the claim and
@@ -250,6 +255,27 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
   let deferred = 0;
 
   for (const row of due) {
+    // N7 (wave-2 design v2 §7, WIDENED by the Inc-C audit). The tick-start `now`
+    // above goes stale the moment the FIRST row's send() awaits: every later
+    // iteration would then compare against a time that can be minutes — on a
+    // slow/stalled engine, up to the whole per-tenant budget — in the past.
+    // Three comparisons below have a real consequence when that happens, so
+    // each one re-reads the clock here, once per row:
+    //   1. the send-window check — a tick spanning a window's closing hour
+    //      would keep sending outside the campaign's configured hours;
+    //   2. the domain's `first_send_eligible_at` gate — stale time is
+    //      conservative (excludes a newly-eligible domain), kept fresh for
+    //      consistency with the same row's other two;
+    //   3. `sending_since` at the atomic claim — the original N7: a row claimed
+    //      late in a long tick recorded as if claimed at minute 0 is eligible
+    //      for the 5-minute stuck-'sending' reclaim while its send is still in
+    //      flight (attempts inflate; a 'failed' event can land beside a final
+    //      'sent'). The wire is protected by the four double-send layers either
+    //      way — this fixes the bookkeeping, not a duplicate email.
+    // The failure/compliance event stamps below use it too, so a row's own
+    // audit trail carries the time it was actually processed.
+    const rowNow = ctx.clock.now();
+
     // Skip: lead no longer active, campaign not active, or the address is
     // suppressed (bounce/complaint/unsub) — checked HERE at send time, across
     // every campaign, so a suppression created after launch is honored.
@@ -260,25 +286,22 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
     }
 
     // Defer (leave 'pending'): outside the campaign's configured send window.
-    if (!isWithinSendWindow(now, parseSendWindow(row.send_window_json))) {
+    if (!isWithinSendWindow(rowNow, parseSendWindow(row.send_window_json))) {
       deferred++;
       continue;
     }
 
-    // SPEC.md §20.2's mandatory DMARC p=none observation window: a BYO
-    // domain's `first_send_eligible_at` (NULL for every provisioned/
-    // non-gated domain -- always eligible, byte-identical to today) excludes
-    // its mailboxes from the capacity picker until the window elapses. This
-    // is a hard "not yet" gate, distinct from `deliv_status='paused'` (a
-    // control-loop decision) -- neither state implies the other.
+    // WHICH mailboxes may carry this send — the ONE shared eligibility
+    // predicate (engine/mailbox-eligibility.ts), also read by the send-starved
+    // watchtower alert so the two can never disagree. It carries SPEC.md
+    // §20.2's mandatory DMARC observation window and the deliverability loop's
+    // pause, plus (paid tenants only) the wave-2 provenance clauses that keep a
+    // phantom sandbox / uncredentialed / BYO mailbox out of the picker.
     const mailboxes = ctx.sql
       .exec<{ id: string; email: string; sentToday: number; dailyCap: number }>(
-        `SELECT m.id as id, m.email as email, m.sent_today as sentToday, m.daily_cap as dailyCap
-         FROM mailboxes m JOIN domains d ON d.id = m.domain_id
-         WHERE m.tenant_id = ? AND m.deliv_status != 'paused'
-           AND (d.first_send_eligible_at IS NULL OR d.first_send_eligible_at <= ?)`,
+        sendEligibleMailboxSql(ctx.plan, `m.id as id, m.email as email, m.sent_today as sentToday, m.daily_cap as dailyCap`),
         ctx.tenantId,
-        now,
+        rowNow,
       )
       .toArray();
     const picked = pickMailboxWithCapacity(mailboxes);
@@ -314,7 +337,7 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
     // SELECT and the claim and double-process the row.
     const claim = ctx.sql.exec(
       `UPDATE scheduled_sends SET status = 'sending', sending_since = ? WHERE id = ? AND status = 'pending'`,
-      now,
+      rowNow,
       row.id,
     );
     if (claim.rowsWritten !== 1) continue; // another tick already owns this row
@@ -346,7 +369,7 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
         row.lead_id,
         row.step,
         row.thread_id,
-        now,
+        rowNow,
         JSON.stringify({
           stage: "compliance",
           reason: "tenant_profile missing physical_address/sender_identity — refused to send a non-CAN-SPAM-compliant email",
@@ -417,7 +440,12 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
         row.lead_id,
         row.step,
         row.thread_id,
-        now,
+        // Re-read AFTER the send await, not `rowNow`: on a stalled engine this
+        // lands up to a full request timeout after the row was claimed, and the
+        // watchtower's failure-signal alert windows on `events.ts >= sinceMs`
+        // (engine/ops-summary.ts) — an early stamp can drop a real failure out
+        // of the sweep window and silence the alert.
+        ctx.clock.now(),
         // Customer-readable (campaign activity), so the abstract step only. The
         // raw text named our INTERNAL engine host and its connection errors
         // ("engine send unreachable at http://10.x.x.x:8787") — infrastructure

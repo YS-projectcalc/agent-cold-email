@@ -56,8 +56,6 @@ interface RampCompleteMailbox {
  * (runTick) awaits it purely for ordering.
  */
 export async function runWarmupCancellationSweep(ctx: TenantContext): Promise<{ cancelled: number; failed: number }> {
-  const now = ctx.clock.now();
-
   // Tenant-scoped (CLAUDE.md rule h). Three exclusions, each for a mailbox that
   // has no subscription for us to cancel:
   //  - `released_at` — teardown already released the whole mailbox vendor-side.
@@ -87,6 +85,18 @@ export async function runWarmupCancellationSweep(ctx: TenantContext): Promise<{ 
   let failed = 0;
 
   for (const mailbox of candidates) {
+    // RE-READ THE CLOCK PER CANDIDATE, never hoisted above the loop (adversary
+    // round-2, R2). Each iteration awaits a vendor call, which opens the DO
+    // input gate — and a concurrent checkout can swap this tenant from its
+    // frozen demo-era virtual clock onto real time mid-sweep (clock.ts's
+    // DelegatingClock makes that swap visible here). A hoisted `now` from
+    // BEFORE such a flip is a timestamp far in the future, which would (a)
+    // read a mailbox that is NOT ramp-complete as send-ready and cancel a
+    // paying customer's warmup subscription early, and (b) stamp the markers
+    // below — whose whole documented contract is "the vendor confirmed, at
+    // this time" — with a time that never happened.
+    const now = ctx.clock.now();
+
     // The ramp-completion transition itself — the same day math the warmup
     // status column is derived from, so "cancelled" and "active" flip together
     // rather than drifting apart on separate definitions of day 29.

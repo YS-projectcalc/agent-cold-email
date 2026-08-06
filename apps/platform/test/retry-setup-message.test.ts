@@ -1,8 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { VendorError, type DnsRecordSet, type DomainPort, type LookalikeCandidate, type OwnedDomain, type PurchasedDomain, type ReleaseResult } from "@coldstart/shared";
+import {
+  VendorError,
+  type CancelWarmupResult,
+  type DnsRecordSet,
+  type DomainPort,
+  type LookalikeCandidate,
+  type MailboxHealth,
+  type MailboxPort,
+  type MailboxProvisioningState,
+  type OwnedDomain,
+  type ProvisionedMailbox,
+  type PurchasedDomain,
+  type ReleaseResult,
+} from "@coldstart/shared";
 import { runSetupInfrastructure } from "../src/engine/provisioning.js";
 import { listSurfacedTenantMessages } from "../src/engine/tenant-messages.js";
-import { signup, withTenantContext } from "./helpers.js";
+import { activatePaidPlan, mintTenant, signup, withTenantContext } from "./helpers.js";
 
 // Wire point A (system->agent message channel, increment 1): when
 // setup_infrastructure's setDns retry is exhausted (H2, INCIDENT
@@ -66,6 +79,59 @@ function multiCandidateStuckDnsDomainPort(): { port: DomainPort; buyCalls: strin
     },
   };
   return { port, buyCalls };
+}
+
+/** A DomainPort whose DNS is always ready — the domain leg is not the subject here. */
+function healthyDomainPort(): DomainPort {
+  return {
+    async searchLookalikes(): Promise<LookalikeCandidate[]> {
+      return [{ domain: "gowireamailbox.com", available: true }];
+    },
+    async listOwnedDomains(): Promise<OwnedDomain[]> {
+      return [];
+    },
+    async buy(domain: string): Promise<PurchasedDomain> {
+      return { domain, purchasedAt: Date.now(), registrar: "test-registrar", connectionType: "purchased" };
+    },
+    async setDns(): Promise<DnsRecordSet> {
+      return { mx: true, spf: true, dkim: true, dmarc: true, rdns: true };
+    },
+    async release(): Promise<ReleaseResult> {
+      return { released: true, releasedAt: Date.now() };
+    },
+  };
+}
+
+/**
+ * A MailboxPort whose buy is accepted but never finishes provisioning
+ * (InboxKit's "scheduled") — exhausts `awaitMailboxReady`'s in-call budget
+ * and throws a RETRYABLE VendorError with `step: "mailbox purchase"`
+ * (mailbox-provisioning.ts:275). This is the gate's exact repro for finding
+ * #2 (docs/adversarial/wave-integration-gate-2026-08-05.md): DNS is already
+ * ready, so the ONLY retryable throw reaching wire A's catch is the mailbox
+ * leg, not setDnsWithRetry.
+ */
+function stuckMailboxPort(): MailboxPort {
+  return {
+    async provision(domain: string, localPart: string): Promise<ProvisionedMailbox> {
+      return { email: `${localPart}@${domain}`, provider: "google", provisionedAt: Date.now() };
+    },
+    async provisioningState(): Promise<MailboxProvisioningState> {
+      return "pending"; // never reaches 'ready' within the backoff budget
+    },
+    async startWarmup(): Promise<{ started: boolean; startedAt: number }> {
+      throw new Error("startWarmup must never be reached before the mailbox is ready");
+    },
+    async cancelWarmup(): Promise<CancelWarmupResult> {
+      return { cancelled: true, cancelledAt: Date.now() };
+    },
+    async getHealth(email: string): Promise<MailboxHealth> {
+      return { email, reputationScore: 90, bounceRate: 0, complaintRate: 0, placementRate: 1 };
+    },
+    async release(): Promise<ReleaseResult> {
+      return { released: true, releasedAt: Date.now() };
+    },
+  };
 }
 
 const SETUP_INPUT = {
@@ -196,5 +262,53 @@ describe("retry_setup tenant message — fires when setDns retry is exhausted", 
     // The phantom domain — genuinely never bought on either call — must never
     // appear in a customer-facing message.
     expect(messages[0]!.body).not.toContain("resumelook2.com");
+  });
+
+  it("gate finding #2 (2026-08-06) — a MAILBOX-leg retryable failure names the mailbox step, not DNS", async () => {
+    // DNS is already ready (healthyDomainPort); the only retryable throw wire A
+    // can see is awaitMailboxReady's. The pre-fix message hard-coded DNS prose
+    // regardless of which leg actually failed — the exact contradiction the
+    // gate executed: REST body step="mailbox purchase", agent message blamed DNS.
+    const { tenantId } = await mintTenant("Wire A Mailbox Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
+    const idempotencyKey = "wire-a-mailbox-1";
+
+    const err = await withTenantContext(tenantId, (base) =>
+      runSetupInfrastructure(
+        { ...base, adapters: { ...base.adapters, domain: healthyDomainPort(), mailbox: stuckMailboxPort() } },
+        { ...SETUP_INPUT, brand: "Wire A Mailbox", primaryDomain: "gowireamailbox.com", senderIdentity: "S <s@gowireamailbox.com>" },
+        undefined,
+        idempotencyKey,
+      ).catch((e: unknown) => e),
+    );
+    expect(err).toBeInstanceOf(VendorError);
+    expect((err as VendorError).retryable).toBe(true);
+    expect((err as VendorError).step).toBe("mailbox purchase");
+
+    const messages = await withTenantContext(tenantId, (ctx) => listSurfacedTenantMessages(ctx));
+    expect(messages).toHaveLength(1);
+    expect(messages[0]!.kind).toBe("retry_setup");
+    // The two customer surfaces (this message + the REST error's `step`) must
+    // agree: the failing leg was the mailbox, never DNS.
+    expect(messages[0]!.body).toMatch(/mailbox/i);
+    expect(messages[0]!.body).not.toMatch(/DNS/i);
+  });
+
+  it("the DNS-leg case still names DNS, unchanged by step-awareness", async () => {
+    const { tenantId } = await signup("Retry DNS Still Co", "founder@retrydnsstill.test");
+    const err = await withTenantContext(tenantId, (base) =>
+      runSetupInfrastructure(
+        { ...base, adapters: { ...base.adapters, domain: stuckDnsDomainPort("inboxkit domains/nameservers failed: domain not found") } },
+        SETUP_INPUT,
+        undefined,
+        "retry-key-dns-still",
+      ).catch((e: unknown) => e),
+    );
+    expect(err).toBeInstanceOf(VendorError);
+
+    const messages = await withTenantContext(tenantId, (ctx) => listSurfacedTenantMessages(ctx));
+    expect(messages).toHaveLength(1);
+    expect(messages[0]!.body).toMatch(/DNS/i);
+    expect(messages[0]!.body).not.toMatch(/mailbox/i);
   });
 });

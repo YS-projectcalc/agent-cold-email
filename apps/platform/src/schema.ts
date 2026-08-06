@@ -106,7 +106,26 @@ CREATE TABLE IF NOT EXISTS tenant_profile (
   created_at INTEGER NOT NULL,
   clock_base INTEGER NOT NULL,
   clock_offset INTEGER NOT NULL DEFAULT 0,
-  clock_multiplier INTEGER NOT NULL DEFAULT 1
+  clock_multiplier INTEGER NOT NULL DEFAULT 1,
+  -- Wave-2 DECISION 2 (founder ruling 2026-08-05): which clock this tenant's
+  -- TenantContext runs on. 'virtual' (the DEFAULT — every tenant signs up as
+  -- 'demo', routes/signup.ts) | 'real'. Stamped 'real' ONLY inside the one-shot
+  -- virtual->real migration's transaction (engine/clock-migration.ts), never
+  -- before it: the marker IS the interlock. The auto-send driver's predicate
+  -- requires clock_mode='real', so an unmigrated tenant can never be sent for,
+  -- and a migration that rolls back leaves this 'virtual' — a genuinely virgin
+  -- retry state, which is what makes a double-shift structurally impossible.
+  -- One-way: plan never downgrades paid->demo (its only two writers are the
+  -- checkout upgrades, engine/billing.ts), so there is no reverse migration.
+  clock_mode TEXT NOT NULL DEFAULT 'virtual',
+  -- Forensics for the shift the migration applied, persisted in the SAME
+  -- transaction as the stamp above: realNow - frozenNow, EITHER SIGN (a
+  -- pre-upgrade demo tenant's frozen clock is typically far in the real
+  -- FUTURE — ~32 virtual days per demo run, up to 20 runs). Never read by
+  -- product code; exists so a mis-shift can be diagnosed and corrected by
+  -- hand, since the migration itself is one-shot.
+  clock_migration_delta_ms INTEGER,
+  clock_migrated_at INTEGER
 );
 
 -- SPEC.md §20 — BYO domains & mailboxes. Every new column below defaults to
@@ -287,7 +306,40 @@ CREATE TABLE IF NOT EXISTS mailboxes (
   -- so the live adapter kind can no longer tell a real slot from a sandbox one —
   -- this durable marker records the truth at provision time. DEFAULT 0 keeps
   -- every existing (sandbox) mailbox byte-identical and never double-decrements.
-  slot_counted INTEGER NOT NULL DEFAULT 0
+  slot_counted INTEGER NOT NULL DEFAULT 0,
+  -- Wave-2 §1 — WHICH VENDOR actually holds this mailbox: 'google' (a real
+  -- InboxKit-provisioned mailbox) | 'byo' (customer-connected) | 'sandbox' (a
+  -- demo-era row created by the sandbox bundle — nothing exists at any vendor)
+  -- | '' (not yet classified). slot_counted is NOT this discriminator: a BYO
+  -- mailbox and any real row predating that column both read 0.
+  --
+  -- WRITTEN AT INSERT by both mailbox creation paths — engine/
+  -- mailbox-provisioning.ts records whatever the MailboxPort returned
+  -- ('google' real / 'sandbox' sandbox), engine/byo-mailbox-composition.ts
+  -- writes 'byo'. The one-shot clock migration (engine/clock-migration.ts)
+  -- back-fills ONLY the two POSITIVE signals available on a row predating this
+  -- column — 'byo' from source='byo_connected', 'google' from
+  -- slot_counted=1 — and deliberately does NOT guess 'sandbox' for whatever
+  -- remains (wave2-integration-gate-2026-08-06 BLOCKING finding 1's sibling: a
+  -- REAL row that also predates slot_counted reads slot_counted=0 too, so a
+  -- catch-all guess retired it). A row created before the column existed AND
+  -- not caught by either positive rule reads '' and stays '' forever — the
+  -- migration is one-shot and never re-runs to reconsider it.
+  --
+  -- '' IS LOAD-BEARING, NOT A BUG (adversary round-2, R8; reaffirmed by the
+  -- 2026-08-06 gate). The ALTER that adds this column runs in
+  -- ensureColumnMigrations(), OUTSIDE the migration's transaction, and the
+  -- backfill runs INSIDE it. So a rolled-back clock migration leaves
+  -- provider='' on every row while clock_mode stays 'virtual'. The
+  -- send-eligibility picker excludes '' precisely so those unclassified rows
+  -- can never be picked or billed; that coheres with the clock_mode interlock,
+  -- which independently blocks the driver for the same tenant. Do NOT "fix"
+  -- the '' exclusion — removing it would un-gate unclassified rows in exactly
+  -- the state where nothing has classified them. The resolution path for a
+  -- genuinely-stuck '' row is the U2 pre-arm provenance read
+  -- (engine/ops-summary.ts's mailboxProvenance, ACTIVATION.md's arming-order
+  -- runbook) — a human reclassifies it by hand before real sending is armed.
+  provider TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS campaigns (
@@ -460,6 +512,74 @@ CREATE TABLE IF NOT EXISTS webhook_events (
   event_id TEXT PRIMARY KEY,
   type TEXT NOT NULL,
   ts INTEGER NOT NULL
+);
+
+-- Guard-before-effect marker for the webhook handler
+-- (audit-stripe-webhook-2026-08-06.md finding 2). The dedup claim above commits
+-- BEFORE the handler's effects run, and checkout.session.completed awaits a
+-- Stripe round trip partway through — so a 429/500/timeout there threw with the
+-- claim already durable, Stripe's retry short-circuited on it, and the tenant
+-- was left HALF-APPLIED forever: billing_state='active' but the OFAC screening
+-- gate never run (fail-OPEN on a compliance control) and quantity billing dead
+-- (stripe_mailbox_item_id NULL, which syncMailboxQuantity bails on).
+--
+-- A row here exists ONLY while an event's effects are in flight. Present on a
+-- redelivery == the previous attempt died mid-handler, so the handler is re-run
+-- to completion instead of being no-op'd as a duplicate. Every handler is
+-- written to be idempotent (the checkout ledger row is keyed on the EVENT id
+-- for exactly this reason), so a re-run cannot double-apply. Deleting the
+-- marker is the LAST thing an attempt does, so the failure direction is
+-- "re-run something already done" (safe) and never "skip something undone".
+CREATE TABLE IF NOT EXISTS webhook_event_inflight (
+  event_id TEXT PRIMARY KEY,
+  started_at INTEGER NOT NULL
+);
+
+-- Where the CURRENT dunning cycle starts (audit-stripe-webhook-2026-08-06.md
+-- finding 6). The dunning "cycle" is the number of invoice.payment_failed rows
+-- in webhook_events, and nothing ever windowed it — so it was a LIFETIME count
+-- that survived a full recovery. A customer who had a rough month a year ago
+-- was suspended on their FIRST failure thereafter, skipping the entire
+-- four-strike grace period the design specifies.
+--
+-- The basis is a webhook_events ROWID, not a timestamp: rowids are assigned in
+-- insertion order and can never tie, so "failures recorded after the recovery"
+-- is exact, with no dependence on clock granularity or on the tenant's virtual
+-- clock (which advanceClock can move). Written at every billing RECOVERY
+-- transition (engine/billing.ts), read by engine/ops-summary.ts.
+CREATE TABLE IF NOT EXISTS dunning_cycle_basis (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  -- MAX(rowid) of webhook_events at the moment billing recovered. Failures at
+  -- or below it belong to a CLOSED cycle and no longer count.
+  basis_rowid INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+-- Event-ordering watermark, ONE ROW PER LANE
+-- (audit-stripe-webhook-2026-08-06.md finding 3, rescoped by
+-- wave2-integration-gate-2026-08-06.md BLOCKING 2). Stripe does not guarantee
+-- delivery ORDER, and anything that 500s is redelivered hours later — so
+-- last-write-wins let a STALE invoice.payment_failed land on a RECOVERED payer,
+-- regress billing_state to 'past_due', fail isTenantActivated (which swaps the
+-- tenant's real vendor adapters for sandbox ones mid-campaign), and hand the
+-- dunning sweep a legitimate-looking past_due to suspend on.
+--
+-- KEYED BY LANE, never globally: the six subscribed event types are independent
+-- Stripe state machines on independent objects. A single shared watermark meant
+-- a routine subscription renewal silenced a real chargeback emitted minutes
+-- earlier — the D5 freeze never fired, with no alert and no self-heal. A lane
+-- may only order ITS OWN events. See engine/billing.ts's isStaleBillingEvent
+-- for the full rule (lane ordering AND an actual state conflict are both
+-- required to refuse).
+CREATE TABLE IF NOT EXISTS billing_event_order (
+  -- 'billing' (checkout/subscription/invoice — one subscription's lifecycle)
+  -- or 'dispute' (chargebacks, orthogonal to it).
+  lane TEXT PRIMARY KEY,
+  -- The emission time of the newest event this tenant has APPLIED in this lane.
+  last_event_created INTEGER NOT NULL,
+  -- Which event set it — for audit when a refusal needs explaining.
+  last_event_id TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
 );
 
 -- Deliverability control-loop audit log (B6). Every action the loop takes
@@ -769,12 +889,60 @@ CREATE TABLE IF NOT EXISTS mailbox_intents (
 );
 CREATE INDEX IF NOT EXISTS idx_mailbox_intents_tenant ON mailbox_intents(tenant_id, status);
 
+-- The BUY-DISPATCH claim behind the guarded re-buy (founder ruling 2026-08-06:
+-- one automatic re-buy per stuck purchase, only after the provider confirms the
+-- first one produced nothing). One row per mailbox intent, claimed BEFORE every
+-- /mailboxes/buy call, so a crash at any point after the claim leaves a durable
+-- record that a buy MAY have landed.
+--
+-- WHY mailbox_intents.status alone cannot carry this: status is written AFTER
+-- the vendor answers, so a kill between the accepted buy and the status write
+-- leaves 'intent' — indistinguishable from "never dispatched", which is what
+-- bought a second paid mailbox (wave-integration gate finding #3). attempts
+-- is written BEFORE the call instead, and is also the cap: 2 dispatches (the
+-- original + the ONE authorized re-buy), enforced crash-safely because the
+-- increment precedes the spend.
+--
+-- WHY A SEPARATE TABLE rather than columns on mailbox_intents: (1) this DDL runs
+-- on EVERY DO construction, so a new TABLE reaches already-provisioned tenants
+-- automatically, while a new COLUMN would need a tenant-do.ts back-fill; and
+-- (2) last_dispatched_at is REAL wall clock (never ctx.clock) — it measures
+-- how long the PROVIDER has had to catch up, a real-world duration that a
+-- tenant's virtual clock offset must not be able to shorten. Same reasoning as
+-- engine/spend-ceiling.ts's ledgerNow(). Rows are dropped at teardown alongside
+-- the intent and the idempotency claim (markMailboxIntentsReleased).
+CREATE TABLE IF NOT EXISTS mailbox_buy_dispatches (
+  intent_key TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  email TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  -- REAL wall clock (RealClock), NOT ctx.clock — see the comment above.
+  last_dispatched_at INTEGER NOT NULL,
+  -- 1 when this row was reconstructed from an intent status that pre-dates the
+  -- table (the original dispatch time is unknowable, so the absence clock
+  -- restarts at reconstruction — never earlier, so it can only delay a re-buy).
+  reconstructed INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS mailbox_cred_pushes (
   email TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',
   attempts INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
+  -- CREDSTORE F1 (wave2-design §"CREDSTORE F1") — Worker-owned monotonic push
+  -- claim sequence, distinct from content-hash dedup (which orders CONTENT,
+  -- not CLAIMS). Claimed via a synchronous UPDATE+SELECT before the first
+  -- await in pushRecordedMailbox (engine/mailbox-credential-push.ts) so a
+  -- provision-hook push racing a reconcile push against the same mailbox
+  -- always claims two distinct, ordered sequence numbers (the DO is
+  -- single-threaded). Sent on the wire; the engine can then reject a stale
+  -- replay without depending on request arrival order. Survives every
+  -- status flip (including 'revoked' -> revived 'pending'), so it is
+  -- monotonic per email forever, not just per push cycle.
+  push_seq INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );

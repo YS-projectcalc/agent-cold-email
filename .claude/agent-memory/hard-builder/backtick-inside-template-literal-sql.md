@@ -10,3 +10,11 @@ When editing a large SQL string stored as a JS backtick template literal (ColdSt
 **Why:** cost a debugging cycle here — a comment `NOT the warmup \`status\` column` broke the schema literal; the fix was dropping the backticks.
 
 **How to apply:** in any backtick template literal, quote identifiers in prose with plain quotes or nothing (`warmup status`, `'status'`), never backticks. If a typecheck throws TS1005 inside a known-good template-literal string, suspect a rogue backtick before anything else.
+
+**Sibling delimiter trap — `*/` inside a BLOCK COMMENT (hit twice in one session,
+2026-08-06):** writing env-var globs in a JSDoc as `ENGINE_*/INBOXKIT_*` closes the
+comment at the `*/`, and the rest of the prose is then parsed as code. Vite/oxc reports
+`[PARSE_ERROR] Expected a semicolon ... Try inserting a semicolon here` pointing at the
+PROSE, with no mention of comments. Write `ENGINE_ / INBOXKIT_` or "neither ENGINE_ nor
+INBOXKIT_". Note `//` line comments and string literals are unaffected — only block
+comments — so a repo-wide `grep '\*/[A-Za-z]'` needs its hits triaged, not blanket-fixed.

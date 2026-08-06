@@ -27,7 +27,7 @@ import {
   stripeMode,
   type StripePriceMap,
 } from "../billing/stripe-client.js";
-import type { StripeEventInput } from "../billing/stripe-webhook.js";
+import { HANDLED_STRIPE_EVENT_TYPES, type StripeEventInput } from "../billing/stripe-webhook.js";
 import type { Env } from "../env.js";
 import { newId } from "../schema.js";
 import { screenTenant } from "../ofac/screening.js";
@@ -260,6 +260,7 @@ export async function completeSimulatedCheckout(ctx: TenantContext, sessionId: s
   // suspension (a now-paying customer — finding #6).
   clearTeardownRecord(ctx);
   reactivateFromDunning(ctx);
+  recordDunningCycleBasis(ctx, now);
   ctx.sql.exec(
     `INSERT INTO ledger_entries (id, tenant_id, kind, amount_cents, description, ts) VALUES (?, ?, 'credit', 0, ?, ?)`,
     newId("ledg"),
@@ -283,6 +284,12 @@ export interface WebhookApplyResult {
   frozen?: boolean;
   /** D5 chargeback lane: a won dispute lifted the freeze (billing_state -> 'active'). */
   unfrozen?: boolean;
+  /** Refused as OUT OF ORDER: Stripe emitted this event before one already
+   *  applied, so applying it would regress billing state (finding 3). */
+  stale?: boolean;
+  /** This delivery FINISHED a previous attempt that died mid-handler, rather
+   *  than no-op'ing as an ordinary duplicate (finding 2). */
+  completed?: boolean;
 }
 
 function readStripeMetadataPlan(obj: Record<string, unknown>): TenantPlan | null {
@@ -337,10 +344,179 @@ function mapStripeSubscriptionStatus(status: unknown): "active" | "past_due" | "
 }
 
 /**
+ * Which independent Stripe state machine an event belongs to. The six subscribed
+ * types are NOT one sequence: a Dispute, a Subscription and an Invoice are
+ * separate objects with no causal ordering between them, and Stripe guarantees
+ * no cross-object delivery order.
+ *
+ *   'billing' — checkout.session.completed, customer.subscription.*,
+ *     invoice.payment_failed. These all report on the SAME subscription's
+ *     payment/status lifecycle, so a later one genuinely supersedes an earlier
+ *     one (a subscription that is 'active' now supersedes the invoice that
+ *     failed before it).
+ *   'dispute' — charge.dispute.*. A chargeback on a charge is orthogonal to the
+ *     subscription's status: a renewal succeeding says NOTHING about whether a
+ *     cardholder disputed an earlier charge, so it must never silence one.
+ */
+function stripeEventLane(type: string): "billing" | "dispute" | null {
+  if (type === "charge.dispute.created" || type === "charge.dispute.closed") return "dispute";
+  return HANDLED_STRIPE_EVENT_TYPES.has(type) ? "billing" : null;
+}
+
+/**
+ * The `billing_state` this event WANTS to write, or null when it writes none.
+ * The staleness rule compares this against the state already on the row — see
+ * isStaleBillingEvent's condition (2).
+ */
+function intendedBillingState(event: StripeEventInput): string | null {
+  const obj = event.data.object;
+  switch (event.type) {
+    case "checkout.session.completed":
+      return "active";
+    case "customer.subscription.updated":
+      return mapStripeSubscriptionStatus(obj.status);
+    case "customer.subscription.deleted":
+      return "canceled";
+    case "invoice.payment_failed":
+      return "past_due";
+    case "charge.dispute.created":
+      return "disputed";
+    case "charge.dispute.closed":
+      // Only a WON dispute writes state (it lifts the freeze); lost/other just
+      // record the outcome on the disputes row.
+      return obj.status === "won" ? "active" : null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * True when this event must be REFUSED as out of order
+ * (audit-stripe-webhook-2026-08-06.md finding 3, rescoped by
+ * wave2-integration-gate-2026-08-06.md BLOCKING 2).
+ *
+ * The original defect: a stale `invoice.payment_failed` landing on a RECOVERED
+ * payer wrote 'past_due', which flipped `isTenantActivated` false — swapping
+ * real vendor adapters for sandbox ones mid-campaign — and then let the dunning
+ * sweep suspend a paying customer off that poisoned state. A conditional write
+ * is only as good as the freshness of what it conditions on.
+ *
+ * The first fix over-reached: ONE global watermark across all six types, so once
+ * any event at time T applied, every event emitted before T was refused forever
+ * IN EVERY LANE. That silently dropped the D5 chargeback freeze (a routine
+ * renewal at T+300 made a real dispute emitted at T+120 a no-op, with no alert
+ * and no self-heal) and could drop a paid checkout with `screened_at` NULL,
+ * reopening the very compliance fail-open the guard-before-effect fix closed.
+ * Refusal is right for SAME-LANE supersession and wrong for cross-lane, where
+ * the older event carries information the newer one does not replace.
+ *
+ * THE RULE — refuse only when BOTH hold:
+ *   (1) the event is OLDER than the newest applied event IN ITS OWN LANE.
+ *       Strictly older; EQUAL applies, because Stripe's `created` has
+ *       one-second granularity and two genuinely distinct events can share a
+ *       second. A genuinely NEW failure after a recovery is therefore not
+ *       stale (its `created` is later) — the guard must not turn a recovered
+ *       tenant into one that can never go past_due again.
+ *   (2) applying it would actually CHANGE the billing_state a newer event has
+ *       already established. If the older event agrees with where the tenant
+ *       already is, there is nothing to regress — so let it through and let its
+ *       OTHER effects land. This is what saves a late checkout: it writes the
+ *       'active' the renewal already set, but it is also the only carrier of
+ *       the OFAC screen, the ledger credit and the subscription-item capture.
+ *       It is also what still refuses a stale checkout after a cancellation
+ *       (it would write 'active' over 'canceled'), and a stale dispute.closed
+ *       (won) that would lift a NEWER freeze.
+ *
+ * An event with NO `created` is UNORDERED: it applies, and never advances a
+ * watermark. Every real Stripe event carries `created`; only synthetic fixtures
+ * lack one, and an unordered event must not poison the ordering of real ones.
+ *
+ * Failure direction: a wrong APPLY here can only be an event whose state write
+ * agrees with the current state — i.e. it changes no state at all, and only its
+ * idempotent side effects run. A wrong REFUSE silently drops a control. The
+ * rule is deliberately biased toward applying.
+ */
+function isStaleBillingEvent(ctx: TenantContext, event: StripeEventInput): boolean {
+  if (event.created === undefined) return false;
+  const lane = stripeEventLane(event.type);
+  if (!lane) return false;
+
+  const row = ctx.sql
+    .exec<{ last_event_created: number }>(`SELECT last_event_created FROM billing_event_order WHERE lane = ?`, lane)
+    .toArray()[0];
+  if (row === undefined || event.created >= row.last_event_created) return false; // (1)
+
+  const intended = intendedBillingState(event);
+  if (intended === null) return false; // writes no state — nothing to regress
+  const current = ctx.sql
+    .exec<{ billing_state: string }>(`SELECT billing_state FROM tenant_profile WHERE id = ?`, ctx.tenantId)
+    .one().billing_state;
+  return intended !== current; // (2)
+}
+
+/**
+ * Closes the current dunning cycle at a billing RECOVERY transition
+ * (audit-stripe-webhook-2026-08-06.md finding 6). `billingFailureCount`
+ * (engine/ops-summary.ts) counts `invoice.payment_failed` rows in
+ * `webhook_events` and had no window at all, so the "cycle" was a LIFETIME
+ * count: three failures a year ago plus one today read as cycle 4 and
+ * suspended the tenant on that single new failure, skipping the whole
+ * four-strike grace period.
+ *
+ * Recorded as a webhook_events ROWID rather than a timestamp — insertion order
+ * cannot tie, so it needs no clock and is unaffected by the tenant's virtual
+ * one. Called at EVERY recovery transition regardless of whether the tenant was
+ * actually dunning-suspended: a tenant sitting at cycle 3 (failing, not yet
+ * suspended) who then pays must start their next cycle at 1 too. Monotonic by
+ * construction, since rowids only increase.
+ */
+function recordDunningCycleBasis(ctx: TenantContext, now: number): void {
+  ctx.sql.exec(
+    `INSERT INTO dunning_cycle_basis (id, basis_rowid, updated_at)
+     VALUES (1, (SELECT COALESCE(MAX(rowid), 0) FROM webhook_events), ?)
+     ON CONFLICT (id) DO UPDATE SET basis_rowid = excluded.basis_rowid, updated_at = excluded.updated_at`,
+    now,
+  );
+}
+
+/** Advances the watermark FOR THIS EVENT'S LANE ONLY, monotonically — the
+ *  conditional upsert means an out-of-order write can never pull it backwards,
+ *  and one lane can never move another lane's mark. */
+function recordBillingEventOrder(ctx: TenantContext, event: StripeEventInput, now: number): void {
+  if (event.created === undefined) return;
+  const lane = stripeEventLane(event.type);
+  if (!lane) return;
+  ctx.sql.exec(
+    `INSERT INTO billing_event_order (lane, last_event_created, last_event_id, updated_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT (lane) DO UPDATE SET
+       last_event_created = excluded.last_event_created,
+       last_event_id = excluded.last_event_id,
+       updated_at = excluded.updated_at
+     WHERE excluded.last_event_created >= billing_event_order.last_event_created`,
+    lane,
+    event.created,
+    event.id,
+    now,
+  );
+}
+
+/**
  * Applies one Stripe webhook event to this tenant. Idempotent by event id
  * (ARCHITECTURE.md #3): a redelivered event's second `INSERT OR IGNORE`
- * writes zero rows, and this returns `{ applied: false, duplicate: true }`
- * WITHOUT re-running any of the mutation below.
+ * writes zero rows and this returns `{ applied: false, duplicate: true }`
+ * WITHOUT re-running the mutation — UNLESS the previous attempt died partway
+ * through (finding 2), which the in-flight marker records and this finishes.
+ *
+ * ORDER OF OPERATIONS, and why:
+ *   1. claim the event id. This is the concurrency guard — DO single-threading
+ *      serializes the INSERT OR IGNORE, so of two simultaneous deliveries
+ *      exactly one wins the claim. It has to stay FIRST for that to hold.
+ *   2. refuse an out-of-order event (isStaleBillingEvent) before any effect.
+ *   3. advance the watermark, synchronously, BEFORE the effects — so a handler
+ *      that dies mid-flight still can't be undercut by an older redelivery.
+ *   4. mark in flight, run effects, unmark. The effects themselves are ordered
+ *      so every awaited VENDOR call comes last: the compliance screen and the
+ *      ledger write can no longer be skipped by a Stripe hiccup.
  */
 export async function applyStripeWebhookEvent(ctx: TenantContext, event: StripeEventInput): Promise<WebhookApplyResult> {
   const now = ctx.clock.now();
@@ -351,9 +527,50 @@ export async function applyStripeWebhookEvent(ctx: TenantContext, event: StripeE
     now,
   );
   if (claim.rowsWritten === 0) {
-    return { applied: false, duplicate: true };
+    const halfApplied = ctx.sql
+      .exec<{ event_id: string }>(`SELECT event_id FROM webhook_event_inflight WHERE event_id = ?`, event.id)
+      .toArray()[0];
+    if (!halfApplied) return { applied: false, duplicate: true };
+    // The completion pass obeys the SAME ordering rule as a first delivery.
+    // Without this, finding 2's fix would reopen finding 3 one door down: a
+    // checkout that crashed mid-handler at T1, followed by a
+    // customer.subscription.deleted at T2, would have its half-applied work
+    // "finished" when Stripe redelivered it — re-writing plan='managed',
+    // billing_state='active' and resurrecting a canceled tenant. Superseded
+    // work is not worth finishing; drop the marker and stop.
+    if (isStaleBillingEvent(ctx, event)) {
+      ctx.sql.exec(`DELETE FROM webhook_event_inflight WHERE event_id = ?`, event.id);
+      return { applied: false, duplicate: true, stale: true };
+    }
+    // A previous attempt claimed this event and then died before finishing
+    // (finding 2's exact repro: an awaited Stripe call threw with the claim
+    // already durable). Finish the job instead of no-op'ing it — the effects
+    // are idempotent, which is what makes this safe to run against work that
+    // may have partially landed, and safe to run CONCURRENTLY with the original
+    // attempt that is still in flight.
+    await applyStripeEventEffects(ctx, event, now);
+    ctx.sql.exec(`DELETE FROM webhook_event_inflight WHERE event_id = ?`, event.id);
+    return { applied: false, duplicate: true, completed: true };
   }
 
+  if (isStaleBillingEvent(ctx, event)) {
+    return { applied: false, duplicate: false, stale: true };
+  }
+  recordBillingEventOrder(ctx, event, now);
+
+  ctx.sql.exec(`INSERT OR REPLACE INTO webhook_event_inflight (event_id, started_at) VALUES (?, ?)`, event.id, now);
+  const result = await applyStripeEventEffects(ctx, event, now);
+  ctx.sql.exec(`DELETE FROM webhook_event_inflight WHERE event_id = ?`, event.id);
+  return result;
+}
+
+/**
+ * The per-type effects. EVERY branch must be idempotent — the in-flight
+ * completion path above re-runs this against state a crashed attempt may have
+ * partially written, so a branch that appends rather than sets (the checkout
+ * ledger entry) has to be keyed on something stable, not a fresh random id.
+ */
+async function applyStripeEventEffects(ctx: TenantContext, event: StripeEventInput, now: number): Promise<WebhookApplyResult> {
   const obj = event.data.object;
 
   switch (event.type) {
@@ -385,22 +602,39 @@ export async function applyStripeWebhookEvent(ctx: TenantContext, event: StripeE
       // The item-id capture needs a real Stripe subscription (a getSubscription
       // round trip), so it is gated on the key — a simulated tenant has none.
       ctx.sql.exec(`UPDATE tenant_profile SET checkout_discount_pct = ? WHERE id = ?`, readCheckoutDiscountPct(obj), ctx.tenantId);
-      if (ctx.env.STRIPE_SECRET_KEY && subscriptionId) {
-        await captureSubscriptionState(ctx, ctx.env.STRIPE_SECRET_KEY, subscriptionId);
-      }
       // Re-subscribe bookkeeping (findings #4 + #6).
       clearTeardownRecord(ctx);
       reactivateFromDunning(ctx);
+      recordDunningCycleBasis(ctx, now);
+      // Keyed on the EVENT id, not a fresh newId: the in-flight completion path
+      // re-runs this branch after a crash, and an appending INSERT would then
+      // write a second upgrade-credit row for one checkout.
       ctx.sql.exec(
-        `INSERT INTO ledger_entries (id, tenant_id, kind, amount_cents, description, ts) VALUES (?, ?, 'credit', 0, ?, ?)`,
-        newId("ledg"),
+        `INSERT OR IGNORE INTO ledger_entries (id, tenant_id, kind, amount_cents, description, ts) VALUES (?, ?, 'credit', 0, ?, ?)`,
+        `ledg_${event.id}`,
         ctx.tenantId,
         `plan upgraded to ${plan} (stripe checkout.session.completed)`,
         now,
       );
       // G1 — screen at the activation transition, including the Stripe
       // billing name when the completed session actually carried one.
+      //
+      // ORDERING (audit 2026-08-06 finding 2): the sanctions screen and the
+      // ledger write run BEFORE the Stripe round trip below, never after. When
+      // `captureSubscriptionState` sat first, an ordinary 429/500 on
+      // `GET /v1/subscriptions/{id}` threw with the dedup claim and
+      // `billing_state='active'` already committed, so the retry short-circuited
+      // as a duplicate and the tenant ended up permanently activated with
+      // `screening_status` still at its 'clear' DEFAULT and `screened_at` NULL —
+      // a crashed checkout was MORE activated than a clean one, breaking the
+      // `isPaidPlanTier => screened-at-least-once` invariant.
       await screenTenant(ctx, { trigger: "checkout", billingName: readStripeBillingName(obj) });
+      // The one vendor round trip, LAST, so nothing durable depends on it
+      // completing. If it throws, the in-flight marker survives and the next
+      // delivery of this event finishes exactly this step.
+      if (ctx.env.STRIPE_SECRET_KEY && subscriptionId) {
+        await captureSubscriptionState(ctx, ctx.env.STRIPE_SECRET_KEY, subscriptionId);
+      }
       return { applied: true, duplicate: false, plan };
     }
 
@@ -419,8 +653,12 @@ export async function applyStripeWebhookEvent(ctx: TenantContext, event: StripeE
         billingState,
         ctx.tenantId,
       );
-      // Recovery-to-active also un-suspends a dunning-frozen tenant (finding #6).
-      if (billingState === "active" && res.rowsWritten > 0) reactivateFromDunning(ctx);
+      // Recovery-to-active also un-suspends a dunning-frozen tenant (finding #6)
+      // and closes the dunning cycle, so the NEXT failure starts at 1.
+      if (billingState === "active" && res.rowsWritten > 0) {
+        reactivateFromDunning(ctx);
+        recordDunningCycleBasis(ctx, now);
+      }
       return { applied: true, duplicate: false };
     }
 
@@ -502,8 +740,11 @@ export async function applyStripeWebhookEvent(ctx: TenantContext, event: StripeE
           ctx.tenantId,
         );
         // A won dispute is a billing-recovery transition — also un-suspend a
-        // dunning-frozen tenant (finding #6).
-        if (res.rowsWritten > 0) reactivateFromDunning(ctx);
+        // dunning-frozen tenant (finding #6) and close the dunning cycle.
+        if (res.rowsWritten > 0) {
+          reactivateFromDunning(ctx);
+          recordDunningCycleBasis(ctx, now);
+        }
         return { applied: true, duplicate: false, unfrozen: res.rowsWritten > 0 };
       }
       return { applied: true, duplicate: false };

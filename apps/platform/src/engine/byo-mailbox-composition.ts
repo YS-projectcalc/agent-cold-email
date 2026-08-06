@@ -103,9 +103,16 @@ export async function connectByoMailbox(
   const now = ctx.clock.now();
   const mailboxId = newId("mbx");
   ctx.sql.exec(
+    // provider='byo' (wave-2 §1a): a customer-owned mailbox is real and really
+    // sends, but consumes no InboxKit plan slot — so `slot_counted` (absent
+    // here, DEFAULT 0) cannot classify it and the column has to say so
+    // explicitly. The send-eligibility picker excludes BYO on `source` while no
+    // BYO->engine credential push exists; the provider value is what keeps the
+    // row honest for the pre-arm provenance read and the clock migration's
+    // classification, which must never mistake it for a sandbox phantom.
     `INSERT INTO mailboxes
-       (id, tenant_id, domain_id, domain, email, daily_cap, sent_today, sent_today_epoch_day, status, warmup_started_at, created_at, poll_cursor, source, transport_kind, transport_json)
-     VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'warming', ?, ?, -1, 'byo_connected', ?, ?)`,
+       (id, tenant_id, domain_id, domain, email, daily_cap, sent_today, sent_today_epoch_day, status, warmup_started_at, created_at, poll_cursor, source, transport_kind, transport_json, provider)
+     VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'warming', ?, ?, -1, 'byo_connected', ?, ?, 'byo')`,
     mailboxId,
     ctx.tenantId,
     domainId,

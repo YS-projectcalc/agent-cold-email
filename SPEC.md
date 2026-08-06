@@ -537,6 +537,36 @@ Design principle: the platform is the system of record for lead state (identity,
 
 ---
 
+## 23. Send pipeline driver — the automatic cron leg (wave-2 DECISION 1, ratified 2026-08-05/06)
+
+The production driver of automatic sending is a **5-minute cron leg** (`admin/ops-sweep.ts`'s `runSendPipelineAllTenants`, `[triggers] crons` period `CRON_PERIOD_MS` = 300s), not DO alarms — alarms would add re-arm-after-throw / alarm-lost-on-error / constructor-re-arm failure classes whose failure mode is a silently-never-sending tenant, strictly harder to detect than a loud cron-leg error; cold-email cadence is day/hour-granular, so 5-minute worst-case latency is immaterial (design DECISION 1).
+
+**Poll-then-tick, per tenant.** For every tenant (enumerated via D1's `tenants_index`, which is NOT plan-filtered — that index is stale by design, written once at signup and never updated): `runScheduledPoll()` then `runScheduledTick()`, always poll BEFORE tick so a reply that arrived since the last cycle lands (and stop-on-reply cancels remaining steps) before this cycle decides what to send.
+
+**Budget + deadline.** Each tenant's poll+tick pair runs under a **135s budget** (`SEND_PIPELINE_TENANT_BUDGET_MS`) — a tenant that exceeds it is abandoned for the cycle (the abandoned RPC keeps running server-side; every effect it can still land is protected by the tick's atomic row claim and the engine's send idempotency). The whole leg carries a **150s deadline** (`SEND_PIPELINE_LEG_DEADLINE_MS`), checked BETWEEN tenants, converting "the tenants behind a stalled one never run" into "some tenants this cycle, all tenants across cycles." True worst case is deadline + one budget = 285s, under the 300s cron period — what stops a wedged engine from making every sweep overlap the next.
+
+**Rotation.** A stateless, cycle-derived offset (`Math.floor(nowMs / CRON_PERIOD_MS) % tenantIds.length`) into the tenant list, so a tenant that consistently burns the budget can't permanently occupy the head of the queue and starve everyone behind it. Needs no storage (two Workers can't disagree); it stutters around period boundaries (harmless — the fairness property is eventual coverage across cycles, not strict stepping).
+
+**The DO-side 4-leg gate** (`engine/activation.ts`'s `readSendDriverGate`, called fresh on every `runScheduledTick`/`runScheduledPoll`, nothing cached) is what may actually allow the cron to send for a tenant — the cron is a dumb driver, this is the gate, so no future route/tool/alarm can arm automatic sending by finding another door:
+  1. **paid plan** (`isPaidPlan`) — a demo/free tenant's whole world is the sandbox.
+  2. **`clock_mode === 'real'`** — the one-shot clock migration's interlock (ARCHITECTURE.md #4); an unmigrated tenant's rows still carry frozen virtual timestamps.
+  3. the existing activation predicate (paid AND `billing_state='active'` AND not lifecycle-frozen AND `screening_status='clear'`) — reused, not re-derived.
+  4. **`realSendPathLive(env)`** — `ENGINE_BASE_URL`/`ENGINE_AUTH_SECRET`/`INBOXKIT_API_KEY`/`INBOXKIT_WORKSPACE_ID` all set; without it a paid, activated tenant would get a SANDBOX `EmailPort` and the cron would mass-produce fake "sent" events that never left.
+
+**Kill switch.** Setting env var `AUTOSEND_DISABLED` to any non-empty value stops every tenant's automatic sending on the next cycle with no deploy — checked once per leg, logged loudly (`console.warn`) so a disabled send pipeline is never silent.
+
+**The five-rung timeout ladder** (`vendors/real/email-port.ts`'s `ENGINE_REQUEST_TIMEOUT_MS`, asserted whole by `test/send-pipeline-ladder.test.ts`) keeps the per-send HTTP timeout, the per-tenant cron budget, the leg deadline, the cron period, and the send-claim reclaim TTL from silently going incoherent when any one of them changes:
+```
+~100s engine worst-case SMTP transaction (apps/engine/src/smtp.ts)
+  < ENGINE_REQUEST_TIMEOUT_MS (120s)        — a merely-slow send is never aborted mid-flight
+  < SEND_PIPELINE_TENANT_BUDGET_MS (135s)   — a tenant's cron budget fits at least one complete engine request
+  <= SEND_PIPELINE_LEG_DEADLINE_MS (150s)   — the leg can spend one whole tenant budget
+  + one budget (285s worst case) < CRON_PERIOD_MS (300s) — a wedged engine can't make sweeps overlap
+  < SEND_CLAIM_TTL_MS (5 min, engine/tick.ts) — a send resolves/aborts before it is reclaim-eligible
+```
+
+---
+
 ## Appendix — verified facts & sources
 
 - Cold email is BANNED on shared-pool ESPs (SES/SendGrid/Mailgun/Postmark) → must use own SMTP or Google/MS mailboxes.

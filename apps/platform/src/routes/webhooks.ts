@@ -1,6 +1,10 @@
 import { Hono } from "hono";
 import type { Env } from "../env.js";
-import { extractStripeTenantId, StripeEventInput, verifyStripeSignature } from "../billing/stripe-webhook.js";
+import { resolveStripeTenant, StripeEventInput, verifyStripeSignature } from "../billing/stripe-webhook.js";
+import { getChargeCustomerId } from "../billing/stripe-client.js";
+import { alertUnroutableStripeEvent } from "../billing/webhook-routing-alert.js";
+import { RealClock } from "../clock.js";
+import { lookupTenantById, lookupTenantIdByStripeCustomer, recordStripeCustomerTenant } from "../db.js";
 import { SMALL_BODY_MAX_BYTES } from "../validate.js";
 
 // POST /webhooks/stripe — UNAUTHENTICATED (Stripe calls this, no bearer token
@@ -52,13 +56,63 @@ export const webhooksRoute = new Hono<{ Bindings: Env }>().post("/webhooks/strip
     return c.json({ error: "unrecognized stripe event shape", issues: parsed.error.issues }, 400);
   }
 
-  const tenantId = extractStripeTenantId(parsed.data);
-  if (!tenantId) {
-    // Nothing to route to — accepted (Stripe should not retry), but not applied.
+  // Tenant resolution is a ladder (billing/stripe-webhook.ts): our own metadata
+  // first, then the invoice's subscription_details, then the D1 customer index,
+  // then — for disputes only — the charge's customer. A TRANSIENT Stripe failure
+  // inside the last rung THROWS, which 500s here on purpose so Stripe redelivers
+  // rather than us dropping a chargeback freeze.
+  const resolution = await resolveStripeTenant(parsed.data, {
+    lookupTenantIdByCustomer: (customerId) => lookupTenantIdByStripeCustomer(c.env, customerId),
+    lookupChargeCustomerId: async (chargeId) => {
+      const key = c.env.STRIPE_SECRET_KEY;
+      if (!key) return null; // unarmed: no Stripe to ask, so the event is unroutable
+      return getChargeCustomerId(key, chargeId);
+    },
+  });
+  if (!resolution) {
+    // Nothing to route to — accepted (Stripe must not retry a permanently
+    // unroutable event), but LOUD: silence here is what let the chargeback lane
+    // die unnoticed in production (audit 2026-08-06 findings 1 + 8).
+    await alertUnroutableStripeEvent(c.env, parsed.data, "no tenant reference on event");
     return c.json({ received: true, applied: false, reason: "no tenant reference on event" }, 200);
   }
 
-  const stub = c.env.TENANT.get(c.env.TENANT.idFromName(tenantId));
+  // `idFromName` ALWAYS resolves, so an unknown id used to instantiate an empty
+  // DO whose requireContext() threw -> 500 -> ~3 days of Stripe retries counting
+  // toward endpoint auto-disable, for an event that can never succeed (finding
+  // 8). Check the control-plane index first and accept-with-an-alert instead.
+  const known = await lookupTenantById(c.env, resolution.tenantId);
+  if (!known) {
+    await alertUnroutableStripeEvent(
+      c.env,
+      parsed.data,
+      `resolved tenant ${resolution.tenantId} (via ${resolution.source}) is not in the control-plane index`,
+    );
+    return c.json({ received: true, applied: false, reason: "unknown tenant" }, 200);
+  }
+
+  // Learn the customer->tenant pairing from every event that carries both, so
+  // the LATER events that carry no metadata at all (invoices, and disputes via
+  // their charge) stay routable. Recorded BEFORE the dispatch: if the DO call
+  // fails, the redelivery should still be routable.
+  if (resolution.customerId) {
+    await recordStripeCustomerTenant(c.env, resolution.customerId, resolution.tenantId, new RealClock().now());
+  }
+
+  const stub = c.env.TENANT.get(c.env.TENANT.idFromName(resolution.tenantId));
   const result = await stub.handleStripeWebhook(parsed.data);
+  // A refused-as-stale event is a DROPPED state transition, and Stripe will not
+  // retry a 200 — so it must never be silent (wave2-integration-gate-2026-08-06.md
+  // BLOCKING 2 called out that the first version of this guard dropped a
+  // chargeback freeze with no alert and no self-heal). The refusal is usually
+  // correct (a late payment failure on a customer who already recovered), but
+  // "usually correct and invisible" is how the whole class started.
+  if (result.stale) {
+    await alertUnroutableStripeEvent(
+      c.env,
+      parsed.data,
+      `refused as out of order for tenant ${resolution.tenantId}: a newer event in the same lane already superseded this state transition`,
+    );
+  }
   return c.json({ received: true, ...result }, 200);
 });

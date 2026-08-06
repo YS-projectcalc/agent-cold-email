@@ -135,6 +135,18 @@ export function billableMailboxCount(ctx: TenantContext): number {
  * so a retry re-attempts both idempotently. Decrements the G4 account slot
  * counter by the count of REAL plan-slot mailboxes released (mailboxes.slot_counted).
  * Callers that touch billing must `syncMailboxQuantity` afterward.
+ *
+ * CREDSTORE F2 (wave2-design §"CREDSTORE F2", audit-credstore-2026-08-05
+ * finding F2) — per-mailbox order is now: (1) tombstone `mailbox_cred_pushes`
+ * FIRST, synchronous SQL, before ANY await; (2) vendor release; (3) engine
+ * revoke; (4) mark `released_at`. Tombstone-first (not after revoke) closes
+ * the reconcile-in-the-await-gap resurrection window: `reconcileMailboxCredentialPushes`
+ * selects `status = 'pending'` with no lifecycle gate, and every await below
+ * opens the DO's input gate — a reconcile landing in that gap used to find
+ * the row still 'pending'/'pushed' and push (create) fresh credentials for a
+ * mailbox we were in the middle of revoking. Retry semantics are unchanged
+ * (the loop is driven by `released_at IS NULL`, marked last; the tombstone
+ * UPDATE is idempotent on retry, same as the revoke).
  */
 export async function releaseMailboxes(
   ctx: TenantContext,
@@ -157,6 +169,16 @@ export async function releaseMailboxes(
 
   let slotCountedReleased = 0;
   for (const m of mailboxes) {
+    // CREDSTORE F2 — tombstone FIRST, synchronous, before any await (closes
+    // the reconcile-in-the-await-gap resurrection window; see doc comment
+    // above). Only touches a still-live claim ('pending'/'pushed'); an
+    // already-'revoked' row (a retry) is left alone.
+    ctx.sql.exec(
+      `UPDATE mailbox_cred_pushes SET status = 'revoked', updated_at = ? WHERE email = ? AND tenant_id = ? AND status IN ('pending', 'pushed')`,
+      now,
+      m.email,
+      ctx.tenantId,
+    );
     await ctx.adapters.mailbox.release(m.email, `release-mbx:${ctx.tenantId}:${m.id}`);
     if (m.slot_counted) slotCountedReleased++;
     // Revoke BEFORE marking released_at (i3i4-r2): a crash in between leaves the

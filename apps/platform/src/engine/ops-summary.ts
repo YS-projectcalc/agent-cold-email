@@ -10,6 +10,8 @@
 
 import { isPaidPlan, monthlyRevenueCents } from "@coldstart/shared";
 import type { TenantContext } from "../tenant-context.js";
+import { readActivationState } from "./activation.js";
+import { countSendEligibleMailboxes } from "./mailbox-eligibility.js";
 import { getDeliverabilitySummary } from "./reporting.js";
 
 export interface TenantOpsSummary {
@@ -23,7 +25,8 @@ export interface TenantOpsSummary {
   annualDomainLiabilityCents: number;
   /** priceCents of the tenant's plan if it's a paid tier AND billing is 'active'; 0 otherwise (SPEC.md §18). */
   mrrCents: number;
-  /** Count of invoice.payment_failed webhook events this tenant's DO has recorded — the dunning "cycle" (admin/dunning.ts). */
+  /** Count of invoice.payment_failed webhook events recorded since this tenant's
+   *  last billing recovery — the dunning "cycle" (admin/dunning.ts). */
   billingFailureCount: number;
   /** A5 — the most recent charge decline code (permanent codes make the dunning sweep suspend immediately); null if none/unknown. */
   lastDeclineCode: string | null;
@@ -42,7 +45,50 @@ export interface TenantOpsSummary {
    * reply-processor.ts) with `events`.ts >= sinceMs. Windowed so the watchtower
    * alerts on NEW failures since its last sweep, not all-time totals. */
   failureSignalsInWindow: { failed: number; complaints: number };
+  /** Wave-2 §1c — read-only signals for the two send-pipeline watchtower checks
+   * (admin/watchtower.ts). Read-only by construction: nothing here writes. */
+  sendPipeline: SendPipelineSignals;
+  /** Wave-2 §9-U2 — the PRE-ARM provenance read. Every mailbox this tenant has
+   * ever held, with the columns that decide whether it may be sent from, so the
+   * arm-verification runbook can confirm (i) the clock migration classified every
+   * row correctly and (ii) which demo-era rows it retired, BEFORE auto-send is
+   * armed for a real customer. Any real-but-classified-'sandbox' row blocks
+   * arming until an operator reclassifies it. Field names mirror the mailboxes
+   * COLUMN names on purpose — a runbook reader is checking this against the
+   * schema, not against a product API. Stays as standing ops visibility. */
+  mailboxProvenance: MailboxProvenanceRow[];
 }
+
+export interface SendPipelineSignals {
+  /** The existing activation predicate — both checks below only mean anything for an activated tenant. */
+  activated: boolean;
+  /** Non-demo 'pending' scheduled_sends whose send_at has come and gone. */
+  dueNonDemoPendingSends: number;
+  /** Mailboxes the tick's capacity picker could actually choose right now —
+   * computed by the SHARED predicate (engine/mailbox-eligibility.ts), never a
+   * restatement of it. A copy that drifts would report capacity while the picker
+   * finds none: a silent zero-send with the alarm asleep (adversary round-2, R4). */
+  eligibleMailboxes: number;
+  /** Credential pushes stuck 'pending' longer than AGING_CRED_PUSH_MS, named. */
+  agingPendingPushes: { email: string; pendingForMs: number }[];
+}
+
+export interface MailboxProvenanceRow {
+  email: string;
+  source: string;
+  slot_counted: number;
+  provider: string;
+  released_at: number | null;
+  warmup_started_at: number;
+  /** Read straight out of SqlStorage — the index signature is what `exec<T>` requires of its row type. */
+  [column: string]: SqlStorageValue;
+}
+
+/** How long a 'pending' credential push may sit before it is a founder problem.
+ * A push clears only on success, and on the manual-mint path that means an
+ * operator has to add an OAuth grant to a Worker secret — so "still pending"
+ * past this is a human's cue, not a transient. */
+export const AGING_CRED_PUSH_MS = 30 * 60 * 1000;
 
 function countActionsInWindow(ctx: TenantContext, action: string, sinceMs: number): number {
   return ctx.sql
@@ -143,8 +189,19 @@ export function getOpsSummary(ctx: TenantContext, sinceMs: number): TenantOpsSum
 
   // webhook_events is scoped per-DO already (one tenant per DO instance) —
   // no tenant_id column/filter needed, same as engine/billing.ts's idempotency check.
+  // Scoped to the CURRENT dunning cycle (audit-stripe-webhook-2026-08-06.md
+  // finding 6): unwindowed, this was a lifetime count that survived a full
+  // recovery, so a customer who had a rough month a year ago was suspended on
+  // their FIRST failure thereafter — cycle 4 on one new failure, skipping the
+  // whole four-strike grace period. `dunning_cycle_basis` (schema.ts) holds the
+  // webhook_events rowid at the last billing recovery; 0 when a tenant has
+  // never recovered, which counts everything exactly as before.
   const billingFailureCount = ctx.sql
-    .exec<{ n: number }>(`SELECT COUNT(*) as n FROM webhook_events WHERE type = 'invoice.payment_failed'`)
+    .exec<{ n: number }>(
+      `SELECT COUNT(*) as n FROM webhook_events
+       WHERE type = 'invoice.payment_failed'
+         AND rowid > (SELECT COALESCE(MAX(basis_rowid), 0) FROM dunning_cycle_basis)`,
+    )
     .one().n;
 
   // MRR follows the per-mailbox curve on the LIVE provisioned count (design §9),
@@ -214,5 +271,56 @@ export function getOpsSummary(ctx: TenantContext, sinceMs: number): TenantOpsSum
       failed: failureSignals.failed ?? 0,
       complaints: failureSignals.complaints ?? 0,
     },
+    sendPipeline: readSendPipelineSignals(ctx),
+    mailboxProvenance: ctx.sql
+      .exec<MailboxProvenanceRow>(
+        `SELECT email, source, slot_counted, provider, released_at, warmup_started_at
+         FROM mailboxes WHERE tenant_id = ? ORDER BY created_at ASC`,
+        ctx.tenantId,
+      )
+      .toArray(),
+  };
+}
+
+/**
+ * §1c — the two conditions the wave-2 watchtower checks alert on, read (never
+ * written) from this tenant's own state.
+ *
+ * The clock is the TENANT's clock, not the sweep's `sinceMs`: on a migrated
+ * paid tenant that is real wall time, which is the only base the due-window and
+ * the push age mean anything against. A demo tenant reads its virtual clock and
+ * is never `activated`, so neither check fires for it.
+ */
+function readSendPipelineSignals(ctx: TenantContext): SendPipelineSignals {
+  const now = ctx.clock.now();
+  const { activated } = readActivationState(ctx.sql, ctx.tenantId);
+
+  const dueNonDemoPendingSends = ctx.sql
+    .exec<{ n: number }>(
+      `SELECT COUNT(*) as n FROM scheduled_sends ss
+        WHERE ss.tenant_id = ? AND ss.status = 'pending' AND ss.send_at <= ?
+          AND ss.campaign_id IN (SELECT id FROM campaigns WHERE tenant_id = ? AND is_demo = 0)`,
+      ctx.tenantId,
+      now,
+      ctx.tenantId,
+    )
+    .one().n;
+
+  const agingPendingPushes = ctx.sql
+    .exec<{ email: string; updated_at: number }>(
+      `SELECT email, updated_at FROM mailbox_cred_pushes
+        WHERE tenant_id = ? AND status = 'pending' AND updated_at <= ?
+        ORDER BY updated_at ASC`,
+      ctx.tenantId,
+      now - AGING_CRED_PUSH_MS,
+    )
+    .toArray()
+    .map((row) => ({ email: row.email, pendingForMs: now - row.updated_at }));
+
+  return {
+    activated,
+    dueNonDemoPendingSends,
+    eligibleMailboxes: countSendEligibleMailboxes(ctx, now),
+    agingPendingPushes,
   };
 }

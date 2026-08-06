@@ -1,12 +1,13 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
-import type { TenantPlan } from "@coldstart/shared";
+import type { Clock, TenantPlan } from "@coldstart/shared";
 import { generateApiToken, hashApiToken } from "../src/auth.js";
-import { VirtualClock } from "../src/clock.js";
+import { RealClock, VirtualClock } from "../src/clock.js";
 import { insertTenantIndex } from "../src/db.js";
 import { readActivationState } from "../src/engine/activation.js";
 import { normalizeName, tokenize } from "../src/ofac/normalize.js";
 import { swapInSdnList } from "../src/ofac/sdn-list.js";
 import { newId } from "../src/schema.js";
+import { checkoutSessionCompleted, invoicePaymentFailed, stripeCustomerIdFor } from "./stripe-fixtures.js";
 import type { TenantContext } from "../src/tenant-context.js";
 import type { TenantDO } from "../src/tenant-do.js";
 import { createVendorAdapters } from "../src/vendors/factory.js";
@@ -53,12 +54,19 @@ export async function withTenantContext<T>(tenantId: string, fn: (ctx: TenantCon
   return runInDurableObject(tenantStub(tenantId), async (_instance, state) => {
     const sql = state.storage.sql;
     const profile = sql
-      .exec<{ plan: TenantPlan; clock_base: number; clock_offset: number; clock_multiplier: number }>(
-        `SELECT plan, clock_base, clock_offset, clock_multiplier FROM tenant_profile WHERE id = ?`,
+      .exec<{ plan: TenantPlan; clock_base: number; clock_offset: number; clock_multiplier: number; clock_mode: string }>(
+        `SELECT plan, clock_base, clock_offset, clock_multiplier, clock_mode FROM tenant_profile WHERE id = ?`,
         tenantId,
       )
       .one();
-    const clock = new VirtualClock(profile.clock_base, profile.clock_offset, profile.clock_multiplier);
+    // Mirrors TenantDO's own clock selection (wave-2 DECISION 2): a migrated
+    // (paid) tenant runs on the REAL clock. Constructing a VirtualClock
+    // unconditionally here would silently test a paid tenant against a frozen
+    // demo-era time base — the opposite of what production does for it.
+    const clock: Clock =
+      profile.clock_mode === "real"
+        ? new RealClock()
+        : new VirtualClock(profile.clock_base, profile.clock_offset, profile.clock_multiplier);
     // Mirrors tenant-do.ts's buildAdapters(): the I1 activation gate is a
     // FRESH SQL read, never a cached decision (adversarial finding F3).
     const { activated } = readActivationState(sql, tenantId);
@@ -71,6 +79,34 @@ export async function withTenantContext<T>(tenantId: string, fn: (ctx: TenantCon
       env,
     };
     return fn(ctx);
+  });
+}
+
+/**
+ * Makes a PAID tenant's provisioned mailboxes send-eligible (wave-2 §1a).
+ *
+ * WHY A TEST HAS TO SAY THIS OUT LOUD. Tests run against the SANDBOX vendor
+ * bundle (neither ENGINE_ nor INBOXKIT_ secrets are armed in the hermetic test
+ * env, by design), and the sandbox MailboxPort truthfully stamps `provider='sandbox'`
+ * on every row it creates. A paid tenant may NOT send from a sandbox-provider
+ * mailbox: nothing exists at any vendor for it, and handing one to a real
+ * EmailPort is the exact failure the provenance column was added to close
+ * (adversary round-1 finding 1 — every send routed at a phantom mailbox,
+ * campaign drained to 'failed' in ~25 minutes). Production only ever reaches
+ * the sending state with the REAL bundle, which stamps 'google'.
+ *
+ * So "paid tenant + sandbox mailboxes + a direct tick() RPC" is a combination
+ * production cannot reach (the cron's activation predicate requires
+ * realSendPathLive, which forces the real bundle). A test that wants a paid
+ * tenant to actually SEND is testing the armed shape and should establish it
+ * explicitly, rather than depending on a predicate gap that no longer exists.
+ */
+export async function makeMailboxesSendEligible(tenantId: string): Promise<void> {
+  await runInDurableObject(tenantStub(tenantId), async (_instance, state) => {
+    state.storage.sql.exec(
+      `UPDATE mailboxes SET provider = 'google' WHERE tenant_id = ? AND provider = 'sandbox'`,
+      tenantId,
+    );
   });
 }
 
@@ -137,19 +173,45 @@ export async function adminApi<T = unknown>(
 }
 
 /**
+ * Delivers a REAL-shaped `charge.dispute.*` event. A Dispute carries
+ * `metadata: {}` and NO `customer` field, so the route resolves it
+ * charge -> customer -> D1 customer index (src/billing/stripe-webhook.ts) —
+ * the one webhook path that needs a Stripe round trip. This arms a test key
+ * and stubs that single fetch for exactly the duration of the delivery, then
+ * restores both: a set `STRIPE_SECRET_KEY` also arms `isRealSpendArmed`, so it
+ * must never be left on around a tick or a provisioning call. The tenant must
+ * have been through `activatePaidPlan` first — that is what records its
+ * customer id in the index.
+ */
+export async function postDisputeWebhook<T = unknown>(event: unknown, tenantId: string): Promise<ApiResult<T>> {
+  const savedKey = env.STRIPE_SECRET_KEY;
+  const savedFetch = globalThis.fetch;
+  (env as { STRIPE_SECRET_KEY?: string }).STRIPE_SECRET_KEY = "sk_test_dispute_fixture";
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).includes("/charges/")) {
+      return new Response(JSON.stringify({ object: "charge", customer: stripeCustomerIdFor(tenantId) }), { status: 200 });
+    }
+    return savedFetch(input, init);
+  }) as typeof fetch;
+  try {
+    return await postWebhook<T>(event);
+  } finally {
+    globalThis.fetch = savedFetch;
+    (env as { STRIPE_SECRET_KEY?: string }).STRIPE_SECRET_KEY = savedKey;
+  }
+}
+
+/**
  * Drives a tenant's billing_state to 'past_due' via the SAME
  * `invoice.payment_failed` Stripe webhook path B1 exercises
  * (test/webhook.test.ts) — each call is one more recorded failure (the
  * dunning "cycle", src/admin/dunning.ts), matching how a real Stripe account
- * would redeliver a fresh event id per failed invoice attempt.
+ * would redeliver a fresh event id per failed invoice attempt. The payload is
+ * a REAL invoice shape (test/stripe-fixtures.ts): empty `metadata`, tenant
+ * reference under `subscription_details`.
  */
 export async function failPayment(tenantId: string): Promise<void> {
-  const event = {
-    id: `evt_${crypto.randomUUID()}`,
-    type: "invoice.payment_failed",
-    data: { object: { metadata: { tenantId } } },
-  };
-  const res = await postWebhook(event);
+  const res = await postWebhook(invoicePaymentFailed({ tenantId, customerId: stripeCustomerIdFor(tenantId) }));
   if (res.status !== 200) throw new Error(`failPayment webhook failed: ${JSON.stringify(res)}`);
 }
 
@@ -158,22 +220,12 @@ export async function failPayment(tenantId: string): Promise<void> {
  * `checkout.session.completed` Stripe webhook path B1 exercises
  * (test/webhook.test.ts) — the real path a Stripe checkout success uses to
  * set `plan` + `billing_state = 'active'` together, which is what
- * MRR (src/engine/ops-summary.ts) requires.
+ * MRR (src/engine/ops-summary.ts) requires. Also what seeds this tenant's
+ * customer id into the D1 routing index, so its LATER invoice/dispute events
+ * resolve the way real ones do.
  */
 export async function activatePaidPlan(tenantId: string, plan: TenantPlan): Promise<void> {
-  const event = {
-    id: `evt_${crypto.randomUUID()}`,
-    type: "checkout.session.completed",
-    data: {
-      object: {
-        customer: "cus_test_admin",
-        subscription: "sub_test_admin",
-        client_reference_id: tenantId,
-        metadata: { tenantId, plan },
-      },
-    },
-  };
-  const res = await postWebhook(event);
+  const res = await postWebhook(checkoutSessionCompleted({ tenantId, plan }));
   if (res.status !== 200) throw new Error(`activatePaidPlan webhook failed: ${JSON.stringify(res)}`);
 }
 

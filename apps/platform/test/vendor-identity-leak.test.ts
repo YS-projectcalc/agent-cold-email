@@ -21,9 +21,23 @@ import { activatePaidPlan, mintTenant, tenantStub, withTenantContext } from "./h
 // real adapter error through the surfaces and inspect what comes out) and a
 // SOURCE TRIPWIRE (no new emittable literal reintroduces the vendor name).
 
-const SOURCES = import.meta.glob("../src/**/*.ts", { query: "?raw", eager: true, import: "default" }) as Record<string, string>;
+// Gate finding #4 (docs/adversarial/wave-integration-gate-2026-08-05.md): the
+// scan root used to be `../src/**` only, missing `packages/shared/src` —
+// whose error classes (errors.ts) carry `message` text `error-response.ts`
+// returns to a tenant VERBATIM (ValidationError -> 400, IncompleteRegistrantError
+// -> 400, CapacityPendingError -> 409). A vendor-naming literal there would
+// reach a customer and this tripwire would never see it. Two glob roots
+// (rather than one pattern spanning both) keep each pattern's relative-path
+// math simple and independently verifiable.
+const SOURCES = {
+  ...(import.meta.glob("../src/**/*.ts", { query: "?raw", eager: true, import: "default" }) as Record<string, string>),
+  ...(import.meta.glob("../../../packages/shared/src/**/*.ts", { query: "?raw", eager: true, import: "default" }) as Record<string, string>),
+};
 
-const normalize = (key: string) => key.replace(/^\.\.\//, "");
+// Strips EVERY leading `../` segment (not just one) — `../src/foo.ts` and the
+// deeper `../../../packages/shared/src/foo.ts` both normalize to a
+// repo-root-relative path (`src/foo.ts`, `packages/shared/src/foo.ts`).
+const normalize = (key: string) => key.replace(/^(\.\.\/)+/, "");
 
 /**
  * Source text with comments removed. Comments naming the vendor are FINE and
@@ -173,6 +187,17 @@ describe("source tripwire — a new emittable vendor string cannot slip in", () 
     expect(keys.length).toBeGreaterThan(50);
     expect(keys).toContain("src/error-response.ts");
     expect(keys).toContain("src/vendor-failure.ts");
+  });
+
+  it("gate finding #4 (2026-08-06) — the scan root now covers packages/shared/src too", () => {
+    // errors.ts defines ValidationError/IncompleteRegistrantError/
+    // CapacityPendingError, whose `message` error-response.ts returns
+    // verbatim to a tenant — a future vendor-naming literal there must be
+    // reachable by this tripwire.
+    const keys = Object.keys(SOURCES).map(normalize);
+    expect(keys).toContain("packages/shared/src/errors.ts");
+    expect(keys).toContain("packages/shared/src/vendor-ports.ts");
+    expect(keys.filter((k) => k.startsWith("packages/shared/src/")).length).toBeGreaterThan(5);
   });
 
   it("no file outside the adapter/config layer contains emittable vendor-name text", () => {

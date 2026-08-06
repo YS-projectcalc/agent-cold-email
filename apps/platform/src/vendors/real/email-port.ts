@@ -30,12 +30,36 @@ export interface EngineClientConfig {
 
 // A request to the engine is bounded so a stalled engine/SMTP socket can't hang
 // the tick indefinitely — an aborted fetch surfaces as a RETRYABLE VendorError
-// (the tick reverts the row and retries under its cap). MUST stay below the
-// stuck-'sending' reclaim TTL (SEND_CLAIM_TTL_MS = 5 min, engine/tick.ts): the
-// send's row must resolve or abort BEFORE it is eligible for reclaim, so a
-// reclaim can never race a still-live fetch. Also above the engine's worst-case
-// SMTP time (~100s, apps/engine/src/smtp.ts) so a merely-slow send isn't aborted.
-const ENGINE_REQUEST_TIMEOUT_MS = 3 * 60 * 1000;
+// (the tick reverts the row and retries under its cap).
+//
+// THE ORDERING LADDER. Five rungs, every one of them load-bearing; changing any
+// constant means re-deriving all of them (adversary round-2 R5 found the ladder
+// silently violated the moment the wave-2 cron leg added a per-tenant budget):
+//
+//   ~100s   engine worst-case SMTP transaction (20s connect + 20s greeting +
+//           60s socket, apps/engine/src/smtp.ts)
+//     <  ENGINE_REQUEST_TIMEOUT_MS (120s)   — a merely-slow send must not be
+//           aborted mid-flight by us
+//     <  SEND_PIPELINE_TENANT_BUDGET_MS (135s, admin/ops-sweep.ts) — R5's rung:
+//           a tenant's cron budget must fit at least ONE complete engine
+//           request, or it is abandoned having done zero work on every cycle
+//     <= SEND_PIPELINE_LEG_DEADLINE_MS (150s) — the leg must be able to spend
+//           one whole tenant budget
+//     +  one budget (285s total worst case) < the 300s cron period — the leg
+//           checks its deadline BETWEEN tenants, so its true worst case is
+//           deadline + one budget; keeping that under the period is what stops
+//           a wedged engine making every sweep overlap the next one
+//     <  SEND_CLAIM_TTL_MS (5 min, engine/tick.ts) — the original rung: a
+//           send's row must resolve or abort BEFORE it is reclaim-eligible, so
+//           a reclaim can never race a still-live fetch
+//
+// This value came DOWN from 180s to satisfy rung 3 while leaving rung 1 intact.
+// The adversary's suggested ~45s would have broken rung 1 (it sits below the
+// engine's own worst-case SMTP transaction), which would abort genuinely slow
+// but succeeding sends; 120s is the largest reduction that satisfies every rung
+// at once. test/send-pipeline-ladder.test.ts asserts the whole ladder so the
+// next constant change cannot quietly re-open R5's incoherence.
+export const ENGINE_REQUEST_TIMEOUT_MS = 2 * 60 * 1000;
 
 // 4xx statuses the tick should RETRY rather than terminally fail:
 //   409 — a send with this idempotency key is already in flight on the engine

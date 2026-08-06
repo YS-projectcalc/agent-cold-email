@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { runInDurableObject } from "cloudflare:test";
 import { api, mintTenant, postWebhook, tenantStub } from "./helpers.js";
+import { checkoutSessionCompleted, invoicePaymentFailed, stripeCustomerIdFor, subscriptionDeleted } from "./stripe-fixtures.js";
 
 interface AccountResponse {
   plan: string;
@@ -14,28 +15,10 @@ interface WebhookResponse {
   plan?: string;
 }
 
-function checkoutCompletedEvent(eventId: string, tenantId: string, plan: string) {
-  return {
-    id: eventId,
-    type: "checkout.session.completed",
-    data: {
-      object: {
-        customer: "cus_test_123",
-        subscription: "sub_test_123",
-        client_reference_id: tenantId,
-        metadata: { tenantId, plan },
-      },
-    },
-  };
-}
-
-function invoicePaymentFailedEvent(eventId: string, tenantId: string) {
-  return {
-    id: eventId,
-    type: "invoice.payment_failed",
-    data: { object: { metadata: { tenantId } } },
-  };
-}
+// Fixtures come from test/stripe-fixtures.ts — REAL Stripe object shapes. The
+// versions these replaced hand-placed `metadata.tenantId` on the invoice, which
+// Stripe never does, so this file's dunning case passed against a lane that was
+// dead in production (audit-stripe-webhook-2026-08-06.md finding 1).
 
 // A test STRIPE_WEBHOOK_SECRET IS configured (vitest.config.ts), and the route
 // now FAILS CLOSED without one (adversarial panel-03 finding #1). So every
@@ -46,8 +29,7 @@ function invoicePaymentFailedEvent(eventId: string, tenantId: string) {
 describe("POST /webhooks/stripe — idempotent per event id (ARCHITECTURE.md #3)", () => {
   it("checkout.session.completed upgrades the tenant plan exactly once, even redelivered", async () => {
     const { tenantId, token } = await mintTenant("Webhook Co", "demo");
-    const eventId = `evt_${crypto.randomUUID()}`;
-    const event = checkoutCompletedEvent(eventId, tenantId, "managed");
+    const event = checkoutSessionCompleted({ tenantId, plan: "managed" });
 
     const first = await postWebhook<WebhookResponse>(event);
     expect(first.status).toBe(200);
@@ -76,7 +58,7 @@ describe("POST /webhooks/stripe — idempotent per event id (ARCHITECTURE.md #3)
 
   it("invoice.payment_failed marks the tenant past_due", async () => {
     const { tenantId, token } = await mintTenant("Dunning Co", "managed");
-    const event = invoicePaymentFailedEvent(`evt_${crypto.randomUUID()}`, tenantId);
+    const event = invoicePaymentFailed({ tenantId, customerId: stripeCustomerIdFor(tenantId) });
 
     const res = await postWebhook<WebhookResponse>(event);
     expect(res.status).toBe(200);
@@ -89,13 +71,7 @@ describe("POST /webhooks/stripe — idempotent per event id (ARCHITECTURE.md #3)
 
   it("customer.subscription.deleted cancels billing and downgrades the tenant to free", async () => {
     const { tenantId, token } = await mintTenant("Cancel Co", "managed");
-    const event = {
-      id: `evt_${crypto.randomUUID()}`,
-      type: "customer.subscription.deleted",
-      data: { object: { metadata: { tenantId } } },
-    };
-
-    const res = await postWebhook<WebhookResponse>(event);
+    const res = await postWebhook<WebhookResponse>(subscriptionDeleted({ tenantId }));
     expect(res.body).toMatchObject({ applied: true, plan: "free" });
 
     const account = await api<AccountResponse>("/account", { token });

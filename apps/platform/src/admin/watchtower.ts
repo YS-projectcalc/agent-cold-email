@@ -12,6 +12,7 @@
 
 import { listAllTenantIds } from "./db.js";
 import type { Env } from "../env.js";
+import type { TenantOpsSummary } from "../engine/ops-summary.js";
 import { escapeHtml } from "../html-escape.js";
 import type { OpsMailer } from "../ops-mail/ops-mailer.js";
 
@@ -60,7 +61,73 @@ const CHECK_LABELS: Record<string, string> = {
   failure_signals: "Failure signals",
 };
 
+/**
+ * Per-mailbox check-name prefixes (founder ruling 2026-08-06 — a stuck mailbox
+ * purchase alerts on entering the stuck state AND on the re-buy's outcome).
+ *
+ * TWO names, not one, because `reconcileAlerts` suppresses a repeat alert for the
+ * same check inside WATCHTOWER_COOLDOWN_MS: a failed re-buy reported under the
+ * stuck check would be swallowed seconds after the stuck alert that preceded it.
+ * Splitting them makes both outcomes reportable while keeping each one deduped:
+ *  - `mailbox_provisioning:<email>` — unhealthy on entering the stuck state;
+ *    healthy again once the mailbox is resolved, which sends the RECOVERY email
+ *    that reports a SUCCESSFUL re-buy.
+ *  - `mailbox_rebuy:<email>` — unhealthy when the re-buy itself failed, or when
+ *    the one-re-buy budget is spent and the address is being abandoned.
+ */
+const MAILBOX_PROVISIONING_CHECK = "mailbox_provisioning:";
+const MAILBOX_REBUY_CHECK = "mailbox_rebuy:";
+
+/**
+ * Wave-2 §1c — the two send-pipeline checks. DISTINCT prefixes from the two
+ * above (which the re-buy lane owns) so neither dedups the other away:
+ *  - `cred_push_aging:<email>` — one mailbox's credential push has been
+ *    'pending' too long on an ACTIVATED tenant. Per-mailbox, because the
+ *    remedy is per-mailbox (mint that address a grant) and the alert has to
+ *    name it. This is the alarm on the failure mode the picker's per-mailbox
+ *    exclusion converts from "the tenant sends nothing" into "this mailbox
+ *    sends nothing" — quiet, and quiet is what makes it invisible.
+ *  - `send_starved:<tenantId>` — an activated tenant has mail due and ZERO
+ *    mailboxes the picker could pick. The whole point of §1c: without it, a
+ *    tenant whose every mailbox is excluded looks healthy while sending
+ *    nothing, forever.
+ */
+const CRED_PUSH_AGING_CHECK = "cred_push_aging:";
+const SEND_STARVED_CHECK = "send_starved:";
+
+/** The watchtower check tracking whether ONE mailbox address is provisioning-stuck. */
+export function mailboxProvisioningCheckName(email: string): string {
+  return `${MAILBOX_PROVISIONING_CHECK}${email}`;
+}
+
+/** The watchtower check tracking the OUTCOME of a guarded re-buy for one address. */
+export function mailboxRebuyCheckName(email: string): string {
+  return `${MAILBOX_REBUY_CHECK}${email}`;
+}
+
+/** The watchtower check tracking ONE mailbox's overdue engine credential push. */
+export function credPushAgingCheckName(email: string): string {
+  return `${CRED_PUSH_AGING_CHECK}${email}`;
+}
+
+/** The watchtower check tracking whether ONE tenant has due mail and no way to send it. */
+export function sendStarvedCheckName(tenantId: string): string {
+  return `${SEND_STARVED_CHECK}${tenantId}`;
+}
+
 function labelFor(name: string): string {
+  if (name.startsWith(MAILBOX_PROVISIONING_CHECK)) {
+    return `Mailbox provisioning ${name.slice(MAILBOX_PROVISIONING_CHECK.length)}`;
+  }
+  if (name.startsWith(MAILBOX_REBUY_CHECK)) {
+    return `Mailbox re-buy ${name.slice(MAILBOX_REBUY_CHECK.length)}`;
+  }
+  if (name.startsWith(CRED_PUSH_AGING_CHECK)) {
+    return `Mailbox credentials ${name.slice(CRED_PUSH_AGING_CHECK.length)}`;
+  }
+  if (name.startsWith(SEND_STARVED_CHECK)) {
+    return `Send capacity ${name.slice(SEND_STARVED_CHECK.length)}`;
+  }
   return CHECK_LABELS[name] ?? name;
 }
 
@@ -115,11 +182,19 @@ export async function evaluateHealthChecks(env: Env, sinceMs: number): Promise<C
   let failed = 0;
   let complaints = 0;
   const tenantIds = await listAllTenantIds(env);
+  // One read of every check name the state machine has ever recorded. The
+  // wave-2 per-entity checks below use it to stay SILENT about entities they
+  // never alerted on (a "healthy" row per mailbox per tenant would bury the
+  // handful of real platform checks this table exists for — same reasoning as
+  // readCheckStatus) while still emitting the healthy result that sends the
+  // RECOVERY email for one they did.
+  const reported = await readReportedCheckNames(env);
   for (const tenantId of tenantIds) {
     try {
       const s = await env.TENANT.get(env.TENANT.idFromName(tenantId)).opsSummary(sinceMs);
       failed += s.failureSignalsInWindow.failed;
       complaints += s.failureSignalsInWindow.complaints;
+      results.push(...sendPipelineChecks(tenantId, s, reported));
     } catch (err) {
       console.error(`watchtower failure-signal scan failed for tenant ${tenantId}`, err);
     }
@@ -133,6 +208,65 @@ export async function evaluateHealthChecks(env: Env, sinceMs: number): Promise<C
         ? "no new failed sends or complaints since last sweep"
         : `${failed} new terminal-failed send(s) + ${complaints} new complaint(s) since last sweep`,
   });
+
+  return results;
+}
+
+/**
+ * Wave-2 §1c — derives one tenant's send-pipeline checks from the opsSummary
+ * the failure-signal scan already fetched (no extra RPC). PURE: it decides what
+ * to report, `reconcileAlerts` decides what to email.
+ *
+ * Both checks are scoped to ACTIVATED tenants. An unactivated tenant is
+ * expected not to send — alerting on it would be noise that trains the founder
+ * to ignore the channel. When a tenant DE-activates while a check is
+ * outstanding it is reported healthy once (clearing it), which is the honest
+ * reading: the condition no longer describes a problem.
+ */
+export function sendPipelineChecks(
+  tenantId: string,
+  summary: TenantOpsSummary,
+  reported: ReadonlySet<string>,
+): CheckResult[] {
+  const results: CheckResult[] = [];
+  const { activated, agingPendingPushes, dueNonDemoPendingSends, eligibleMailboxes } = summary.sendPipeline;
+
+  const aging = activated ? agingPendingPushes : [];
+  for (const push of aging) {
+    results.push({
+      name: credPushAgingCheckName(push.email),
+      healthy: false,
+      detail:
+        `Mailbox ${push.email} (tenant ${tenantId}) has been waiting ${Math.round(push.pendingForMs / 60000)} min for its engine ` +
+        `credential push. It cannot send or poll until an OAuth grant is minted for it — on the manual path that means adding it ` +
+        `to the GMAIL_OAUTH_GRANTS secret. The tenant's other mailboxes are unaffected.`,
+    });
+  }
+  // Clear any aging alert for a mailbox that is no longer aging — but only for
+  // ones actually raised before, so this never files rows for healthy mailboxes.
+  const agingNow = new Set(aging.map((p) => p.email));
+  for (const name of reported) {
+    if (!name.startsWith(CRED_PUSH_AGING_CHECK)) continue;
+    const email = name.slice(CRED_PUSH_AGING_CHECK.length);
+    if (agingNow.has(email)) continue;
+    if (!summary.mailboxProvenance.some((m) => m.email === email)) continue; // another tenant's mailbox
+    results.push({ name, healthy: true, detail: `Mailbox ${email} (tenant ${tenantId}) now has its engine credentials pushed.` });
+  }
+
+  const starved = activated && dueNonDemoPendingSends > 0 && eligibleMailboxes === 0;
+  const starvedName = sendStarvedCheckName(tenantId);
+  if (starved) {
+    results.push({
+      name: starvedName,
+      healthy: false,
+      detail:
+        `Tenant ${tenantId} (${summary.brand}) has ${dueNonDemoPendingSends} send(s) due and ZERO eligible mailboxes — nothing will go ` +
+        `out. Every mailbox it holds is released, sandbox-origin, BYO (no engine credentials wired yet), unclassified, paused by the ` +
+        `deliverability loop, or waiting on a credential push. Read opsSummary.mailboxProvenance for which.`,
+    });
+  } else if (reported.has(starvedName)) {
+    results.push({ name: starvedName, healthy: true, detail: `Tenant ${tenantId} (${summary.brand}) has eligible mailboxes again.` });
+  }
 
   return results;
 }
@@ -213,6 +347,50 @@ export async function runWatchtower(env: Env, mailer: OpsMailer, nowMs: number):
   return outcomes;
 }
 
+/**
+ * The persisted status of one check, or null when it has never been reported.
+ *
+ * Lets an event-driven caller stay silent about a check it never raised: without
+ * it, every successful mailbox provision would file a "healthy" row for an
+ * address that was never in trouble, burying the handful of real platform checks
+ * this table exists for.
+ */
+export async function readCheckStatus(env: Env, checkName: string): Promise<"healthy" | "unhealthy" | null> {
+  const row = await env.DB.prepare(`SELECT status FROM watchtower_state WHERE check_name = ?`)
+    .bind(checkName)
+    .first<{ status: "healthy" | "unhealthy" }>();
+  return row?.status ?? null;
+}
+
+/**
+ * Reports ONE event-driven check through the same state machine the cron sweep
+ * uses, so an alert raised from inside a TenantDO inherits its dedup, its 6h
+ * cooldown and its recovery email rather than growing a parallel notifier.
+ *
+ * Unlike `evaluateHealthChecks`'s probes, these checks are raised by whatever
+ * observed the condition (engine/mailbox-provisioning.ts) — the cron never
+ * produces them, so they stay at whatever state their last report left them.
+ *
+ * NEVER THROWS. The caller is mid-saga around real vendor spend; a D1 hiccup in
+ * the notifier must not decide whether a purchase happens or a customer's setup
+ * fails. A failure to alert is logged and swallowed, exactly as `trySend` already
+ * swallows a dark mail channel.
+ */
+export async function reportCheck(
+  env: Env,
+  mailer: OpsMailer,
+  result: CheckResult,
+  nowMs: number,
+): Promise<AlertOutcome | null> {
+  try {
+    const [outcome] = await reconcileAlerts(env, mailer, [result], nowMs);
+    return outcome ?? null;
+  } catch (err) {
+    console.error(`watchtower: failed to report check "${result.name}"`, err);
+    return null;
+  }
+}
+
 // --- Email bodies --------------------------------------------------------
 
 interface OutgoingAlert {
@@ -260,6 +438,17 @@ async function trySend(mailer: OpsMailer, alert: OutgoingAlert): Promise<boolean
 }
 
 // --- D1 state helpers ----------------------------------------------------
+
+/**
+ * Every check name the state machine has ever recorded, in ONE query. Lets a
+ * cron-driven per-entity check (wave-2 §1c) emit the healthy result that sends
+ * a RECOVERY email for entities it alerted on, without filing a healthy row for
+ * every entity it never did.
+ */
+export async function readReportedCheckNames(env: Env): Promise<Set<string>> {
+  const result = await env.DB.prepare(`SELECT check_name FROM watchtower_state`).all<{ check_name: string }>();
+  return new Set(result.results.map((row) => row.check_name));
+}
 
 async function readWatchtowerState(env: Env): Promise<Map<string, WatchtowerStateRow>> {
   const result = await env.DB.prepare(

@@ -37,6 +37,14 @@ same shape as a vacuous test guard passing on an empty set.
   on a ~4min vitest run writes nothing and looks identical to a dead one. Quiet tree +
   live PID = verifying, not stopped.
 
+**Second instance — a REVERT-PROOF that silently no-ops (2026-08-06, ColdStart wave-2
+Inc-D):** ran a `python3` patch to strip an activation gate for a cp-backed RED proof
+WITHOUT asserting the replacement matched. The `str.replace` found nothing, the file was
+untouched, the suite passed — which reads EXACTLY like "this test isn't RED." Nearly
+concluded the gate was untested. Fix: count the marker before and after and `assert`
+inside the patch script (`assert before==2 and after==0`), and echo the counts. A revert
+that didn't apply and a test that isn't RED are the same green output.
+
 Related: [[agent-error-death-can-resume]] — a "relieved"/silent agent can auto-resume on
 its stale brief and rebuild the same task concurrently; mtime forensics is how you catch
 it before double-editing. See also

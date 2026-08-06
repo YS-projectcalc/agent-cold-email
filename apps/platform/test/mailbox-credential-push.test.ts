@@ -10,6 +10,7 @@ import {
   maybePushProvisionedMailbox,
   pushRecordedMailbox,
   reconcileMailboxCredentialPushes,
+  recordProvisionedMailboxForPush,
   revokePushedMailboxCredentials,
 } from "../src/engine/mailbox-credential-push.js";
 import { signup, withTenantContext } from "./helpers.js";
@@ -68,11 +69,20 @@ describe("assembleEngineCredentials", () => {
 });
 
 describe("maybePushProvisionedMailbox — inert unless armed + real vendor mailbox", () => {
-  it("is a no-op (no row) when the push is unconfigured (default env, the deployed build)", async () => {
+  // R1 (wave2-design-review round 2) — recordProvisionedMailboxForPush now
+  // runs ABOVE the `!deps` guard: the row is the durable "this mailbox needs
+  // credentials" fact, independent of whether the push itself is armed. This
+  // makes "every platform-provisioned real mailbox has a row" true by
+  // construction, closing the ENGINE_*-unarmed window (INBOXKIT_* armed,
+  // ENGINE_* absent -> a really-bought mailbox previously got NO row and was
+  // invisible to reconcile forever once ENGINE_* later armed). The push
+  // itself is still skipped while deps are unconfigured (FAILS on old code:
+  // no row is ever created).
+  it("R1 — still records the durable 'pending' row when the push is unconfigured; only the push itself is skipped", async () => {
     const { tenantId } = await signup("Push Inert Co", "founder@pushinert.test");
     const out = await withTenantContext(tenantId, (ctx) => maybePushProvisionedMailbox(ctx, { email: "a@pushinert.test", provider: "google" }));
     expect(out).toBeUndefined();
-    expect(await statusOf(tenantId, "a@pushinert.test")).toBeUndefined();
+    expect(await statusOf(tenantId, "a@pushinert.test")).toBe("pending");
   });
 
   it("is a no-op for a SANDBOX-provider mailbox even when deps are supplied (never pushes a sandbox mailbox)", async () => {
@@ -176,6 +186,7 @@ describe("regression — a retry with re-minted (different) credentials must not
     };
 
     // First push commits.
+    await withTenantContext(tenantId, (ctx) => recordProvisionedMailboxForPush(ctx, mailbox.email));
     const first = await withTenantContext(tenantId, (ctx) => pushRecordedMailbox(ctx, mailbox, deps));
     expect(first).toMatchObject({ pushed: true });
     expect(store.get(mailbox.email)).toMatchObject({ send: { refreshToken: "refresh-v1" } });
@@ -269,5 +280,115 @@ describe("revokePushedMailboxCredentials — best-effort revoke seam", () => {
     await expect(withTenantContext(tenantId, (ctx) => revokePushedMailboxCredentials(ctx, "a@revokeunreachable.test", client))).resolves.toBeUndefined();
     expect(spy).toHaveBeenCalledTimes(1);
     vi.restoreAllMocks();
+  });
+});
+
+// CREDSTORE F1 (wave2-design §"CREDSTORE F1") — content-hash is dedup, not
+// ordering (audit-credstore-2026-08-05 finding F1). The Worker now owns a
+// monotonic push_seq: claimed via a synchronous UPDATE+SELECT BEFORE the
+// first await in pushRecordedMailbox (the DO is single-threaded, so an
+// interleaved provision-hook + reconcile racing the SAME mailbox claim
+// strictly distinct, ordered sequence numbers), and sent on the wire so the
+// engine can reject a stale replay without depending on request arrival order.
+describe("CREDSTORE F1 — Worker-owned monotonic push_seq claim", () => {
+  it("claims a strictly increasing push_seq per push (interleaved provision-hook + reconcile) and sends it on the wire (FAILS on old code: no push_seq column/claim, wire always receives undefined)", async () => {
+    const { tenantId } = await signup("F1 Co", "founder@f1.test");
+    const email = "seller1@f1.test";
+    const seenSeqs: (number | undefined)[] = [];
+    const deps: CredentialPushDeps = {
+      fetchCredentials: async () => ({ imap: VENDOR_IMAP, smtp: undefined }),
+      mintGrant: async () => GRANT,
+      push: {
+        pushMailbox: async (em: string, _creds: unknown, _idem?: string, pushSeq?: number) => {
+          seenSeqs.push(pushSeq);
+          return { email: em, outcome: "created", contentHash: "h" };
+        },
+      } as unknown as EngineMailboxClient,
+    };
+
+    // The provisioning hook's first push.
+    await withTenantContext(tenantId, (ctx) => maybePushProvisionedMailbox(ctx, { email, provider: "google" }, deps));
+    // A reconcile-style re-push of the same mailbox (e.g. after a rotation).
+    await withTenantContext(tenantId, (ctx) => pushRecordedMailbox(ctx, { email, domain: "f1.test" }, deps));
+
+    expect(seenSeqs).toEqual([1, 2]);
+    const persisted = await withTenantContext(tenantId, (ctx) =>
+      ctx.sql
+        .exec<{ push_seq: number }>(`SELECT push_seq FROM mailbox_cred_pushes WHERE tenant_id = ? AND email = ?`, ctx.tenantId, email)
+        .one().push_seq,
+    );
+    expect(persisted).toBe(2);
+  });
+
+  // The Worker never branches on the engine's outcome string today (any
+  // non-throwing response marks the row 'pushed') — this pins that contract
+  // down explicitly for the new 'stale' outcome F1 introduces engine-side: a
+  // stale replay means the goal state (a newer credential) already holds, so
+  // it is success from the Worker's point of view, not a failure to retry.
+  it("treats an engine 'stale' outcome as SUCCESS — the row is marked 'pushed' (goal state already holds)", async () => {
+    const { tenantId } = await signup("F1 Stale Co", "founder@f1stale.test");
+    const email = "seller1@f1stale.test";
+    const deps: CredentialPushDeps = {
+      fetchCredentials: async () => ({ imap: VENDOR_IMAP, smtp: undefined }),
+      mintGrant: async () => GRANT,
+      push: { pushMailbox: async (em: string) => ({ email: em, outcome: "stale", contentHash: "h" }) } as unknown as EngineMailboxClient,
+    };
+    await withTenantContext(tenantId, (ctx) => maybePushProvisionedMailbox(ctx, { email, provider: "google" }, deps));
+    expect(await statusOf(tenantId, email)).toBe("pushed");
+  });
+});
+
+// CREDSTORE F2 revive half (wave2-design §"CREDSTORE F2") — the record path
+// is `INSERT OR IGNORE`, which would silently swallow a legitimate
+// re-provision of a mailbox whose row was tombstoned 'revoked' by a prior
+// teardown (see lifecycle-credstore-tombstone.test.ts for the teardown half).
+describe("revive-on-reprovision — a 'revoked' row is revived to 'pending'; a live 'pushed' row is never reset", () => {
+  it("recordProvisionedMailboxForPush revives a 'revoked' row to 'pending', resetting attempts/last_error (FAILS on old code: INSERT OR IGNORE silently swallows it, stuck 'revoked' forever)", async () => {
+    const { tenantId } = await signup("Revive Co", "founder@revive.test");
+    const email = "seller1@revive.test";
+    await withTenantContext(tenantId, (ctx) => {
+      recordProvisionedMailboxForPush(ctx, email);
+      ctx.sql.exec(
+        `UPDATE mailbox_cred_pushes SET status = 'revoked', attempts = 3, last_error = 'boom' WHERE tenant_id = ? AND email = ?`,
+        ctx.tenantId,
+        email,
+      );
+    });
+
+    await withTenantContext(tenantId, (ctx) => recordProvisionedMailboxForPush(ctx, email));
+
+    const row = await withTenantContext(tenantId, (ctx) =>
+      ctx.sql
+        .exec<{ status: string; attempts: number; last_error: string | null }>(
+          `SELECT status, attempts, last_error FROM mailbox_cred_pushes WHERE tenant_id = ? AND email = ?`,
+          ctx.tenantId,
+          email,
+        )
+        .one(),
+    );
+    expect(row).toEqual({ status: "pending", attempts: 0, last_error: null });
+  });
+
+  it("never resets a live 'pushed' row on a duplicate re-provision call", async () => {
+    const { tenantId } = await signup("Revive Pushed Co", "founder@revivepushed.test");
+    const email = "seller1@revivepushed.test";
+    await withTenantContext(tenantId, (ctx) => maybePushProvisionedMailbox(ctx, { email, provider: "google" }, WORKING));
+    expect(await statusOf(tenantId, email)).toBe("pushed");
+
+    await withTenantContext(tenantId, (ctx) => recordProvisionedMailboxForPush(ctx, email));
+    expect(await statusOf(tenantId, email)).toBe("pushed");
+  });
+
+  it("legitimate re-provision after cancel revives the row and the mailbox pushes again", async () => {
+    const { tenantId } = await signup("Revive Push Again Co", "founder@revivepushagain.test");
+    const email = "seller1@revivepushagain.test";
+    await withTenantContext(tenantId, (ctx) => {
+      recordProvisionedMailboxForPush(ctx, email);
+      ctx.sql.exec(`UPDATE mailbox_cred_pushes SET status = 'revoked' WHERE tenant_id = ? AND email = ?`, ctx.tenantId, email);
+    });
+
+    const out = await withTenantContext(tenantId, (ctx) => maybePushProvisionedMailbox(ctx, { email, provider: "google" }, WORKING));
+    expect(out).toMatchObject({ pushed: true });
+    expect(await statusOf(tenantId, email)).toBe("pushed");
   });
 });

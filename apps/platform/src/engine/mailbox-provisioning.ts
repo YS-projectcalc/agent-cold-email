@@ -24,15 +24,27 @@
  */
 
 import { isPaidPlan, NotActivatedError, VendorError } from "@coldstart/shared";
+import type { OpsMailer } from "../ops-mail/ops-mailer.js";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
 import { logVendorFailure, VENDOR_STEP } from "../vendor-failure.js";
 import { logAction } from "./deliverability-actions.js";
 import { withRequestIdempotency } from "./idempotency.js";
+import {
+  abandonedPurchaseError,
+  alertMailboxRebuyFailed,
+  alertMailboxResolved,
+  alertMailboxStuck,
+  confirmVendorOwnership,
+  unresolvedPurchaseError,
+} from "./mailbox-acquisition.js";
 import { maybePushProvisionedMailbox } from "./mailbox-credential-push.js";
 import {
+  claimBuyDispatch,
   mailboxIntentKey,
   markMailboxIntent,
+  MAX_BUY_DISPATCHES,
+  readBuyDispatch,
   recordMailboxIntent,
   type MailboxIntentRow,
 } from "./provision-intents.js";
@@ -55,8 +67,16 @@ const MAILBOX_READY_BACKOFF_MS = [2_000];
 /** The abstract step label the mailbox legs report (vendor-failure.ts's closed vocabulary). */
 const MAILBOX_STEP = VENDOR_STEP.mailboxPurchase;
 
-/** The provider a resumed leg assumes when the interrupted attempt never recorded one. */
-const DEFAULT_PROVIDER = "google";
+/**
+ * The provider a resumed leg assumes when the interrupted attempt never
+ * recorded one, on the REAL vendor path. Never assumed unconditionally: a
+ * sandbox-bundle resume derives 'sandbox' from the live adapter identity
+ * instead (see acquireMailbox), because mislabelling a sandbox row 'google'
+ * would make the wave-2 send-eligibility picker treat a mailbox that exists at
+ * no vendor as sendable — the exact failure the provider column exists to
+ * close.
+ */
+const DEFAULT_REAL_PROVIDER = "google";
 
 /** What one completed per-mailbox unit yields — the shape the row insert + credential push consume. */
 interface ProvisionedMailboxRecord {
@@ -78,7 +98,15 @@ interface ProvisionedMailboxRecord {
  */
 export async function provisionMailboxesForDomain(
   ctx: TenantContext,
-  opts: { domainId: string; domain: string; domainOrdinal: number; personaSlug: string; inboxesEach: number },
+  opts: {
+    domainId: string;
+    domain: string;
+    domainOrdinal: number;
+    personaSlug: string;
+    inboxesEach: number;
+    /** Injectable for the stuck/re-buy founder alerts — defaults to the real (env-dark) OpsMailer. */
+    mailer?: OpsMailer;
+  },
 ): Promise<string[]> {
   const now = ctx.clock.now();
   const mailboxEmails: string[] = [];
@@ -103,14 +131,14 @@ export async function provisionMailboxesForDomain(
     // cannot do is survive a THROW (it is deleted, by design, so failures are
     // never cached); that half is the intent row's job.
     const provisioned = await withRequestIdempotency(ctx, `provision:${intentKey}`, () =>
-      runMailboxProvisioningUnit(ctx, { email, localPart, domain: opts.domain, intentKey }),
+      runMailboxProvisioningUnit(ctx, { email, localPart, domain: opts.domain, intentKey, mailer: opts.mailer }),
     );
     mailboxEmails.push(provisioned.email);
 
     // The row lands only now — after the vendor confirmed the mailbox exists AND
     // its warmup enrolled. See invariant 2 in the module doc: the billing meter
     // counts these rows, so one must never exist ahead of the resource.
-    insertProvisionedMailbox(ctx, opts, provisioned.email, provisioned.warmupStartedAt, now);
+    insertProvisionedMailbox(ctx, opts, provisioned, now);
     markMailboxIntent(ctx, intentKey, "committed");
 
     await meterProvisionedMailbox(ctx, provisioned.email, intentKey, now);
@@ -138,10 +166,10 @@ export async function provisionMailboxesForDomain(
  */
 async function runMailboxProvisioningUnit(
   ctx: TenantContext,
-  opts: { email: string; localPart: string; domain: string; intentKey: string },
+  opts: { email: string; localPart: string; domain: string; intentKey: string; mailer?: OpsMailer },
 ): Promise<ProvisionedMailboxRecord> {
   const intent = recordMailboxIntent(ctx, opts.intentKey, opts.email);
-  const bought = await buyMailboxUnlessAlreadyOurs(ctx, intent, opts);
+  const bought = await acquireMailbox(ctx, intent, opts);
 
   // L2 — THE GATE. `provision()` returning means the vendor ACCEPTED the order,
   // not that the mailbox exists: InboxKit answers "scheduled". Every next step
@@ -151,44 +179,143 @@ async function runMailboxProvisioningUnit(
   // buy that already succeeded.
   await awaitMailboxReady(ctx, opts.email);
 
+  // The one point where the mailbox is PROVEN to exist and be usable. Clearing
+  // the stuck flag here (rather than when a re-buy is accepted) is what makes the
+  // founder's success notification mean something: a re-buy the provider accepted
+  // and never fulfilled is the failure being recovered from, not a recovery.
+  // Silent for any address that was never flagged.
+  await alertMailboxResolved(ctx, opts.email, "the mailbox is confirmed ready at the provider", opts.mailer);
+
   const warmupStartedAt = await startWarmupUnlessAlreadyRunning(ctx, intent, opts);
   return { email: opts.email, provider: bought.provider, provisionedAt: bought.provisionedAt, warmupStartedAt };
 }
 
 /**
- * Buys the mailbox unless a prior attempt already did.
+ * Acquires the mailbox: resumes it, adopts it, or buys it — with a buy
+ * authorized only by the DISPATCH RECORD plus, when anything was ever sent, the
+ * provider's own answer. See engine/mailbox-acquisition.ts for why each uncertain
+ * branch refuses to spend.
  *
- * The three cases mirror the domain flow's adopt-before-buy, because the defect
- * is the same one a step later:
- *  - 'intent'   — no purchase has been attempted. Buy.
- *  - 'dangling' — the buy call THREW; we cannot know whether it landed. ASK the
- *                 vendor. Anything but 'absent' means it landed, so adopt it;
- *                 'absent' means the throw really did precede the order, and
- *                 buying is the only way forward.
- *  - anything further along — the vendor accepted it. NEVER buy again: 'absent'
- *                 here is the async window, not evidence the order was lost.
+ * The old shape branched on `intent.status` alone, and that is precisely what
+ * failed: status is written AFTER the provider replies, so 'intent' meant both
+ * "nothing was sent" and "an accepted order whose status write was lost". The
+ * dispatch record is written BEFORE the call, so it never conflates the two.
+ *
+ *  - 'warming'/'committed'  — the mailbox demonstrably exists (its warmup
+ *                             resolved a uid / its local row is written).
+ *                             Resume; ask nothing, buy nothing.
+ *  - zero dispatches        — nothing has ever been sent for this address. Buy.
+ *  - any dispatch on record — ASK THE PROVIDER, whatever the status says. It
+ *                             holds it -> adopt. It cannot be asked, or the
+ *                             dispatch is too recent for "no" to mean anything
+ *                             -> retry later, spend nothing. It confirms nothing
+ *                             exists -> the stuck case: ONE guarded re-buy, or a
+ *                             hard stop if that re-buy is already spent.
  */
-async function buyMailboxUnlessAlreadyOurs(
+async function acquireMailbox(
   ctx: TenantContext,
   intent: MailboxIntentRow,
-  opts: { email: string; localPart: string; domain: string; intentKey: string },
+  opts: { email: string; localPart: string; domain: string; intentKey: string; mailer?: OpsMailer },
 ): Promise<{ provider: string; provisionedAt: number }> {
-  const alreadyOrdered =
-    intent.status === "bought" || intent.status === "warming" || intent.status === "committed";
-  if (alreadyOrdered) {
+  // Derived from the LIVE adapter, not a constant: `intent.provider` is only
+  // null when a prior attempt died before the vendor answered, and the bundle
+  // this call is running against is the honest answer to "which vendor would
+  // have held it".
+  const provider = intent.provider ?? (ctx.adapters.kind === "real" ? DEFAULT_REAL_PROVIDER : "sandbox");
+
+  if (intent.status === "warming" || intent.status === "committed") {
     logAction(ctx, "MAILBOX_PROVISION_RESUMED", opts.email, {
       reason: "a prior attempt already purchased this mailbox — resuming without a second purchase",
       priorStatus: intent.status,
     });
-    return { provider: intent.provider ?? DEFAULT_PROVIDER, provisionedAt: ctx.clock.now() };
+    return { provider, provisionedAt: ctx.clock.now() };
   }
 
-  if (intent.status === "dangling" && (await ctx.adapters.mailbox.provisioningState(opts.email)) !== "absent") {
+  const dispatch = readBuyDispatch(ctx, opts.intentKey, opts.email, intent.status);
+  if (dispatch.attempts === 0) return dispatchBuy(ctx, opts);
+
+  const verdict = await confirmVendorOwnership(ctx, opts.email, dispatch);
+
+  if (verdict.kind === "present") {
     logAction(ctx, "MAILBOX_ADOPTED", opts.email, {
       reason: "the provider already holds this mailbox from an interrupted attempt — recovered instead of re-bought",
+      priorStatus: intent.status,
+      dispatches: dispatch.attempts,
+      vendorState: verdict.state,
     });
-    markMailboxIntent(ctx, opts.intentKey, "bought", intent.provider ?? DEFAULT_PROVIDER);
-    return { provider: intent.provider ?? DEFAULT_PROVIDER, provisionedAt: ctx.clock.now() };
+    markMailboxIntent(ctx, opts.intentKey, "bought", provider);
+    return { provider, provisionedAt: ctx.clock.now() };
+  }
+
+  if (verdict.kind === "unconfirmed") {
+    await alertMailboxStuck(
+      ctx,
+      opts.email,
+      verdict.reason === "lookup_failed"
+        ? `a purchase is on record but the provider could not be asked what it holds — no re-buy authorized (${dispatch.attempts} dispatch(es) so far)`
+        : `a purchase is on record and the provider does not list it yet — too recent for absence to count, no re-buy authorized (${dispatch.attempts} dispatch(es) so far)`,
+      opts.mailer,
+    );
+    throw unresolvedPurchaseError(ctx, opts.email, verdict.reason, verdict.cause);
+  }
+
+  // The provider confirms the recorded purchase(s) produced nothing.
+  if (dispatch.attempts >= MAX_BUY_DISPATCHES) {
+    await alertMailboxRebuyFailed(
+      ctx,
+      opts.email,
+      `${dispatch.attempts} purchases are on record and the provider confirms none of them exist — the one automatic re-buy is spent, so this address is abandoned and needs a hand`,
+      opts.mailer,
+    );
+    throw abandonedPurchaseError(ctx, opts.email);
+  }
+
+  await alertMailboxStuck(
+    ctx,
+    opts.email,
+    `a purchase is on record and the provider confirms it produced nothing — attempting the ONE authorized automatic re-buy`,
+    opts.mailer,
+  );
+  try {
+    return await dispatchBuy(ctx, opts);
+  } catch (err) {
+    await alertMailboxRebuyFailed(
+      ctx,
+      opts.email,
+      `the automatic re-buy failed: ${err instanceof Error ? err.message : String(err)}`,
+      opts.mailer,
+    );
+    throw err;
+  }
+  // NOTE the absence of a success report here. The provider ACCEPTING the re-buy
+  // is not the mailbox existing — that is this module's invariant 1, and it is
+  // the whole reason a re-buy was needed. The stuck state is cleared only where
+  // the mailbox is proven real, after awaitMailboxReady.
+}
+
+/**
+ * Dispatches ONE `/mailboxes/buy`, claiming it durably first.
+ *
+ * The claim before the call is the crash-safety: a kill anywhere after it —
+ * including inside the vendor call, which is the window that bought a second
+ * mailbox — leaves a record that money MAY have moved, so the next attempt asks
+ * instead of buying. It is also what caps the re-buy at one, since the increment
+ * happens whether or not the call is ever answered.
+ *
+ * Both the first buy and the re-buy come through here, so the re-buy reserves
+ * against the same spend ceiling and the same plan-slot counter as any other
+ * purchase (engine/spend-ceiling.ts) — it is a real second purchase and is
+ * accounted as one.
+ */
+async function dispatchBuy(
+  ctx: TenantContext,
+  opts: { email: string; localPart: string; domain: string; intentKey: string },
+): Promise<{ provider: string; provisionedAt: number }> {
+  const attempt = claimBuyDispatch(ctx, opts.intentKey, opts.email);
+  if (attempt > MAX_BUY_DISPATCHES) {
+    // Only two provisions racing the same address reach this: the claim, not the
+    // budget check above it, is the arbiter, so the loser stops before spending.
+    throw abandonedPurchaseError(ctx, opts.email);
   }
 
   let bought;
@@ -324,10 +451,10 @@ async function meterProvisionedMailbox(ctx: TenantContext, email: string, idempo
 function insertProvisionedMailbox(
   ctx: TenantContext,
   opts: { domainId: string; domain: string },
-  email: string,
-  warmupStartedAt: number,
+  provisioned: ProvisionedMailboxRecord,
   now: number,
 ): void {
+  const { email, warmupStartedAt } = provisioned;
   const day = computeWarmupDay(warmupStartedAt, now);
   ctx.sql.exec(
     // poll_cursor starts at -1 (never-polled sentinel, engine.ts's
@@ -336,8 +463,8 @@ function insertProvisionedMailbox(
     // WITHOUT fetching history, instead of the column's own DEFAULT 0 (an
     // ordinary incremental cursor since the round-2 fix, not a sentinel).
     `INSERT OR IGNORE INTO mailboxes
-       (id, tenant_id, domain_id, domain, email, daily_cap, sent_today, sent_today_epoch_day, status, warmup_started_at, created_at, poll_cursor, slot_counted)
-     VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, -1, ?)`,
+       (id, tenant_id, domain_id, domain, email, daily_cap, sent_today, sent_today_epoch_day, status, warmup_started_at, created_at, poll_cursor, slot_counted, provider)
+     VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, -1, ?, ?)`,
     newId("mbx"),
     ctx.tenantId,
     opts.domainId,
@@ -352,5 +479,12 @@ function insertProvisionedMailbox(
     // withSpendCeiling reserve above incremented vendor_slot_state iff the
     // bundle is real). Read at teardown to decrement the slot counter precisely.
     ctx.adapters.kind === "real" ? 1 : 0,
+    // Wave-2 §1a — WHICH VENDOR holds it, straight from the port's own answer
+    // ('google' from RealMailboxPort, 'sandbox' from the sandbox one). This
+    // value used to be computed and then DROPPED at the insert, which is what
+    // left the send-eligibility picker unable to tell a real mailbox from a
+    // demo-era phantom. `slot_counted` beside it is NOT a substitute: a BYO
+    // mailbox and any real row predating that column both read 0.
+    provisioned.provider,
   );
 }

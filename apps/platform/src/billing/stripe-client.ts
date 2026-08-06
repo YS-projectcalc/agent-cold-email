@@ -244,6 +244,46 @@ export async function getSubscription(secretKey: string, subscriptionId: string)
 }
 
 /**
+ * The customer id behind a charge — the ONLY route from a Dispute back to an
+ * account (audit-stripe-webhook-2026-08-06.md finding 1). A Dispute is minted by
+ * Stripe FROM a charge: it carries `metadata: {}`, no `client_reference_id`, and
+ * no `customer` field of its own, so `charge.dispute.*` cannot be routed from
+ * its payload alone. Its `charge` id can be, with this one read.
+ *
+ * The error grading is the point. This runs on the unauthenticated webhook path,
+ * where the two failure modes need OPPOSITE handling:
+ *   - transient (429 / 5xx / network) -> THROW, so the route 500s and Stripe
+ *     redelivers. Losing a chargeback freeze to a momentary blip is not
+ *     acceptable; the D5 lane exists because a dispute WAVE can get the master
+ *     account frozen (SPEC.md §12).
+ *   - permanent (any other non-2xx — charge not found, wrong mode, revoked key)
+ *     -> `null`, i.e. "unroutable". A THROW here would 500 every redelivery for
+ *     the ~3 days Stripe retries and count the whole way toward endpoint
+ *     auto-disable, which would take down billing for EVERY tenant over one
+ *     poison event (finding 8). The caller turns null into a 200 + a founder alert.
+ */
+export async function getChargeCustomerId(secretKey: string, chargeId: string): Promise<string | null> {
+  const res = await fetch(`${STRIPE_API_BASE}/charges/${encodeURIComponent(chargeId)}`, {
+    method: "GET",
+    headers: stripeHeaders(secretKey),
+  });
+  if (!res.ok) {
+    const detail = `${res.status} ${await res.text()}`;
+    if (res.status === 429 || res.status >= 500) throw new Error(`stripe charge fetch failed (transient): ${detail}`);
+    console.error(`stripe charge fetch failed permanently for ${chargeId} — event is unroutable: ${detail}`);
+    return null;
+  }
+  const json = (await res.json()) as { customer?: unknown };
+  if (typeof json.customer === "string" && json.customer.length > 0) return json.customer;
+  // Expanded shape (`?expand[]=customer`, or a future default) — accept both.
+  if (json.customer && typeof json.customer === "object") {
+    const id = (json.customer as { id?: unknown }).id;
+    if (typeof id === "string" && id.length > 0) return id;
+  }
+  return null;
+}
+
+/**
  * Sets a licensed subscription item's quantity to an ABSOLUTE value (design
  * §8.2 — set-to-N, never increment, so a missed/duplicated push self-heals on
  * the next sync). `prorationBehavior` is the founder-ruled direction: increases

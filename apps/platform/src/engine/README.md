@@ -25,6 +25,24 @@ into a god file:
   digest. Skips BYO-connected mailboxes (never had a subscription) and released
   ones. Failure-isolated — it can never delay a send. Cancelling changes nothing
   about send capacity: the ramp is ours.
+- `clock-migration.ts` — `migrateTenantClockToReal`: the ONE-SHOT virtual->real
+  clock migration a tenant crosses when it starts paying (wave-2 DECISION 2,
+  founder ruling 2026-08-05: RealClock for every non-sandbox tenant). Every
+  tenant signs up as `demo`, so a paying tenant's frozen virtual clock is
+  typically far in the real FUTURE; this rebases every clock-stamped row by
+  `realNow - frozenNow` (either sign), retires the demo-era sandbox mailboxes
+  AND sandbox-origin `domains` rows (NEW-4, wave-2 design review round 2 —
+  never a `source='byo'` row, and only a `source='provisioned'` domain with
+  zero currently-live non-sandbox mailboxes attached, so a domain a live real
+  mailbox is still on is left alone), terminalizes demo-seed sends, and stamps
+  `tenant_profile.clock_mode='real'`.
+  Called ONLY by `TenantDO` — at constructor rehydrate (so it self-applies to a
+  live tenant on first touch after deploy) and from both checkout paths. All of
+  it, marker included, runs inside one `storage.transactionSync`, so a throw
+  rolls back everything and the retry re-enters virgin state — a double shift is
+  structurally impossible. `clock_mode='real'` is also the interlock the
+  auto-send driver's predicate requires, so an unmigrated tenant is never sent
+  for. Pure synchronous SQL: no `await` may ever appear inside it.
 - `scheduler.ts` — pure send-window + least-loaded-mailbox-with-capacity
   helpers used by `tick.ts` (`isWithinSendWindow` is wired into the tick).
 - `brand-guard.ts` — the lookalike third-party-brand hard-reject validator
@@ -39,7 +57,18 @@ into a god file:
     BEFORE the purchase and never deleted, because the request-idempotency claim
     is deleted on a throw: that is what made a retry re-buy. `markMailboxIntentsReleased`
     is teardown's invalidation hook — a claim about a released mailbox must not
-    outlive the mailbox (N4).
+    outlive the mailbox (N4). It also owns the `mailbox_buy_dispatches` claim
+    (`claimBuyDispatch` / `readBuyDispatch`), written BEFORE each `/mailboxes/buy`
+    on a REAL wall clock: an intent status is written AFTER the vendor answers, so
+    only a pre-call claim can tell "nothing was sent" apart from "an accepted buy
+    whose status write was lost".
+  - `mailbox-acquisition.ts` — the guarded re-buy (founder ruling 2026-08-06).
+    Decides whether a mailbox may be bought at all: any dispatch on record means
+    ASK the provider, and only a corroborated absence (repeated lookups, plus a
+    minimum real age since the dispatch) authorizes the ONE automatic re-buy. A
+    failed lookup authorizes nothing. Raises the founder's stuck / re-buy-outcome
+    alerts through the watchtower state machine so they inherit its dedup and
+    cooldown.
   - `domain-dns.ts` — `setDnsWithRetry`, the only export. Runs the DNS operation
     the domain's `connection_type` calls for (INCIDENT 2026-08-05: the
     connect-an-existing-domain nameserver handshake was being run against
@@ -221,7 +250,7 @@ DO's own `SqlStorage` handle, tenant id, injected `Clock`, and the tenant's
 `VendorAdapterBundle`. `tenant-do.ts` assembles the context once per RPC
 call and dispatches into these modules — it holds no business logic itself.
 
-## Why the tick/poll are directly-callable methods, not real alarms
+## Why the tick/poll are directly-callable methods, not real alarms (HISTORICAL — see below)
 
 B2 (ROADMAP.md) is where resumable, DO-alarm-driven scheduling lands. B0's
 job is to prove the pipe end-to-end with an honest, directly-callable
@@ -229,6 +258,22 @@ job is to prove the pipe end-to-end with an honest, directly-callable
 keeps the walking-skeleton test deterministic (no real waiting) without
 overbuilding a scheduling system this phase doesn't need (CLAUDE.md rule i,
 YAGNI).
+
+**HISTORICAL as of wave-2.** The paragraph above described B0's walking
+skeleton, where `tick()`/`pollInbox()` had no production driver at all — a
+test/demo-only surface. That is no longer the whole picture: wave-2 (SPEC.md
+§23) added a **5-minute cron leg** (`admin/ops-sweep.ts`'s
+`runSendPipelineAllTenants`) that drives `runScheduledTick()`/
+`runScheduledPoll()` — thin wrappers around this file's `tick()`/`pollInbox()`
+gated by `engine/activation.ts`'s `readSendDriverGate` — for every tenant on
+every cron cycle. The cron leg, not a DO alarm, is now the actual production
+driver of automatic sending (design DECISION 1: alarms would add re-arm/
+alarm-lost/constructor-re-arm failure classes a loud cron-leg error avoids,
+and 5-minute worst-case latency is immaterial at cold-email's day/hour
+cadence). `tick()`/`pollInbox()` themselves remain directly-callable and
+untouched — the demo path and the existing test surface still drive them with
+no activation predicate — but "no production driver" is the part of this
+section that is now historical, not the RPC shape itself.
 
 ## How to run
 

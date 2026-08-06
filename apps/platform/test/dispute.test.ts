@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { runInDurableObject } from "cloudflare:test";
-import { activatePaidPlan, api, mintTenant, postWebhook, tenantStub } from "./helpers.js";
+import { activatePaidPlan, api, makeMailboxesSendEligible, mintTenant, postDisputeWebhook, tenantStub } from "./helpers.js";
+import { disputeClosed, disputeCreated } from "./stripe-fixtures.js";
 
 interface WebhookResponse {
   received: boolean;
@@ -14,23 +15,15 @@ interface AccountResponse {
   billingState: string;
 }
 
-function disputeCreatedEvent(eventId: string, tenantId: string, disputeId: string) {
-  return {
-    id: eventId,
-    type: "charge.dispute.created",
-    data: { object: { id: disputeId, charge: "ch_test_1", amount: 9900, reason: "fraudulent", metadata: { tenantId } } },
-  };
-}
+// Dispute fixtures are REAL Stripe Dispute objects (test/stripe-fixtures.ts):
+// `metadata: {}`, no `customer`, routable only through their `charge`. The
+// versions these replaced carried a hand-placed `metadata.tenantId` — the
+// shape that made this whole lane pass its tests while being inert against
+// every real chargeback (audit-stripe-webhook-2026-08-06.md finding 1), which
+// is why deliveries here go through `postDisputeWebhook`.
+const DISPUTED_CHARGE = "ch_test_disputed_1";
 
-function disputeClosedEvent(eventId: string, tenantId: string, disputeId: string, status: string) {
-  return {
-    id: eventId,
-    type: "charge.dispute.closed",
-    data: { object: { id: disputeId, status, metadata: { tenantId } } },
-  };
-}
-
-async function provisionAndLaunch(token: string): Promise<void> {
+async function provisionAndLaunch(tenantId: string, token: string): Promise<void> {
   await api("/setup-infrastructure", {
     method: "POST",
     token,
@@ -54,6 +47,10 @@ async function provisionAndLaunch(token: string): Promise<void> {
       sequence: [{ step: 1, subject: "Hi", body: "Hi", delayDays: 0 }],
     }),
   });
+  // This lane asserts that a DISPUTE freeze stops sends and a won dispute
+  // resumes them, so its mailboxes must be sendable for any other reason —
+  // otherwise "sent 0" would pass while proving nothing (wave-2 §1a).
+  await makeMailboxesSendEligible(tenantId);
 }
 
 // D5.3 — chargeback / dispute lane (protects the master Stripe account).
@@ -63,11 +60,12 @@ describe("charge.dispute.* webhook — chargeback freeze/unfreeze lane (D5)", ()
   it("dispute.created freezes the tenant (sends stop); dispute.closed(won) unfreezes (sends resume)", async () => {
     const { tenantId, token } = await mintTenant("Dispute Co", "managed");
     await activatePaidPlan(tenantId, "managed");
-    await provisionAndLaunch(token);
+    await provisionAndLaunch(tenantId, token);
 
     const disputeId = "dp_test_1";
-    const created = await postWebhook<WebhookResponse>(
-      disputeCreatedEvent(`evt_${crypto.randomUUID()}`, tenantId, disputeId),
+    const created = await postDisputeWebhook<WebhookResponse>(
+      disputeCreated({ chargeId: DISPUTED_CHARGE, disputeId }),
+      tenantId,
     );
     expect(created.status).toBe(200);
     expect(created.body).toMatchObject({ applied: true, duplicate: false, frozen: true });
@@ -89,8 +87,9 @@ describe("charge.dispute.* webhook — chargeback freeze/unfreeze lane (D5)", ()
     expect(frozenTick.sent).toBe(0);
 
     // Won -> unfreeze.
-    const closed = await postWebhook<WebhookResponse>(
-      disputeClosedEvent(`evt_${crypto.randomUUID()}`, tenantId, disputeId, "won"),
+    const closed = await postDisputeWebhook<WebhookResponse>(
+      disputeClosed({ chargeId: DISPUTED_CHARGE, disputeId, status: "won" }),
+      tenantId,
     );
     expect(closed.body).toMatchObject({ applied: true, unfrozen: true });
 
@@ -113,13 +112,12 @@ describe("charge.dispute.* webhook — chargeback freeze/unfreeze lane (D5)", ()
     const { tenantId } = await mintTenant("Dispute Idem Co", "managed");
     await activatePaidPlan(tenantId, "managed");
 
-    const eventId = `evt_${crypto.randomUUID()}`;
-    const event = disputeCreatedEvent(eventId, tenantId, "dp_idem_1");
+    const event = disputeCreated({ chargeId: DISPUTED_CHARGE, disputeId: "dp_idem_1" });
 
-    const first = await postWebhook<WebhookResponse>(event);
+    const first = await postDisputeWebhook<WebhookResponse>(event, tenantId);
     expect(first.body).toMatchObject({ applied: true, duplicate: false, frozen: true });
 
-    const second = await postWebhook<WebhookResponse>(event);
+    const second = await postDisputeWebhook<WebhookResponse>(event, tenantId);
     expect(second.status).toBe(200);
     expect(second.body).toMatchObject({ applied: false, duplicate: true });
 
@@ -139,9 +137,10 @@ describe("charge.dispute.* webhook — chargeback freeze/unfreeze lane (D5)", ()
     await activatePaidPlan(tenantId, "managed");
     const disputeId = "dp_lost_1";
 
-    await postWebhook(disputeCreatedEvent(`evt_${crypto.randomUUID()}`, tenantId, disputeId));
-    const closed = await postWebhook<WebhookResponse>(
-      disputeClosedEvent(`evt_${crypto.randomUUID()}`, tenantId, disputeId, "lost"),
+    await postDisputeWebhook(disputeCreated({ chargeId: DISPUTED_CHARGE, disputeId }), tenantId);
+    const closed = await postDisputeWebhook<WebhookResponse>(
+      disputeClosed({ chargeId: DISPUTED_CHARGE, disputeId, status: "lost" }),
+      tenantId,
     );
     expect(closed.body).toMatchObject({ applied: true });
     expect(closed.body.unfrozen).toBeFalsy();

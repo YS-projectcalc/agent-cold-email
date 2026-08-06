@@ -280,10 +280,16 @@ interface MailboxRow {
 export function gatherMailboxHealth(ctx: TenantContext): MailboxHealthSignal[] {
   const now = ctx.clock.now();
 
+  // NEW-4 (docs/adversarial/wave2-design-review-2026-08-05.md round 2) — a
+  // retired mailbox (released_at set — clock-migration.ts's sandbox retirement,
+  // or an ordinary teardown release) must drop out of the health signal set
+  // entirely, so its all-time demo/history bounce and complaint counts stop
+  // feeding both the per-mailbox pause/throttle decision and the per-domain
+  // burn aggregate (gatherDomainStats sums over exactly this returned list).
   const mailboxes = ctx.sql
     .exec<MailboxRow>(
       `SELECT id, email, domain, deliv_status, daily_cap, sent_today, warmup_started_at, last_polled_at
-       FROM mailboxes WHERE tenant_id = ?`,
+       FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL`,
       ctx.tenantId,
     )
     .toArray();
