@@ -1,7 +1,7 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
-import type { TenantPlan } from "@coldstart/shared";
+import type { Clock, TenantPlan } from "@coldstart/shared";
 import { generateApiToken, hashApiToken } from "../src/auth.js";
-import { VirtualClock } from "../src/clock.js";
+import { RealClock, VirtualClock } from "../src/clock.js";
 import { insertTenantIndex } from "../src/db.js";
 import { readActivationState } from "../src/engine/activation.js";
 import { normalizeName, tokenize } from "../src/ofac/normalize.js";
@@ -53,12 +53,19 @@ export async function withTenantContext<T>(tenantId: string, fn: (ctx: TenantCon
   return runInDurableObject(tenantStub(tenantId), async (_instance, state) => {
     const sql = state.storage.sql;
     const profile = sql
-      .exec<{ plan: TenantPlan; clock_base: number; clock_offset: number; clock_multiplier: number }>(
-        `SELECT plan, clock_base, clock_offset, clock_multiplier FROM tenant_profile WHERE id = ?`,
+      .exec<{ plan: TenantPlan; clock_base: number; clock_offset: number; clock_multiplier: number; clock_mode: string }>(
+        `SELECT plan, clock_base, clock_offset, clock_multiplier, clock_mode FROM tenant_profile WHERE id = ?`,
         tenantId,
       )
       .one();
-    const clock = new VirtualClock(profile.clock_base, profile.clock_offset, profile.clock_multiplier);
+    // Mirrors TenantDO's own clock selection (wave-2 DECISION 2): a migrated
+    // (paid) tenant runs on the REAL clock. Constructing a VirtualClock
+    // unconditionally here would silently test a paid tenant against a frozen
+    // demo-era time base — the opposite of what production does for it.
+    const clock: Clock =
+      profile.clock_mode === "real"
+        ? new RealClock()
+        : new VirtualClock(profile.clock_base, profile.clock_offset, profile.clock_multiplier);
     // Mirrors tenant-do.ts's buildAdapters(): the I1 activation gate is a
     // FRESH SQL read, never a cached decision (adversarial finding F3).
     const { activated } = readActivationState(sql, tenantId);

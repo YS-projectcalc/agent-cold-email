@@ -126,7 +126,28 @@ export class RealMailboxPort implements MailboxPort {
       throw new VendorError(`inboxkit warmup/add did not create a subscription for ${email}: ${body.message ?? "no message"}`, false);
     }
     const startedAt = subscription.started_at ?? subscription.createdAt;
-    return { started: true, startedAt: Date.parse(startedAt) };
+    // FAIL LOUD ON A NON-FINITE PARSE (adversary N2). `Date.parse` returns NaN
+    // for a missing/unrecognized value, and this number is written straight
+    // into `mailboxes.warmup_started_at` — the ramp's only anchor. A NaN or
+    // absent anchor makes the ramp math read "fully warmed" (cap 40/day, and
+    // send-ready, which also makes the warmup-cancel sweep cancel the paid
+    // subscription immediately) for a mailbox that has never sent anything.
+    // A retryable VendorError here costs one retry; guessing costs the
+    // mailbox's reputation on its first day.
+    //
+    // NON-retryable, matching the malformed-response throw in provision() above:
+    // the subscription has ALREADY been created and billed by the time we parse
+    // this, and a vendor whose date format we cannot read answers the retry the
+    // same way — so a retryable grade would enrol (and charge for) a fresh
+    // subscription on every attempt. Loud and once is the right shape here.
+    const startedAtMs = Date.parse(startedAt);
+    if (!Number.isFinite(startedAtMs)) {
+      throw new VendorError(
+        `inboxkit warmup/add returned an unparseable start time for ${email}: ${JSON.stringify(startedAt)}`,
+        false,
+      );
+    }
+    return { started: true, startedAt: startedAtMs };
   }
 
   /**

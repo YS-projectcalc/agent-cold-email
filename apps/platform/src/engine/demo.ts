@@ -10,6 +10,7 @@
 // not a policy an operator could accidentally relax).
 
 import type { DemoRunInput } from "@coldstart/shared";
+import { requireVirtualClock } from "../clock.js";
 import type { TenantContext } from "../tenant-context.js";
 import { launchCampaign } from "./campaigns.js";
 import { runTick } from "./tick.js";
@@ -33,7 +34,10 @@ export interface DemoRunSummary {
 // level rather than re-entering the DO, since engine/*.ts functions only
 // ever see a `TenantContext`, never the DO instance itself.
 function advanceClock(ctx: TenantContext, virtualMs: number): void {
-  const newOffset = ctx.clock.advanceVirtual(virtualMs);
+  // `ctx.clock` is a plain Clock now that a paid tenant runs on real time
+  // (clock.ts). Narrowing here is the structural guard behind demoRun()'s plan
+  // gate — a real-clock tenant throws loudly instead of silently no-op'ing.
+  const newOffset = requireVirtualClock(ctx.clock).advanceVirtual(virtualMs);
   ctx.sql.exec(`UPDATE tenant_profile SET clock_offset = ? WHERE id = ?`, newOffset, ctx.tenantId);
 }
 

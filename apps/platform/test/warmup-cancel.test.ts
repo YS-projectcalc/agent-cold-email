@@ -1,8 +1,10 @@
 import { createExecutionContext, createScheduledController, env, runInDurableObject, waitOnExecutionContext } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Clock } from "@coldstart/shared";
 import worker from "../src/index.js";
+import { DelegatingClock, RealClock } from "../src/clock.js";
 import { runWarmupCancellationSweep } from "../src/engine/warmup-cancel.js";
-import { ONE_DAY_MS, WARMUP_RAMP_DAYS } from "../src/engine/warmup.js";
+import { computeWarmupDay, isSendReady, ONE_DAY_MS, warmupDailyCap, WARMUP_RAMP_DAYS } from "../src/engine/warmup.js";
 import { api, signup, tenantStub, withTenantContext } from "./helpers.js";
 
 // Founder ruling 2026-08-02 (ROADMAP.md:25, option b) — InboxKit's warmup pool
@@ -315,5 +317,91 @@ describe("warmup auto-cancel at ramp completion (founder ruling 2026-08-02)", ()
 
     expect(swept.calls).toEqual([]);
     expect(swept.cancelled).toBe(0);
+  });
+});
+
+// --- Wave-2 clock hardening (adversary round-2 R2 + round-1 N2) -------------
+
+describe("the sweep re-reads the clock per candidate (adversary round-2, R2)", () => {
+  it("a virtual->real flip mid-sweep stops the NEXT candidate being read as ramp-complete", async () => {
+    const { tenantId } = await seedProvisionedTenant("warmupstaleclock");
+    // Demo runs pushed this tenant's virtual clock ~400 days into the real
+    // future — the state every pre-upgrade tenant is actually in.
+    await tenantStub(tenantId).advanceClock(400 * ONE_DAY_MS);
+
+    const first = await readMailbox(tenantId);
+    await runInDurableObject(tenantStub(tenantId), (_i, state) => {
+      const sql = state.storage.sql;
+      // The mailbox the sweep reaches FIRST is genuinely ramp-complete on BOTH
+      // clocks (real day 61) — it gets cancelled, and the flip lands during its
+      // await. The candidate query has no ORDER BY, so the two mailboxes are
+      // ordered so that rowid order and (tenant_id, email) index order AGREE:
+      // this row is inserted first AND sorts first.
+      sql.exec(`UPDATE mailboxes SET warmup_started_at = ? WHERE id = ?`, Date.now() - 60 * ONE_DAY_MS, first.id);
+      // The SECOND mailbox started its ramp for real yesterday: ramp-complete
+      // under the frozen virtual clock (400 days of apparent elapsed time), but
+      // on day 2 of 28 under real time.
+      sql.exec(
+        `INSERT INTO mailboxes (id, tenant_id, domain_id, domain, email, daily_cap, warmup_started_at, created_at)
+         SELECT 'mb_fresh', tenant_id, domain_id, domain, 'zz-fresh@' || domain, 5, ?, ?
+         FROM mailboxes WHERE id = ?`,
+        Date.now() - ONE_DAY_MS,
+        Date.now() - ONE_DAY_MS,
+        first.id,
+      );
+    });
+
+    const outcome = await withTenantContext(tenantId, async (ctx) => {
+      // The DO's own shape: a delegating clock over a swappable current clock,
+      // so the flip lands the way a concurrent checkout webhook lands — during
+      // the await inside the candidate loop.
+      let current: Clock = ctx.clock;
+      const calls: string[] = [];
+      const patched = {
+        ...ctx,
+        clock: new DelegatingClock(() => current),
+        adapters: {
+          ...ctx.adapters,
+          mailbox: {
+            ...ctx.adapters.mailbox,
+            cancelWarmup: async (email: string) => {
+              calls.push(email);
+              current = new RealClock(); // the checkout flip lands here
+              return { cancelled: true, cancelledAt: Date.now() };
+            },
+          },
+        },
+      };
+      const result = await runWarmupCancellationSweep(patched);
+      return { ...result, calls };
+    });
+
+    // Only the genuinely ramp-complete mailbox is cancelled. With a `now`
+    // hoisted above the loop, the stale future timestamp would survive the flip
+    // and cancel the fresh mailbox's paid warmup subscription on day 2.
+    expect(outcome.calls).toEqual([first.email]);
+    expect(outcome.cancelled).toBe(1);
+
+    const fresh = await runInDurableObject(tenantStub(tenantId), (_i, state) =>
+      state.storage.sql
+        .exec<{ warmup_cancelled_at: number | null; [c: string]: SqlStorageValue }>(
+          `SELECT warmup_cancelled_at FROM mailboxes WHERE id = 'mb_fresh'`,
+        )
+        .one(),
+    );
+    expect(fresh.warmup_cancelled_at).toBeNull();
+  });
+});
+
+describe("ramp math refuses a non-finite warmup anchor (adversary N2)", () => {
+  it("falls back to day 1 (cap 5, not send-ready) instead of falling through to fully-warmed", () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, null as unknown as number, undefined as unknown as number]) {
+      const day = computeWarmupDay(bad, Date.now());
+      expect(day).toBe(1);
+      expect(warmupDailyCap(day)).toBe(5);
+      expect(isSendReady(day)).toBe(false);
+    }
+    // A finite anchor is unaffected.
+    expect(computeWarmupDay(Date.now() - 10 * ONE_DAY_MS, Date.now())).toBe(11);
   });
 });
