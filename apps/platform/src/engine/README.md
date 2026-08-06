@@ -25,6 +25,20 @@ into a god file:
   digest. Skips BYO-connected mailboxes (never had a subscription) and released
   ones. Failure-isolated — it can never delay a send. Cancelling changes nothing
   about send capacity: the ramp is ours.
+- `clock-migration.ts` — `migrateTenantClockToReal`: the ONE-SHOT virtual->real
+  clock migration a tenant crosses when it starts paying (wave-2 DECISION 2,
+  founder ruling 2026-08-05: RealClock for every non-sandbox tenant). Every
+  tenant signs up as `demo`, so a paying tenant's frozen virtual clock is
+  typically far in the real FUTURE; this rebases every clock-stamped row by
+  `realNow - frozenNow` (either sign), retires the demo-era sandbox mailboxes,
+  terminalizes demo-seed sends, and stamps `tenant_profile.clock_mode='real'`.
+  Called ONLY by `TenantDO` — at constructor rehydrate (so it self-applies to a
+  live tenant on first touch after deploy) and from both checkout paths. All of
+  it, marker included, runs inside one `storage.transactionSync`, so a throw
+  rolls back everything and the retry re-enters virgin state — a double shift is
+  structurally impossible. `clock_mode='real'` is also the interlock the
+  auto-send driver's predicate requires, so an unmigrated tenant is never sent
+  for. Pure synchronous SQL: no `await` may ever appear inside it.
 - `scheduler.ts` — pure send-window + least-loaded-mailbox-with-capacity
   helpers used by `tick.ts` (`isWithinSendWindow` is wired into the tick).
 - `brand-guard.ts` — the lookalike third-party-brand hard-reject validator

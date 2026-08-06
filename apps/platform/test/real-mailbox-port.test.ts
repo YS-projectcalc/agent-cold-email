@@ -124,6 +124,31 @@ describe("RealMailboxPort — configured (InboxKit)", () => {
     expect((err as VendorError).retryable).toBe(false);
   });
 
+  // Adversary N2 (wave-2 design review): this number goes straight into
+  // `mailboxes.warmup_started_at`, the ramp's only anchor. A non-finite anchor
+  // made computeWarmupDay fall through every `<=` threshold to the fully-warmed
+  // branch — cap 40/day on a brand-new mailbox, and send-ready, which also makes
+  // the warmup-cancel sweep cancel the paid subscription immediately.
+  it("startWarmup() refuses an unparseable vendor start time instead of writing a non-finite anchor", async () => {
+    stubFetchSequence([
+      { status: 200, body: IK_MAILBOX_LIST_SUCCESS },
+      {
+        status: 200,
+        body: {
+          ...IK_WARMUP_ADD_SUCCESS,
+          subscriptions: [{ ...IK_WARMUP_ADD_SUCCESS.subscriptions[0], started_at: null, createdAt: "not-a-date" }],
+        },
+      },
+    ]);
+    const err = await new RealMailboxPort(CONFIG).startWarmup("john.doe@example-lookalike.com", "k1").catch((e) => e);
+
+    expect(err).toBeInstanceOf(VendorError);
+    // NON-retryable on purpose: the billed subscription already exists by this
+    // point, and a vendor whose date format we cannot read answers the retry the
+    // same way — a retryable grade would enrol a fresh paid subscription per attempt.
+    expect((err as VendorError).retryable).toBe(false);
+  });
+
   it("startWarmup() resolves the uid then POSTs /warmup/add with activate_immediately:true", async () => {
     const spy = stubFetchSequence([{ status: 200, body: IK_MAILBOX_LIST_SUCCESS }, { status: 200, body: IK_WARMUP_ADD_SUCCESS }]);
     const result = await new RealMailboxPort(CONFIG).startWarmup("john.doe@example-lookalike.com", "k1");

@@ -106,7 +106,26 @@ CREATE TABLE IF NOT EXISTS tenant_profile (
   created_at INTEGER NOT NULL,
   clock_base INTEGER NOT NULL,
   clock_offset INTEGER NOT NULL DEFAULT 0,
-  clock_multiplier INTEGER NOT NULL DEFAULT 1
+  clock_multiplier INTEGER NOT NULL DEFAULT 1,
+  -- Wave-2 DECISION 2 (founder ruling 2026-08-05): which clock this tenant's
+  -- TenantContext runs on. 'virtual' (the DEFAULT — every tenant signs up as
+  -- 'demo', routes/signup.ts) | 'real'. Stamped 'real' ONLY inside the one-shot
+  -- virtual->real migration's transaction (engine/clock-migration.ts), never
+  -- before it: the marker IS the interlock. The auto-send driver's predicate
+  -- requires clock_mode='real', so an unmigrated tenant can never be sent for,
+  -- and a migration that rolls back leaves this 'virtual' — a genuinely virgin
+  -- retry state, which is what makes a double-shift structurally impossible.
+  -- One-way: plan never downgrades paid->demo (its only two writers are the
+  -- checkout upgrades, engine/billing.ts), so there is no reverse migration.
+  clock_mode TEXT NOT NULL DEFAULT 'virtual',
+  -- Forensics for the shift the migration applied, persisted in the SAME
+  -- transaction as the stamp above: realNow - frozenNow, EITHER SIGN (a
+  -- pre-upgrade demo tenant's frozen clock is typically far in the real
+  -- FUTURE — ~32 virtual days per demo run, up to 20 runs). Never read by
+  -- product code; exists so a mis-shift can be diagnosed and corrected by
+  -- hand, since the migration itself is one-shot.
+  clock_migration_delta_ms INTEGER,
+  clock_migrated_at INTEGER
 );
 
 -- SPEC.md §20 — BYO domains & mailboxes. Every new column below defaults to
@@ -287,7 +306,24 @@ CREATE TABLE IF NOT EXISTS mailboxes (
   -- so the live adapter kind can no longer tell a real slot from a sandbox one —
   -- this durable marker records the truth at provision time. DEFAULT 0 keeps
   -- every existing (sandbox) mailbox byte-identical and never double-decrements.
-  slot_counted INTEGER NOT NULL DEFAULT 0
+  slot_counted INTEGER NOT NULL DEFAULT 0,
+  -- Wave-2 §1 — WHICH VENDOR actually holds this mailbox: 'google' (a real
+  -- InboxKit-provisioned mailbox; the ports already return this and the insert
+  -- used to drop it) | 'byo' (customer-connected) | 'sandbox' (a demo-era row
+  -- created by the sandbox bundle — nothing exists at any vendor) | '' (not yet
+  -- classified). slot_counted is NOT this discriminator: a BYO mailbox and
+  -- any real row predating that column both read 0.
+  --
+  -- '' IS LOAD-BEARING, NOT A BUG (adversary round-2, R8). The ALTER that adds
+  -- this column runs in ensureColumnMigrations(), OUTSIDE the migration's
+  -- transaction, and the backfill runs INSIDE it. So a rolled-back clock
+  -- migration leaves provider='' on every row while clock_mode stays 'virtual'.
+  -- The send-eligibility picker excludes '' precisely so those unclassified
+  -- rows can never be picked; that coheres with the clock_mode interlock, which
+  -- independently blocks the driver for the same tenant. Do NOT "fix" the ''
+  -- exclusion — removing it would un-gate unclassified rows in exactly the
+  -- state where nothing has classified them.
+  provider TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS campaigns (
