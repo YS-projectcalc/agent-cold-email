@@ -4,6 +4,7 @@ import type { EngineClientConfig } from "../vendors/real/email-port.js";
 import { EngineMailboxClient, type EnginePushCredentials } from "./engine-mailbox-client.js";
 import { type InboxKitMailboxCredentials, RealMailboxPort } from "../vendors/real/mailbox-port.js";
 import { ManualOAuthMinter, type GmailGrant, type MailboxRef, type OAuthMinter } from "../vendors/real/oauth-mint.js";
+import { emitTenantMessage } from "./tenant-messages.js";
 
 /**
  * Self-serve activation I3 — the Worker provisioning PUSH (F6 partial-failure
@@ -122,6 +123,22 @@ export async function pushRecordedMailbox(ctx: TenantContext, mailbox: MailboxRe
       mailbox.email,
       ctx.tenantId,
     );
+    // Wire point B (system->agent message channel, increment 1) — the
+    // pending->pushed transition IS the "you can send now" signal the
+    // founder currently hand-relays. Every call here is only ever reached for
+    // a row that was 'pending' a moment ago (recordProvisionedMailboxForPush's
+    // first call, or reconcile's own `WHERE status = 'pending'` selection —
+    // see this file's doc comment), so this is always a genuine transition,
+    // never a re-fire on an already-pushed mailbox. Composed prose only, never
+    // `credentials`/vendor detail (GUARDRAIL B — the assembled credentials
+    // carry the IMAP host/user/pass and the gmail_api refresh token).
+    emitTenantMessage(ctx, {
+      kind: "credential_ready",
+      severity: "action_required",
+      body: `Your mailbox ${mailbox.email} is authorized — sending is now enabled.`,
+      actionHint: { tool: "infrastructure_status" },
+      dedupKey: mailbox.email,
+    });
     return { email: mailbox.email, pushed: true };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

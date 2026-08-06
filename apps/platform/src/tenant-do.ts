@@ -47,6 +47,7 @@ import { runWarmupCancellationSweep } from "./engine/warmup-cancel.js";
 import { withRequestIdempotency } from "./engine/idempotency.js";
 import { reconcileMailboxCredentialPushes } from "./engine/mailbox-credential-push.js";
 import { runDeliverabilitySweep } from "./engine/deliverability-actions.js";
+import { pruneTenantMessages } from "./engine/tenant-messages.js";
 import { runPollInbox } from "./engine/reply-processor.js";
 import { suppressLead, unsubscribeEmail, type UnsubscribeResult } from "./engine/suppression.js";
 import { upsertLeadDisposition, type LeadDispositionView } from "./engine/lead-dispositions.js";
@@ -867,6 +868,10 @@ export class TenantDO extends DurableObject<Env> {
     // later recovered). Active-only + set-to-N idempotent inside; a no-op in the
     // default build and every test (no real Stripe subscription).
     await syncMailboxQuantity(ctx);
+    // System->agent message channel, increment 1 — bounded, tenant-scoped
+    // cleanup of expired/old-read tenant_messages rows, reusing this existing
+    // per-tenant cron leg rather than a new cron (engine/tenant-messages.ts).
+    pruneTenantMessages(ctx);
     return result;
   }
 

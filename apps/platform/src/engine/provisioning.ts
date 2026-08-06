@@ -26,6 +26,7 @@ import { assertWithinProvisioningCap } from "./quota.js";
 import { screenTenant } from "../ofac/screening.js";
 import { alertRegistrarUnarmed } from "./registrar-alert.js";
 import { withSpendCeiling } from "./spend-ceiling.js";
+import { emitTenantMessage, listSurfacedTenantMessages, type TenantMessage } from "./tenant-messages.js";
 import { RealInboxKitDomainPort } from "../vendors/real/inboxkit-domain-port.js";
 import { assertCompleteRegistrant, readRegistrarOptInState } from "../vendors/registrar-arming.js";
 import { computeWarmupDay, epochDay, warmupDailyCap, warmupStatus } from "./warmup.js";
@@ -745,12 +746,18 @@ export async function runSetupInfrastructure(
     );
   }
 
+  // Wire point A (system->agent message channel, increment 1) — tracks which
+  // domain the loop below was working on when it threw, so the catch can name
+  // it in the retry_setup message without needing the error itself to carry
+  // structured detail.
+  let inFlightDomain: string | undefined;
   try {
     const personaSlug = slugify(input.persona);
 
     for (let domainIndex = 0; domainIndex < input.domains; domainIndex++) {
       const candidate = usable[domainIndex];
       if (!candidate) continue;
+      inFlightDomain = candidate.domain;
       await provisionDomainWithMailboxes(ctx, {
         domain: candidate.domain,
         domainIndex,
@@ -780,6 +787,24 @@ export async function runSetupInfrastructure(
     }
     if (err instanceof RegistrarUnarmedError) {
       await alertRegistrarUnarmed(ctx, input.primaryDomain, err, mailer);
+    }
+    // Wire point A — a RETRYABLE VendorError here is H2's exact shape
+    // (setDnsWithRetry exhausted its in-call backoff): the domain is bought
+    // and recorded (dns_status 'pending'), nothing was lost, and the caller's
+    // OWN error text already says so — but until now that only reached a
+    // human via a relayed alert. Surface it directly to the agent instead.
+    // Deliberately composed prose, never `err.message` (GUARDRAIL B — the
+    // vendor error can carry upstream detail this message must not repeat).
+    if (err instanceof VendorError && err.retryable) {
+      emitTenantMessage(ctx, {
+        kind: "retry_setup",
+        severity: "action_required",
+        body: inFlightDomain
+          ? `Setup for ${inFlightDomain} has not finished yet — its DNS registration is still completing at the vendor. Nothing was lost; retry setup_infrastructure with the same idempotency key to finish it.`
+          : `Your last setup_infrastructure call has not finished yet. Nothing was lost; retry it with the same idempotency key to finish it.`,
+        actionHint: { tool: "setup_infrastructure", idempotencyKey: setupKey ?? null },
+        dedupKey: inFlightDomain ?? `tenant:${ctx.tenantId}`,
+      });
     }
     throw err;
   }
@@ -836,6 +861,12 @@ export interface InfrastructureStatus {
   mailboxes: number;
   mailboxHealth: MailboxHealthReport[];
   sendReady: boolean;
+  // System->agent message channel, increment 1 (founder-approved 2026-08-05,
+  // engine/tenant-messages.ts) — system notices (a retryable setup step, a
+  // credential going live) surfaced here so the customer's agent sees them
+  // without a human relay. Unread-first, newest-first, capped at 5, expired
+  // rows filtered out.
+  messages: TenantMessage[];
 }
 
 export async function getInfrastructureStatus(ctx: TenantContext): Promise<InfrastructureStatus> {
@@ -913,5 +944,7 @@ export async function getInfrastructureStatus(ctx: TenantContext): Promise<Infra
     // Send-readiness ignores paused/throttled state (it's a warmup concept);
     // a paused mailbox still counts as warmed. delivStatus surfaces the pause.
     sendReady: mailboxHealth.length > 0 && mailboxHealth.every((m) => m.sendReady),
+    // Pure SELECT (GUARDRAIL: never inserts) — see listSurfacedTenantMessages.
+    messages: listSurfacedTenantMessages(ctx),
   };
 }
