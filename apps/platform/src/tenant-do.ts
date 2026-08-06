@@ -40,13 +40,15 @@ import {
 } from "./engine/billing.js";
 import { runDemo, type DemoRunSummary } from "./engine/demo.js";
 import { cancelTenant, terminateTenant, type CancelResult, type TerminateResult } from "./engine/lifecycle.js";
-import { getInfrastructureStatus, runSetupInfrastructure } from "./engine/provisioning.js";
+import { getInfrastructureStatus } from "./engine/infrastructure-status.js";
+import { runSetupInfrastructure } from "./engine/provisioning.js";
 import { launchCampaign, listCampaigns, pauseAllCampaigns, pauseCampaign, type CampaignListItem } from "./engine/campaigns.js";
 import { runTick } from "./engine/tick.js";
 import { runWarmupCancellationSweep } from "./engine/warmup-cancel.js";
 import { withRequestIdempotency } from "./engine/idempotency.js";
 import { reconcileMailboxCredentialPushes } from "./engine/mailbox-credential-push.js";
 import { runDeliverabilitySweep } from "./engine/deliverability-actions.js";
+import { pruneTenantMessages } from "./engine/tenant-messages.js";
 import { runPollInbox } from "./engine/reply-processor.js";
 import { suppressLead, unsubscribeEmail, type UnsubscribeResult } from "./engine/suppression.js";
 import { upsertLeadDisposition, type LeadDispositionView } from "./engine/lead-dispositions.js";
@@ -205,6 +207,11 @@ export class TenantDO extends DurableObject<Env> {
     // — provisioned before DNS state was tracked, and whose setDns did succeed
     // (it was a precondition of the row existing at all) — keeps its meaning.
     this.addColumnIfMissing("domains", "dns_status", "TEXT NOT NULL DEFAULT 'ready'");
+    // INCIDENT 2026-08-05 root cause — which DNS operation applies (see
+    // schema.ts). NULL for every pre-existing row: unknown, which the adapters
+    // treat as 'purchased' (the read-only poll), so a legacy row can never drive
+    // the connect-existing handshake that stranded the incident domain.
+    this.addColumnIfMissing("domains", "connection_type", "TEXT");
     // SPEC.md §20 BYO domains & mailboxes — every default below reproduces an
     // EXISTING provisioned domain/mailbox's implicit state exactly (flag-dark:
     // see schema.ts's TENANT_DO_SCHEMA comment on these same columns).
@@ -867,12 +874,23 @@ export class TenantDO extends DurableObject<Env> {
     // later recovered). Active-only + set-to-N idempotent inside; a no-op in the
     // default build and every test (no real Stripe subscription).
     await syncMailboxQuantity(ctx);
+    // System->agent message channel, increment 1 — bounded, tenant-scoped
+    // cleanup of expired/old-read tenant_messages rows, reusing this existing
+    // per-tenant cron leg rather than a new cron (engine/tenant-messages.ts).
+    pruneTenantMessages(ctx);
     return result;
   }
 
-  /** D2 dunning sweep's "suspend after grace" action — a real local state transition (not a vendor call), armed now. */
-  suspendForDunning(): void {
-    suspendTenant(this.requireContext(), "dunning");
+  /**
+   * D2 dunning sweep's "suspend after grace" action — a real local state
+   * transition (not a vendor call), armed now. Returns false (a no-op) when
+   * billing_state is no longer 'past_due' at write time — a recovery webhook
+   * landed in the gap between the sweep's read and this write (F3, audit
+   * 2026-08-05); the caller must not record a suspend or notify one that
+   * didn't happen.
+   */
+  suspendForDunning(): boolean {
+    return suspendTenant(this.requireContext(), "dunning");
   }
 
   /** G1b admin resolution — POST /admin/tenants/:id/screening {decision:'clear'} (routes/admin-screening.ts). */

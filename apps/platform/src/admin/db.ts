@@ -126,6 +126,23 @@ export async function insertDunningEventIfNew(
   return (result.meta.changes ?? 0) > 0;
 }
 
+/**
+ * Read-only pre-check for (tenantId, cycle) — F2's fix (audit 2026-08-05)
+ * moved the suspend EFFECT before `insertDunningEventIfNew`'s guard-row
+ * commit (so a crash in between leaves nothing committed and the next tick
+ * retries), which means the INSERT alone can no longer gate the suspend
+ * branch BEFORE it runs. Without this pre-check, a tenant that's already
+ * suspended stays 'past_due' forever (suspending never changes billing_state)
+ * and would be re-suspended + re-emailed the notice every single 5-min tick.
+ * `insertDunningEventIfNew` still does the actual (race-safe) commit after.
+ */
+export async function hasDunningEventForCycle(env: Env, tenantId: string, cycle: number): Promise<boolean> {
+  const row = await env.DB.prepare(`SELECT 1 FROM dunning_events WHERE tenant_id = ? AND cycle = ? LIMIT 1`)
+    .bind(tenantId, cycle)
+    .first();
+  return row !== null;
+}
+
 /** Every tenant id known to the control plane — the D1 read-model driving
  * the cross-tenant sweeps/digest (ARCHITECTURE.md #3). Test-mode scale only:
  * a full D1 read-model (rather than re-fetching every tenant id per sweep)

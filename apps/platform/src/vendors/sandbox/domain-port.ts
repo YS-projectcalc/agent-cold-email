@@ -1,4 +1,13 @@
-import type { Clock, DnsRecordSet, DomainPort, LookalikeCandidate, OwnedDomain, PurchasedDomain, ReleaseResult } from "@coldstart/shared";
+import type {
+  Clock,
+  DnsRecordSet,
+  DomainConnectionType,
+  DomainPort,
+  LookalikeCandidate,
+  OwnedDomain,
+  PurchasedDomain,
+  ReleaseResult,
+} from "@coldstart/shared";
 
 // Sandbox DomainPort — SPEC.md §8 lookalike workflow, simulated. Deterministic
 // happy path (no fault injection yet — that's a later, budgeted lane per
@@ -54,10 +63,15 @@ export class SandboxDomainPort implements DomainPort {
   async buy(domain: string, idempotencyKey: string): Promise<PurchasedDomain> {
     // Idempotent: re-buying the same domain under the same key is a no-op success.
     this.seen.add(`${idempotencyKey}:${domain}`);
-    return { domain, purchasedAt: this.clock.now(), registrar: "sandbox-registrar" };
+    // Same shape as a real registrar buy: we registered it, so we hold it.
+    return { domain, purchasedAt: this.clock.now(), registrar: "sandbox-registrar", connectionType: "purchased" };
   }
 
-  async setDns(_domain: string, _idempotencyKey: string): Promise<DnsRecordSet> {
+  async setDns(_domain: string, _idempotencyKey: string, _connectionType: DomainConnectionType): Promise<DnsRecordSet> {
+    // The sandbox registrar operates both halves identically (there is no real
+    // zone and no propagation delay), so the branch a real vendor needs is
+    // invisible here — see test/domain-connection-type.test.ts, which drives the
+    // real port for it.
     return { mx: true, spf: true, dkim: true, dmarc: true, rdns: true };
   }
 

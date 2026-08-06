@@ -8,6 +8,7 @@ import {
   IK_DOMAIN_REGISTER_STRIPE_SESSION,
   IK_DOMAIN_REGISTER_WALLET_SUCCESS,
   IK_DOMAIN_REMOVE_SUCCESS,
+  IK_DOMAINS_LIST_PURCHASED_PENDING,
   IK_NAMESERVERS_RESULT,
   IK_PROPAGATION_CONFIRMED,
   IK_PROPAGATION_PENDING,
@@ -48,7 +49,8 @@ describe("RealInboxKitDomainPort — dark until configured", () => {
     const port = new RealInboxKitDomainPort();
     await expect(port.searchLookalikes("Acme", "acme.com", 1)).rejects.toBeInstanceOf(NotActivatedError);
     await expect(port.buy("acme-lookalike.com", "k1")).rejects.toBeInstanceOf(VendorError); // registrant missing, not even reaching the client
-    await expect(port.setDns("acme-lookalike.com", "k1")).rejects.toBeInstanceOf(NotActivatedError);
+    await expect(port.setDns("acme-lookalike.com", "k1", "connected")).rejects.toBeInstanceOf(NotActivatedError);
+    await expect(port.setDns("acme-lookalike.com", "k1", "purchased")).rejects.toBeInstanceOf(NotActivatedError);
     await expect(port.release("acme-lookalike.com", "k1")).rejects.toBeInstanceOf(NotActivatedError);
   });
 });
@@ -75,7 +77,12 @@ describe("RealInboxKitDomainPort — configured (InboxKit)", () => {
     const spy = stubFetchSequence([{ status: 200, body: IK_DOMAIN_REGISTER_WALLET_SUCCESS }]);
     const result = await new RealInboxKitDomainPort(CONFIG, REGISTRANT).buy("acme-lookalike.com", "k1");
 
-    expect(result).toEqual({ domain: "acme-lookalike.com", purchasedAt: expect.any(Number), registrar: "inboxkit" });
+    expect(result).toEqual({
+      domain: "acme-lookalike.com",
+      purchasedAt: expect.any(Number),
+      registrar: "inboxkit",
+      connectionType: "purchased",
+    });
     const [url, init] = spy.mock.calls[0]!;
     expect(url).toBe("https://ik.example.internal/v1/api/domains/register");
     const body = JSON.parse((init as RequestInit).body as string);
@@ -103,9 +110,15 @@ describe("RealInboxKitDomainPort — configured (InboxKit)", () => {
     expect((err as VendorError).message).toContain("Stripe checkout");
   });
 
-  it("setDns() creates InboxKit nameservers then maps a confirmed propagation onto all five DnsRecordSet flags", async () => {
+  it("buy() reports the domain as PURCHASED — the vendor registered it, so it holds the nameservers", async () => {
+    stubFetchSequence([{ status: 200, body: IK_DOMAIN_REGISTER_WALLET_SUCCESS }]);
+    const result = await new RealInboxKitDomainPort(CONFIG, REGISTRANT).buy("acme-lookalike.com", "k1");
+    expect(result.connectionType).toBe("purchased");
+  });
+
+  it("setDns('connected') creates InboxKit nameservers then maps a confirmed propagation onto all five DnsRecordSet flags", async () => {
     const spy = stubFetchSequence([{ status: 200, body: IK_NAMESERVERS_RESULT }, { status: 200, body: IK_PROPAGATION_CONFIRMED }]);
-    const result = await new RealInboxKitDomainPort(CONFIG).setDns("acme-lookalike.com", "k1");
+    const result = await new RealInboxKitDomainPort(CONFIG).setDns("acme-lookalike.com", "k1", "connected");
 
     expect(result).toEqual({ mx: true, spf: true, dkim: true, dmarc: true, rdns: true });
     const [nsUrl] = spy.mock.calls[0]!;
@@ -115,10 +128,18 @@ describe("RealInboxKitDomainPort — configured (InboxKit)", () => {
     expect(JSON.parse((propInit as RequestInit).body as string)).toEqual({ domains: ["acme-lookalike.com"] });
   });
 
-  it("setDns() maps a not-yet-propagated domain onto all-false DnsRecordSet flags (never a false positive)", async () => {
+  it("setDns('connected') maps a not-yet-propagated domain onto all-false DnsRecordSet flags (never a false positive)", async () => {
     stubFetchSequence([{ status: 200, body: IK_NAMESERVERS_RESULT }, { status: 200, body: IK_PROPAGATION_PENDING }]);
-    const result = await new RealInboxKitDomainPort(CONFIG).setDns("acme-lookalike.com", "k1");
+    const result = await new RealInboxKitDomainPort(CONFIG).setDns("acme-lookalike.com", "k1", "connected");
     expect(result).toEqual({ mx: false, spf: false, dkim: false, dmarc: false, rdns: false });
+  });
+
+  it("listOwnedDomains() carries the vendor's connection_type instead of dropping it", async () => {
+    stubFetchSequence([{ status: 200, body: IK_DOMAINS_LIST_PURCHASED_PENDING }]);
+    const owned = await new RealInboxKitDomainPort(CONFIG).listOwnedDomains();
+    expect(owned).toEqual([
+      { domain: "goauthorpitchdesk.com", status: "active", assignedMailboxes: 0, connectionType: "purchased" },
+    ]);
   });
 
   it("release() POSTs /domains/remove and reports released:true", async () => {

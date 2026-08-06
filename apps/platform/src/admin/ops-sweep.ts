@@ -7,10 +7,11 @@
 
 import { countWaitlistEmails, lookupTenantContactEmail } from "../db.js";
 import type { Env } from "../env.js";
+import type { TenantOpsSummary } from "../engine/ops-summary.js";
 import { escapeHtml } from "../html-escape.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import { newId } from "../schema.js";
-import { countSupportTicketsByStatus, countTerminatedTenants, insertDunningEventIfNew, listAllTenantIds } from "./db.js";
+import { countSupportTicketsByStatus, countTerminatedTenants, hasDunningEventForCycle, insertDunningEventIfNew, listAllTenantIds } from "./db.js";
 import { decideDunningAction } from "./dunning.js";
 
 export interface DunningSweepResult {
@@ -24,6 +25,10 @@ export interface DunningSweepSummary {
   scannedTenants: number;
   pastDueTenants: number;
   results: DunningSweepResult[];
+  /** Tenants whose sweep body threw (a wedged/overloaded DO, storage error,
+   * etc). Never aborts the sweep for the rest — mirrors the 3 sibling sweeps
+   * below (audit F1, 2026-08-05). */
+  errors: number;
 }
 
 /** D2 dunning sweep — scans every tenant, actions only the 'past_due' ones,
@@ -38,33 +43,73 @@ export async function runDunningSweep(
 ): Promise<DunningSweepSummary> {
   const tenantIds = await listAllTenantIds(env);
   const results: DunningSweepResult[] = [];
+  let errors = 0;
 
   for (const tenantId of tenantIds) {
-    const stub = env.TENANT.get(env.TENANT.idFromName(tenantId));
-    const summary = await stub.opsSummary(nowMs);
-    if (summary.billingState !== "past_due") continue;
+    try {
+      const stub = env.TENANT.get(env.TENANT.idFromName(tenantId));
+      const summary = await stub.opsSummary(nowMs);
+      if (summary.billingState !== "past_due") continue;
 
-    const cycle = summary.billingFailureCount;
-    // A5: a permanent decline code makes this suspend immediately, regardless
-    // of cycle count (see admin/dunning.ts).
-    const action = decideDunningAction(cycle, summary.lastDeclineCode);
-    const applied = await insertDunningEventIfNew(env, {
-      id: newId("dun"),
-      tenantId,
-      cycle,
-      action,
-      detail: { billingFailureCount: cycle, plan: summary.plan, declineCode: summary.lastDeclineCode },
-      ts: nowMs,
-    });
-    if (applied && action === "suspend") {
-      // Suspend commits FIRST; the notice is strictly best-effort after it.
-      await stub.suspendForDunning();
-      await sendDunningSuspendNotice(env, mailer, { tenantId, brand: summary.brand, cycle, declineCode: summary.lastDeclineCode });
+      const cycle = summary.billingFailureCount;
+      // A5: a permanent decline code makes this suspend immediately, regardless
+      // of cycle count (see admin/dunning.ts).
+      const action = decideDunningAction(cycle, summary.lastDeclineCode);
+      const recordEvent = () =>
+        insertDunningEventIfNew(env, {
+          id: newId("dun"),
+          tenantId,
+          cycle,
+          action,
+          detail: { billingFailureCount: cycle, plan: summary.plan, declineCode: summary.lastDeclineCode },
+          ts: nowMs,
+        });
+
+      let applied: boolean;
+      if (action === "suspend") {
+        // F2 (audit 2026-08-05): apply the suspend EFFECT before recording the
+        // idempotency guard row — the reverse of the old order left a
+        // committed guard row with the tenant never actually suspended on a
+        // crash/RPC-failure in between, and since `cycle` freezes once
+        // Stripe's payment_failed retries are exhausted, the suspend was never
+        // retried (permanent miss). suspendForDunning is safe to re-run: it's
+        // a conditional UPDATE (F3), a no-op if already suspended or no
+        // longer past_due.
+        //
+        // The guard-row INSERT can no longer gate BEFORE the effect now that
+        // it commits AFTER it, so a cheap read-only pre-check stands in for
+        // it: without this, an already-suspended tenant stays 'past_due'
+        // forever (suspending never changes billing_state) and would be
+        // re-suspended + re-emailed the notice on every subsequent tick.
+        const alreadyActioned = await hasDunningEventForCycle(env, tenantId, cycle);
+        if (alreadyActioned) {
+          applied = false;
+        } else {
+          const suspended = await stub.suspendForDunning();
+          if (suspended) {
+            await sendDunningSuspendNotice(env, mailer, { tenantId, brand: summary.brand, cycle, declineCode: summary.lastDeclineCode });
+            applied = await recordEvent();
+          } else {
+            // F3: billing_state was no longer 'past_due' at write time — a
+            // recovery webhook landed in the read/write gap. Nothing happened;
+            // don't record a suspend event or email one that didn't occur.
+            applied = false;
+          }
+        }
+      } else {
+        applied = await recordEvent();
+      }
+      results.push({ tenantId, cycle, action, applied });
+    } catch (err) {
+      // One tenant's failure must never abort the sweep for every other
+      // tenant, nor (via runScheduledOpsSweep) every other cron leg — mirrors
+      // the 3 sibling sweeps below (audit F1, 2026-08-05).
+      errors++;
+      console.error(`dunning sweep failed for tenant ${tenantId}`, err);
     }
-    results.push({ tenantId, cycle, action, applied });
   }
 
-  return { scannedTenants: tenantIds.length, pastDueTenants: results.length, results };
+  return { scannedTenants: tenantIds.length, pastDueTenants: results.length, results, errors };
 }
 
 /**
@@ -239,15 +284,29 @@ export interface OpsDigest {
   /** C6 — total durable waitlist leads (adversarial panel-03 finding #9: owner visibility into the funnel). */
   waitlist: { count: number };
   watchdogAlerts: string[];
+  /** Tenants whose opsSummary call failed this window (wedged/overloaded DO,
+   * storage error) — skipped, never zero out the rest of the digest (audit
+   * class-sweep sibling fix, 2026-08-06, mirrors runDunningSweep's `errors`). */
+  errors: number;
 }
 
 /** D6 — the owner's single cross-tenant business-health rollup (SPEC.md §0.10). */
 export async function buildOpsDigest(env: Env, nowMs: number, windowHours: number): Promise<OpsDigest> {
   const sinceMs = nowMs - windowHours * 60 * 60 * 1000;
   const tenantIds = await listAllTenantIds(env);
-  const summaries = await Promise.all(
-    tenantIds.map((id) => env.TENANT.get(env.TENANT.idFromName(id)).opsSummary(sinceMs)),
-  );
+  const summaries: TenantOpsSummary[] = [];
+  let errors = 0;
+  for (const id of tenantIds) {
+    try {
+      summaries.push(await env.TENANT.get(env.TENANT.idFromName(id)).opsSummary(sinceMs));
+    } catch (err) {
+      // One tenant's failure must never zero out the digest for every other
+      // tenant, nor 500 the on-demand GET /admin/ops/digest route (audit
+      // class-sweep sibling fix, 2026-08-06).
+      errors++;
+      console.error(`ops digest: opsSummary failed for tenant ${id}`, err);
+    }
+  }
 
   const activeByPlan: Record<string, number> = {};
   let mrrCents = 0;
@@ -328,5 +387,6 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
     lifecycle: { canceled: canceledCount, terminated: terminatedCount, disputed: disputedCount, annualDomainLiabilityCents },
     waitlist: { count: waitlistCount },
     watchdogAlerts,
+    errors,
   };
 }

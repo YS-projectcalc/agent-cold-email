@@ -1,4 +1,5 @@
 import type { TenantContext } from "../tenant-context.js";
+import { customerSafeDetail, customerSafeVendorDetail, customerSafeVendorFailure, logVendorFailure } from "../vendor-failure.js";
 import { logAction } from "./deliverability-actions.js";
 import { computeWarmupDay, isSendReady } from "./warmup.js";
 
@@ -102,7 +103,9 @@ export async function runWarmupCancellationSweep(ctx: TenantContext): Promise<{ 
         mailbox.id,
         ctx.tenantId,
       );
-      const reason = err instanceof Error ? err.message : String(err);
+      // Raw text to the Worker log (operators); the customer-readable activity
+      // row gets the abstract step + retryability only.
+      logVendorFailure(`cancelWarmup ${mailbox.email}`, err);
       if (attempts >= MAX_CANCEL_ATTEMPTS) {
         // Give up rather than retry forever — but record it in its OWN column,
         // never `warmup_cancelled_at` (adversary N-c): that column asserts the
@@ -116,14 +119,29 @@ export async function runWarmupCancellationSweep(ctx: TenantContext): Promise<{ 
           mailbox.id,
           ctx.tenantId,
         );
-        logAction(ctx, "WARMUP_CANCEL_GAVE_UP", mailbox.email, {
-          reason,
-          attempts,
-          note: "warmup subscription may still be billing — verify with the vendor",
-        });
+        // retryable:FALSE regardless of the underlying grade — the sweep has
+        // stopped trying, so telling a reader "retryable" would describe the
+        // vendor error rather than what will actually happen next. An
+        // uncancelled subscription is a live recurring charge; the honest signal
+        // is "this needs a human", not "we'll get it next time".
+        logAction(
+          ctx,
+          "WARMUP_CANCEL_GAVE_UP",
+          mailbox.email,
+          customerSafeDetail(
+            { step: customerSafeVendorFailure(err).step, retryable: false },
+            "warmup cancellation needs operator attention",
+            { attempts, note: "the warmup subscription may still be billing — an operator must verify it with the provider" },
+          ),
+        );
         continue;
       }
-      logAction(ctx, "WARMUP_CANCEL_FAILED", mailbox.email, { reason, attempts, willRetry: true });
+      logAction(
+        ctx,
+        "WARMUP_CANCEL_FAILED",
+        mailbox.email,
+        customerSafeVendorDetail(err, "warmup cancellation is retrying", { attempts, willRetry: true }),
+      );
       continue;
     }
 

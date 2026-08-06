@@ -1,12 +1,10 @@
 import {
   CapacityPendingError,
   isPaidPlan,
-  NotActivatedError,
   RegistrarUnarmedError,
-  VendorError,
   ValidationError,
+  VendorError,
   type LookalikeCandidate,
-  type MailboxHealth,
   type OwnedDomain,
   type PurchasedDomain,
   type SetupInfrastructureInput,
@@ -15,26 +13,20 @@ import { newId } from "../schema.js";
 import { logAction } from "./deliverability-actions.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { TenantContext } from "../tenant-context.js";
+import { customerSafeVendorDetail, logVendorFailure } from "../vendor-failure.js";
 import { buildMailboxBilling, syncMailboxQuantity, type MailboxBilling } from "./billing.js";
 import { assertNotLifecycleFrozen } from "./billing-state.js";
 import { assertBrandOwnership } from "./brand-guard.js";
-import { gatherMailboxHealth } from "./deliverability.js";
-import { withRequestIdempotency } from "./idempotency.js";
-import { maybePushProvisionedMailbox } from "./mailbox-credential-push.js";
-import { computeMailboxWarmupSnapshot } from "./mailbox-state.js";
+import { setDnsWithRetry } from "./domain-dns.js";
+import { provisionMailboxesForDomain } from "./mailbox-provisioning.js";
+import { markDomainIntent, recordDomainIntent } from "./provision-intents.js";
 import { assertWithinProvisioningCap } from "./quota.js";
 import { screenTenant } from "../ofac/screening.js";
 import { alertRegistrarUnarmed } from "./registrar-alert.js";
 import { withSpendCeiling } from "./spend-ceiling.js";
+import { emitTenantMessage } from "./tenant-messages.js";
 import { RealInboxKitDomainPort } from "../vendors/real/inboxkit-domain-port.js";
 import { assertCompleteRegistrant, readRegistrarOptInState } from "../vendors/registrar-arming.js";
-import { computeWarmupDay, epochDay, warmupDailyCap, warmupStatus } from "./warmup.js";
-
-// Per-mailbox/mo metering fee (SPEC.md §18 ballpark fully-loaded cost) —
-// paid tiers only. Demo/free is structurally 0-real-spend (ARCHITECTURE.md
-// #8); sandbox mailboxes are still provisioned there for exploration, but no
-// fee accrues (see e2e.test.ts's demo-tenant usageCents assertion).
-const MAILBOX_MONTHLY_FEE_CENTS = 600;
 
 // Extra candidates requested beyond what a call needs, so the not-owned +
 // available filters have room to discard. Matches pickReplacementDomain's own
@@ -53,255 +45,6 @@ function ownedDomainNames(ctx: TenantContext): Set<string> {
 
 export function slugify(input: string): string {
   return input.toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 20) || "hello";
-}
-
-/**
- * Provisions `inboxesEach` PLATFORM-OWNED mailboxes on an ALREADY-OWNED
- * domain row (vendor provision + startWarmup + insert mailbox row +
- * per-mailbox/mo metering on paid tiers). Extracted from
- * `provisionDomainWithMailboxes` (CLAUDE.md rule c — no duplicated logic) so
- * SPEC.md §20.6's shape (a) — a managed mailbox provisioned on a BYO domain
- * (`engine/byo-intake.ts`'s `requestManagedByoMailboxes`) — reuses the exact
- * same vendor-call + warmup-bootstrap + metering sequence as the existing
- * lookalike-domain flow and REPLACE_DOMAIN, instead of a parallel
- * implementation. `domainKey` namespaces idempotency keys (distinct domains
- * never collide); `domainOrdinal` only affects the generated local-part
- * numbering (cosmetic — uniqueness only requires the local part be unique
- * WITHIN this one domain, which the mailboxIndex loop already guarantees).
- */
-export async function provisionMailboxesForDomain(
-  ctx: TenantContext,
-  opts: { domainId: string; domain: string; domainKey: string; domainOrdinal: number; personaSlug: string; inboxesEach: number },
-): Promise<string[]> {
-  const now = ctx.clock.now();
-  const mailboxEmails: string[] = [];
-
-  for (let mailboxIndex = 0; mailboxIndex < opts.inboxesEach; mailboxIndex++) {
-    const localPart = `${opts.personaSlug}${opts.domainOrdinal + 1}${mailboxIndex + 1}`;
-    const provisionIdempotencyKey = `mbx:${ctx.tenantId}:${opts.domainKey}:${localPart}`;
-    // Gate (c) — provision idempotency via the repo's own withRequestIdempotency
-    // (adversary inboxkit-adapters-2026-07-20 finding 3). InboxKit's
-    // /mailboxes/buy has no idempotency-key primitive, so a redelivered
-    // setup_infrastructure (its outer request-idempotency claim expired mid-run,
-    // or the response was lost) would re-buy — a DOUBLE CHARGE on a paid slot.
-    // Wrapping the vendor call in withRequestIdempotency keyed by the
-    // DETERMINISTIC per-mailbox key makes a re-run return the recorded
-    // ProvisionedMailbox WITHOUT a second buy. This is the durable local record
-    // that REPLACES the fragile /already exists/i message-substring hack the
-    // adapter used to lean on (mailbox-port.ts provision()).
-    // G2 money-out site #1 (design §0 inventory) — the mailbox slot buy. The
-    // spend reserve composes INSIDE withRequestIdempotency (design §G2 collision
-    // note): a replayed provision returns the RECORDED mailbox without re-buying,
-    // so it never re-enters withSpendCeiling and never double-reserves — only a
-    // true first execution reserves. 'mailbox' consumes one InboxKit plan slot
-    // (G4).
-    // H4 (INCIDENT 2026-08-05): the recorded unit spans the WHOLE per-mailbox
-    // effect — buy AND startWarmup AND the row insert — not just the buy. When
-    // only the buy was recorded, a replay returned the cached mailbox and then
-    // re-ran startWarmup (a SECOND $3/mo subscription) and re-INSERTed the row
-    // (a phantom mailbox that syncMailboxQuantity then BILLED the customer for).
-    // Everything with a side effect now lives inside fn, so a replay returns the
-    // recorded outcome and re-runs none of it.
-    const provisioned = await withRequestIdempotency(ctx, `provision:${provisionIdempotencyKey}`, async () => {
-      const bought = await withSpendCeiling(ctx, "mailbox", () =>
-        ctx.adapters.mailbox.provision(opts.domain, localPart, provisionIdempotencyKey),
-      );
-      // G2 money-out site #2 — the warmup add-on. Its cost is already priced into
-      // COST_MAILBOX_CENTS at the provision reserve above (spendCostCents's 'warmup'
-      // branch reserves 0), so this wrap is for choke-point completeness (no
-      // money-out vendor call escapes the enumerated inventory), not a second charge.
-      const warmup = await withSpendCeiling(ctx, "warmup", () =>
-        ctx.adapters.mailbox.startWarmup(bought.email, `warmup:${ctx.tenantId}:${bought.email}`),
-      );
-      return { email: bought.email, provider: bought.provider, provisionedAt: bought.provisionedAt, warmupStartedAt: warmup.startedAt };
-    });
-    mailboxEmails.push(provisioned.email);
-    // The row INSERT stays OUTSIDE the recorded unit, unlike the two vendor
-    // calls above. Putting it inside looked tidier but broke legitimate
-    // re-provisioning: a claim outlives a cancel, so a replay after teardown
-    // returned the recorded mailbox and inserted NOTHING, leaving a
-    // re-subscribed tenant with zero mailboxes. Idempotence here comes from the
-    // PARTIAL unique index on (tenant_id, email) WHERE released_at IS NULL
-    // (tenant-do.ts) instead: a replay while the mailbox is live is ignored (no
-    // phantom row for syncMailboxQuantity to bill), while a genuine
-    // re-provision after release — where no live row exists — inserts normally.
-    //
-    // N4 correction (gate 2026-08-05): that re-provision inserts a BILLABLE row
-    // without a vendor mailbox behind it, because the per-mailbox provision
-    // claim outlives the teardown and the replay skips the vendor buy. This
-    // comment previously implied the re-insert was simply correct. It is not —
-    // it is a PRE-EXISTING divergence (it predates the recorded-unit change,
-    // which only made it visible), deferred to the class wave. Do not read the
-    // paragraph above as a claim that the resulting row is backed by anything.
-    insertProvisionedMailbox(ctx, opts, provisioned.email, provisioned.warmupStartedAt, now);
-
-    // Per-mailbox/mo INTERNAL COGS metering — paid plan only (see
-    // MAILBOX_MONTHLY_FEE_CENTS comment above). The local ledger 'usage' write
-    // stays as the founder's internal cost tracking (account().usageCents);
-    // it is NOT the customer's bill. The customer is billed by the licensed
-    // Stripe QUANTITY (syncMailboxQuantity, design §2) — the former per-mailbox
-    // Stripe usage report was DELETED with the migration: that endpoint only
-    // accepts metered items, but checkout creates a LICENSED item (a latent 400
-    // if ever armed), and keeping both would double-count the per-mailbox charge.
-    // Reuses the SAME idempotency key as mailbox.provision() as the ledger's
-    // source_send_id so a retried provision can never double-count.
-    if (isPaidPlan(ctx.plan)) {
-      // H5 (INCIDENT 2026-08-05) — this call sits AFTER the money already moved,
-      // and the real billing port throws NotActivatedError unconditionally
-      // (vendors/real/billing-port.ts): it was the guaranteed NEXT 500 once the
-      // domain legs were fixed, failing a provision whose vendor spend had
-      // already happened. The metering is INTERNAL COGS tracking, not the
-      // customer's bill (they are billed by Stripe quantity), so an unarmed
-      // usage reporter must not destroy a successful provision. Narrow by
-      // design: only NotActivatedError is absorbed — a genuine billing failure
-      // still propagates.
-      try {
-        await ctx.adapters.billing.recordUsage(
-          ctx.tenantId,
-          "mailbox provisioned (mo)",
-          MAILBOX_MONTHLY_FEE_CENTS,
-          provisionIdempotencyKey,
-        );
-      } catch (err) {
-        if (!(err instanceof NotActivatedError)) throw err;
-        logAction(ctx, "USAGE_METERING_SKIPPED", provisioned.email, {
-          reason: "billing usage reporter is not activated — local ledger entry still recorded",
-        });
-      }
-      ctx.sql.exec(
-        `INSERT OR IGNORE INTO ledger_entries (id, tenant_id, kind, amount_cents, description, ts, source_send_id)
-         VALUES (?, ?, 'usage', ?, 'mailbox provisioned (mo)', ?, ?)`,
-        newId("ledg"),
-        ctx.tenantId,
-        MAILBOX_MONTHLY_FEE_CENTS,
-        now,
-        provisionIdempotencyKey,
-      );
-    }
-
-    // Self-serve I3 credential push (F6): record-then-push the just-provisioned
-    // mailbox's credentials to the engine. INERT unless the vendor+engine are
-    // armed AND this is a real vendor mailbox (never sandbox) — so it is a no-op
-    // in the default build and every existing test. A push failure is swallowed
-    // (the mailbox is durably recorded 'pending'; the reconcile sweep retries),
-    // so it can never fail a provision whose vendor spend already happened.
-    await maybePushProvisionedMailbox(ctx, provisioned);
-  }
-
-  return mailboxEmails;
-}
-
-/**
- * The `mailboxes` row for a just-provisioned mailbox. Extracted so it can live
- * INSIDE the per-mailbox recorded unit (H4) — a replay must not re-insert it.
- * The unique index on (tenant_id, email) is the backstop if it ever does.
- */
-function insertProvisionedMailbox(
-  ctx: TenantContext,
-  opts: { domainId: string; domain: string },
-  email: string,
-  warmupStartedAt: number,
-  now: number,
-): void {
-  const day = computeWarmupDay(warmupStartedAt, now);
-  ctx.sql.exec(
-    // poll_cursor starts at -1 (never-polled sentinel, engine.ts's
-    // first-contact branch) so runPollInbox's first poll for a brand-new
-    // mailbox initializes the cursor at the mailbox's current high-water
-    // WITHOUT fetching history, instead of the column's own DEFAULT 0 (an
-    // ordinary incremental cursor since the round-2 fix, not a sentinel).
-    //
-    // OR IGNORE against idx_mailboxes_tenant_email (H4 backstop): if a replay
-    // ever reaches here anyway, a duplicate row would be BILLED by
-    // syncMailboxQuantity, so the index — not just the recorded unit — is what
-    // makes double-billing structurally impossible.
-    `INSERT OR IGNORE INTO mailboxes
-       (id, tenant_id, domain_id, domain, email, daily_cap, sent_today, sent_today_epoch_day, status, warmup_started_at, created_at, poll_cursor, slot_counted)
-     VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, -1, ?)`,
-    newId("mbx"),
-    ctx.tenantId,
-    opts.domainId,
-    opts.domain,
-    email,
-    warmupDailyCap(day),
-    epochDay(now),
-    warmupStatus(day),
-    warmupStartedAt,
-    now,
-    // G4 — record whether this consumed a REAL InboxKit plan slot (the
-    // withSpendCeiling reserve above incremented vendor_slot_state iff the
-    // bundle is real). Read at teardown to decrement the slot counter precisely.
-    ctx.adapters.kind === "real" ? 1 : 0,
-  );
-}
-
-export interface DomainIntentRow {
-  key: string;
-  candidate_domain: string;
-  status: string;
-  [column: string]: SqlStorageValue;
-}
-
-/**
- * H1 — the durable buy-intent record. Idempotent by construction: a retry
- * re-reads the EXISTING row (keeping the candidate name the first attempt
- * resolved) rather than overwriting it, which is what makes the retry converge
- * on the same domain instead of generating a fresh one. Tenant-scoped on read
- * (CLAUDE.md rule h) even though the key already embeds the tenant.
- */
-export function recordDomainIntent(ctx: TenantContext, key: string, candidateDomain: string): DomainIntentRow {
-  const now = ctx.clock.now();
-  ctx.sql.exec(
-    `INSERT OR IGNORE INTO domain_intents (key, tenant_id, candidate_domain, status, created_at, updated_at)
-     VALUES (?, ?, ?, 'intent', ?, ?)`,
-    key,
-    ctx.tenantId,
-    candidateDomain,
-    now,
-    now,
-  );
-  return ctx.sql
-    .exec<DomainIntentRow>(
-      `SELECT key, candidate_domain, status FROM domain_intents WHERE key = ? AND tenant_id = ?`,
-      key,
-      ctx.tenantId,
-    )
-    .one();
-}
-
-/**
- * Advances an intent's status, optionally correcting the domain it names.
- * NEVER deletes — see the table's schema comment.
- *
- * `actualDomain` (N1) is the resource genuinely acquired. The recorded name is
- * a claim about what we may own, so it has to match reality at commit time: a
- * fall-through buy acquires THIS call's candidate, which is not necessarily the
- * name the first attempt under this key resolved to.
- */
-export function markDomainIntent(
-  ctx: TenantContext,
-  key: string,
-  status: "intent" | "committed" | "dangling",
-  actualDomain?: string,
-): void {
-  if (actualDomain === undefined) {
-    ctx.sql.exec(
-      `UPDATE domain_intents SET status = ?, updated_at = ? WHERE key = ? AND tenant_id = ?`,
-      status,
-      ctx.clock.now(),
-      key,
-      ctx.tenantId,
-    );
-    return;
-  }
-  ctx.sql.exec(
-    `UPDATE domain_intents SET status = ?, candidate_domain = ?, updated_at = ? WHERE key = ? AND tenant_id = ?`,
-    status,
-    actualDomain,
-    ctx.clock.now(),
-    key,
-    ctx.tenantId,
-  );
 }
 
 /**
@@ -330,10 +73,16 @@ export async function findAdoptableDomain(ctx: TenantContext, candidate: string)
   try {
     owned = await ctx.adapters.domain.listOwnedDomains();
   } catch (err) {
-    logAction(ctx, "DOMAIN_ADOPT_LOOKUP_FAILED", candidate, {
-      reason: err instanceof Error ? err.message : String(err),
-      note: "falling through to the ordinary buy path",
-    });
+    // The raw failure goes to the Worker log (operators only); the activity row
+    // a customer can read back carries the ABSTRACT step + retryability instead
+    // of the adapter's text, which names the provider and its endpoints.
+    logVendorFailure(`listOwnedDomains ${candidate}`, err);
+    logAction(
+      ctx,
+      "DOMAIN_ADOPT_LOOKUP_FAILED",
+      candidate,
+      customerSafeVendorDetail(err, "could not check existing domains — continuing with a new domain purchase"),
+    );
     return null;
   }
 
@@ -348,73 +97,32 @@ export async function findAdoptableDomain(ctx: TenantContext, candidate: string)
   return match;
 }
 
-// H2 — the async-registration race window. InboxKit took ~32s to complete the
-// registration that stranded the incident domain, while our nameservers call
-// went out milliseconds after the order was accepted, so a bare first attempt
-// is expected to lose the race.
-//
-// Deliberately SHORT (one quick re-attempt, ~2s) rather than long enough to
-// bridge the full ~32s. Parking a Durable Object for half a minute to wait out
-// a vendor's async pipeline is the wrong place to spend that time: it burns
-// wall-clock budget, blocks the input gate, and would still be a guess about
-// the vendor's timing. The SAFETY comes from H2's persist-before-DNS ordering,
-// not from winning the race — the domain is already recorded, so the honest
-// outcome is dns_status 'pending' plus a RETRYABLE error, and the caller's
-// retry (which now adopts rather than re-buys) finishes the job.
-const SET_DNS_BACKOFF_MS = [2_000];
-
-/**
- * H2 — runs setDns as a recoverable follow-up. The domain row already exists,
- * so every outcome here is non-destructive: success flips `dns_status` to
- * 'ready', exhaustion leaves it 'pending' with an ops-visible action row and a
- * RETRYABLE VendorError for the caller. Never throws a non-retryable error and
- * never deletes the domain.
- */
-export async function setDnsWithRetry(
-  ctx: TenantContext,
-  domain: string,
-  idempotencyKey: string,
-  domainId: string,
-  // Injectable so tests exercise the retry LOGIC without paying its wall-clock.
-  // Production always uses the module default.
-  backoffMs: number[] = SET_DNS_BACKOFF_MS,
-): Promise<void> {
-  const attempts = backoffMs.length + 1;
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    try {
-      await ctx.adapters.domain.setDns(domain, idempotencyKey);
-      ctx.sql.exec(`UPDATE domains SET dns_status = 'ready' WHERE id = ? AND tenant_id = ?`, domainId, ctx.tenantId);
-      return;
-    } catch (err) {
-      lastError = err;
-      const backoff = backoffMs[attempt - 1];
-      if (backoff !== undefined && backoff > 0) {
-        await new Promise((resolve) => setTimeout(resolve, backoff));
-      }
-    }
-  }
-
-  const reason = lastError instanceof Error ? lastError.message : String(lastError);
-  logAction(ctx, "DOMAIN_DNS_PENDING", domain, { reason, attempts });
-  throw new VendorError(
-    `domain ${domain} is registered and recorded, but its DNS setup has not completed yet (${reason}). Nothing was lost — retry to finish it.`,
-    true,
-  );
-}
-
 /**
  * Provisions ONE domain + its mailboxes: buy → DNS → insert domain row → for
  * each mailbox provision + startWarmup + insert mailbox row (+ per-mailbox/mo
  * metering on paid tiers). The single implementation shared by
  * setup_infrastructure (initial provisioning) and the deliverability control
  * loop's REPLACE_DOMAIN (burn replacement) — CLAUDE.md rule c (no duplicated
- * logic). Idempotency keys are namespaced by `domainKey` (`domain#index`) so
- * distinct domains never collide.
+ * logic). The DOMAIN-leg idempotency keys are namespaced by `domainKey`
+ * (`domain#index`) so distinct domains never collide; the per-mailbox keys are
+ * address-derived (engine/mailbox-provisioning.ts).
  */
 export async function provisionDomainWithMailboxes(
   ctx: TenantContext,
-  opts: { domain: string; domainIndex: number; personaSlug: string; inboxesEach: number; intentKey: string },
+  opts: {
+    domain: string;
+    domainIndex: number;
+    personaSlug: string;
+    inboxesEach: number;
+    intentKey: string;
+    // N2 (gate 2026-08-05, wire-A F1 fix) — fired the instant the domain THIS
+    // call is actually going to operate on is known (the resume branch's
+    // `existing.domain`, or the buy/adopt branch's `purchased.domain`), before
+    // any operation past that point can throw. Lets the caller's wire-A
+    // catch name the REAL domain instead of `opts.domain` — which, on a
+    // resume, is a fresh unrelated candidate this call never touches.
+    onDomainResolved?: (domain: string) => void;
+  },
 ): Promise<{ domainId: string; domain: string; mailboxEmails: string[] }> {
   const domainKey = `${opts.domain}#${opts.domainIndex}`;
 
@@ -467,13 +175,16 @@ export async function provisionDomainWithMailboxes(
     // it propagate — deliberately BEFORE any mailbox spend. A domain with no
     // working nameservers must never carry paid mailboxes; the domain row and
     // the intent both survive, so the next retry resumes from here.
+    // N2 — this call operates on `existing.domain` (the intent-resolved name),
+    // NEVER on `opts.domain` (this call's fresh candidate) — report it before
+    // the one operation below that can throw retryably.
+    opts.onDomainResolved?.(existing.domain);
     if (existing.dns_status !== "ready") {
       await setDnsWithRetry(ctx, existing.domain, `dns:${ctx.tenantId}:${existing.domain}#${opts.domainIndex}`, existing.id);
     }
     const mailboxEmails = await provisionMailboxesForDomain(ctx, {
       domainId: existing.id,
       domain: existing.domain,
-      domainKey: `${existing.domain}#${opts.domainIndex}`,
       domainOrdinal: opts.domainIndex,
       personaSlug: opts.personaSlug,
       inboxesEach: opts.inboxesEach,
@@ -507,7 +218,16 @@ export async function provisionDomainWithMailboxes(
   // unarmed registrar never leaks a reservation.
   let purchased: PurchasedDomain;
   if (adopted) {
-    purchased = { domain: adopted.domain, purchasedAt: ctx.clock.now(), registrar: "adopted" };
+    // The adopted domain's connection type comes from the VENDOR's own listing —
+    // the discriminator that decides which DNS operation applies to it. An
+    // adopted domain is the one case where it is genuinely not implied by how we
+    // acquired it, which is exactly why it has to be carried rather than assumed.
+    purchased = {
+      domain: adopted.domain,
+      purchasedAt: ctx.clock.now(),
+      registrar: "adopted",
+      connectionType: adopted.connectionType,
+    };
     logAction(ctx, "DOMAIN_ADOPTED", adopted.domain, {
       reason: "already owned by the vendor account with no mailboxes attached — recovered instead of re-bought",
       intentKey: opts.intentKey,
@@ -528,16 +248,27 @@ export async function provisionDomainWithMailboxes(
     }
   }
 
+  // N2 — `purchased.domain` is now the resource genuinely acquired this call
+  // (bought or adopted); report it before setDnsWithRetry below, the next
+  // operation that can throw retryably.
+  opts.onDomainResolved?.(purchased.domain);
+
   // H2 — PERSIST THE INSTANT IT IS OURS, before any DNS work. This INSERT used
   // to sit AFTER setDns, so a setDns throw discarded a domain we had already
   // paid for. dns_status starts 'pending' and is flipped below.
   const domainId = newId("dom");
   ctx.sql.exec(
-    `INSERT INTO domains (id, tenant_id, domain, status, purchased_at, dns_status) VALUES (?, ?, ?, 'active', ?, 'pending')`,
+    // connection_type is recorded HERE, at the moment of acquisition, because it
+    // is the only moment we know it for free — and without it in the row, even
+    // fixed adapter code has nothing to branch on when a later retry re-drives
+    // DNS (INCIDENT 2026-08-05, the enabler half of the root cause).
+    `INSERT INTO domains (id, tenant_id, domain, status, purchased_at, dns_status, connection_type)
+     VALUES (?, ?, ?, 'active', ?, 'pending', ?)`,
     domainId,
     ctx.tenantId,
     purchased.domain,
     purchased.purchasedAt,
+    purchased.connectionType,
   );
   // N1 (gate 2026-08-05) — the intent must name the resource ACTUALLY acquired.
   // A fall-through buy purchases `opts.domain` (this call's fresh candidate)
@@ -557,7 +288,6 @@ export async function provisionDomainWithMailboxes(
   const mailboxEmails = await provisionMailboxesForDomain(ctx, {
     domainId,
     domain: purchased.domain,
-    domainKey,
     domainOrdinal: opts.domainIndex,
     personaSlug: opts.personaSlug,
     inboxesEach: opts.inboxesEach,
@@ -745,12 +475,18 @@ export async function runSetupInfrastructure(
     );
   }
 
+  // Wire point A (system->agent message channel, increment 1) — tracks which
+  // domain the loop below was working on when it threw, so the catch can name
+  // it in the retry_setup message without needing the error itself to carry
+  // structured detail.
+  let inFlightDomain: string | undefined;
   try {
     const personaSlug = slugify(input.persona);
 
     for (let domainIndex = 0; domainIndex < input.domains; domainIndex++) {
       const candidate = usable[domainIndex];
       if (!candidate) continue;
+      inFlightDomain = candidate.domain;
       await provisionDomainWithMailboxes(ctx, {
         domain: candidate.domain,
         domainIndex,
@@ -762,6 +498,16 @@ export async function runSetupInfrastructure(
         // intent row even if candidate generation ever changes, which is the
         // whole point of recording the resolved name rather than deriving it.
         intentKey: `${setupKey ?? `tenant:${ctx.tenantId}`}#${domainIndex}`,
+        // N2 (gate 2026-08-05, F1) — `candidate.domain` above is only a correct
+        // guess for a FIRST attempt. On a resume, provisionDomainWithMailboxes
+        // actually operates on the intent-resolved domain, which can differ
+        // from this call's fresh `usable[domainIndex]` candidate (the prior
+        // candidate is now excluded from `usable` because it's already owned).
+        // This callback corrects `inFlightDomain` to the real one the instant
+        // it's known, before the catch below ever names it in a customer message.
+        onDomainResolved: (domain) => {
+          inFlightDomain = domain;
+        },
       });
     }
   } catch (err) {
@@ -781,6 +527,24 @@ export async function runSetupInfrastructure(
     if (err instanceof RegistrarUnarmedError) {
       await alertRegistrarUnarmed(ctx, input.primaryDomain, err, mailer);
     }
+    // Wire point A — a RETRYABLE VendorError here is H2's exact shape
+    // (setDnsWithRetry exhausted its in-call backoff): the domain is bought
+    // and recorded (dns_status 'pending'), nothing was lost, and the caller's
+    // OWN error text already says so — but until now that only reached a
+    // human via a relayed alert. Surface it directly to the agent instead.
+    // Deliberately composed prose, never `err.message` (GUARDRAIL B — the
+    // vendor error can carry upstream detail this message must not repeat).
+    if (err instanceof VendorError && err.retryable) {
+      emitTenantMessage(ctx, {
+        kind: "retry_setup",
+        severity: "action_required",
+        body: inFlightDomain
+          ? `Setup for ${inFlightDomain} has not finished yet — its DNS registration is still completing at the vendor. Nothing was lost; retry setup_infrastructure with the same idempotency key to finish it.`
+          : `Your last setup_infrastructure call has not finished yet. Nothing was lost; retry it with the same idempotency key to finish it.`,
+        actionHint: { tool: "setup_infrastructure", idempotencyKey: setupKey ?? null },
+        dedupKey: inFlightDomain ?? `tenant:${ctx.tenantId}`,
+      });
+    }
     throw err;
   }
 
@@ -791,127 +555,4 @@ export async function runSetupInfrastructure(
   // SPEC §18 — return the new count + projected monthly on the add (no silent
   // capacity addition); computed from the REAL post-provision count.
   return { jobId: newId("job"), billing: buildMailboxBilling(ctx, liveProvisioned()) };
-}
-
-export interface MailboxHealthReport {
-  email: string;
-  domain: string;
-  status: string;
-  warmupDay: number;
-  dailyCap: number;
-  sentToday: number;
-  sendReady: boolean;
-  // B6 deliverability signals surfaced so the customer's agent can see the
-  // control loop working: our own throttle/pause state + observed first-party
-  // rates (fractions, 0-1) + the vendor-reported reputation/placement.
-  delivStatus: string;
-  sends: number;
-  complaintRate: number;
-  bounceRate: number;
-  /** Soft (transient 4.x.x) bounce fraction — visible here but never triggers pause/burn (A3). */
-  softBounceRate: number;
-  // Gate (d) — display honesty (adversary inboxkit-adapters-2026-07-20 finding
-  // 4): these are VENDOR-REPORTED approximations (InboxKit's coarse
-  // health_status enum -> a 0-100 score, and the bounce-rate complement as a
-  // placement PROXY — NOT a real inbox-placement test), never first-party
-  // measurements. The control loop's burn/pause decisions use local counts
-  // ONLY; these two are display-only. The `vendor*` prefix carries that
-  // provenance so a consuming agent never treats them as measured (the pre-fix
-  // `reputationScore`/`placementRate` names read as first-party truth).
-  /** H-status (pipeline F4) — 'ok' when the vendor health lookup succeeded,
-   * 'unknown' when it failed for THIS mailbox. The two `vendor*` numbers below
-   * are 0 and meaningless when this is 'unknown'; previously that case took the
-   * whole endpoint down with a 500 instead. */
-  vendorHealth: "ok" | "unknown";
-  /** Why the lookup failed, for the operator. null when `vendorHealth` is 'ok'. */
-  vendorHealthError: string | null;
-  vendorReputationScore: number;
-  vendorPlacementRate: number;
-  /** SPEC.md §19.2/§19.6 [F7] — last time runPollInbox() polled this mailbox (engine/reply-processor.ts); null before the first poll. Backs the Settings→Mailboxes "last polled" UI claim. */
-  lastPolledAt: number | null;
-}
-
-export interface InfrastructureStatus {
-  domains: number;
-  mailboxes: number;
-  mailboxHealth: MailboxHealthReport[];
-  sendReady: boolean;
-}
-
-export async function getInfrastructureStatus(ctx: TenantContext): Promise<InfrastructureStatus> {
-  // Read-only: computes the same live warmup dailyCap/sentToday the tick
-  // would persist, WITHOUT writing (MCP readOnlyHint: true — see
-  // mailbox-state.ts's computeMailboxWarmupSnapshot doc). `s.warmupStatus`
-  // below is already freshly computed by gatherMailboxHealth (never read
-  // from the possibly-stale DB `status` column), so only dailyCap/sentToday
-  // need overriding from the snapshot.
-  const warmupSnapshot = computeMailboxWarmupSnapshot(ctx);
-  const domainCount = ctx.sql
-    .exec<{ n: number }>(`SELECT COUNT(*) as n FROM domains WHERE tenant_id = ?`, ctx.tenantId)
-    .one().n;
-
-  const signals = gatherMailboxHealth(ctx);
-  const mailboxHealth: MailboxHealthReport[] = await Promise.all(
-    signals.map(async (s) => {
-      // Vendor-reported reputation/placement (SPEC.md §10 raw signal, Inboxkit
-      // in the real adapter) — display-only, surfaced under `vendor*` names
-      // (gate (d)). On-demand here, NOT on the hot tick path.
-      // H-status (INCIDENT 2026-08-05, pipeline F4) — PER-MAILBOX isolation.
-      // This fan-out was an unguarded Promise.all, so ONE rejection blanked the
-      // whole response into a 500. `resolveMailboxUid` throws a PERMANENT
-      // VendorError when the vendor has no matching mailbox — exactly what a
-      // half-failed saga leaves behind — which bricked `infrastructure_status`
-      // forever for that tenant, with no API path to repair it. It is the one
-      // endpoint the tool description tells the agent to poll, so it must
-      // degrade, never disappear: the mailbox reports vendorHealth 'unknown'
-      // and the rest of the response (including every OTHER mailbox) survives.
-      let vendor: MailboxHealth | null = null;
-      let vendorHealthError: string | null = null;
-      try {
-        vendor = await ctx.adapters.mailbox.getHealth(s.email);
-      } catch (err) {
-        vendorHealthError = err instanceof Error ? err.message : String(err);
-      }
-      const snapshot = warmupSnapshot.get(s.mailboxId);
-      return {
-        email: s.email,
-        domain: s.domain,
-        status: s.warmupStatus,
-        warmupDay: s.warmupDay,
-        dailyCap: snapshot?.dailyCap ?? s.dailyCap,
-        sentToday: snapshot?.sentToday ?? s.sentToday,
-        sendReady: s.sendReady,
-        delivStatus: s.delivStatus,
-        sends: s.sends,
-        complaintRate: s.complaintRate,
-        bounceRate: s.bounceRate,
-        softBounceRate: s.softBounceRate,
-        // 'ok' | 'unknown' — whether the VENDOR-reported pair below could be
-        // fetched at all. Distinguishes "the vendor says 0" from "we could not
-        // ask", which the previous 0-or-500 shape could not express.
-        vendorHealth: vendor ? ("ok" as const) : ("unknown" as const),
-        vendorHealthError,
-        vendorReputationScore: vendor?.reputationScore ?? 0,
-        vendorPlacementRate: vendor?.placementRate ?? 0,
-        lastPolledAt: s.lastPolledAt,
-      };
-    }),
-  );
-  // Operator-visible, once per degraded mailbox per call: a permanently-failing
-  // health lookup usually means a local row with no vendor counterpart, which
-  // is a saga remnant someone has to reconcile.
-  for (const report of mailboxHealth) {
-    if (report.vendorHealth === "unknown") {
-      logAction(ctx, "MAILBOX_HEALTH_UNAVAILABLE", report.email, { reason: report.vendorHealthError });
-    }
-  }
-
-  return {
-    domains: domainCount,
-    mailboxes: mailboxHealth.length,
-    mailboxHealth,
-    // Send-readiness ignores paused/throttled state (it's a warmup concept);
-    // a paused mailbox still counts as warmed. delivStatus surfaces the pause.
-    sendReady: mailboxHealth.length > 0 && mailboxHealth.every((m) => m.sendReady),
-  };
 }

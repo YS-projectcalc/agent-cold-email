@@ -12,10 +12,12 @@
  * Both surfaces now translate here, so a class can never be mapped on one
  * transport and unmapped on the other. Adding a class means adding ONE case.
  *
- * `step` carries the vendor operation name adapters already put in their
- * messages, so a caller learns WHERE in the saga it failed without us shipping
- * internal detail.
+ * `step` carries an ABSTRACT operation label (vendor-failure.ts) derived from
+ * what the adapters put in their messages, so a caller learns WHERE in the saga
+ * it failed without us shipping internal detail — or the provider's identity.
  */
+
+import { customerSafeVendorFailure } from "./vendor-failure.js";
 
 export interface ErrorResponse {
   status: number;
@@ -33,41 +35,20 @@ interface StructuredError extends Error {
 }
 
 /**
- * The vendor operations we are willing to name to a customer. An ALLOWLIST, not
- * a parse (N2, gate 2026-08-05): the previous best-effort regex over the error
- * message emitted whatever token happened to sit in position 2, producing junk
- * steps like "unreachable" and "manually-minted" — and, far worse, it sat next
- * to a `error: err.message` that shipped the raw adapter text to the customer.
- * Proven leaks included the operator's InboxKit Stripe checkout URL,
- * ENGINE_BASE_URL (an internal 10.x address), ECONNREFUSED internal IPs, and
- * OAuth runbook wording.
- */
-const CUSTOMER_SAFE_STEPS = new Set([
-  "domains/register",
-  "domains/available",
-  "domains/list",
-  "domains/nameservers",
-  "domains/remove",
-  "mailboxes/buy",
-  "mailboxes/list",
-  "mailboxes/cancel",
-  "warmup/add",
-  "warmup/cancel",
-  "warmup/list",
-  "email/send",
-  "email/poll",
-]);
-
-/**
- * The vendor operation, ONLY when it is one we have decided is safe to name.
- * Anything else returns undefined: a caller learns nothing from a leaked
- * internal token, and a wrong or noisy `step` is worse than no step.
+ * The vendor operation as an ABSTRACT label, ONLY when we can name it safely.
+ *
+ * This used to be a passthrough allowlist of the vendor's LITERAL endpoint
+ * paths ("domains/register", "mailboxes/buy", …) shipped to the customer as
+ * `step` — the guard file's own leak (sweep-vendor-leak-2026-08-05): those
+ * tokens are the vendor's routes, so `step` identified the provider as surely
+ * as its name would. `customerSafeVendorFailure` maps them to prose labels
+ * instead, keeping the actionable signal and dropping the fingerprint.
+ *
+ * Anything unrecognized still returns undefined: a caller learns nothing from a
+ * leaked internal token, and a wrong or noisy `step` is worse than no step.
  */
 function vendorStep(err: StructuredError): string | undefined {
-  const explicit = typeof err.step === "string" ? err.step : undefined;
-  const parsed = /^[a-z0-9-]+ ([a-z0-9/_:-]+)/i.exec(err.message ?? "")?.[1];
-  const candidate = explicit ?? parsed;
-  return candidate && CUSTOMER_SAFE_STEPS.has(candidate) ? candidate : undefined;
+  return customerSafeVendorFailure(err).step;
 }
 
 export function toErrorResponse(err: unknown): ErrorResponse {

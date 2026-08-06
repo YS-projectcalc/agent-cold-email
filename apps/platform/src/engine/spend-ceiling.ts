@@ -187,11 +187,17 @@ async function rejectCapacity(
 ): Promise<never> {
   const transitioned = setCapacityPendingMarker(ctx);
   if (transitioned) await alertCapacityPending(ctx, reason, detail, mailer);
+  // CUSTOMER-FACING (error-response.ts returns this message verbatim in the 409
+  // body), so it names neither the provider nor our internal capacity numbers.
+  // It used to read "InboxKit plan-slot capacity reached (3/10)" — the vendor's
+  // identity plus our own inventory position, shipped to a tenant. The operator
+  // detail lives in the ops alert above, which is exactly the split the founder
+  // rule asks for (docs/adversarial/sweep-vendor-leak-2026-08-05.md).
   throw new CapacityPendingError(
     reason,
     reason === "slot_capacity"
-      ? `provisioning held: InboxKit plan-slot capacity reached (${detail.slotsUsed}/${detail.planSlots})`
-      : `provisioning held: monthly vendor-spend ceiling reached (${detail.ceilingCents}¢)`,
+      ? "provisioning is temporarily held: this account has reached its provisioning capacity. Nothing was charged. The operator has been notified and a retry will succeed once capacity is raised."
+      : "provisioning is temporarily held: this account has reached its monthly provisioning limit. Nothing was charged. The operator has been notified and a retry will succeed once the limit is raised.",
   );
 }
 
@@ -387,7 +393,10 @@ export async function withSpendCeiling<T>(
  * commit that flipped the SAME entry to 'committed' first makes the reaper's
  * flip a no-op and the counters are left alone (no double-subtract).
  */
-export async function reapStaleReservations(env: Env, nowMs: number): Promise<{ reaped: number; releasedCents: number }> {
+export async function reapStaleReservations(
+  env: Env,
+  nowMs: number,
+): Promise<{ reaped: number; releasedCents: number; errors: number }> {
   const cutoff = nowMs - RESERVE_REAP_TTL_MS;
   const stale = await env.DB.prepare(
     `SELECT id, period_key, kind, est_cents FROM vendor_spend_entries WHERE status = 'reserved' AND created_at < ?`,
@@ -397,27 +406,37 @@ export async function reapStaleReservations(env: Env, nowMs: number): Promise<{ 
 
   let reaped = 0;
   let releasedCents = 0;
+  let errors = 0;
   for (const row of stale.results) {
-    const flip = await env.DB.prepare(
-      `UPDATE vendor_spend_entries SET status = 'released', updated_at = ? WHERE id = ? AND status = 'reserved'`,
-    )
-      .bind(nowMs, row.id)
-      .run();
-    if ((flip.meta.changes ?? 0) === 0) continue; // committed/released concurrently — leave the counters untouched
-    await env.DB.prepare(
-      `UPDATE vendor_spend_ledger SET reserved_cents = MAX(0, reserved_cents - ?), updated_at = ? WHERE period_key = ?`,
-    )
-      .bind(row.est_cents, nowMs, row.period_key)
-      .run();
-    if (row.kind === "mailbox") {
-      await env.DB.prepare(`UPDATE vendor_slot_state SET slots_used = MAX(0, slots_used - 1), updated_at = ? WHERE id = 1`)
-        .bind(nowMs)
+    try {
+      const flip = await env.DB.prepare(
+        `UPDATE vendor_spend_entries SET status = 'released', updated_at = ? WHERE id = ? AND status = 'reserved'`,
+      )
+        .bind(nowMs, row.id)
         .run();
+      if ((flip.meta.changes ?? 0) === 0) continue; // committed/released concurrently — leave the counters untouched
+      await env.DB.prepare(
+        `UPDATE vendor_spend_ledger SET reserved_cents = MAX(0, reserved_cents - ?), updated_at = ? WHERE period_key = ?`,
+      )
+        .bind(row.est_cents, nowMs, row.period_key)
+        .run();
+      if (row.kind === "mailbox") {
+        await env.DB.prepare(`UPDATE vendor_slot_state SET slots_used = MAX(0, slots_used - 1), updated_at = ? WHERE id = 1`)
+          .bind(nowMs)
+          .run();
+      }
+      reaped++;
+      releasedCents += row.est_cents;
+    } catch (err) {
+      // One row's transient D1 failure must never abort reaping the rest of
+      // the batch — the row stays 'reserved' and is retried next tick (audit
+      // class-sweep sibling fix, 2026-08-06, mirrors runDunningSweep's
+      // per-tenant try/catch).
+      errors++;
+      console.error(`reapStaleReservations: failed to reap entry ${row.id}`, err);
     }
-    reaped++;
-    releasedCents += row.est_cents;
   }
-  return { reaped, releasedCents };
+  return { reaped, releasedCents, errors };
 }
 
 /**

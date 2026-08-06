@@ -248,6 +248,107 @@ export const IK_PROPAGATION_PENDING = {
   ],
 };
 
+/**
+ * POST /domains/list for a domain InboxKit ITSELF registered, whose registrar-
+ * side nameserver change has not propagated yet — the shape polled LIVE on
+ * 2026-08-05 from the workspace holding the stranded incident domain, field for
+ * field (only the uid is synthetic). This is the state three customer retries
+ * kept hitting, and the one no fixture in the suite could express before: the
+ * old adopt fixtures modelled a domain as `{name, status, assigned_mailboxes}`
+ * with no connection type and no DNS state at all, so "purchased, not yet
+ * propagated" — the actual production state — was unrepresentable.
+ */
+export const IK_DOMAINS_LIST_PURCHASED_PENDING = {
+  error: false,
+  message: "Domains retrieved successfully",
+  domains: [
+    {
+      uid: "dom-22222222-3333-4444-5555-666666666666",
+      name: "goauthorpitchdesk.com",
+      price: 12.5,
+      assigned_mailboxes: 0,
+      status: "active",
+      connection_type: "purchased",
+      dns_propagation_status: "pending",
+      nameserver_match_status: "pending",
+      last_nameserver_check: null,
+      actual_nameservers: [],
+      nameservers: ["alexandra.ns.cloudflare.com", "phil.ns.cloudflare.com"],
+    },
+  ],
+  total: 1,
+  pages: 1,
+};
+
+/** The same purchased domain once the registrar change has actually propagated:
+ * the assigned nameservers now appear in `actual_nameservers`, which is the
+ * FIRST-PARTY proof the readiness check prefers over any vendor status token. */
+export const IK_DOMAINS_LIST_PURCHASED_PROPAGATED = {
+  ...IK_DOMAINS_LIST_PURCHASED_PENDING,
+  domains: [
+    {
+      ...IK_DOMAINS_LIST_PURCHASED_PENDING.domains[0],
+      dns_propagation_status: "completed",
+      nameserver_match_status: "matched",
+      last_nameserver_check: "2026-08-05T12:00:00.000Z",
+      actual_nameservers: ["alexandra.ns.cloudflare.com", "phil.ns.cloudflare.com"],
+    },
+  ],
+};
+
+/**
+ * THE INTERMEDIATE STATE — the registrar's nameserver delegation has landed, but
+ * the vendor has NOT finished setting up the domain's mail DNS.
+ *
+ * This shape did not exist in the fixtures, and its absence hid a false-ready
+ * bug (combined-diff gate 2026-08-06, finding #1): the only "propagated" fixture
+ * flipped `actual_nameservers`, `nameserver_match_status` and
+ * `dns_propagation_status` SIMULTANEOUSLY, so a readiness rule that consulted
+ * the nameservers and ignored the propagation verdict was indistinguishable from
+ * one that required both. A domain in this state must read NOT ready: mail sent
+ * from it would not deliver, and a mailbox bought on it bills monthly.
+ *
+ * Causally this is the EXPECTED window, not a corner case — mail DNS cannot
+ * propagate until the delegation lands, so every purchased domain passes through
+ * it on the way to ready.
+ */
+export const IK_DOMAINS_LIST_PURCHASED_NS_MATCHED_DNS_PENDING = {
+  ...IK_DOMAINS_LIST_PURCHASED_PENDING,
+  domains: [
+    {
+      ...IK_DOMAINS_LIST_PURCHASED_PENDING.domains[0],
+      // Delegation confirmed, by BOTH the raw field and the vendor's verdict…
+      nameserver_match_status: "matched",
+      last_nameserver_check: "2026-08-05T12:00:00.000Z",
+      actual_nameservers: ["alexandra.ns.cloudflare.com", "phil.ns.cloudflare.com"],
+      // …but the mail DNS itself is still being set up.
+      dns_propagation_status: "pending",
+    },
+  ],
+};
+
+/** A domain CONNECTED to the workspace (registered elsewhere) — the other half
+ * of the discriminator, and the only shape the nameserver handshake applies to. */
+export const IK_DOMAINS_LIST_CONNECTED = {
+  error: false,
+  message: "Domains retrieved successfully",
+  domains: [
+    {
+      uid: "dom-77777777-8888-9999-aaaa-bbbbbbbbbbbb",
+      name: "connected-elsewhere.com",
+      assigned_mailboxes: 0,
+      status: "active",
+      connection_type: "connected",
+      dns_propagation_status: "pending",
+      nameserver_match_status: "pending",
+      actual_nameservers: [],
+      nameservers: ["alexandra.ns.cloudflare.com", "phil.ns.cloudflare.com"],
+    },
+  ],
+  total: 1,
+  pages: 1,
+};
+
 export const IK_DOMAIN_REMOVE_SUCCESS = {
   error: false,
   message: "Domains scheduled for deletion",

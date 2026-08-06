@@ -1,5 +1,13 @@
 import { VendorError } from "@coldstart/shared";
-import type { DnsRecordSet, DomainPort, LookalikeCandidate, OwnedDomain, PurchasedDomain, ReleaseResult } from "@coldstart/shared";
+import type {
+  DnsRecordSet,
+  DomainConnectionType,
+  DomainPort,
+  LookalikeCandidate,
+  OwnedDomain,
+  PurchasedDomain,
+  ReleaseResult,
+} from "@coldstart/shared";
 import { InboxKitClient, type InboxKitClientConfig } from "./inboxkit-client.js";
 
 /**
@@ -60,11 +68,20 @@ export interface InboxKitDomainRegistrant {
  *    call per candidate — InboxKit has no documented batch-check endpoint
  *    this pass looked at)
  *  - buy              -> POST /domains/register (InboxKit-registered flow)
- *  - setDns           -> POST /domains/nameservers (get nameservers to point
- *                        the domain at) then
- *                        POST /domains/nameservers/check-propagation
- *                        (connect-existing-domain flow's poll-verify step)
+ *  - setDns           -> BRANCHES on connection type (see below)
  *  - release          -> POST /domains/remove
+ *
+ * ⚠ INCIDENT 2026-08-05 root cause (docs/adversarial/sweep-domain-type-2026-08-05.md):
+ * `setDns` used to run the CONNECT-EXISTING-DOMAIN flow (POST
+ * /domains/nameservers = "here are nameservers for YOU to apply at YOUR
+ * registrar", then check-propagation) UNCONDITIONALLY — while the only domains
+ * this platform ever puts through it are ones InboxKit itself REGISTERED
+ * (`connection_type: "purchased"`, live-verified against the stranded
+ * goauthorpitchdesk.com). Wrong operation for that domain type: it threw at
+ * step 1 on every attempt, before a single mailbox was attempted, and the
+ * failure was graded RETRYABLE so the customer's agent re-ran the same wrong
+ * call for 24 hours. The port implemented one half of a two-half contract and
+ * was only ever invoked on the other half.
  */
 export class RealInboxKitDomainPort implements DomainPort {
   private readonly client: InboxKitClient;
@@ -117,7 +134,23 @@ export class RealInboxKitDomainPort implements DomainPort {
    * failed page throws rather than under-reporting.
    */
   async listOwnedDomains(): Promise<OwnedDomain[]> {
-    const owned: OwnedDomain[] = [];
+    return (await this.listDomainRecords()).map((row) => ({
+      domain: row.name,
+      status: row.status ?? "unknown",
+      assignedMailboxes: row.assigned_mailboxes ?? 0,
+      // The discriminator the vendor has always reported and this adapter used
+      // to DROP — the enabler that made the wrong-operation bug unbranchable.
+      connectionType: normalizeConnectionType(row.connection_type),
+    }));
+  }
+
+  /**
+   * The raw paged /domains/list walk shared by `listOwnedDomains` (adopt-before-buy)
+   * and `findDomainRecord` (the purchased-domain DNS poll) — one implementation,
+   * one page ceiling, one error grade.
+   */
+  private async listDomainRecords(): Promise<ListedDomain[]> {
+    const rows: ListedDomain[] = [];
     for (let page = 1; page <= MAX_DOMAIN_PAGES; page++) {
       const body = await this.client.request<ListDomainsResponse>("listOwnedDomains", "POST", "/domains/list", {
         body: { page, limit: DOMAIN_PAGE_SIZE },
@@ -125,18 +158,25 @@ export class RealInboxKitDomainPort implements DomainPort {
       if (body.error) {
         throw new VendorError(`inboxkit domains/list failed: ${body.message ?? "no message"}`, true);
       }
-      const rows = body.domains ?? [];
-      for (const row of rows) {
-        if (!row.name) continue;
-        owned.push({
-          domain: row.name,
-          status: row.status ?? "unknown",
-          assignedMailboxes: row.assigned_mailboxes ?? 0,
-        });
+      const pageRows = body.domains ?? [];
+      for (const row of pageRows) {
+        const { name } = row;
+        if (!name) continue;
+        rows.push({ ...row, name });
       }
-      if (rows.length === 0 || page >= (body.pages ?? 1)) return owned;
+      if (pageRows.length === 0 || page >= (body.pages ?? 1)) return rows;
     }
-    throw new VendorError("inboxkit domains/list has more pages than this adapter will walk", true);
+    // A workspace bigger than we will walk is a PERMANENT condition for this
+    // adapter, not a hiccup: retrying re-walks the same ceiling and fails
+    // identically. Grading it retryable (the pre-fix grade) turned it into an
+    // unbounded loop — the same laundering class as the setDns grade above.
+    throw new VendorError("inboxkit domains/list has more pages than this adapter will walk", false);
+  }
+
+  /** One domain's raw vendor record, or null when the workspace does not list it. */
+  private async findDomainRecord(domain: string): Promise<ListedDomain | null> {
+    const wanted = domain.toLowerCase();
+    return (await this.listDomainRecords()).find((row) => row.name.toLowerCase() === wanted) ?? null;
   }
 
   async buy(domain: string, _idempotencyKey: string): Promise<PurchasedDomain> {
@@ -174,30 +214,61 @@ export class RealInboxKitDomainPort implements DomainPort {
     if (body.payment_type !== "wallet") {
       throw new VendorError(`inboxkit domains/register for ${domain} returned an unrecognized response shape (no wallet payment_type)`, false);
     }
-    return { domain, purchasedAt: Date.now(), registrar: "inboxkit" };
+    // A domain InboxKit registers for us is one InboxKit HOLDS — the
+    // discriminator is a fact about the operation, not a lookup.
+    return { domain, purchasedAt: Date.now(), registrar: "inboxkit", connectionType: "purchased" };
   }
 
-  async setDns(domain: string, _idempotencyKey: string): Promise<DnsRecordSet> {
-    // Step 1 (connect-existing-domain flow): ask InboxKit which nameservers
-    // to point this domain at (its Cloudflare zone). We don't act on the
-    // returned nameservers ourselves — the operator/tenant applies them at
-    // their registrar — this call just (re)creates the InboxKit-side zone.
+  /**
+   * Brings mail DNS up and reports what is ACTUALLY in effect, by the route the
+   * domain's connection type calls for (INCIDENT 2026-08-05 root cause).
+   */
+  async setDns(domain: string, _idempotencyKey: string, connectionType: DomainConnectionType): Promise<DnsRecordSet> {
+    return connectionType === "connected"
+      ? this.setDnsForConnectedDomain(domain)
+      : this.pollPurchasedDomainDns(domain);
+  }
+
+  /**
+   * PURCHASED (and 'unknown', see `DomainConnectionType`): InboxKit is the
+   * registrar AND already owns the nameservers, so there is no handshake to
+   * perform — its own automation sets the mail DNS up once the registrar-side
+   * nameserver change propagates. Our job is only to OBSERVE that, so this is a
+   * read-only poll: it can report "not ready yet" but can never fail the way
+   * asking to connect an already-connected domain does.
+   */
+  private async pollPurchasedDomainDns(domain: string): Promise<DnsRecordSet> {
+    const record = await this.findDomainRecord(domain);
+    if (!record) {
+      // Registration is ASYNC — a domain whose order was accepted seconds ago is
+      // genuinely not listed yet. Retryable: this one really does heal by waiting.
+      throw new VendorError(`inboxkit domains/list does not yet list ${domain}`, true);
+    }
+    return dnsRecordSet(purchasedDomainIsReady(record));
+  }
+
+  /**
+   * CONNECTED: the domain is registered elsewhere and pointed at InboxKit, which
+   * is exactly what the two-step nameserver flow is for. Step 1 (re)creates the
+   * InboxKit-side zone and returns the nameservers to apply at the OWNER's
+   * registrar; step 2 poll-verifies propagation (SPEC.md §20.1's
+   * `we_manage_zone`-style signal).
+   *
+   * APPROXIMATION: InboxKit reports one coarse `propagated` boolean per domain,
+   * not per-record-type (MX/SPF/DKIM/DMARC/rDNS) status. Once nameservers have
+   * propagated, InboxKit's own automation owns the domain's mail DNS — so
+   * `propagated` maps onto ALL FIVE flags rather than being left granular.
+   */
+  private async setDnsForConnectedDomain(domain: string): Promise<DnsRecordSet> {
     await this.client.request("setDns:nameservers", "POST", "/domains/nameservers", {
       body: { domains: [domain], mask_forwarding: false },
     });
 
-    // Step 2: poll-verify propagation (SPEC.md §20.1's `we_manage_zone`-style
-    // signal, InboxKit's own analogue). APPROXIMATION: InboxKit reports one
-    // coarse `propagated` boolean per domain, not per-record-type (MX/SPF/
-    // DKIM/DMARC/rDNS) status. Once nameservers have propagated, InboxKit's
-    // own automation owns setting up the domain's mail DNS — so `propagated`
-    // is mapped onto ALL FIVE `DnsRecordSet` flags rather than left granular.
     const body = await this.client.request<CheckPropagationResponse>("setDns:check-propagation", "POST", "/domains/nameservers/check-propagation", {
       body: { domains: [domain] },
     });
     const match = body.result?.find((r) => r.name === domain) ?? body.result?.[0];
-    const propagated = match?.propagated === true;
-    return { mx: propagated, spf: propagated, dkim: propagated, dmarc: propagated, rdns: propagated };
+    return dnsRecordSet(match?.propagated === true);
   }
 
   async release(domain: string, _idempotencyKey: string): Promise<ReleaseResult> {
@@ -236,14 +307,117 @@ interface RemoveDomainsResponse {
 }
 
 // POST /domains/list — contract live-verified 2026-08-05 against the workspace
-// holding the stranded goauthorpitchdesk.com.
+// holding the stranded goauthorpitchdesk.com, whose record read:
+//   {uid, price: 12.5, assigned_mailboxes: 0, status: "active",
+//    connection_type: "purchased", dns_propagation_status: "pending",
+//    nameserver_match_status: "pending", last_nameserver_check: null,
+//    actual_nameservers: [], nameservers: ["alexandra.ns.cloudflare.com", …]}
+// Every field this adapter reads is from that live capture.
 interface ListDomainsResponse {
   error: boolean;
   message?: string;
-  domains?: Array<{ uid?: string; name?: string; status?: string; connection_type?: string; assigned_mailboxes?: number }>;
+  domains?: RawDomainRow[];
   total?: number;
   pages?: number;
 }
 
+interface RawDomainRow {
+  uid?: string;
+  name?: string;
+  status?: string;
+  connection_type?: string;
+  assigned_mailboxes?: number;
+  /** Vendor's own coarse propagation verdict. */
+  dns_propagation_status?: string;
+  /** Vendor's own verdict on whether the domain's real nameservers match the ones it assigned. */
+  nameserver_match_status?: string;
+  /** The nameservers InboxKit assigned (what SHOULD be in effect). */
+  nameservers?: string[];
+  /** The nameservers actually observed in DNS (empty until the registrar change propagates). */
+  actual_nameservers?: string[];
+}
+
+/** A listed domain that actually carries a name — the only kind the walk keeps. */
+type ListedDomain = RawDomainRow & { name: string };
+
 const DOMAIN_PAGE_SIZE = 100;
 const MAX_DOMAIN_PAGES = 10;
+
+/** `connection_type` as reported, defaulting to 'unknown' when the vendor omits it. */
+function normalizeConnectionType(raw: string | undefined): DomainConnectionType {
+  const value = (raw ?? "").trim().toLowerCase();
+  return value === "purchased" || value === "connected" ? value : "unknown";
+}
+
+/**
+ * Vendor status tokens that positively mean "propagation/matching finished".
+ * BEST-EFFORT (only "pending" has been observed live), and deliberately an
+ * ALLOWLIST rather than "anything that isn't pending": an unrecognized token
+ * must fall to NOT-ready, because the two failure directions are not
+ * symmetrical. A false "not ready" leaves the domain 'pending' with a retryable
+ * error — visible, recoverable, no money spent. A false "ready" provisions
+ * billable mailboxes onto a domain whose mail DNS does not work, which is the
+ * silent, monthly-billing failure this wave exists to prevent.
+ */
+const READY_STATUS_TOKENS = new Set([
+  "completed",
+  "complete",
+  "propagated",
+  "matched",
+  "match",
+  "active",
+  "success",
+  "successful",
+  "verified",
+  "done",
+  "ok",
+]);
+
+/**
+ * Is a PURCHASED domain's mail DNS genuinely in effect?
+ *
+ * A CONJUNCTION of the vendor's own two verdicts, plus `status: "active"` (an
+ * expired/suspended domain is never ready whatever else it reports). Both
+ * verdicts are required; there is no alternative route to `true`.
+ *
+ * THIS USED TO HAVE A SECOND ROUTE and it was a false-ready bug (combined-diff
+ * gate 2026-08-06, finding #1, EXECUTED against the real REST route): if every
+ * nameserver InboxKit assigned appeared in `actual_nameservers`, the function
+ * returned true WITHOUT consulting `dns_propagation_status`, so a domain whose
+ * NS delegation had landed but whose mail DNS the vendor had not finished
+ * setting up was marked ready — and a mailbox was bought, warmup-enrolled and
+ * billed on it. Exactly the silent monthly-billing failure this module's own
+ * asymmetry note (above) exists to prevent.
+ *
+ * The route was deleted rather than added as a third conjunct, for three
+ * reasons:
+ *  - It was NOT independent evidence. `actual_nameservers` is a field in the
+ *    same `/domains/list` response as the verdicts — we never query DNS
+ *    ourselves — so the route traded the vendor's CONCLUSION for the vendor's
+ *    raw input, which is strictly less information from the same source. The
+ *    "first-party proof" framing it shipped under was simply wrong.
+ *  - Matching nameservers say "the zone is delegated to the vendor", NOT
+ *    "MX/SPF/DKIM/DMARC are live inside it". Delegation is a PRECONDITION of
+ *    mail-DNS propagation, not a substitute for it, and the mailbox buy depends
+ *    on the latter.
+ *  - `nameserver_match_status` is the vendor's verdict on precisely the
+ *    comparison the route re-derived. Two derivations of one fact with
+ *    different thresholds is what produced the disagreement in the first place.
+ */
+function purchasedDomainIsReady(record: ListedDomain): boolean {
+  if ((record.status ?? "").trim().toLowerCase() !== "active") return false;
+  return isReadyStatus(record.dns_propagation_status) && isReadyStatus(record.nameserver_match_status);
+}
+
+function isReadyStatus(raw: string | undefined): boolean {
+  return READY_STATUS_TOKENS.has((raw ?? "").trim().toLowerCase());
+}
+
+/**
+ * One readiness verdict onto all five DnsRecordSet flags. The port reports a
+ * single coarse signal (see setDnsForConnectedDomain's APPROXIMATION note), and
+ * every caller gates on ALL flags, so the mapping stays in one place.
+ */
+function dnsRecordSet(ready: boolean): DnsRecordSet {
+  return { mx: ready, spf: ready, dkim: ready, dmarc: ready, rdns: ready };
+}

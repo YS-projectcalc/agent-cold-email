@@ -165,20 +165,25 @@ export async function handleMcpRequest(
             isError: true,
           });
         }
-        // H6 (INCIDENT 2026-08-05) — every other class goes through the SAME
+        // H6 (INCIDENT 2026-08-05) — every other throw goes through the SAME
         // translator the REST surface uses (error-response.ts), so the two can
-        // never diverge. This ALSO closes a leak: the fallthrough below used to
+        // never diverge. This ALSO closes a leak: the fallthrough here used to
         // return `err.message` verbatim, handing a tenant internal env-var
         // names and ACTIVATION.md runbook text straight out of a vendor error.
         // toErrorResponse emits a customer-safe body for every class it knows
         // and a generic `internal` for everything it doesn't.
-        if (name !== "") {
-          const translated = toErrorResponse(err);
-          if (translated.status >= 500) console.error(err);
-          return result(id, { content: [{ type: "text", text: JSON.stringify(translated.body) }], isError: true });
-        }
-        const message = err instanceof Error ? err.message : String(err);
-        return result(id, { content: [{ type: "text", text: message }], isError: true });
+        //
+        // Vendor-leak sweep sibling (2026-08-05) — UNCONDITIONAL, because the
+        // `name !== ""` gate that used to gate it reopened the very leak above.
+        // A NON-Error throw (a string/object from a vendor SDK or a hand-rolled
+        // reject) has no `name`, so it skipped the translator and came back to
+        // the tenant as `String(err)`; an Error with a blanked name did the
+        // same. toErrorResponse already takes `unknown` and grades a non-Error
+        // as the generic `internal` 500, so routing everything through it needs
+        // no branch — and the raw value still reaches operators via the log.
+        const translated = toErrorResponse(err);
+        if (translated.status >= 500) console.error(err);
+        return result(id, { content: [{ type: "text", text: JSON.stringify(translated.body) }], isError: true });
       }
     }
 
