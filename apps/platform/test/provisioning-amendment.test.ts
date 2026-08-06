@@ -1,7 +1,8 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { VendorError } from "@coldstart/shared";
-import { getInfrastructureStatus, runSetupInfrastructure } from "../src/engine/provisioning.js";
+import { getInfrastructureStatus } from "../src/engine/infrastructure-status.js";
+import { runSetupInfrastructure } from "../src/engine/provisioning.js";
 import { getOpsSummary } from "../src/engine/ops-summary.js";
 import { SandboxDomainPort } from "../src/vendors/sandbox/domain-port.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
@@ -249,7 +250,12 @@ describe("H-status — infrastructure_status degrades per mailbox, never 500s (F
     expect(status.mailboxHealth).toHaveLength(2);
     const degraded = status.mailboxHealth.filter((m) => m.vendorHealth === "unknown");
     expect(degraded).toHaveLength(1);
-    expect(degraded[0]!.vendorHealthError).toMatch(/no mailbox matching/);
+    // The REASON is now abstract: this field used to carry the adapter's
+    // `err.message` ("inboxkit has no mailbox matching …") on the one endpoint
+    // a customer's agent is told to poll (sweep-vendor-leak-2026-08-05). The
+    // operator's copy goes to the Worker log instead.
+    expect(degraded[0]!.vendorHealthError).toBe("mailbox health check temporarily unavailable");
+    expect(degraded[0]!.vendorHealthError).not.toMatch(/inboxkit/i);
     // The healthy sibling is unaffected.
     expect(status.mailboxHealth.filter((m) => m.vendorHealth === "ok")).toHaveLength(1);
   });

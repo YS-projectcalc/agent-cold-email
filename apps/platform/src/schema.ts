@@ -129,6 +129,15 @@ CREATE TABLE IF NOT EXISTS domains (
   -- async registration racing our immediate nameservers call threw and stranded
   -- a domain we had already paid for.
   dns_status TEXT NOT NULL DEFAULT 'ready',
+  -- INCIDENT 2026-08-05 root cause — WHICH DNS operation applies to this domain
+  -- ('purchased' = the vendor registered it and owns its nameservers;
+  -- 'connected' = registered elsewhere and pointed at the vendor). The vendor
+  -- reports this and the adapter used to DROP it, so setDns ran the
+  -- connect-existing handshake against domains the vendor itself had
+  -- registered — the wrong operation, which threw on every retry. NULL means
+  -- unknown (a row that predates this column); adapters treat unknown as
+  -- 'purchased', the read-only branch (packages/shared's DomainConnectionType).
+  connection_type TEXT,
   -- 'provisioned' (the existing lookalike-domain flow, unchanged) | 'byo'
   -- (SPEC.md §20 — the customer brought this domain).
   source TEXT NOT NULL DEFAULT 'provisioned',
@@ -731,6 +740,34 @@ CREATE TABLE IF NOT EXISTS domain_intents (
   updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_domain_intents_tenant ON domain_intents(tenant_id, status);
+
+-- INCIDENT 2026-08-05 (L2) — the durable mailbox-buy INTENT record, the domain
+-- table's sibling one step later in the saga. /mailboxes/buy has no vendor
+-- idempotency key and is ASYNC (it answers "scheduled"), so the very next call
+-- — resolving the mailbox's uid to start warmup — can fail while the buy is
+-- still landing. That throw deletes the request-idempotency claim, and without
+-- this row the retry would BUY AGAIN: a second paid mailbox, invisible.
+--
+-- The key is derived from the ADDRESS ("mbx:<tenant>:<email>"), not from the
+-- caller's idempotency key, so teardown can invalidate it knowing only the email
+-- (engine/provision-intents.ts's markMailboxIntentsReleased). The local part is
+-- deterministic, so the address is known before the buy.
+CREATE TABLE IF NOT EXISTS mailbox_intents (
+  key TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  email TEXT NOT NULL,
+  -- 'intent' (written, buy not confirmed) | 'dangling' (the buy threw — we MAY
+  -- own it) | 'bought' (vendor accepted) | 'warming' (warmup subscription
+  -- exists) | 'committed' (mailboxes row written) | 'released' (torn down; a
+  -- later provision must buy afresh).
+  status TEXT NOT NULL DEFAULT 'intent',
+  -- The vendor's mailbox provider, learned at buy time and re-read on a resume
+  -- so the resumed leg does not have to invent one.
+  provider TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mailbox_intents_tenant ON mailbox_intents(tenant_id, status);
 
 CREATE TABLE IF NOT EXISTS mailbox_cred_pushes (
   email TEXT PRIMARY KEY,

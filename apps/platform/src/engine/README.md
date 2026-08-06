@@ -32,11 +32,33 @@ into a god file:
   before any domain purchase: a well-known-brand denylist + a
   brand↔primaryDomain ownership-consistency check (SPEC.md §8, panel-02).
 - `provisioning.ts` — `setup_infrastructure` (validates brand ownership, then
-  buys domains, DNS, provisions mailboxes, starts warmup) + `infrastructure_status`.
-  `provisionMailboxesForDomain` (the per-mailbox vendor-call/warmup/metering
-  loop) is factored out and reused by `byo-mailbox-composition.ts`'s
-  `requestManagedByoMailboxes` (SPEC.md §20.6 shape (a) — a BYO domain we
-  don't own/buy, but still provision platform-owned mailboxes on).
+  picks candidates, adopts-or-buys each domain, drives its DNS, and provisions
+  mailboxes onto it). The three legs it orchestrates live in their own modules:
+  - `provision-intents.ts` — the durable buy-INTENT records for the two
+    non-idempotent vendor purchases (domain registration, mailbox buy). Written
+    BEFORE the purchase and never deleted, because the request-idempotency claim
+    is deleted on a throw: that is what made a retry re-buy. `markMailboxIntentsReleased`
+    is teardown's invalidation hook — a claim about a released mailbox must not
+    outlive the mailbox (N4).
+  - `domain-dns.ts` — `setDnsWithRetry`, the only export. Runs the DNS operation
+    the domain's `connection_type` calls for (INCIDENT 2026-08-05: the
+    connect-an-existing-domain nameserver handshake was being run against
+    domains the vendor itself had registered — the wrong operation, permanently
+    failing), flips `dns_status` to 'ready' ONLY on real propagation flags, and
+    preserves the underlying transient/permanent grade instead of laundering
+    everything into "retryable".
+  - `mailbox-provisioning.ts` — `provisionMailboxesForDomain`, the per-mailbox
+    saga: buy → WAIT for the vendor to finish creating it → warmup → local row →
+    metering → credential push. The wait is the L2 gate (a buy is ACCEPTED, not
+    completed), and the local row is written only after vendor confirmation, so
+    the billing meter can never count a mailbox that does not exist. Reused by
+    `byo-mailbox-composition.ts`'s `requestManagedByoMailboxes` (SPEC.md §20.6
+    shape (a) — a BYO domain we don't own/buy, but still provision
+    platform-owned mailboxes on).
+- `infrastructure-status.ts` — `infrastructure_status`, the read-only view
+  (per-mailbox warmup/deliverability/vendor-health, degrading per mailbox rather
+  than 500ing the endpoint). Split from `provisioning.ts` because reading and
+  provisioning are separate responsibilities.
 - `campaigns.ts` — `launch_campaign` (schedules every sequence step for
   every non-suppressed lead up front; `is_demo` marks demo-run campaigns) +
   `pause`/`pause_all` + `listCampaigns` (SPEC.md §19.4 `GET /campaigns`: id/
@@ -187,7 +209,7 @@ into a god file:
 - `byo-mailbox-composition.ts` — SPEC.md §20.6's mailbox COMPOSITION on an
   already-active BYO domain: `requestManagedByoMailboxes` (shape (a), the
   founder-ruled PRIMARY build target — platform-provisioned mailboxes, reuses
-  `provisioning.ts`'s `provisionMailboxesForDomain`) + `connectByoMailbox`
+  `mailbox-provisioning.ts`'s `provisionMailboxesForDomain`) + `connectByoMailbox`
   (the Mordy-pilot BYO-mailbox seam — OAuth/SMTP+IMAP connect, maps onto
   `apps/engine/src/config.ts`'s transport discriminator; SECURITY POSTURE
   documented in its own doc comment — the connection secret is stored

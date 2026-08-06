@@ -274,7 +274,10 @@ describe("H6 — error translation is identical on both transports and leaks not
     expect(vendorTranslated.status).toBe(502);
     expect(vendorTranslated.body.code).toBe("vendor_error");
     expect(vendorTranslated.body.retryable).toBe(true);
-    expect(vendorTranslated.body.step).toBe("domains/register");
+    // ABSTRACT, not the vendor's literal route: `step:"domains/register"` was
+    // itself a provider fingerprint (sweep-vendor-leak-2026-08-05) — you can
+    // curl it. The actionable signal survives, the identification does not.
+    expect(vendorTranslated.body.step).toBe("domain registration");
 
     // And the MCP transport returns that SAME structured body, not err.message.
     const res = await api<{ result: { content: { text: string }[]; isError?: boolean } }>("/mcp", {

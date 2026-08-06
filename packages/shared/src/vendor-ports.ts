@@ -9,10 +9,36 @@ export interface LookalikeCandidate {
   available: boolean;
 }
 
+/**
+ * How the vendor came to hold a domain, and therefore which DNS operation
+ * applies to it (INCIDENT 2026-08-05, docs/adversarial/sweep-domain-type-2026-08-05.md):
+ *
+ *  - 'purchased' — the vendor REGISTERED it for us, so it already owns the
+ *    domain's nameservers and runs its own mail-DNS automation. The
+ *    connect-an-existing-domain nameserver handshake does not apply and FAILS
+ *    against it; readiness is observed by polling, never by asking for
+ *    nameservers we would have to apply somewhere else.
+ *  - 'connected' — the domain is registered elsewhere and was pointed AT the
+ *    vendor, which is what the nameserver handshake is for.
+ *  - 'unknown' — no discriminator available (a row that predates this field).
+ *    Treated as 'purchased' by the adapters: every domain this platform sends
+ *    through `setDns` arrived from `buy()` (purchased by construction) or from
+ *    `listOwnedDomains` (which reports the real value), so the only source of
+ *    'unknown' is legacy state — and polling is the read-only, non-destructive
+ *    guess.
+ *
+ * Carrying this on the port types is the FIX for the enabler defect: the vendor
+ * reports the discriminator, the adapter dropped it at the type boundary, and so
+ * nothing downstream could branch on it.
+ */
+export type DomainConnectionType = "purchased" | "connected" | "unknown";
+
 export interface PurchasedDomain {
   domain: string;
   purchasedAt: number;
   registrar: string;
+  /** How the vendor holds it — a domain the registrar port BUYS is 'purchased'. */
+  connectionType: DomainConnectionType;
 }
 
 export interface DnsRecordSet {
@@ -42,6 +68,8 @@ export interface OwnedDomain {
   status: string;
   /** Mailboxes already attached to it vendor-side; 0 means nothing depends on it. */
   assignedMailboxes: number;
+  /** Which DNS operation applies to it — see `DomainConnectionType`. */
+  connectionType: DomainConnectionType;
 }
 
 export interface DomainPort {
@@ -56,7 +84,18 @@ export interface DomainPort {
    */
   listOwnedDomains(): Promise<OwnedDomain[]>;
   buy(domain: string, idempotencyKey: string): Promise<PurchasedDomain>;
-  setDns(domain: string, idempotencyKey: string): Promise<DnsRecordSet>;
+  /**
+   * Brings the domain's mail DNS to a usable state and reports what is ACTUALLY
+   * in effect — the returned flags are the readiness signal callers gate on, so
+   * "did not throw" is never a substitute for "is ready".
+   *
+   * `connectionType` selects the operation (INCIDENT 2026-08-05): a 'purchased'
+   * domain is polled, a 'connected' one goes through the nameserver handshake.
+   * Running the handshake against a purchased domain is not merely redundant —
+   * it FAILS permanently, which is what stranded the incident domain through
+   * three customer retries.
+   */
+  setDns(domain: string, idempotencyKey: string, connectionType: DomainConnectionType): Promise<DnsRecordSet>;
   /**
    * Releases a domain back to the registrar on tenant teardown/reclaim (D5).
    * Idempotency-keyed like every side-effecting op (ARCHITECTURE.md #5). The
@@ -80,8 +119,29 @@ export interface MailboxHealth {
   placementRate: number; // fraction landing in inbox vs spam
 }
 
+/**
+ * Vendor-side progress of an ASYNC mailbox buy (INCIDENT 2026-08-05, L2):
+ *  - 'absent'  — the vendor does not list this mailbox (yet). A buy it accepted
+ *                seconds ago looks exactly like a buy that never happened, so
+ *                'absent' is NEVER by itself a licence to buy again.
+ *  - 'pending' — listed, but not finished provisioning (InboxKit's 'scheduled').
+ *  - 'ready'   — listed and usable.
+ * `provision()` returning is only the vendor ACCEPTING the order; every
+ * uid-resolving operation (warmup enrollment, health, credentials, release) and
+ * the billable local row require 'ready'.
+ */
+export type MailboxProvisioningState = "absent" | "pending" | "ready";
+
 export interface MailboxPort {
   provision(domain: string, localPart: string, idempotencyKey: string): Promise<ProvisionedMailbox>;
+  /**
+   * Where the vendor has got to with this mailbox. The poll-until-ready gate
+   * between the buy and every uid consumer (INCIDENT 2026-08-05, L2), and the
+   * "did our buy actually land?" question a retry must ask before it considers
+   * buying again — asked of the VENDOR rather than parsed out of an error
+   * message, the fragile pattern this codebase has removed twice.
+   */
+  provisioningState(email: string): Promise<MailboxProvisioningState>;
   getHealth(email: string): Promise<MailboxHealth>;
   startWarmup(email: string, idempotencyKey: string): Promise<{ started: boolean; startedAt: number }>;
   /**

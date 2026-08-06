@@ -1,9 +1,16 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { CancelWarmupResult, MailboxHealth, MailboxPort, ProvisionedMailbox, ReleaseResult } from "@coldstart/shared";
+import type {
+  CancelWarmupResult,
+  MailboxHealth,
+  MailboxPort,
+  MailboxProvisioningState,
+  ProvisionedMailbox,
+  ReleaseResult,
+} from "@coldstart/shared";
 import { VirtualClock } from "../src/clock.js";
 import { readActivationState } from "../src/engine/activation.js";
-import { provisionMailboxesForDomain } from "../src/engine/provisioning.js";
+import { provisionMailboxesForDomain } from "../src/engine/mailbox-provisioning.js";
 import type { TenantContext } from "../src/tenant-context.js";
 import { createVendorAdapters } from "../src/vendors/factory.js";
 import { signup, tenantStub } from "./helpers.js";
@@ -22,6 +29,9 @@ function countingMailbox(): { port: MailboxPort; provisionCalls: () => number } 
     async provision(domain, localPart): Promise<ProvisionedMailbox> {
       calls++;
       return { email: `${localPart}@${domain}`, provider: "google", provisionedAt: Date.now() };
+    },
+    async provisioningState(): Promise<MailboxProvisioningState> {
+      return "ready";
     },
     async startWarmup(): Promise<{ started: boolean; startedAt: number }> {
       return { started: true, startedAt: Date.now() };
@@ -61,7 +71,7 @@ async function withInjectedMailbox<T>(tenantId: string, mailbox: MailboxPort, fn
   });
 }
 
-const OPTS = { domainId: "dom_test", domain: "seller-lookalike.com", domainKey: "seller-lookalike.com#0", domainOrdinal: 0, personaSlug: "ops", inboxesEach: 1 };
+const OPTS = { domainId: "dom_test", domain: "seller-lookalike.com", domainOrdinal: 0, personaSlug: "ops", inboxesEach: 1 };
 
 describe("Gate (c) — provision is idempotent via withRequestIdempotency (no double vendor buy)", () => {
   it("a re-run with the same idempotency key returns the recorded mailbox WITHOUT a second vendor buy", async () => {

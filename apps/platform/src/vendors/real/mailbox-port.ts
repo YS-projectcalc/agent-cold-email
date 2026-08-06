@@ -1,5 +1,12 @@
 import { VendorError } from "@coldstart/shared";
-import type { CancelWarmupResult, MailboxHealth, MailboxPort, ProvisionedMailbox, ReleaseResult } from "@coldstart/shared";
+import type {
+  CancelWarmupResult,
+  MailboxHealth,
+  MailboxPort,
+  MailboxProvisioningState,
+  ProvisionedMailbox,
+  ReleaseResult,
+} from "@coldstart/shared";
 import { InboxKitClient, type InboxKitClientConfig } from "./inboxkit-client.js";
 
 /**
@@ -15,6 +22,7 @@ import { InboxKitClient, type InboxKitClientConfig } from "./inboxkit-client.js"
  * Endpoint coverage (verified live/doc-captured 2026-07-20,
  * https://docs.inboxkit.com/):
  *  - provision   -> POST /mailboxes/buy
+ *  - provisioningState -> POST /mailboxes/list (is the async buy done yet?)
  *  - getHealth   -> POST /mailboxes/list (resolve email->uid) then
  *                   GET /email-insights/mailbox/{uid}/health
  *  - startWarmup -> POST /mailboxes/list (resolve uid) then POST /warmup/add
@@ -60,6 +68,27 @@ export class RealMailboxPort implements MailboxPort {
       throw new VendorError(`inboxkit mailboxes/buy did not return a mailbox for ${email}: ${body.message ?? "no message"}`, false);
     }
     return { email, provider: "google", provisionedAt: Date.now() };
+  }
+
+  /**
+   * Vendor-side progress of the ASYNC buy (INCIDENT 2026-08-05, L2). /mailboxes/buy
+   * answers "Mailbox scheduled to be assigned to domains successfully" with
+   * `status: "scheduled"` — the order is ACCEPTED, the mailbox does not exist
+   * yet — and every other method here starts with `resolveMailboxUid`, which
+   * throws PERMANENTLY while the mailbox is unlistable. Provisioning used to run
+   * startWarmup on the next line, so a vendor that hadn't caught up wedged the
+   * whole saga.
+   *
+   * STATUS TOKENS: 'active' (observed on a live mailbox, test/fixtures/inboxkit.ts)
+   * is the only value read as 'ready'; every other value ('scheduled', and
+   * anything unrecognized) is 'pending'. Same asymmetry as the domain readiness
+   * allowlist: guessing "not ready" costs a retry, guessing "ready" enrolls a
+   * paid warmup subscription for a mailbox that may never exist.
+   */
+  async provisioningState(email: string): Promise<MailboxProvisioningState> {
+    const match = await this.findExactMailbox(email);
+    if (!match) return "absent";
+    return (match.status ?? "").trim().toLowerCase() === "active" ? "ready" : "pending";
   }
 
   async getHealth(email: string): Promise<MailboxHealth> {
@@ -241,13 +270,28 @@ export class RealMailboxPort implements MailboxPort {
    * before cancel) so every uid consumer is exact by construction.
    */
   private async resolveMailboxUid(email: string): Promise<string> {
+    const match = await this.findExactMailbox(email);
+    if (!match) {
+      throw new VendorError(`inboxkit has no mailbox matching ${email}`, false);
+    }
+    return match.uid;
+  }
+
+  /**
+   * The single keyword lookup + exactness check behind `resolveMailboxUid` and
+   * `provisioningState`. Returns null for "the vendor lists nothing for this
+   * address" so the caller decides what that means — a uid consumer treats it as
+   * a hard error, the provisioning poll treats it as 'not yet'. A NON-EXACT hit
+   * still throws from HERE, for both callers: acting on a near-match is
+   * catastrophic (release() would cancel a DIFFERENT paid mailbox) and reading
+   * one as "provisioned" would confirm a mailbox we never bought.
+   */
+  private async findExactMailbox(email: string): Promise<{ uid: string; status?: string } | null> {
     const body = await this.client.request<ListMailboxesResponse>("resolveMailboxUid", "POST", "/mailboxes/list", {
       body: { keyword: email, limit: 1 },
     });
     const match = body.mailboxes?.[0];
-    if (!match?.uid) {
-      throw new VendorError(`inboxkit has no mailbox matching ${email}`, false);
-    }
+    if (!match?.uid) return null;
     const resolvedEmail = `${match.username}@${match.domain_name}`;
     if (resolvedEmail.toLowerCase() !== email.toLowerCase()) {
       throw new VendorError(
@@ -255,7 +299,7 @@ export class RealMailboxPort implements MailboxPort {
         false,
       );
     }
-    return match.uid;
+    return { uid: match.uid, status: match.status };
   }
 }
 

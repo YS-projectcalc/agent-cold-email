@@ -19,13 +19,24 @@ export class ValidationError extends Error {
  * cap, non-retryable fails immediately, so no infinite-retry path survives.
  */
 export class VendorError extends Error {
+  /**
+   * The ABSTRACT, vendor-blind operation label this failure belongs to
+   * (apps/platform/src/vendor-failure.ts's `customerSafeVendorFailure`), e.g.
+   * "domain DNS setup". Set by throw sites that already know which step failed
+   * but whose message deliberately names no vendor and no endpoint; a customer
+   * surface reads it INSTEAD of the message. Never a vendor endpoint path — the
+   * path IS a vendor fingerprint (docs/adversarial/sweep-vendor-leak-2026-08-05.md).
+   */
+  public readonly step?: string;
+
   constructor(
     message: string,
     public readonly retryable: boolean,
-    options?: { cause?: unknown },
+    options?: { cause?: unknown; step?: string },
   ) {
     super(message, options);
     this.name = "VendorError";
+    this.step = options?.step;
   }
 }
 
