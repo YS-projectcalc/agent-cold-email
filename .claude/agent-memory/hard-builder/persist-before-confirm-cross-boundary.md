@@ -35,6 +35,22 @@ silently dropped or a row is stuck forever. Known members + fixes:
   rows. RED-proof: remove the pre-push record ⇒ a failed push leaves status
   `undefined` instead of 'pending' (billed mailbox lost).
 
+**THE MIRROR (2026-08-06, guarded mailbox re-buy).** For a NON-IDEMPOTENT PURCHASE
+the rule inverts: the *risk* marker must be persisted BEFORE the call. A status
+written after the vendor answers cannot distinguish "nothing was ever sent" from
+"an accepted order whose status write a kill destroyed" — and the second read as
+the first buys the thing twice (wave-integration gate #3; the same hole exists at
+'dangling', where the buy THREW). FIX: a pre-call dispatch claim
+(`mailbox_buy_dispatches.attempts`, incremented immediately before
+`/mailboxes/buy`), which doubles as the crash-safe cap on retries. NOTE the two
+rules do not conflict: persist-AFTER-confirm protects against *losing* work,
+persist-the-RISK-BEFORE protects against *repeating* it — apply the second
+whenever repeating the effect spends money or is otherwise unrepeatable. Its
+timestamp must be a REAL clock (`RealClock`), not `ctx.clock`: the thing being
+measured is the vendor's catch-up lag. And any such marker must be dropped at
+teardown alongside the intent + idempotency claim, or a re-provision's FIRST buy
+looks like a re-buy.
+
 **The safe direction is vendor/effect AHEAD of the DB, never the reverse.**
 provisioning.ts / lifecycle.ts / threads.ts are NOT members: they persist the DB
 row only AFTER the vendor call confirms (idempotent-recoverable). **How to apply:**
