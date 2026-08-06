@@ -4,6 +4,7 @@ import { RealInboxKitDomainPort } from "../src/vendors/real/inboxkit-domain-port
 import {
   IK_API_KEY,
   IK_DOMAINS_LIST_CONNECTED,
+  IK_DOMAINS_LIST_PURCHASED_NS_MATCHED_DNS_PENDING,
   IK_DOMAINS_LIST_PURCHASED_PENDING,
   IK_DOMAINS_LIST_PURCHASED_PROPAGATED,
   IK_NAMESERVERS_RESULT,
@@ -103,10 +104,41 @@ describe("purchased-domain readiness is derived from REAL propagation state", ()
     expect(result).toEqual({ mx: false, spf: false, dkim: false, dmarc: false, rdns: false });
   });
 
-  it("ready once the ASSIGNED nameservers actually appear in the observed set (first-party proof)", async () => {
+  it("ready only once the vendor's own propagation verdict says so", async () => {
     installFetch({ list: IK_DOMAINS_LIST_PURCHASED_PROPAGATED });
     const result = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "purchased");
     expect(result.mx).toBe(true);
+  });
+
+  it("NS delegation landed but mail DNS still pending reads NOT ready — the false-ready bug", async () => {
+    // Combined-diff gate 2026-08-06 finding #1, EXECUTED end to end: readiness
+    // short-circuited on a nameserver match and never consulted
+    // `dns_propagation_status`, so this exact record marked the domain ready and
+    // a mailbox was bought, warmup-enrolled and BILLED on a domain whose mail DNS
+    // does not work yet. Delegation is a precondition of propagation, not a
+    // substitute for it.
+    installFetch({ list: IK_DOMAINS_LIST_PURCHASED_NS_MATCHED_DNS_PENDING });
+    const result = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "purchased");
+    expect(result).toEqual({ mx: false, spf: false, dkim: false, dmarc: false, rdns: false });
+  });
+
+  it("a matching nameserver set cannot override an unrecognized propagation token either", async () => {
+    // The deleted route trusted the vendor's RAW field over the vendor's own
+    // verdict computed from it. Neither an explicit 'pending' nor an unknown
+    // token may be overridden by the nameservers agreeing.
+    installFetch({
+      list: {
+        ...IK_DOMAINS_LIST_PURCHASED_NS_MATCHED_DNS_PENDING,
+        domains: [
+          {
+            ...IK_DOMAINS_LIST_PURCHASED_NS_MATCHED_DNS_PENDING.domains[0],
+            dns_propagation_status: "not_started",
+          },
+        ],
+      },
+    });
+    const result = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "purchased");
+    expect(result.mx).toBe(false);
   });
 
   it("an unrecognized vendor status token falls to NOT ready (the safe direction)", async () => {

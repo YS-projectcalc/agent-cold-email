@@ -131,7 +131,21 @@ function fakeInboxKit(seed: { domains: VendorDomain[] }) {
   return {
     calls,
     countOf: (path: string) => calls.filter((c) => c.path === path).length,
-    /** The registrar's nameserver change finally shows up in DNS. */
+    /**
+     * The registrar's NS delegation lands — and NOTHING else. Separated from
+     * `propagate` because flipping every signal at once is precisely what hid a
+     * false-ready bug (gate 2026-08-06 #1): a readiness rule that consulted the
+     * nameservers and ignored the propagation verdict was indistinguishable from
+     * one that required both. Mail DNS cannot propagate before delegation lands,
+     * so every purchased domain really does pass through this state.
+     */
+    matchNameservers(domain: string) {
+      const record = domains.get(domain.toLowerCase());
+      if (!record) throw new Error(`fixture: ${domain} not registered`);
+      record.actual_nameservers = [...ASSIGNED_NS];
+      record.nameserver_match_status = "matched";
+    },
+    /** The vendor finishes setting up the mail DNS — the verdict readiness turns on. */
     propagate(domain: string) {
       const record = domains.get(domain.toLowerCase());
       if (!record) throw new Error(`fixture: ${domain} not registered`);
@@ -264,6 +278,47 @@ describe("ACCEPTANCE — the stranded purchased domain is recovered and provisio
     // handshake is never run against a domain the vendor registered. Pre-fix
     // this fired on every attempt and 404'd every time.
     expect(vendor.calls.filter((c) => c.path.startsWith("/domains/nameservers"))).toEqual([]);
+  });
+
+  it("NS delegation landed but mail DNS still pending: 202-with-a-billed-mailbox must NOT happen", async () => {
+    // The combined-diff gate's EXECUTED repro (2026-08-06 finding #1). Readiness
+    // short-circuited on a nameserver match and never consulted the vendor's
+    // `dns_propagation_status`, so this exact vendor state returned 202 with
+    // provisionedAfter:1, one /mailboxes/buy and one /warmup/add — real spend and
+    // a recurring subscription on a domain whose mail DNS does not work.
+    const { token, tenantId } = await mintTenant("Author Pitch Desk", "managed");
+    await activatePaidPlan(tenantId, "managed");
+    const vendor = fakeInboxKit({
+      domains: [
+        {
+          name: ORPHAN,
+          status: "active",
+          connection_type: "purchased",
+          assigned_mailboxes: 0,
+          dns_propagation_status: "pending",
+          nameserver_match_status: "pending",
+          nameservers: ASSIGNED_NS,
+          actual_nameservers: [],
+        },
+      ],
+    });
+
+    // Delegation lands. The mail DNS has NOT been set up yet.
+    vendor.matchNameservers(ORPHAN);
+    const held = await post(token);
+
+    expect(held.status).not.toBe(202);
+    expect(vendor.countOf("/mailboxes/buy")).toBe(0); // no spend
+    expect(vendor.countOf("/warmup/add")).toBe(0); // no recurring subscription
+    expect(await readMailboxes(tenantId)).toEqual([]); // nothing billable
+    expect((await readDomains(tenantId))[0]!.dns_status).toBe("pending");
+
+    // The vendor finishes the mail DNS — NOW it may proceed.
+    vendor.propagate(ORPHAN);
+    await post(token);
+
+    expect((await readDomains(tenantId))[0]!.dns_status).toBe("ready");
+    expect(vendor.countOf("/mailboxes/buy")).toBe(1);
   });
 
   it("HIS POST-DEPLOY RETRY: a domain row recorded before the discriminator existed still classifies correctly", async () => {

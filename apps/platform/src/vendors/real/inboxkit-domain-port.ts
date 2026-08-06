@@ -376,33 +376,41 @@ const READY_STATUS_TOKENS = new Set([
 /**
  * Is a PURCHASED domain's mail DNS genuinely in effect?
  *
- * Two independent routes, because neither alone is trustworthy:
- *  1. FIRST-PARTY PROOF — every nameserver InboxKit assigned is present in the
- *     nameservers actually observed. Derived from raw data the vendor returns,
- *     so it needs no guess about vendor vocabulary. This is SPEC.md §20.1's own
- *     discipline for BYO DNS ("diff expected-vs-actual, never a bare 'some
- *     record exists'") applied to the provisioned path.
- *  2. The vendor's own two status verdicts, both positively ready.
- * Plus `status: "active"` in either case — an expired/suspended domain is never
- * ready no matter what its nameservers say.
+ * A CONJUNCTION of the vendor's own two verdicts, plus `status: "active"` (an
+ * expired/suspended domain is never ready whatever else it reports). Both
+ * verdicts are required; there is no alternative route to `true`.
+ *
+ * THIS USED TO HAVE A SECOND ROUTE and it was a false-ready bug (combined-diff
+ * gate 2026-08-06, finding #1, EXECUTED against the real REST route): if every
+ * nameserver InboxKit assigned appeared in `actual_nameservers`, the function
+ * returned true WITHOUT consulting `dns_propagation_status`, so a domain whose
+ * NS delegation had landed but whose mail DNS the vendor had not finished
+ * setting up was marked ready — and a mailbox was bought, warmup-enrolled and
+ * billed on it. Exactly the silent monthly-billing failure this module's own
+ * asymmetry note (above) exists to prevent.
+ *
+ * The route was deleted rather than added as a third conjunct, for three
+ * reasons:
+ *  - It was NOT independent evidence. `actual_nameservers` is a field in the
+ *    same `/domains/list` response as the verdicts — we never query DNS
+ *    ourselves — so the route traded the vendor's CONCLUSION for the vendor's
+ *    raw input, which is strictly less information from the same source. The
+ *    "first-party proof" framing it shipped under was simply wrong.
+ *  - Matching nameservers say "the zone is delegated to the vendor", NOT
+ *    "MX/SPF/DKIM/DMARC are live inside it". Delegation is a PRECONDITION of
+ *    mail-DNS propagation, not a substitute for it, and the mailbox buy depends
+ *    on the latter.
+ *  - `nameserver_match_status` is the vendor's verdict on precisely the
+ *    comparison the route re-derived. Two derivations of one fact with
+ *    different thresholds is what produced the disagreement in the first place.
  */
 function purchasedDomainIsReady(record: ListedDomain): boolean {
   if ((record.status ?? "").trim().toLowerCase() !== "active") return false;
-  if (nameserversMatch(record.nameservers, record.actual_nameservers)) return true;
   return isReadyStatus(record.dns_propagation_status) && isReadyStatus(record.nameserver_match_status);
 }
 
 function isReadyStatus(raw: string | undefined): boolean {
   return READY_STATUS_TOKENS.has((raw ?? "").trim().toLowerCase());
-}
-
-/** Every EXPECTED nameserver observed in the ACTUAL set (case/trailing-dot insensitive). */
-function nameserversMatch(expected: string[] | undefined, actual: string[] | undefined): boolean {
-  const normalize = (host: string) => host.trim().toLowerCase().replace(/\.$/, "");
-  const want = (expected ?? []).map(normalize).filter(Boolean);
-  const have = new Set((actual ?? []).map(normalize).filter(Boolean));
-  if (want.length === 0 || have.size === 0) return false;
-  return want.every((host) => have.has(host));
 }
 
 /**

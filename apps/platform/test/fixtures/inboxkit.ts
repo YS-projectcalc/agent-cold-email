@@ -296,6 +296,37 @@ export const IK_DOMAINS_LIST_PURCHASED_PROPAGATED = {
   ],
 };
 
+/**
+ * THE INTERMEDIATE STATE — the registrar's nameserver delegation has landed, but
+ * the vendor has NOT finished setting up the domain's mail DNS.
+ *
+ * This shape did not exist in the fixtures, and its absence hid a false-ready
+ * bug (combined-diff gate 2026-08-06, finding #1): the only "propagated" fixture
+ * flipped `actual_nameservers`, `nameserver_match_status` and
+ * `dns_propagation_status` SIMULTANEOUSLY, so a readiness rule that consulted
+ * the nameservers and ignored the propagation verdict was indistinguishable from
+ * one that required both. A domain in this state must read NOT ready: mail sent
+ * from it would not deliver, and a mailbox bought on it bills monthly.
+ *
+ * Causally this is the EXPECTED window, not a corner case — mail DNS cannot
+ * propagate until the delegation lands, so every purchased domain passes through
+ * it on the way to ready.
+ */
+export const IK_DOMAINS_LIST_PURCHASED_NS_MATCHED_DNS_PENDING = {
+  ...IK_DOMAINS_LIST_PURCHASED_PENDING,
+  domains: [
+    {
+      ...IK_DOMAINS_LIST_PURCHASED_PENDING.domains[0],
+      // Delegation confirmed, by BOTH the raw field and the vendor's verdict…
+      nameserver_match_status: "matched",
+      last_nameserver_check: "2026-08-05T12:00:00.000Z",
+      actual_nameservers: ["alexandra.ns.cloudflare.com", "phil.ns.cloudflare.com"],
+      // …but the mail DNS itself is still being set up.
+      dns_propagation_status: "pending",
+    },
+  ],
+};
+
 /** A domain CONNECTED to the workspace (registered elsewhere) — the other half
  * of the discriminator, and the only shape the nameserver handshake applies to. */
 export const IK_DOMAINS_LIST_CONNECTED = {
