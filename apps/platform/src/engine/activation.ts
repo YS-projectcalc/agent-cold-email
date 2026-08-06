@@ -100,6 +100,52 @@ export function realSendPathLive(env: Env): boolean {
 }
 
 /**
+ * Wave-2 ACTIVATION PREDICATE — may the CRON drive this tenant's send pipeline?
+ *
+ * Evaluated INSIDE the TenantDO (tenant-do.ts's runScheduledTick /
+ * runScheduledPoll) on every call, from FRESH SQL reads with nothing cached, so
+ * no future route, MCP tool or alarm can arm automatic sending by reaching a
+ * different entry point: the cron is a dumb driver and this is the gate.
+ *
+ * The four legs, and what each one alone prevents:
+ *  1. paid plan — a demo/free tenant's whole world is the sandbox; automatic
+ *     real sending is not a thing it can have. Read fresh rather than from
+ *     TenantDO's cached `this.plan` (which is only ever more restrictive, but
+ *     "only ever" is not a guarantee worth depending on in a send gate).
+ *  2. `clock_mode='real'` — the L4/L5 interlock. The one-shot clock migration
+ *     stamps this INSIDE its own transaction, so an unmigrated (or
+ *     rolled-back) tenant is structurally unreachable by the driver: its rows
+ *     still carry frozen virtual timestamps, and sending against those would
+ *     mean sending on a schedule rebased to a time base that no longer exists.
+ *  3. the EXACT existing activation predicate (paid AND billing_state='active'
+ *     AND not lifecycle-frozen AND screening clear) — reused, never re-derived,
+ *     so past_due / suspended / canceling / disputed / OFAC-review all block
+ *     here by construction rather than by an enumeration that can drift.
+ *  4. `realSendPathLive` — without it a paid, activated tenant gets a SANDBOX
+ *     EmailPort and the cron would mass-produce fake "sent" events that never
+ *     left the building.
+ *
+ * `runTick`'s own internal freeze guard stays in place as the belt.
+ */
+export interface SendDriverGate {
+  allowed: boolean;
+  /** Why the driver skipped this tenant — logged by the cron leg; never customer-facing. */
+  reason: string;
+}
+
+export function readSendDriverGate(sql: SqlStorage, tenantId: string, env: Env): SendDriverGate {
+  const row = sql
+    .exec<{ plan: TenantPlan; clock_mode: string }>(`SELECT plan, clock_mode FROM tenant_profile WHERE id = ?`, tenantId)
+    .toArray()[0];
+  if (!row) return { allowed: false, reason: "no tenant_profile row" };
+  if (!isPaidPlan(row.plan)) return { allowed: false, reason: `plan '${row.plan}' is not a paid plan` };
+  if (row.clock_mode !== "real") return { allowed: false, reason: "clock_mode is not 'real' (clock migration has not committed)" };
+  if (!readActivationState(sql, tenantId).activated) return { allowed: false, reason: "tenant is not activated (billing/lifecycle/screening)" };
+  if (!realSendPathLive(env)) return { allowed: false, reason: "the real send path is not live (ENGINE_*/INBOXKIT_* unarmed)" };
+  return { allowed: true, reason: "" };
+}
+
+/**
  * PURE activation-surface derivation (design §G3). Derive-don't-store, mirroring
  * isTenantActivated. Branch order is load-bearing: the billing freeze is checked
  * BEFORE screening (adversary minor) so a disputed+in-review tenant shows its

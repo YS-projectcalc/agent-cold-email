@@ -99,7 +99,7 @@ import {
 } from "./engine/byo-mailbox-composition.js";
 import { newId, TENANT_DO_SCHEMA } from "./schema.js";
 import type { TenantContext } from "./tenant-context.js";
-import { readActivationState } from "./engine/activation.js";
+import { readActivationState, readSendDriverGate } from "./engine/activation.js";
 import { clearScreeningStatus, LIST_UNAVAILABLE_VERSION, screenTenant } from "./ofac/screening.js";
 import { createVendorAdapters, selectRealDomainPort, type VendorAdapterBundle } from "./vendors/factory.js";
 import type { EngineClientConfig } from "./vendors/real/email-port.js";
@@ -110,6 +110,29 @@ export interface InitTenantInput {
   tenantId: string;
   brand: string;
   plan: TenantPlan;
+}
+
+/**
+ * What the cron's send-pipeline leg gets back from one tenant. `ran: false`
+ * with a `reason` is the NORMAL outcome for almost every tenant on the
+ * platform (63 tenants, one paying) — it is a quiet skip, not an error, and
+ * the counters are zero rather than absent so the leg's log line reads the
+ * same either way.
+ */
+export interface ScheduledTickResult {
+  ran: boolean;
+  reason: string;
+  sent: number;
+  skipped: number;
+  deferred: number;
+}
+
+export interface ScheduledPollResult {
+  ran: boolean;
+  reason: string;
+  replies: number;
+  bounces: number;
+  complaints: number;
 }
 
 const DEMO_RUN_MIN_INTERVAL_MS = 60_000; // at most 1 demo run / minute / tenant
@@ -871,26 +894,52 @@ export class TenantDO extends DurableObject<Env> {
 
   async completeCheckoutSimulated(sessionId: string): Promise<CompleteCheckoutResult> {
     const result = await completeSimulatedCheckout(this.requireContext(), sessionId);
-    // Keep the in-memory plan in sync for the REST of this DO instance's
-    // lifetime (quota checks + the demo/free-only sandbox guards below both
-    // read `this.plan`, not a fresh SQL read, on every call).
-    if (result.upgraded) {
-      this.plan = result.plan;
-      // Swap site 3 — the tenant just became paid, so it must leave the
-      // sandbox clock (wave-2 DECISION 2).
-      if (isPaidPlan(result.plan)) this.switchToRealClock();
-    }
+    this.reconcileClockWithDurablePlan(); // swap site 3
     return result;
   }
 
   async handleStripeWebhook(event: StripeEventInput): Promise<WebhookApplyResult> {
     const result = await applyStripeWebhookEvent(this.requireContext(), event);
-    if (result.plan) {
-      this.plan = result.plan;
-      // Swap site 4 — the real Stripe path to the same upgrade.
-      if (isPaidPlan(result.plan)) this.switchToRealClock();
-    }
+    this.reconcileClockWithDurablePlan(); // swap site 4 — the real Stripe path
     return result;
+  }
+
+  /**
+   * Swap sites 3 and 4 — reconciles the in-memory plan AND the clock against
+   * what is DURABLY on disk after a checkout/webhook call.
+   *
+   * WHY DURABLE STATE, NOT THE CALL'S RESULT (integration audit FINDING 1).
+   * Both paths used to gate the flip on a field of the result object
+   * (`upgraded` / `plan`), and one real path writes the upgrade to disk without
+   * ever populating those: a webhook delivery that FINISHES a previous attempt
+   * which died mid-handler returns `{applied:false, duplicate:true,
+   * completed:true}` with no `plan` at all (engine/billing.ts's completion
+   * pass). The upgrade is committed, the tenant is paid — and the clock stayed
+   * virtual until the DO happened to be evicted and reconstructed, so
+   * `clock_mode` stayed 'virtual' and the auto-send driver's interlock held
+   * that paying customer at zero sends for an unbounded time.
+   *
+   * Reading the row is also the honest way to keep `this.plan` current: it is
+   * cached for the DO instance's lifetime and read by every quota check and
+   * demo/free guard, so it must reflect disk rather than whichever field the
+   * last call chose to return.
+   *
+   * Idempotent and cheap: `switchToRealClock` is a no-op once the clock is
+   * real, and the migration itself is guarded by the `clock_mode` marker it
+   * writes inside its own transaction — so calling this after EVERY webhook
+   * (most of which change nothing) costs one indexed single-row read.
+   */
+  private reconcileClockWithDurablePlan(): void {
+    if (!this.tenantId) return;
+    const row = this.ctx.storage.sql
+      .exec<{ plan: TenantPlan; clock_mode: string }>(
+        `SELECT plan, clock_mode FROM tenant_profile WHERE id = ?`,
+        this.tenantId,
+      )
+      .toArray()[0];
+    if (!row) return;
+    this.plan = row.plan;
+    if (isPaidPlan(row.plan) && row.clock_mode !== "real") this.switchToRealClock();
   }
 
   // --- B4 opt-out: the hosted RFC 8058 one-click unsubscribe endpoint
@@ -944,6 +993,28 @@ export class TenantDO extends DurableObject<Env> {
 
   async pollInbox() {
     return runPollInbox(this.requireContext());
+  }
+
+  // --- Wave-2 auto-send drivers. The CRON's only entry points into the send
+  // pipeline (admin/ops-sweep.ts's runSendPipelineAllTenants). `tick()` and
+  // `pollInbox()` above are deliberately untouched: they carry no activation
+  // predicate and are what the demo path and the existing test surface drive.
+  // The gate lives HERE rather than in the cron so that no future caller can
+  // arm automatic sending by finding another door — engine/activation.ts's
+  // readSendDriverGate re-reads everything it needs on every call. ---
+
+  async runScheduledTick(): Promise<ScheduledTickResult> {
+    const ctx = this.requireContext();
+    const gate = readSendDriverGate(ctx.sql, ctx.tenantId, this.env);
+    if (!gate.allowed) return { ran: false, reason: gate.reason, sent: 0, skipped: 0, deferred: 0 };
+    return { ran: true, reason: "", ...(await runTick(ctx)) };
+  }
+
+  async runScheduledPoll(): Promise<ScheduledPollResult> {
+    const ctx = this.requireContext();
+    const gate = readSendDriverGate(ctx.sql, ctx.tenantId, this.env);
+    if (!gate.allowed) return { ran: false, reason: gate.reason, replies: 0, bounces: 0, complaints: 0 };
+    return { ran: true, reason: "", ...(await runPollInbox(ctx)) };
   }
 
   // --- D2/D6 admin surface RPCs (src/admin/README.md) — called ONLY from

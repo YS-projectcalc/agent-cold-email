@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { runInDurableObject } from "cloudflare:test";
-import { activatePaidPlan, adminApi, api, failPayment, mintTenant, postWebhook, tenantStub } from "./helpers.js";
+import { activatePaidPlan, adminApi, api, failPayment, makeMailboxesSendEligible, mintTenant, postWebhook, tenantStub } from "./helpers.js";
 
 function setupBody(brand: string, primaryDomain: string, domains: number, inboxesEach: number) {
   return JSON.stringify({
@@ -132,6 +132,11 @@ describe("dunning suspension is reversible; terminate is not (finding #6)", () =
         sequence: [{ step: 1, subject: "Hi", body: "Hi", delayDays: 0 }],
       }),
     });
+
+    // The assertions below turn on the dunning FREEZE stopping sends and the
+    // recovery resuming them, so the mailboxes must be sendable for every other
+    // reason — a sandbox-provider row is not, for a paid tenant (wave-2 §1a).
+    await makeMailboxesSendEligible(tenantId);
 
     // Dunning: fail payment then suspend (the D2 sweep's action).
     await failPayment(tenantId);

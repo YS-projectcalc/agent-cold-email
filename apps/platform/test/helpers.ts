@@ -82,6 +82,34 @@ export async function withTenantContext<T>(tenantId: string, fn: (ctx: TenantCon
   });
 }
 
+/**
+ * Makes a PAID tenant's provisioned mailboxes send-eligible (wave-2 §1a).
+ *
+ * WHY A TEST HAS TO SAY THIS OUT LOUD. Tests run against the SANDBOX vendor
+ * bundle (neither ENGINE_ nor INBOXKIT_ secrets are armed in the hermetic test
+ * env, by design), and the sandbox MailboxPort truthfully stamps `provider='sandbox'`
+ * on every row it creates. A paid tenant may NOT send from a sandbox-provider
+ * mailbox: nothing exists at any vendor for it, and handing one to a real
+ * EmailPort is the exact failure the provenance column was added to close
+ * (adversary round-1 finding 1 — every send routed at a phantom mailbox,
+ * campaign drained to 'failed' in ~25 minutes). Production only ever reaches
+ * the sending state with the REAL bundle, which stamps 'google'.
+ *
+ * So "paid tenant + sandbox mailboxes + a direct tick() RPC" is a combination
+ * production cannot reach (the cron's activation predicate requires
+ * realSendPathLive, which forces the real bundle). A test that wants a paid
+ * tenant to actually SEND is testing the armed shape and should establish it
+ * explicitly, rather than depending on a predicate gap that no longer exists.
+ */
+export async function makeMailboxesSendEligible(tenantId: string): Promise<void> {
+  await runInDurableObject(tenantStub(tenantId), async (_instance, state) => {
+    state.storage.sql.exec(
+      `UPDATE mailboxes SET provider = 'google' WHERE tenant_id = ? AND provider = 'sandbox'`,
+      tenantId,
+    );
+  });
+}
+
 // The test webhook secret — MUST match vitest.config.ts's miniflare binding.
 // The route fails CLOSED without a secret (adversarial panel-03 finding #1), so
 // every webhook fixture is signed exactly as a real Stripe delivery would be.

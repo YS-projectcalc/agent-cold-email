@@ -242,47 +242,69 @@ function processComplaint(ctx: TenantContext, ev: Extract<PolledEvent, { kind: "
 export async function runPollInbox(
   ctx: TenantContext,
 ): Promise<{ replies: number; bounces: number; complaints: number }> {
+  // N6 (wave-2 design v2 §7) — RELEASED mailboxes are excluded at the root.
+  // Without this, every torn-down mailbox cost a doomed engine round trip on
+  // every poll, forever: the cron drives this every 5 minutes, and a released
+  // mailbox is unknown to the engine (its credentials were revoked), so each
+  // one burns a full request timeout against a slow engine and then throws.
+  // The tick's picker excluded them already; this query did not.
   const mailboxes = ctx.sql
-    .exec<{ email: string; poll_cursor: number }>(`SELECT email, poll_cursor FROM mailboxes WHERE tenant_id = ?`, ctx.tenantId)
+    .exec<{ email: string; poll_cursor: number }>(
+      `SELECT email, poll_cursor FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL`,
+      ctx.tenantId,
+    )
     .toArray();
 
   let replies = 0;
   let bounces = 0;
   let complaints = 0;
-  const now = ctx.clock.now();
 
   for (const mailbox of mailboxes) {
-    // CONSUMER-OWNED CURSOR (persist-after-confirm class fix): pass our stored
-    // high-water, process, then advance it. The engine holds no cursor, so a
-    // lost poll response leaves poll_cursor un-advanced and the next poll
-    // redelivers the same events (deduped below on message_id).
-    const { events, cursor } = await ctx.adapters.email.poll(mailbox.email, mailbox.poll_cursor);
-    for (const ev of events) {
-      const ref = lookupThreadRef(ctx, ev.threadId);
-      if (!ref) continue; // defensive: unknown thread, nothing to attribute it to
+    // PER-MAILBOX ISOLATION (N6). One mailbox's throw — an uncredentialed
+    // address, a transient engine failure, a vendor hiccup — used to abort the
+    // WHOLE tenant's poll, so a single bad mailbox silently stopped every
+    // other mailbox's replies/bounces from ever being processed. The failed
+    // mailbox's cursor stays un-advanced (nothing below it ran), so its events
+    // are redelivered on the next poll and deduped on message_id — no event
+    // loss, exactly like a lost poll response.
+    try {
+      // CONSUMER-OWNED CURSOR (persist-after-confirm class fix): pass our stored
+      // high-water, process, then advance it. The engine holds no cursor, so a
+      // lost poll response leaves poll_cursor un-advanced and the next poll
+      // redelivers the same events (deduped below on message_id).
+      const { events, cursor } = await ctx.adapters.email.poll(mailbox.email, mailbox.poll_cursor);
+      for (const ev of events) {
+        const ref = lookupThreadRef(ctx, ev.threadId);
+        if (!ref) continue; // defensive: unknown thread, nothing to attribute it to
 
-      // A duplicate (already-processed) event returns false and is NOT counted,
-      // so a double poll of the same reply yields metrics().replies === 1.
-      if (ev.kind === "reply") {
-        if (processReply(ctx, ev, ref)) replies++;
-      } else if (ev.kind === "bounce") {
-        if (processBounce(ctx, ev, ref)) bounces++;
-      } else {
-        if (processComplaint(ctx, ev, ref)) complaints++;
+        // A duplicate (already-processed) event returns false and is NOT counted,
+        // so a double poll of the same reply yields metrics().replies === 1.
+        if (ev.kind === "reply") {
+          if (processReply(ctx, ev, ref)) replies++;
+        } else if (ev.kind === "bounce") {
+          if (processBounce(ctx, ev, ref)) bounces++;
+        } else {
+          if (processComplaint(ctx, ev, ref)) complaints++;
+        }
       }
+      // Advance the cursor + stamp last-sync in the SAME synchronous stretch as
+      // the event processing above (no await between) — the DO commits the event
+      // side effects and the cursor advance as one unit at the next await/return.
+      // SPEC.md §19.2/§19.6 (M1): every poll, including a zero-event one, stamps
+      // last_polled_at (Settings→Mailboxes UI claim). The clock is read HERE,
+      // after this mailbox's own await, rather than hoisted above the loop: a
+      // hoisted value would record every mailbox in a long poll as synced at the
+      // moment the first one started (wave-2 N7's class).
+      ctx.sql.exec(
+        `UPDATE mailboxes SET last_polled_at = ?, poll_cursor = ? WHERE email = ? AND tenant_id = ?`,
+        ctx.clock.now(),
+        cursor,
+        mailbox.email,
+        ctx.tenantId,
+      );
+    } catch (err) {
+      console.error(`poll failed for mailbox ${mailbox.email} (cursor left un-advanced; other mailboxes still polled)`, err);
     }
-    // Advance the cursor + stamp last-sync in the SAME synchronous stretch as
-    // the event processing above (no await between) — the DO commits the event
-    // side effects and the cursor advance as one unit at the next await/return.
-    // SPEC.md §19.2/§19.6 (M1): every poll, including a zero-event one, stamps
-    // last_polled_at (Settings→Mailboxes UI claim).
-    ctx.sql.exec(
-      `UPDATE mailboxes SET last_polled_at = ?, poll_cursor = ? WHERE email = ? AND tenant_id = ?`,
-      now,
-      cursor,
-      mailbox.email,
-      ctx.tenantId,
-    );
   }
 
   return { replies, bounces, complaints };

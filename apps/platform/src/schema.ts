@@ -308,11 +308,17 @@ CREATE TABLE IF NOT EXISTS mailboxes (
   -- every existing (sandbox) mailbox byte-identical and never double-decrements.
   slot_counted INTEGER NOT NULL DEFAULT 0,
   -- Wave-2 §1 — WHICH VENDOR actually holds this mailbox: 'google' (a real
-  -- InboxKit-provisioned mailbox; the ports already return this and the insert
-  -- used to drop it) | 'byo' (customer-connected) | 'sandbox' (a demo-era row
-  -- created by the sandbox bundle — nothing exists at any vendor) | '' (not yet
-  -- classified). slot_counted is NOT this discriminator: a BYO mailbox and
-  -- any real row predating that column both read 0.
+  -- InboxKit-provisioned mailbox) | 'byo' (customer-connected) | 'sandbox' (a
+  -- demo-era row created by the sandbox bundle — nothing exists at any vendor)
+  -- | '' (not yet classified). slot_counted is NOT this discriminator: a BYO
+  -- mailbox and any real row predating that column both read 0.
+  --
+  -- WRITTEN AT INSERT by both mailbox creation paths — engine/
+  -- mailbox-provisioning.ts records whatever the MailboxPort returned
+  -- ('google' real / 'sandbox' sandbox), engine/byo-mailbox-composition.ts
+  -- writes 'byo' — and back-filled for rows predating the column by the
+  -- one-shot clock migration (engine/clock-migration.ts). Rows created before
+  -- BOTH of those read '' and are excluded from sending, deliberately.
   --
   -- '' IS LOAD-BEARING, NOT A BUG (adversary round-2, R8). The ALTER that adds
   -- this column runs in ensureColumnMigrations(), OUTSIDE the migration's

@@ -195,6 +195,19 @@ declare global {
       // nothing and arms no vendor spend; categorized in
       // KNOWN_NON_SPEND_ARMING (spend-armed-env-coverage.test.ts).
       SDN_INGEST_TOKEN?: string;
+      // Wave-2 auto-send OPS KILL SWITCH (design ACTIVATION PREDICATE leg 6).
+      // Any non-empty value stops the cron's send-pipeline leg for EVERY tenant
+      // on the next cycle — no deploy, no code change (`wrangler secret put` /
+      // a `[vars]` entry, then it takes effect within 5 minutes). Ships UNSET
+      // (auto-send enabled) per the founder ruling; this exists so the emergency
+      // stop is one command rather than a rollback. Checked once per leg and
+      // logged loudly when it trips (admin/ops-sweep.ts's
+      // runSendPipelineAllTenants).
+      //
+      // NOT `// spend-arming` — it can only ever SUPPRESS sending, never enable
+      // it; treating a kill switch as an arming signal would be backwards.
+      // Categorized in KNOWN_NON_SPEND_ARMING (spend-armed-env-coverage.test.ts).
+      AUTOSEND_DISABLED?: string;
     }
   }
 }

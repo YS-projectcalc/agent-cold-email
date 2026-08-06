@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { runInDurableObject } from "cloudflare:test";
-import { activatePaidPlan, api, mintTenant, postDisputeWebhook, tenantStub } from "./helpers.js";
+import { activatePaidPlan, api, makeMailboxesSendEligible, mintTenant, postDisputeWebhook, tenantStub } from "./helpers.js";
 import { disputeClosed, disputeCreated } from "./stripe-fixtures.js";
 
 interface WebhookResponse {
@@ -23,7 +23,7 @@ interface AccountResponse {
 // is why deliveries here go through `postDisputeWebhook`.
 const DISPUTED_CHARGE = "ch_test_disputed_1";
 
-async function provisionAndLaunch(token: string): Promise<void> {
+async function provisionAndLaunch(tenantId: string, token: string): Promise<void> {
   await api("/setup-infrastructure", {
     method: "POST",
     token,
@@ -47,6 +47,10 @@ async function provisionAndLaunch(token: string): Promise<void> {
       sequence: [{ step: 1, subject: "Hi", body: "Hi", delayDays: 0 }],
     }),
   });
+  // This lane asserts that a DISPUTE freeze stops sends and a won dispute
+  // resumes them, so its mailboxes must be sendable for any other reason —
+  // otherwise "sent 0" would pass while proving nothing (wave-2 §1a).
+  await makeMailboxesSendEligible(tenantId);
 }
 
 // D5.3 — chargeback / dispute lane (protects the master Stripe account).
@@ -56,7 +60,7 @@ describe("charge.dispute.* webhook — chargeback freeze/unfreeze lane (D5)", ()
   it("dispute.created freezes the tenant (sends stop); dispute.closed(won) unfreezes (sends resume)", async () => {
     const { tenantId, token } = await mintTenant("Dispute Co", "managed");
     await activatePaidPlan(tenantId, "managed");
-    await provisionAndLaunch(token);
+    await provisionAndLaunch(tenantId, token);
 
     const disputeId = "dp_test_1";
     const created = await postDisputeWebhook<WebhookResponse>(

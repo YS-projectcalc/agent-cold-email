@@ -67,8 +67,16 @@ const MAILBOX_READY_BACKOFF_MS = [2_000];
 /** The abstract step label the mailbox legs report (vendor-failure.ts's closed vocabulary). */
 const MAILBOX_STEP = VENDOR_STEP.mailboxPurchase;
 
-/** The provider a resumed leg assumes when the interrupted attempt never recorded one. */
-const DEFAULT_PROVIDER = "google";
+/**
+ * The provider a resumed leg assumes when the interrupted attempt never
+ * recorded one, on the REAL vendor path. Never assumed unconditionally: a
+ * sandbox-bundle resume derives 'sandbox' from the live adapter identity
+ * instead (see acquireMailbox), because mislabelling a sandbox row 'google'
+ * would make the wave-2 send-eligibility picker treat a mailbox that exists at
+ * no vendor as sendable — the exact failure the provider column exists to
+ * close.
+ */
+const DEFAULT_REAL_PROVIDER = "google";
 
 /** What one completed per-mailbox unit yields — the shape the row insert + credential push consume. */
 interface ProvisionedMailboxRecord {
@@ -130,7 +138,7 @@ export async function provisionMailboxesForDomain(
     // The row lands only now — after the vendor confirmed the mailbox exists AND
     // its warmup enrolled. See invariant 2 in the module doc: the billing meter
     // counts these rows, so one must never exist ahead of the resource.
-    insertProvisionedMailbox(ctx, opts, provisioned.email, provisioned.warmupStartedAt, now);
+    insertProvisionedMailbox(ctx, opts, provisioned, now);
     markMailboxIntent(ctx, intentKey, "committed");
 
     await meterProvisionedMailbox(ctx, provisioned.email, intentKey, now);
@@ -209,7 +217,11 @@ async function acquireMailbox(
   intent: MailboxIntentRow,
   opts: { email: string; localPart: string; domain: string; intentKey: string; mailer?: OpsMailer },
 ): Promise<{ provider: string; provisionedAt: number }> {
-  const provider = intent.provider ?? DEFAULT_PROVIDER;
+  // Derived from the LIVE adapter, not a constant: `intent.provider` is only
+  // null when a prior attempt died before the vendor answered, and the bundle
+  // this call is running against is the honest answer to "which vendor would
+  // have held it".
+  const provider = intent.provider ?? (ctx.adapters.kind === "real" ? DEFAULT_REAL_PROVIDER : "sandbox");
 
   if (intent.status === "warming" || intent.status === "committed") {
     logAction(ctx, "MAILBOX_PROVISION_RESUMED", opts.email, {
@@ -439,10 +451,10 @@ async function meterProvisionedMailbox(ctx: TenantContext, email: string, idempo
 function insertProvisionedMailbox(
   ctx: TenantContext,
   opts: { domainId: string; domain: string },
-  email: string,
-  warmupStartedAt: number,
+  provisioned: ProvisionedMailboxRecord,
   now: number,
 ): void {
+  const { email, warmupStartedAt } = provisioned;
   const day = computeWarmupDay(warmupStartedAt, now);
   ctx.sql.exec(
     // poll_cursor starts at -1 (never-polled sentinel, engine.ts's
@@ -451,8 +463,8 @@ function insertProvisionedMailbox(
     // WITHOUT fetching history, instead of the column's own DEFAULT 0 (an
     // ordinary incremental cursor since the round-2 fix, not a sentinel).
     `INSERT OR IGNORE INTO mailboxes
-       (id, tenant_id, domain_id, domain, email, daily_cap, sent_today, sent_today_epoch_day, status, warmup_started_at, created_at, poll_cursor, slot_counted)
-     VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, -1, ?)`,
+       (id, tenant_id, domain_id, domain, email, daily_cap, sent_today, sent_today_epoch_day, status, warmup_started_at, created_at, poll_cursor, slot_counted, provider)
+     VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, -1, ?, ?)`,
     newId("mbx"),
     ctx.tenantId,
     opts.domainId,
@@ -467,5 +479,12 @@ function insertProvisionedMailbox(
     // withSpendCeiling reserve above incremented vendor_slot_state iff the
     // bundle is real). Read at teardown to decrement the slot counter precisely.
     ctx.adapters.kind === "real" ? 1 : 0,
+    // Wave-2 §1a — WHICH VENDOR holds it, straight from the port's own answer
+    // ('google' from RealMailboxPort, 'sandbox' from the sandbox one). This
+    // value used to be computed and then DROPPED at the insert, which is what
+    // left the send-eligibility picker unable to tell a real mailbox from a
+    // demo-era phantom. `slot_counted` beside it is NOT a substitute: a BYO
+    // mailbox and any real row predating that column both read 0.
+    provisioned.provider,
   );
 }

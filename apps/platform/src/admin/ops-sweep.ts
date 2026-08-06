@@ -5,6 +5,7 @@
 // tenants_index, dispatching into each tenant's own DO via RPC — see
 // admin/README.md for why this is the aggregation boundary.
 
+import { RealClock } from "../clock.js";
 import { countWaitlistEmails, lookupTenantContactEmail } from "../db.js";
 import type { Env } from "../env.js";
 import type { TenantOpsSummary } from "../engine/ops-summary.js";
@@ -260,6 +261,177 @@ export async function runWebhookDeliveriesAllTenants(env: Env): Promise<WebhookD
     }
   }
   return { tenantsSwept: tenantIds.length, errors };
+}
+
+// --- Wave-2 §5: the send-pipeline leg (the auto-send driver) ---------------
+
+/**
+ * How long ONE tenant's poll+tick pair may occupy the leg. Rung 3 of the
+ * ordering ladder documented in vendors/real/email-port.ts — it MUST exceed
+ * ENGINE_REQUEST_TIMEOUT_MS (120s), or a tenant behind a slow-but-alive engine
+ * is abandoned having completed zero work on every single cycle, forever
+ * (adversary round-2, R5). Read that comment before changing this.
+ *
+ * The pair shares ONE budget, per the design. Consequence, stated rather than
+ * hidden: against a WEDGED engine a tenant's poll can consume the whole budget
+ * and its tick never runs — but a wedged engine is exactly the state in which
+ * the tick could not have sent anything either, so nothing is lost that was
+ * otherwise available.
+ */
+export const SEND_PIPELINE_TENANT_BUDGET_MS = 135_000;
+
+/**
+ * The whole leg's wall-clock ceiling, checked BETWEEN tenants. Converts "the
+ * tenants behind a stalled one never run" into "some tenants this cycle, all
+ * tenants across cycles" (with the rotation below). True worst case is this
+ * plus one tenant budget — 285s, under the 300s cron period, which is what
+ * keeps a wedged engine from making every sweep overlap the next.
+ */
+export const SEND_PIPELINE_LEG_DEADLINE_MS = 150_000;
+
+/** The `[triggers] crons` period this leg is sized against (5 minutes). */
+export const CRON_PERIOD_MS = 300_000;
+
+export interface SendPipelineSweepSummary {
+  tenantsScanned: number;
+  /** Tenants whose DO actually ran the pipeline (the activation predicate allowed it). */
+  tenantsRan: number;
+  sent: number;
+  replies: number;
+  /** Tenants whose poll+tick pair threw. Never aborts the sweep for the rest. */
+  errors: number;
+  /** Tenants abandoned mid-pair at the per-tenant budget. */
+  budgetExpiries: number;
+  /** Tenants not reached this cycle because the leg deadline was hit. */
+  skippedForLegDeadline: number;
+  /** True iff AUTOSEND_DISABLED tripped and NOTHING ran. */
+  disabled: boolean;
+}
+
+const BUDGET_EXPIRED = Symbol("send-pipeline-budget-expired");
+
+/**
+ * Runs `fn` under a wall-clock budget. The abandoned promise keeps running
+ * server-side (a DO RPC is not cancellable) — safe, because every effect it can
+ * still land is protected by the tick's atomic row claim and the engine's send
+ * idempotency, and a next-cycle overlap serializes on the DO input gate. Its
+ * rejection is swallowed so an abandoned RPC can never surface as an unhandled
+ * rejection that takes down the whole sweep.
+ */
+async function withTenantBudget<T>(budgetMs: number, fn: () => Promise<T>): Promise<T | typeof BUDGET_EXPIRED> {
+  const work = fn();
+  work.catch(() => {});
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expiry = new Promise<typeof BUDGET_EXPIRED>((resolve) => {
+    timer = setTimeout(() => resolve(BUDGET_EXPIRED), budgetMs);
+  });
+  try {
+    return await Promise.race([work, expiry]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * WAVE 2 — the auto-send driver. For every tenant: poll, then tick.
+ *
+ * WHY A CRON LEG AND NOT DO ALARMS (design DECISION 1). The 5-minute cron
+ * already fans out several DO-RPC legs across every tenant, so this is +O(N)
+ * RPCs on DOs that are being woken anyway; alarms would add three new failure
+ * classes (re-arm-after-throw, alarm lost on error, constructor re-arm for
+ * existing DOs) whose failure mode is a silently-never-sending tenant — strictly
+ * harder to detect than a loud cron-leg error. Cold-email cadence is day- and
+ * hour-granular, so 5-minute worst-case latency is immaterial.
+ *
+ * POLL BEFORE TICK, always: a reply that arrived since the last cycle must land
+ * (and stop-on-reply must cancel the remaining steps) BEFORE this cycle decides
+ * what to send, or we mail someone who already answered.
+ *
+ * NO D1 PRE-FILTER. `tenants_index.plan` is stale by design (it is written once
+ * at signup and never updated), so a D1 plan filter would exclude the only
+ * paying customer. The activation predicate lives ONLY inside the DO
+ * (tenant-do.ts's runScheduledTick / runScheduledPoll).
+ *
+ * `nowMs` seeds the rotation only; the budget/deadline clock is read live.
+ */
+export async function runSendPipelineAllTenants(
+  env: Env,
+  nowMs: number = new RealClock().now(),
+  opts: { tenantBudgetMs?: number; legDeadlineMs?: number } = {},
+): Promise<SendPipelineSweepSummary> {
+  const empty: SendPipelineSweepSummary = {
+    tenantsScanned: 0,
+    tenantsRan: 0,
+    sent: 0,
+    replies: 0,
+    errors: 0,
+    budgetExpiries: 0,
+    skippedForLegDeadline: 0,
+    disabled: false,
+  };
+
+  // The ops emergency brake (design predicate leg 6), checked ONCE for the whole
+  // leg. Ships ENABLED per the founder ruling; setting AUTOSEND_DISABLED to any
+  // non-empty value stops every tenant's automatic sending on the next cycle
+  // without a deploy. Logged loudly — a silently-disabled send pipeline is the
+  // failure shape this whole wave exists to make impossible.
+  if (env.AUTOSEND_DISABLED) {
+    console.warn("send pipeline: AUTOSEND_DISABLED is set — no tenant was polled or ticked this cycle (ops kill switch)");
+    return { ...empty, disabled: true };
+  }
+
+  const tenantIds = await listAllTenantIds(env);
+  const summary: SendPipelineSweepSummary = { ...empty, tenantsScanned: tenantIds.length };
+  if (tenantIds.length === 0) return summary; // R6 zero-guard: `% 0` is NaN
+
+  const budgetMs = opts.tenantBudgetMs ?? SEND_PIPELINE_TENANT_BUDGET_MS;
+  const legDeadlineMs = opts.legDeadlineMs ?? SEND_PIPELINE_LEG_DEADLINE_MS;
+  const clock = new RealClock();
+  const legStartedAt = clock.now();
+
+  // ROTATION. `listAllTenantIds` has no ORDER BY, i.e. a stable practical
+  // ordering — so without an offset a tenant that consistently burns the budget
+  // would occupy the head of the queue on every cycle and starve everyone behind
+  // it permanently. Cycle-derived and stateless, so it needs no storage and two
+  // Workers can't disagree. It STUTTERS (cron fire times drift around the period
+  // boundary, so consecutive cycles can repeat or skip an offset) — harmless,
+  // and the fairness property to test for is eventual coverage across cycles,
+  // not strict +1 stepping (adversary round-2, R6).
+  const offset = Math.floor(nowMs / CRON_PERIOD_MS) % tenantIds.length;
+
+  for (let i = 0; i < tenantIds.length; i++) {
+    if (clock.now() - legStartedAt >= legDeadlineMs) {
+      summary.skippedForLegDeadline = tenantIds.length - i;
+      console.warn(
+        `send pipeline: leg deadline reached after ${i}/${tenantIds.length} tenant(s) — ${summary.skippedForLegDeadline} deferred to a later cycle (rotation reaches them)`,
+      );
+      break;
+    }
+    const tenantId = tenantIds[(offset + i) % tenantIds.length] as string;
+    try {
+      const outcome = await withTenantBudget(budgetMs, async () => {
+        const stub = env.TENANT.get(env.TENANT.idFromName(tenantId));
+        const poll = await stub.runScheduledPoll();
+        const tick = await stub.runScheduledTick();
+        return { poll, tick };
+      });
+      if (outcome === BUDGET_EXPIRED) {
+        summary.budgetExpiries++;
+        console.warn(`send pipeline: tenant ${tenantId} exceeded its ${budgetMs}ms budget — abandoned for this cycle`);
+        continue;
+      }
+      if (outcome.tick.ran || outcome.poll.ran) summary.tenantsRan++;
+      summary.sent += outcome.tick.sent;
+      summary.replies += outcome.poll.replies;
+    } catch (err) {
+      // One tenant's failure must never abort the sweep for every other tenant,
+      // nor (via runScheduledOpsSweep) every other cron leg.
+      summary.errors++;
+      console.error(`send pipeline failed for tenant ${tenantId}`, err);
+    }
+  }
+
+  return summary;
 }
 
 export interface OpsDigest {
