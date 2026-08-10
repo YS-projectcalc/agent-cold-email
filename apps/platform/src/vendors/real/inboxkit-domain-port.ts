@@ -82,6 +82,12 @@ export interface InboxKitDomainRegistrant {
  * failure was graded RETRYABLE so the customer's agent re-ran the same wrong
  * call for 24 hours. The port implemented one half of a two-half contract and
  * was only ever invoked on the other half.
+ *
+ * ⚠ VENDOR CONTRACT 2026-08-10 (InboxKit support reply, verbatim): "The domain
+ * goauthorpitchdesk.com is now active, and the DNS will be configured during
+ * mailbox processing." The two halves differ in WHEN mail DNS exists, not just
+ * in which call sets it up — so the propagation verdicts the wave-1 fix waited
+ * on are inert on the purchased half. See `polledDomainIsReady`.
  */
 export class RealInboxKitDomainPort implements DomainPort {
   private readonly client: InboxKitClient;
@@ -226,25 +232,25 @@ export class RealInboxKitDomainPort implements DomainPort {
   async setDns(domain: string, _idempotencyKey: string, connectionType: DomainConnectionType): Promise<DnsRecordSet> {
     return connectionType === "connected"
       ? this.setDnsForConnectedDomain(domain)
-      : this.pollPurchasedDomainDns(domain);
+      : this.pollPurchasedDomainDns(domain, connectionType);
   }
 
   /**
    * PURCHASED (and 'unknown', see `DomainConnectionType`): InboxKit is the
    * registrar AND already owns the nameservers, so there is no handshake to
-   * perform — its own automation sets the mail DNS up once the registrar-side
-   * nameserver change propagates. Our job is only to OBSERVE that, so this is a
-   * read-only poll: it can report "not ready yet" but can never fail the way
-   * asking to connect an already-connected domain does.
+   * perform — its own automation sets the mail DNS up. Our job is only to
+   * OBSERVE the domain, so this is a read-only poll: it can report "not ready
+   * yet" but can never fail the way asking to connect an already-connected
+   * domain does.
    */
-  private async pollPurchasedDomainDns(domain: string): Promise<DnsRecordSet> {
+  private async pollPurchasedDomainDns(domain: string, connectionType: DomainConnectionType): Promise<DnsRecordSet> {
     const record = await this.findDomainRecord(domain);
     if (!record) {
       // Registration is ASYNC — a domain whose order was accepted seconds ago is
       // genuinely not listed yet. Retryable: this one really does heal by waiting.
       throw new VendorError(`inboxkit domains/list does not yet list ${domain}`, true);
     }
-    return dnsRecordSet(purchasedDomainIsReady(record));
+    return dnsRecordSet(polledDomainIsReady(record, connectionType));
   }
 
   /**
@@ -327,9 +333,13 @@ interface RawDomainRow {
   status?: string;
   connection_type?: string;
   assigned_mailboxes?: number;
-  /** Vendor's own coarse propagation verdict. */
+  /**
+   * Vendor's own coarse propagation verdict. Meaningful on a CONNECTED domain
+   * only — on a purchased one the checker behind it does not run until mailbox
+   * processing, so it reads "pending" indefinitely (contract note above).
+   */
   dns_propagation_status?: string;
-  /** Vendor's own verdict on whether the domain's real nameservers match the ones it assigned. */
+  /** Vendor's own verdict on whether the domain's real nameservers match the ones it assigned. Same connected-only caveat. */
   nameserver_match_status?: string;
   /** The nameservers InboxKit assigned (what SHOULD be in effect). */
   nameservers?: string[];
@@ -356,14 +366,18 @@ function normalizeConnectionType(raw: string | undefined): DomainConnectionType 
  * "propagated" and "matched" are the tokens actually observed live in this
  * PROPAGATION field ("pending" is the only other one seen). Deliberately an
  * ALLOWLIST rather than "anything that isn't pending": an unrecognized token
- * must fall to NOT-ready, because the two failure directions are not
- * symmetrical. A false "not ready" leaves the domain 'pending' with a retryable
- * error — visible, recoverable, no money spent. A false "ready" provisions
- * billable mailboxes onto a domain whose mail DNS does not work, which is the
- * silent, monthly-billing failure this wave exists to prevent. "active"/"ok"
- * were dropped (round 2 finding): in a `status` field "active" means live, but
- * in a *propagation* field it plausibly means "actively propagating" — i.e.
- * NOT finished — and neither has ever been observed live here.
+ * must fall to NOT-ready, because a false "ready" provisions billable mailboxes
+ * onto a domain whose mail DNS does not work, which is the silent,
+ * monthly-billing failure this wave exists to prevent. "active"/"ok" were
+ * dropped (round 2 finding): in a `status` field "active" means live, but in a
+ * *propagation* field it plausibly means "actively propagating" — i.e. NOT
+ * finished — and neither has ever been observed live here.
+ *
+ * ⚠ The wave-1 justification for that asymmetry ("a false not-ready is visible,
+ * recoverable and costs nothing") held only where the verdicts eventually
+ * ARRIVE. On a purchased domain they never do (see `polledDomainIsReady`), so
+ * there a false not-ready was a permanent deadlock, not a cheap retry — which is
+ * why these tokens no longer gate that branch at all.
  */
 const READY_STATUS_TOKENS = new Set([
   "completed",
@@ -378,23 +392,52 @@ const READY_STATUS_TOKENS = new Set([
 ]);
 
 /**
- * Is a PURCHASED domain's mail DNS genuinely in effect?
+ * May the caller provision mailboxes onto this polled domain?
  *
- * A CONJUNCTION of the vendor's own two verdicts, plus `status: "active"` (an
- * expired/suspended domain is never ready whatever else it reports). Both
- * verdicts are required; there is no alternative route to `true`.
+ * `status: "active"` is required either way — an expired or suspended
+ * registration can never carry mail, whatever else the record reports. What
+ * differs is whether the vendor's two propagation verdicts are consulted at all,
+ * and that is decided by the OPERATING connection type (the discriminator the
+ * caller resolved), never by the vendor row's own field: reading it off the row
+ * would silently import this rule into the connected flow.
  *
- * THIS USED TO HAVE A SECOND ROUTE and it was a false-ready bug (combined-diff
- * gate 2026-08-06, finding #1, EXECUTED against the real REST route): if every
- * nameserver InboxKit assigned appeared in `actual_nameservers`, the function
- * returned true WITHOUT consulting `dns_propagation_status`, so a domain whose
- * NS delegation had landed but whose mail DNS the vendor had not finished
- * setting up was marked ready — and a mailbox was bought, warmup-enrolled and
- * billed on it. Exactly the silent monthly-billing failure this module's own
- * asymmetry note (above) exists to prevent.
+ * PURCHASED — the verdicts are NOT consulted. VENDOR CONTRACT, InboxKit support
+ * reply 2026-08-10, verbatim: "The domain goauthorpitchdesk.com is now active,
+ * and the DNS will be configured during mailbox processing." The propagation
+ * checker belongs to the CONNECT flow; on a domain InboxKit registered it never
+ * runs before a mailbox exists, so `dns_propagation_status` and
+ * `nameserver_match_status` stay "pending" and `last_nameserver_check` stays
+ * null indefinitely (six days observed live on the workspace holding
+ * goauthorpitchdesk.com, while the vendor's own dashboard computed NS "Matched"
+ * live from DNS — the stored fields simply never update). Requiring them was
+ * therefore not a conservative wait but a DEADLOCK: mailbox creation is what
+ * triggers the DNS configuration the old gate was waiting to observe, so every
+ * retry re-read "pending" and stalled forever.
+ *
+ * That inverts where the billing safety comes from on this branch, and it is
+ * worth being explicit that it did not disappear. The mail-DNS-must-work
+ * guarantee no longer rides on this predicate; it rides on the vendor confirming
+ * the MAILBOX — engine/mailbox-provisioning.ts buys, then awaits
+ * `provisioningState === "ready"`, and only then writes the billable row. A
+ * vendor failure while configuring the DNS surfaces there, with its own grade.
+ *
+ * CONNECTED / UNKNOWN — the full conjunction stands. On a connected domain the
+ * customer's own registrar has to act, the checker demonstrably DOES run
+ * (dmhadvisor.com polled live with `last_nameserver_check` non-null and
+ * "matched"), and the verdicts are real evidence. An 'unknown' row is one we
+ * failed to classify, and nothing licenses the short-circuit for it.
+ *
+ * THE CONJUNCTION USED TO HAVE A SECOND ROUTE and it was a false-ready bug
+ * (combined-diff gate 2026-08-06, finding #1, EXECUTED against the real REST
+ * route): if every nameserver InboxKit assigned appeared in
+ * `actual_nameservers`, the function returned true WITHOUT consulting
+ * `dns_propagation_status`, so a domain whose NS delegation had landed but whose
+ * mail DNS the vendor had not finished setting up was marked ready — and a
+ * mailbox was bought, warmup-enrolled and billed on it.
  *
  * The route was deleted rather than added as a third conjunct, for three
- * reasons:
+ * reasons, and it stays deleted — the change above is grounded in the vendor's
+ * stated contract, not in re-deriving readiness from raw fields:
  *  - It was NOT independent evidence. `actual_nameservers` is a field in the
  *    same `/domains/list` response as the verdicts — we never query DNS
  *    ourselves — so the route traded the vendor's CONCLUSION for the vendor's
@@ -402,14 +445,14 @@ const READY_STATUS_TOKENS = new Set([
  *    "first-party proof" framing it shipped under was simply wrong.
  *  - Matching nameservers say "the zone is delegated to the vendor", NOT
  *    "MX/SPF/DKIM/DMARC are live inside it". Delegation is a PRECONDITION of
- *    mail-DNS propagation, not a substitute for it, and the mailbox buy depends
- *    on the latter.
+ *    mail-DNS propagation, not a substitute for it.
  *  - `nameserver_match_status` is the vendor's verdict on precisely the
  *    comparison the route re-derived. Two derivations of one fact with
  *    different thresholds is what produced the disagreement in the first place.
  */
-function purchasedDomainIsReady(record: ListedDomain): boolean {
+function polledDomainIsReady(record: ListedDomain, connectionType: DomainConnectionType): boolean {
   if ((record.status ?? "").trim().toLowerCase() !== "active") return false;
+  if (connectionType === "purchased") return true;
   return isReadyStatus(record.dns_propagation_status) && isReadyStatus(record.nameserver_match_status);
 }
 

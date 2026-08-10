@@ -281,8 +281,10 @@ export const IK_DOMAINS_LIST_PURCHASED_PENDING = {
 };
 
 /** The same purchased domain once the registrar change has actually propagated:
- * the assigned nameservers now appear in `actual_nameservers`, which is the
- * FIRST-PARTY proof the readiness check prefers over any vendor status token. */
+ * the assigned nameservers appear in `actual_nameservers` AND both of the
+ * vendor's verdicts read finished. `actual_nameservers` is NOT a route to ready
+ * on its own — that short-circuit was the 2026-08-06 false-ready bug and is
+ * deleted (inboxkit-domain-port.ts's `polledDomainIsReady`). */
 export const IK_DOMAINS_LIST_PURCHASED_PROPAGATED = {
   ...IK_DOMAINS_LIST_PURCHASED_PENDING,
   domains: [

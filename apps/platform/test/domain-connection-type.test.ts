@@ -95,18 +95,64 @@ describe("setDns branches on connection type — the wrong-operation root cause"
   });
 });
 
-describe("purchased-domain readiness is derived from REAL propagation state", () => {
-  it("Mordy's live state (nameservers assigned, none observed) reports NOT ready — without throwing", async () => {
+describe("a PURCHASED domain clears on the vendor's contract, not on its propagation fields", () => {
+  // VENDOR CONTRACT (InboxKit support, 2026-08-10, verbatim): "The domain
+  // goauthorpitchdesk.com is now active, and the DNS will be configured during
+  // mailbox processing." The propagation checker belongs to the CONNECT flow —
+  // on a purchased domain it never runs before a mailbox exists, so the two
+  // stored verdicts stay "pending" forever (six days observed live). Requiring
+  // them was not a conservative wait, it was a deadlock with no exit.
+  it("Mordy's EXACT live shape (pending/pending, last_nameserver_check null) clears the gate", async () => {
     installFetch({ list: IK_DOMAINS_LIST_PURCHASED_PENDING });
     const result = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "purchased");
-    // Not an error — the vendor is simply not finished. All-false is what makes
-    // the caller's gate work; "did not throw" used to be read as "ready".
+    expect(result).toEqual({ mx: true, spf: true, dkim: true, dmarc: true, rdns: true });
+  });
+
+  it("a purchased domain whose verdicts DID complete clears the gate too", async () => {
+    installFetch({ list: IK_DOMAINS_LIST_PURCHASED_PROPAGATED });
+    const result = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "purchased");
+    expect(result.mx).toBe(true);
+  });
+
+  it("a purchased domain that is NOT active is still refused, whatever its propagation fields say", async () => {
+    // `status` is the one signal that stays meaningful on a purchased domain:
+    // an expired/suspended registration cannot carry mail no matter what the
+    // vendor is about to do during mailbox processing.
+    installFetch({
+      list: {
+        ...IK_DOMAINS_LIST_PURCHASED_PROPAGATED,
+        domains: [{ ...IK_DOMAINS_LIST_PURCHASED_PROPAGATED.domains[0], status: "expired" }],
+      },
+    });
+    const result = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "purchased");
+    expect(result.mx).toBe(false);
+  });
+
+  it("a domain the vendor has not listed yet is RETRYABLE (async registration, genuinely heals)", async () => {
+    // The poll still has to SEE the record — the contract clears the propagation
+    // verdicts, not the existence check.
+    installFetch({ list: { error: false, domains: [], pages: 1 } });
+    const err = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "purchased").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(VendorError);
+    expect((err as VendorError).retryable).toBe(true);
+  });
+});
+
+describe("the propagation-verdict wait still governs every domain we CANNOT classify", () => {
+  // The contract fact is about domains InboxKit registered. An 'unknown' row is
+  // one we failed to classify (a legacy row whose backfill lookup failed, or a
+  // vendor row with no connection_type), so nothing licenses the short-circuit
+  // for it and the wave-1 conjunction — including every false-ready guard the
+  // 2026-08-06 combined-diff gate added — still applies here.
+  it("pending/pending reads NOT ready", async () => {
+    installFetch({ list: IK_DOMAINS_LIST_PURCHASED_PENDING });
+    const result = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "unknown");
     expect(result).toEqual({ mx: false, spf: false, dkim: false, dmarc: false, rdns: false });
   });
 
-  it("ready only once the vendor's own propagation verdict says so", async () => {
+  it("both verdicts complete reads ready", async () => {
     installFetch({ list: IK_DOMAINS_LIST_PURCHASED_PROPAGATED });
-    const result = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "purchased");
+    const result = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "unknown");
     expect(result.mx).toBe(true);
   });
 
@@ -118,7 +164,7 @@ describe("purchased-domain readiness is derived from REAL propagation state", ()
     // does not work yet. Delegation is a precondition of propagation, not a
     // substitute for it.
     installFetch({ list: IK_DOMAINS_LIST_PURCHASED_NS_MATCHED_DNS_PENDING });
-    const result = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "purchased");
+    const result = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "unknown");
     expect(result).toEqual({ mx: false, spf: false, dkim: false, dmarc: false, rdns: false });
   });
 
@@ -137,7 +183,7 @@ describe("purchased-domain readiness is derived from REAL propagation state", ()
         ],
       },
     });
-    const result = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "purchased");
+    const result = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "unknown");
     expect(result.mx).toBe(false);
   });
 
@@ -157,7 +203,7 @@ describe("purchased-domain readiness is derived from REAL propagation state", ()
         ],
       },
     });
-    const result = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "purchased");
+    const result = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "unknown");
     expect(result.mx).toBe(false);
   });
 
@@ -166,7 +212,7 @@ describe("purchased-domain readiness is derived from REAL propagation state", ()
     // PROPAGATION verdicts, not its domain `status` field. "active" is
     // ambiguous there (it could plausibly mean "actively propagating", i.e.
     // NOT finished) and has never been observed live — only "pending" has
-    // (purchasedDomainIsReady's own doc comment). "ok" is equally unobserved.
+    // (READY_STATUS_TOKENS' own doc comment). "ok" is equally unobserved.
     // Neither belongs in the ready-token allowlist.
     for (const token of ["active", "ok"]) {
       vi.restoreAllMocks();
@@ -182,27 +228,44 @@ describe("purchased-domain readiness is derived from REAL propagation state", ()
           ],
         },
       });
-      const result = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "purchased");
+      const result = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "unknown");
       expect(result, `token "${token}" must read NOT ready`).toEqual({ mx: false, spf: false, dkim: false, dmarc: false, rdns: false });
     }
   });
 
-  it("a domain the vendor has not listed yet is RETRYABLE (async registration, genuinely heals)", async () => {
-    installFetch({ list: { error: false, domains: [], pages: 1 } });
-    const err = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "purchased").catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(VendorError);
-    expect((err as VendorError).retryable).toBe(true);
-  });
-
-  it("a non-active domain is never ready, whatever its nameservers say", async () => {
+  it("an unclassified domain that is not active is refused as well", async () => {
     installFetch({
       list: {
         ...IK_DOMAINS_LIST_PURCHASED_PROPAGATED,
         domains: [{ ...IK_DOMAINS_LIST_PURCHASED_PROPAGATED.domains[0], status: "expired" }],
       },
     });
-    const result = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "purchased");
+    const result = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "unknown");
     expect(result.mx).toBe(false);
+  });
+});
+
+describe("the purchased short-circuit is keyed on the OPERATING type, never on the vendor row", () => {
+  it("a CONNECTED domain still waits for real propagation even when its listing row would satisfy the short-circuit", async () => {
+    // OVER-WIDENING GUARD. The listing row here is byte-identical to the
+    // purchased-active-pending record that now clears the gate, but the domain
+    // is being driven as CONNECTED — where the customer's own registrar has to
+    // act, the checker demonstrably DOES run, and the vendor's `propagated`
+    // answer is real evidence. Reading the contract fact off the vendor's row
+    // instead of off the operating type would silently import it into this flow.
+    installFetch({
+      list: IK_DOMAINS_LIST_PURCHASED_PENDING,
+      nameservers: IK_NAMESERVERS_RESULT,
+      propagation: { error: false, result: [{ name: DOMAIN, status: "pending", propagated: false }] },
+    });
+    const result = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "connected");
+    expect(result).toEqual({ mx: false, spf: false, dkim: false, dmarc: false, rdns: false });
+  });
+
+  it("a CONNECTED domain whose propagation the vendor confirms is ready, as before", async () => {
+    installFetch({ nameservers: IK_NAMESERVERS_RESULT, propagation: IK_PROPAGATION_CONFIRMED });
+    const result = await new RealInboxKitDomainPort(CONFIG).setDns("connected-elsewhere.com", "k1", "connected");
+    expect(result.mx).toBe(true);
   });
 });
 
