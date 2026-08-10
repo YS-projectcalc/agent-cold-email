@@ -391,6 +391,32 @@ function intendedBillingState(event: StripeEventInput): string | null {
 }
 
 /**
+ * True when THIS dispute's own resolution is already recorded AND that outcome
+ * does not itself warrant a freeze — so re-applying its `charge.dispute.created`
+ * could only write a 'disputed' that nothing left alive can lift (the sole
+ * writer that leaves 'disputed' is this dispute's own closed(won), by then
+ * deduped by `webhook_events`).
+ *
+ * 'lost' is deliberately NOT settled-without-freeze: a lost chargeback's
+ * terminal state IS the freeze (the owner decides via terminate), and on a
+ * closed-first delivery the `closed` branch writes no billing_state at all, so
+ * the late `created` is the only event that can still apply the D5 control.
+ * A dispute we cannot identify is not settled — the rule stays biased toward
+ * applying.
+ */
+function isDisputeSettledWithoutFreeze(ctx: TenantContext, event: StripeEventInput): boolean {
+  const disputeId = event.data.object.id;
+  if (typeof disputeId !== "string") return false;
+  const row = ctx.sql
+    .exec<{ status: string; closed_at: number | null }>(
+      `SELECT status, closed_at FROM disputes WHERE dispute_id = ?`,
+      disputeId,
+    )
+    .toArray()[0];
+  return row !== undefined && row.closed_at !== null && row.status !== "lost";
+}
+
+/**
  * True when this event must be REFUSED as out of order
  * (audit-stripe-webhook-2026-08-06.md finding 3, rescoped by
  * wave2-integration-gate-2026-08-06.md BLOCKING 2).
@@ -431,14 +457,22 @@ function intendedBillingState(event: StripeEventInput): string | null {
  * watermark. Every real Stripe event carries `created`; only synthetic fixtures
  * lack one, and an unordered event must not poison the ordering of real ones.
  *
- * `charge.dispute.created` is EXEMPT from the whole rule (gate residual N-1).
- * Even a per-lane mark is broader than the state it protects: the dispute lane
- * carries every dispute OBJECT, so one dispute's WIN moved the mark past a
+ * `charge.dispute.created` is exempt from the per-LANE mark (gate residual
+ * N-1). Even a per-lane mark is broader than the state it protects: the dispute
+ * lane carries every dispute OBJECT, so one dispute's WIN moved the mark past a
  * DIFFERENT, genuine chargeback emitted earlier and condition (2) then read
  * 'disputed' vs the 'active' the win had restored as a conflict — the second
- * chargeback was refused and that tenant never froze. A freeze is never a
- * regression: applying it can only lose time (until its own dispute.closed
- * lifts it), while refusing it drops the D5 control outright. Ordering still
+ * chargeback was refused and that tenant never froze. Refusing a freeze drops
+ * the D5 control outright, so the exemption is right for every OTHER dispute.
+ *
+ * It is NOT right for the dispute's own (wave3-integration-gate-2026-08-09.md
+ * B-1): the exemption's justification — "applying it can only lose time, until
+ * its own dispute.closed lifts it" — is false once that dispute.closed has
+ * already been consumed and deduped, which Stripe permits, since it orders
+ * nothing WITHIN a dispute either. So the exemption is bounded by this
+ * dispute's OWN recorded resolution (isDisputeSettledWithoutFreeze) — a
+ * per-object witness, stronger than any timestamp and independent of `created`,
+ * because a dispute is always created before it is resolved. Ordering still
  * governs `charge.dispute.closed`, which is the direction that can actually
  * regress — a stale WON must not lift a newer freeze.
  *
@@ -448,8 +482,11 @@ function intendedBillingState(event: StripeEventInput): string | null {
  * rule is deliberately biased toward applying.
  */
 function isStaleBillingEvent(ctx: TenantContext, event: StripeEventInput): boolean {
+  // Before the `created`-less short circuit on purpose: this is a per-object
+  // ordering witness, not a timestamp comparison, so it holds for an unordered
+  // event too.
+  if (event.type === "charge.dispute.created") return isDisputeSettledWithoutFreeze(ctx, event);
   if (event.created === undefined) return false;
-  if (event.type === "charge.dispute.created") return false;
   const lane = stripeEventLane(event.type);
   if (!lane) return false;
 
@@ -753,11 +790,23 @@ async function applyStripeEventEffects(ctx: TenantContext, event: StripeEventInp
       const rawStatus = typeof obj.status === "string" ? obj.status : "";
       const outcome = rawStatus === "won" ? "won" : rawStatus === "lost" ? "lost" : "closed";
       if (disputeId) {
+        // UPSERT, not UPDATE (wave3 gate B-1): Stripe orders nothing, not even
+        // the two events of one dispute, and a plain UPDATE arriving first wrote
+        // zero rows — leaving NO record that this dispute was ever resolved,
+        // which is exactly the witness isStaleBillingEvent needs to refuse the
+        // late `created`. `created_at` is left alone on conflict: it is when WE
+        // first recorded the dispute, and the open row is the earlier truth.
         ctx.sql.exec(
-          `UPDATE disputes SET status = ?, closed_at = ? WHERE dispute_id = ?`,
+          `INSERT INTO disputes (dispute_id, charge_id, amount_cents, reason, status, created_at, closed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (dispute_id) DO UPDATE SET status = excluded.status, closed_at = excluded.closed_at`,
+          disputeId,
+          typeof obj.charge === "string" ? obj.charge : null,
+          typeof obj.amount === "number" ? obj.amount : 0,
+          typeof obj.reason === "string" ? obj.reason : null,
           outcome,
           now,
-          disputeId,
+          now,
         );
       }
       // Won -> lift the freeze WE set (only when still 'disputed', so we never

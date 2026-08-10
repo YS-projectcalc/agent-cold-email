@@ -632,7 +632,9 @@ CREATE TABLE IF NOT EXISTS deliverability_actions (
 -- redelivered event can never double-apply. Scoped per-DO (one tenant per DO
 -- instance) exactly like webhook_events; keyed on the Stripe dispute id so two
 -- DIFFERENT events referencing the SAME dispute (created then closed) collapse
--- to one row (INSERT OR IGNORE on create, UPDATE on close).
+-- to one row (INSERT OR IGNORE on create, UPSERT on close — the close can be
+-- DELIVERED FIRST, and a row born closed is what tells the late created event
+-- that its dispute is already settled).
 CREATE TABLE IF NOT EXISTS disputes (
   dispute_id TEXT PRIMARY KEY,
   charge_id TEXT,

@@ -418,6 +418,115 @@ describe("N-1 — one dispute's lifecycle must not silence a DIFFERENT chargebac
   });
 });
 
+// wave3-integration-gate-2026-08-09.md B-1. N-1's exemption was UNCONDITIONAL,
+// and Stripe orders nothing — not even the two events of a SINGLE dispute. When
+// a dispute's `closed` lands before its own `created`, the exemption let the
+// late `created` write 'disputed' with no state guard, and 'disputed' is
+// terminal: the only writer that leaves it is that dispute's closed(won), which
+// has already been consumed and deduped. No alert, no self-heal, and the
+// recovery `billing-state.ts` prints ("reactivate via POST /checkout") is itself
+// scoped `billing_state != 'disputed'` — the tenant was bricked forever.
+//
+// The discriminator is the dispute's OWN recorded resolution, which is a
+// stronger ordering witness than any timestamp (a dispute is always created
+// before it is resolved). That means `dispute.closed` has to leave a row even
+// when it arrives first, which a plain UPDATE did not.
+describe("B-1 — a dispute's late `created` must not re-freeze what its own resolution already settled", () => {
+  it("does not brick the tenant when dispute.closed(won) is delivered BEFORE that dispute's created", async () => {
+    const { tenantId } = await mintTenant("Closed First Co", "managed");
+    await seedBenignSdnList();
+    await postWebhook(checkoutSessionCompleted({ tenantId, created: T0 }));
+
+    // The WIN lands first. There is no freeze to lift, so it changes no tenant
+    // state — but it must still record that this dispute is over.
+    const won = await postDisputeWebhook<WebhookResponse>(
+      disputeClosed({ chargeId: "ch_reorder", disputeId: "dp_reorder", status: "won", created: T0 + 500 }),
+      tenantId,
+    );
+    expect(won.body.applied).toBe(true);
+    expect((await readProfile(tenantId)).billing_state).toBe("active");
+
+    const settled = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
+      state.storage.sql
+        .exec<{ status: string; closed_at: number | null }>(`SELECT status, closed_at FROM disputes WHERE dispute_id = ?`, "dp_reorder")
+        .toArray(),
+    );
+    expect(settled).toHaveLength(1);
+    expect(settled[0]?.status).toBe("won");
+    expect(settled[0]?.closed_at).not.toBeNull();
+
+    // Its own `created`, emitted 400s earlier, arrives late. Applying it now
+    // freezes a tenant nothing can ever unfreeze.
+    const late = await postDisputeWebhook<WebhookResponse>(
+      disputeCreated({ chargeId: "ch_reorder", disputeId: "dp_reorder", created: T0 + 100 }),
+      tenantId,
+    );
+    expect(late.body).toMatchObject({ applied: false, stale: true });
+    expect(late.body.frozen).toBeFalsy();
+    expect((await readProfile(tenantId)).billing_state).toBe("active");
+
+    // The refusal is not a dunning strike either (N-2 holds for this path too).
+    const events = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
+      state.storage.sql
+        .exec<{ applied: number }>(`SELECT applied FROM webhook_events WHERE type = 'charge.dispute.created'`)
+        .toArray(),
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0]?.applied).toBe(0);
+  });
+
+  // Same brick, non-`won` terminal outcome: an inquiry/warning that closed
+  // writes NO billing_state (intendedBillingState is null for it), so a late
+  // `created` after it would freeze with nothing left alive to lift the freeze.
+  it("does not brick the tenant when a non-won dispute.closed is delivered before its created", async () => {
+    const { tenantId } = await mintTenant("Warning Closed Co", "managed");
+    await seedBenignSdnList();
+    await postWebhook(checkoutSessionCompleted({ tenantId, created: T0 }));
+
+    await postDisputeWebhook(
+      disputeClosed({ chargeId: "ch_warning", disputeId: "dp_warning", status: "warning_closed", created: T0 + 500 }),
+      tenantId,
+    );
+    const late = await postDisputeWebhook<WebhookResponse>(
+      disputeCreated({ chargeId: "ch_warning", disputeId: "dp_warning", created: T0 + 100 }),
+      tenantId,
+    );
+    expect(late.body).toMatchObject({ applied: false, stale: true });
+    expect((await readProfile(tenantId)).billing_state).toBe("active");
+  });
+
+  // The direction that must NOT be narrowed: a LOST chargeback's terminal state
+  // IS the freeze (the owner decides via terminate). Delivered closed-first,
+  // the `closed` branch writes no billing_state at all, so the late `created`
+  // is the only event that can still apply the D5 control — it must apply.
+  it("still freezes on a late created when the dispute was LOST", async () => {
+    const { tenantId } = await mintTenant("Lost First Co", "managed");
+    await seedBenignSdnList();
+    await postWebhook(checkoutSessionCompleted({ tenantId, created: T0 }));
+
+    await postDisputeWebhook(
+      disputeClosed({ chargeId: "ch_lost_first", disputeId: "dp_lost_first", status: "lost", created: T0 + 500 }),
+      tenantId,
+    );
+    expect((await readProfile(tenantId)).billing_state).toBe("active");
+
+    const late = await postDisputeWebhook<WebhookResponse>(
+      disputeCreated({ chargeId: "ch_lost_first", disputeId: "dp_lost_first", created: T0 + 100 }),
+      tenantId,
+    );
+    expect(late.body).toMatchObject({ applied: true, frozen: true });
+    expect((await readProfile(tenantId)).billing_state).toBe("disputed");
+
+    // One row per dispute, and the recorded outcome is still the resolution —
+    // the late `created`'s INSERT OR IGNORE must not reopen it.
+    const rows = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
+      state.storage.sql.exec<{ status: string }>(`SELECT status FROM disputes WHERE dispute_id = ?`, "dp_lost_first").toArray(),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.status).toBe("lost");
+  });
+});
+
 describe("N-2 — an event REFUSED as stale must not count as a dunning strike", () => {
   it("a recovered payer is not suspended on their first genuine failure after three refused stale ones", async () => {
     const { tenantId } = await mintTenant("Refused Strikes Co", "managed");

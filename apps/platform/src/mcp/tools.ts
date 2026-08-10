@@ -13,7 +13,7 @@
 // exact same facade, never a parallel implementation (CLAUDE.md rule c).
 
 import type { ZodType } from "zod";
-import { ActivityQueryInput, InboxQueryInput, ListLeadsQueryInput, ListMessagesQueryInput, RemoveMailboxesInput, SuppressLeadInput, UpdateLeadInput } from "@coldstart/shared";
+import { ActivityQueryInput, InboxQueryInput, ListLeadsQueryInput, ListMessagesQueryInput, SuppressLeadInput, UpdateLeadInput } from "@coldstart/shared";
 import type { TenantDO } from "../tenant-do.js";
 import {
   CampaignIdInput,
