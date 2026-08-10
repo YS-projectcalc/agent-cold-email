@@ -1024,6 +1024,20 @@ export class TenantDO extends DurableObject<Env> {
   // opsSummary() on each tenant's own DO stub — never touches another
   // tenant's SqlStorage directly (ARCHITECTURE.md #3 + CLAUDE.md rule h). ---
 
+  /**
+   * Watchtower canary probe (src/admin/watchtower.ts). Called against a FIXED
+   * canary id that is never a real tenant, so it touches no customer data and
+   * needs no initialized profile — the value is that reaching this line at all
+   * proves the class CONSTRUCTS: the constructor above runs the whole schema +
+   * column migrations, and this repo has twice shipped a change that made that
+   * throw, which 500s every RPC for every tenant simultaneously. The DO probe
+   * used to ping only RateLimiterDO and reported healthy right through it.
+   */
+  async ping(): Promise<boolean> {
+    await this.ctx.storage.get("__watchtower_probe__");
+    return true;
+  }
+
   opsSummary(sinceMs: number): TenantOpsSummary {
     return getOpsSummary(this.requireContext(), sinceMs);
   }

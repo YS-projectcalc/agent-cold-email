@@ -21,6 +21,16 @@ class_name = "TenantDO"
 name = "SIGNUP_LIMITER"
 class_name = "RateLimiterDO"
 
+# The watchtower's own control state (src/watchtower-do.ts). A DO, not another
+# D1 table, for two reasons the alerting audit (2026-08-06) made blocking: its
+# storage is readable when D1 is NOT, so a sustained D1 outage can still be
+# emailed exactly once per cooldown instead of not at all; and it can schedule
+# an ALARM, which is the only in-platform way to notice that the cron trigger
+# below has stopped firing. Singleton instance, no tenant data.
+[[durable_objects.bindings]]
+name = "WATCHTOWER"
+class_name = "WatchtowerDO"
+
 [[kv_namespaces]]
 binding = "WAITLIST"
 id = "e2d5939d1fdc498d85b59cfc6a3e0187"
@@ -88,6 +98,10 @@ new_sqlite_classes = ["TenantDO"]
 [[migrations]]
 tag = "v2"
 new_classes = ["RateLimiterDO"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["WatchtowerDO"]
 
 # D2 (ROADMAP.md) — the ops-sweep Cron Trigger, calling the `scheduled()`
 # export in src/index.ts (src/scheduled.ts): deliverability sweep -> dunning

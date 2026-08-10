@@ -35,6 +35,7 @@ import { handleInboundSupportEmail } from "./admin/support-inbound.js";
 
 export { TenantDO } from "./tenant-do.js";
 export { RateLimiterDO } from "./rate-limiter-do.js";
+export { WatchtowerDO } from "./watchtower-do.js";
 
 const app = new Hono<{ Bindings: Env; Variables: AuthedVariables }>();
 

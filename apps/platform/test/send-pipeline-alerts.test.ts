@@ -6,8 +6,8 @@ import {
   readReportedCheckNames,
   sendPipelineChecks,
   sendStarvedCheckName,
-  WATCHTOWER_COOLDOWN_MS,
 } from "../src/admin/watchtower.js";
+import { WATCHTOWER_COOLDOWN_MS } from "../src/admin/watchtower-alerts.js";
 import { AGING_CRED_PUSH_MS, type TenantOpsSummary } from "../src/engine/ops-summary.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
 import { activatePaidPlan, api, mintTenant, seedBenignSdnList, tenantStub } from "./helpers.js";

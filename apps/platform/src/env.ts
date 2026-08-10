@@ -1,5 +1,6 @@
 import type { TenantDO } from "./tenant-do.js";
 import type { RateLimiterDO } from "./rate-limiter-do.js";
+import type { WatchtowerDO } from "./watchtower-do.js";
 
 // Cloudflare's convention (what `wrangler types` generates): augment the
 // global `Cloudflare.Env` namespace so both `c.env` in Hono and the `env`
@@ -10,6 +11,11 @@ declare global {
       DB: D1Database;
       TENANT: DurableObjectNamespace<TenantDO>;
       SIGNUP_LIMITER: DurableObjectNamespace<RateLimiterDO>;
+      // The watchtower's own durable control state (src/watchtower-do.ts) —
+      // alert throttling that must survive D1 being the thing that is down, and
+      // the alarm that notices the cron has stopped firing. One singleton
+      // instance; never per-tenant, never customer data.
+      WATCHTOWER: DurableObjectNamespace<WatchtowerDO>;
       TOKEN_HASH_PEPPER: string;
       WAITLIST: KVNamespace;
       // B1 money path — optional test-mode Stripe secrets. Unset in this
