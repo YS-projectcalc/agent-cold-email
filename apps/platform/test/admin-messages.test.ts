@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { isLifecycleFrozen } from "../src/engine/billing-state.js";
 import { adminApi, api, mintTenant, withTenantContext } from "./helpers.js";
 
 // msgchannel increment 2 — the operator route (POST
@@ -148,21 +149,51 @@ describe("POST /admin/tenants/:id/messages — msgchannel increment 2 operator r
     expect(status.body.messages[0]).toMatchObject({ kind: "operator_notice", source: "operator", body: "Heads up from the team." });
   });
 
-  describe("lifecycle gating (msgchannel Inc1 gate F2's assertNotLifecycleFrozen, reused)", () => {
-    it("REJECTS an operator message to a CANCELED tenant, and writes nothing", async () => {
+  // Gate fix (msgchannel-inc23-gate-2026-08-06 F2, orchestrator ruling): the
+  // operator route is DELIBERATELY NOT lifecycle-gated — a human operator
+  // reaching a tenant in a trouble state ("your card failed, update it at
+  // <link>") is the channel's canonical use case (ROADMAP.md's msgchannel
+  // entry: "incident notices"), not a case to block. Only SYSTEM-templated
+  // wires (whose body asserts something a freeze would falsify) still gate —
+  // pinned here via the shared primitive, and independently by
+  // credential-ready-message.test.ts's own F2 tests for wire B.
+  describe("lifecycle STATE has no effect on the operator route (gate fix F2)", () => {
+    it("DELIVERS an operator message to a CANCELED (immediate) tenant", async () => {
       const { tenantId, token } = await mintTenant("Msg Op Canceled Co", "managed");
       const cancel = await api("/cancel", { method: "POST", token, body: JSON.stringify({ immediate: true }) });
       expect(cancel.status).toBe(200);
 
-      const res = await adminApi(`/admin/tenants/${tenantId}/messages`, {
+      const res = await adminApi<OperatorMessageResponse>(`/admin/tenants/${tenantId}/messages`, {
         method: "POST",
         body: JSON.stringify({ kind: "operator_notice", body: "hi" }),
       });
-      expect(res.status).toBe(400);
-      expect(await rowCount(tenantId)).toBe(0);
+      expect(res.status).toBe(201);
+      expect(res.body).toEqual({ tenantId, emitted: true });
+      expect(await rowCount(tenantId)).toBe(1);
     });
 
-    it("REJECTS an operator message to a SUSPENDED (terminated) tenant, and writes nothing", async () => {
+    // The gate's PROBE D1 scenario: an end-of-period cancel leaves
+    // status='active', billing_state='canceling' — still frozen by
+    // isLifecycleFrozen, and a state this exact channel needs to reach
+    // ("your cancellation is scheduled for X").
+    it("DELIVERS an operator message to a CANCELING (end-of-period cancel) tenant", async () => {
+      const { tenantId, token } = await mintTenant("Msg Op Canceling Co", "managed");
+      const cancel = await api("/cancel", { method: "POST", token, body: JSON.stringify({ immediate: false }) });
+      expect(cancel.status).toBe(200);
+      expect(cancel.body).toMatchObject({ billingState: "canceling" });
+
+      const res = await adminApi<OperatorMessageResponse>(`/admin/tenants/${tenantId}/messages`, {
+        method: "POST",
+        body: JSON.stringify({ kind: "operator_notice", body: "your cancellation is scheduled for period end" }),
+      });
+      expect(res.status).toBe(201);
+      expect(await rowCount(tenantId)).toBe(1);
+    });
+
+    // The single highest-value real message this channel exists to carry
+    // (gate F2): "your card failed, update it to resume sending" to the
+    // exact dunning-suspended tenant it's for.
+    it("DELIVERS an operator message to a SUSPENDED (dunning/terminated) tenant", async () => {
       const { tenantId } = await mintTenant("Msg Op Suspended Co", "managed");
       const term = await adminApi(`/admin/tenants/${tenantId}/terminate`, {
         method: "POST",
@@ -170,15 +201,15 @@ describe("POST /admin/tenants/:id/messages — msgchannel increment 2 operator r
       });
       expect(term.status).toBe(200);
 
-      const res = await adminApi(`/admin/tenants/${tenantId}/messages`, {
+      const res = await adminApi<OperatorMessageResponse>(`/admin/tenants/${tenantId}/messages`, {
         method: "POST",
-        body: JSON.stringify({ kind: "operator_notice", body: "hi" }),
+        body: JSON.stringify({ kind: "operator_notice", body: "your card failed, update it at <link> to resume sending" }),
       });
-      expect(res.status).toBe(400);
-      expect(await rowCount(tenantId)).toBe(0);
+      expect(res.status).toBe(201);
+      expect(await rowCount(tenantId)).toBe(1);
     });
 
-    it("still ACCEPTS an operator message to a live (non-frozen) tenant after an unrelated tenant was frozen (no cross-tenant bleed)", async () => {
+    it("a live (non-frozen) tenant is unaffected by an unrelated frozen sibling (no cross-tenant bleed either direction)", async () => {
       const frozen = await mintTenant("Msg Op Frozen Sibling Co", "managed");
       await api("/cancel", { method: "POST", token: frozen.token, body: JSON.stringify({ immediate: true }) });
 
@@ -189,6 +220,21 @@ describe("POST /admin/tenants/:id/messages — msgchannel increment 2 operator r
       });
       expect(res.status).toBe(201);
       expect(await rowCount(live.tenantId)).toBe(1);
+    });
+
+    // Regression pin for the shared primitive itself: the fix removed the
+    // GATE from the operator path, not the PREDICATE. If a future edit
+    // accidentally weakened isLifecycleFrozen (rather than just not calling
+    // it here), wire A (provisioning.ts's assertNotLifecycleFrozen) and wire
+    // B (mailbox-credential-push.ts's isLifecycleFrozen check) would both
+    // silently stop gating too — this pins that the predicate itself still
+    // reports every frozen state as frozen.
+    it("the shared isLifecycleFrozen predicate (still used by wires A/B) is untouched", () => {
+      expect(isLifecycleFrozen("active", "canceling")).toBe(true);
+      expect(isLifecycleFrozen("active", "canceled")).toBe(true);
+      expect(isLifecycleFrozen("active", "disputed")).toBe(true);
+      expect(isLifecycleFrozen("suspended", "active")).toBe(true);
+      expect(isLifecycleFrozen("active", "active")).toBe(false);
     });
   });
 });

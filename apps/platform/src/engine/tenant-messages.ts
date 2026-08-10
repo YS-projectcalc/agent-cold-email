@@ -14,7 +14,6 @@
 import { NotFoundError } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
-import { assertNotLifecycleFrozen } from "./billing-state.js";
 
 /** Convention so far (not DB-enforced — see the schema.ts table comment):
  * 'info' | 'action_required'. Both real emit points use 'action_required'. */
@@ -124,31 +123,26 @@ export interface EmitOperatorMessageInput {
   body: string;
 }
 
-// Kinds allowed to reach a LIFECYCLE-FROZEN tenant (status='suspended' or a
-// frozen billing_state — billing-state.ts's isLifecycleFrozen) despite the
-// gate below. Empty today: the one enumerated operator kind (admin/schemas.ts's
-// AdminOperatorMessageInput — 'operator_notice') is a generic notice, not a
-// message that itself explains or follows from the freeze, so it does not
-// warrant the carve-out. Extend THIS set (never bypass the gate itself) if a
-// future kind genuinely must reach a frozen tenant (e.g. a cancellation
-// confirmation) — CLAUDE.md rule i, no speculative carve-out ahead of a real one.
-const LIFECYCLE_EXEMPT_OPERATOR_KINDS = new Set<string>([]);
-
 /**
  * Increment 2 — the operator route's write path (routes/admin-messages.ts).
- * Same INSERT as emitTenantMessage (source='operator' instead of 'system'),
- * gated by the SAME assertNotLifecycleFrozen predicate Inc1's gate's F2 fix
- * applies to wire B (mailbox-credential-push.ts's reconcileMailboxCredentialPushes):
- * a canceled/terminated (or disputed/suspended/canceling) tenant's agent must
- * not be handed a fresh operator message while the account itself is frozen.
- * Throws the SAME ValidationError assertNotLifecycleFrozen throws elsewhere
- * (mapped to HTTP 400 by error-response.ts) — reused, not reimplemented
- * (CLAUDE.md rule c).
+ * Same INSERT as emitTenantMessage (source='operator' instead of 'system').
+ *
+ * DELIBERATELY NOT lifecycle-gated (gate fix, msgchannel-inc23-gate-2026-08-06
+ * F2 — an earlier version reused wire B's assertNotLifecycleFrozen here and
+ * that generalization was wrong in kind). Wire A/B's gate exists because a
+ * SYSTEM-templated body asserts something the freeze makes FALSE ("sending is
+ * now enabled" to a suspended tenant is a lie) — assertNotLifecycleFrozen
+ * stays on those wires untouched. An operator message has no such claim
+ * baked in: it is human-authored prose under ADMIN_TOKEN, and the channel's
+ * ratified purpose (ROADMAP.md's msgchannel entry: "activation/next-step
+ * instructions, retry-with-same-key prompts, the OAuth-mint-ready signal,
+ * incident notices") is precisely to reach a tenant IN a trouble state —
+ * "your card failed, update it at <link>" to a dunning-suspended tenant is
+ * the canonical use case this channel exists to carry, not a case to block.
+ * Delivers in every lifecycle state; there is no kind-based exemption list to
+ * maintain because there is no default-deny to exempt from.
  */
 export function emitOperatorMessage(ctx: TenantContext, input: EmitOperatorMessageInput): void {
-  if (!LIFECYCLE_EXEMPT_OPERATOR_KINDS.has(input.kind)) {
-    assertNotLifecycleFrozen(ctx, `operator message (${input.kind})`);
-  }
   emitTenantMessage(ctx, { kind: input.kind, severity: input.severity, body: input.body, source: "operator" });
 }
 
@@ -180,9 +174,12 @@ function toTenantMessage(row: TenantMessageRow): TenantMessage {
 /**
  * The infrastructure_status read surface. PURE SELECT — never writes (a read
  * must never mutate tenant_messages; increment 3's ackMessage below is the
- * ONLY writer of `read_at` in this codebase). Unread rows sort first, newest
- * first within each group, expired rows filtered out, capped at
- * MAX_SURFACED_MESSAGES.
+ * ONLY writer of `read_at` in this codebase). UNACKED ONLY (gate fix,
+ * msgchannel-inc23-gate-2026-08-06 F1 — increment 3 shipped the ack writer
+ * without this filter, so an acked message kept resurfacing here, and four
+ * public tool/API descriptions claimed the opposite as fact). Newest first,
+ * expired rows filtered out, capped at MAX_SURFACED_MESSAGES. list_messages
+ * (below) is the surface for acked history — this preview never shows it.
  */
 export function listSurfacedTenantMessages(ctx: TenantContext): TenantMessage[] {
   const now = ctx.clock.now();
@@ -190,8 +187,8 @@ export function listSurfacedTenantMessages(ctx: TenantContext): TenantMessage[] 
     .exec<TenantMessageRow>(
       `SELECT id, kind, severity, body, action_hint, source, created_at, read_at
        FROM tenant_messages
-       WHERE tenant_id = ? AND (expires_at IS NULL OR expires_at > ?)
-       ORDER BY (read_at IS NULL) DESC, created_at DESC, rowid DESC
+       WHERE tenant_id = ? AND read_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
+       ORDER BY created_at DESC, rowid DESC
        LIMIT ?`,
       ctx.tenantId,
       now,

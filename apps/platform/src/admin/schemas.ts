@@ -34,13 +34,13 @@ export type AdminScreeningDecisionInput = z.infer<typeof AdminScreeningDecisionI
 // into one tenant's own message store, `source='operator'`. `kind` is an
 // ENUM, not free text, so an operator call can never write a kind the
 // agent-facing surface (infrastructure_status/list_messages) doesn't already
-// understand; extend the enum (and engine/tenant-messages.ts's
-// LIFECYCLE_EXEMPT_OPERATOR_KINDS, if the new kind should bypass the
-// lifecycle-frozen gate) when a second operator kind is actually needed.
-// `severity` mirrors tenant-messages.ts's documented convention
+// understand; extend the enum when a second operator kind is actually
+// needed. `severity` mirrors tenant-messages.ts's documented convention
 // (info | action_required). `body` is bounded well past the longest real
 // message body in this codebase today, generous headroom for an operator's
-// own prose, still far short of unbounded.
+// own prose, still far short of unbounded. Delivers regardless of the
+// tenant's lifecycle state (gate fix, msgchannel-inc23-gate-2026-08-06 F2) —
+// see emitOperatorMessage's doc for why.
 export const AdminOperatorMessageInput = z.object({
   kind: z.enum(["operator_notice"]),
   severity: z.enum(["info", "action_required"]).default("info"),

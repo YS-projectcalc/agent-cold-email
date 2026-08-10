@@ -10,11 +10,10 @@ import { parseJsonBody } from "../validate.js";
 // infrastructure_status/list_messages exactly like a system-emitted message
 // (increment 1) — same auth pattern as POST /admin/tenants/:id/terminate and
 // /admin/tenants/:id/screening (getTenantIndexById 404 check, then a single
-// TenantDO RPC). A lifecycle-frozen tenant (suspended, or a frozen
-// billing_state — disputed/canceling/canceled) rejects with the SAME
-// ValidationError assertNotLifecycleFrozen throws elsewhere (400), unless the
-// message `kind` is one of the (currently empty)
-// LIFECYCLE_EXEMPT_OPERATOR_KINDS — see that doc comment for why.
+// TenantDO RPC). DELIVERS REGARDLESS OF LIFECYCLE STATE (gate fix,
+// msgchannel-inc23-gate-2026-08-06 F2) — see emitOperatorMessage's doc for
+// why: a human operator reaching a suspended/canceling/canceled tenant is
+// this channel's canonical use case, not a case to block.
 export const adminMessagesRoute = new Hono<{ Bindings: Env }>().post("/admin/tenants/:id/messages", async (c) => {
   const tenantId = c.req.param("id");
   const tenant = await getTenantIndexById(c.env, tenantId);
