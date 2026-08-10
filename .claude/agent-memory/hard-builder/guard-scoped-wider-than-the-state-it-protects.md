@@ -48,7 +48,23 @@ invisible to every same-lane test.
 5. Test the reverse order of every pair you reason about, and specifically test a
    guard against an event type it was NEVER meant to govern.
 
+**SECOND ITERATION, 2026-08-06 (gate residual N-1).** The fix — one watermark
+PER LANE instead of one global — was still not keyed to the state. The `dispute`
+lane holds every dispute OBJECT, so dispute A's WIN moved the lane mark past a
+DIFFERENT, genuine chargeback B emitted earlier, and condition (2) read B's
+'disputed' against the 'active' A's win had restored as a real conflict: the
+second chargeback was refused and that tenant never froze. **Narrowing a guard's
+key one level is not the same as keying it to the state** — ask whether the new
+key still spans independent objects. The fix that held: EXEMPT the direction
+that cannot regress (`charge.dispute.created` — a freeze only ever costs time,
+and its own `dispute.closed` lifts it) and keep ordering on the direction that
+can (`dispute.closed(won)` must never lift a NEWER freeze). Per-dispute-id
+keying was the other candidate and is WRONG: it would put a stale won in its own
+empty lane and let it lift another dispute's freeze — the repo's existing
+"stale dispute.closed(won)" test is what proves it.
+
 Related: [[completion-pass-must-recheck-ordering]] (the other half of this same
 build — a second write path that bypasses the primary path's guards),
 [[guards-inline-in-a-loop-are-not-a-policy]] (guard scoped too NARROW — the
-mirror error).
+mirror error), [[refusal-path-added-to-claimed-record-table]] (what the refusal
+this guard introduced did to a downstream counter).

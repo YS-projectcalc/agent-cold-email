@@ -42,3 +42,17 @@ Corollaries found the same day:
 - Index customer->tenant in a TABLE, not a column: Checkout Sessions created without a
   `customer` param mint a NEW customer each time, so a re-subscribing tenant owns several
   and a late invoice/dispute can arrive against an old one.
+
+**2026-08-06 follow-on — the extra vendor read applies to DECISION INPUTS too, with
+the OPPOSITE error grading.** Same root cause one lane over: `readDeclineCode` parsed
+the decline code off the `invoice.payment_failed` payload, where `charge` and
+`payment_intent` are bare id STRINGS — so it returned null on every real delivery and
+the permanent-decline fast path (lost_card/stolen_card/fraudulent -> immediate suspend)
+had NEVER executed. Fix = `GET /v1/charges/{id}` (`outcome.reason` is where the issuer's
+decline code lives; `failure_code` is the generic card error) or, when the invoice has
+no charge, `GET /v1/payment_intents/{id}` (`last_payment_error.decline_code`). Grading:
+a ROUTING read must THROW on transient (lose the read, lose the tenant); a read that
+only REFINES a decision with a safe default must NEVER throw and must return null on
+any failure — unknown stays transient, so a Stripe 503 can never suspend a paying
+customer. Bound it (`AbortSignal.timeout`), because it now sits inside the webhook's
+own response.
