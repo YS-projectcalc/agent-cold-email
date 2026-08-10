@@ -9,6 +9,7 @@ import type {
   InboxQueryInput,
   LaunchCampaignInput,
   ListLeadsQueryInput,
+  ListMessagesQueryInput,
   Provenance,
   RegisterByoDomainInput,
   RemoveMailboxesInput,
@@ -49,7 +50,15 @@ import { runWarmupCancellationSweep } from "./engine/warmup-cancel.js";
 import { withRequestIdempotency } from "./engine/idempotency.js";
 import { reconcileMailboxCredentialPushes } from "./engine/mailbox-credential-push.js";
 import { runDeliverabilitySweep } from "./engine/deliverability-actions.js";
-import { pruneTenantMessages } from "./engine/tenant-messages.js";
+import {
+  ackMessage,
+  emitOperatorMessage,
+  listMessagesPage,
+  pruneTenantMessages,
+  type AckMessageResult,
+  type EmitOperatorMessageInput,
+  type MessageListPage,
+} from "./engine/tenant-messages.js";
 import { runPollInbox } from "./engine/reply-processor.js";
 import { suppressLead, unsubscribeEmail, type UnsubscribeResult } from "./engine/suppression.js";
 import { upsertLeadDisposition, type LeadDispositionView } from "./engine/lead-dispositions.js";
@@ -972,6 +981,19 @@ export class TenantDO extends DurableObject<Env> {
     return listLeads(this.requireContext(), query);
   }
 
+  // --- msgchannel increment 3 — list_messages/ack_message. The SAME facade
+  // both the HTTP routes (routes/messages.ts) and the MCP tools call (parity
+  // law), reading/writing the SAME tenant_messages store increment 1's
+  // emitTenantMessage and increment 2's emitOperatorMessage write into. ---
+
+  listMessages(query: ListMessagesQueryInput): MessageListPage {
+    return listMessagesPage(this.requireContext(), query);
+  }
+
+  ackMessage(id: string): AckMessageResult {
+    return ackMessage(this.requireContext(), id);
+  }
+
   // --- D5 lifecycle: voluntary cancel (tenant-authed, POST /cancel) + abuse
   // terminate (ADMIN_TOKEN-authed, POST /admin/tenants/:id/terminate). Both
   // reclaim this tenant's OWN infra only — a DO can physically reach no other
@@ -1082,6 +1104,17 @@ export class TenantDO extends DurableObject<Env> {
   /** G1b admin resolution — POST /admin/tenants/:id/screening {decision:'clear'} (routes/admin-screening.ts). */
   clearScreening(): void {
     clearScreeningStatus(this.requireContext());
+  }
+
+  /**
+   * msgchannel increment 2 — the operator route (POST
+   * /admin/tenants/:id/messages, routes/admin-messages.ts ONLY; never a
+   * tenant-facing route). Throws ValidationError (mapped to HTTP 400) when
+   * this tenant is lifecycle-frozen and the message kind doesn't warrant an
+   * exception — see engine/tenant-messages.ts's emitOperatorMessage doc.
+   */
+  emitOperatorMessage(input: EmitOperatorMessageInput): void {
+    emitOperatorMessage(this.requireContext(), input);
   }
 
   /**

@@ -6,10 +6,12 @@
 // tenant-scoped SqlStorage write, same newId-prefixed row. DO-local, not D1
 // (ARCHITECTURE.md decision #3 + CLAUDE.md rule h).
 //
-// Increment 1 scope only: emit + read + a bounded prune. The operator route
-// and the list_messages/ack_message tools (increment 2) are NOT built here —
-// nothing in this file ever sets `read_at`.
+// Increment 1: emit + read + a bounded prune. Increment 2 (this file, below)
+// adds the operator route's write path (emitOperatorMessage); increment 3
+// adds the full paginated read surface + the one place that ever sets
+// `read_at` (listMessagesPage, ackMessage).
 
+import { NotFoundError } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
 
@@ -40,6 +42,9 @@ export interface EmitTenantMessageInput {
   /** Opt-in no-spam key, scoped to (tenant_id, kind, dedup_key) — see GUARDRAIL A below. */
   dedupKey?: string;
   expiresAt?: number;
+  /** 'system' (default — every increment-1 call site) | 'operator' (increment
+   * 2's admin route, routes/admin-messages.ts). */
+  source?: "system" | "operator";
 }
 
 // How long a READ row is kept around before the prune sweep reclaims it.
@@ -98,17 +103,47 @@ export function emitTenantMessage(ctx: TenantContext, input: EmitTenantMessageIn
 
   ctx.sql.exec(
     `INSERT INTO tenant_messages (id, tenant_id, kind, severity, body, action_hint, source, dedup_key, created_at, read_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'system', ?, ?, NULL, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
     newId("tmsg"),
     ctx.tenantId,
     input.kind,
     input.severity,
     input.body,
     actionHintJson,
+    input.source ?? "system",
     input.dedupKey ?? null,
     now,
     expiresAt,
   );
+}
+
+export interface EmitOperatorMessageInput {
+  kind: string;
+  severity: TenantMessageSeverity;
+  body: string;
+}
+
+/**
+ * Increment 2 — the operator route's write path (routes/admin-messages.ts).
+ * Same INSERT as emitTenantMessage (source='operator' instead of 'system').
+ *
+ * DELIBERATELY NOT lifecycle-gated (gate fix, msgchannel-inc23-gate-2026-08-06
+ * F2 — an earlier version reused wire B's assertNotLifecycleFrozen here and
+ * that generalization was wrong in kind). Wire A/B's gate exists because a
+ * SYSTEM-templated body asserts something the freeze makes FALSE ("sending is
+ * now enabled" to a suspended tenant is a lie) — assertNotLifecycleFrozen
+ * stays on those wires untouched. An operator message has no such claim
+ * baked in: it is human-authored prose under ADMIN_TOKEN, and the channel's
+ * ratified purpose (ROADMAP.md's msgchannel entry: "activation/next-step
+ * instructions, retry-with-same-key prompts, the OAuth-mint-ready signal,
+ * incident notices") is precisely to reach a tenant IN a trouble state —
+ * "your card failed, update it at <link>" to a dunning-suspended tenant is
+ * the canonical use case this channel exists to carry, not a case to block.
+ * Delivers in every lifecycle state; there is no kind-based exemption list to
+ * maintain because there is no default-deny to exempt from.
+ */
+export function emitOperatorMessage(ctx: TenantContext, input: EmitOperatorMessageInput): void {
+  emitTenantMessage(ctx, { kind: input.kind, severity: input.severity, body: input.body, source: "operator" });
 }
 
 interface TenantMessageRow {
@@ -138,10 +173,13 @@ function toTenantMessage(row: TenantMessageRow): TenantMessage {
 
 /**
  * The infrastructure_status read surface. PURE SELECT — never writes (a read
- * must never mutate tenant_messages; increment 2's ack_message tool is the
- * only future writer of `read_at`). Unread rows sort first, newest first
- * within each group, expired rows filtered out, capped at
- * MAX_SURFACED_MESSAGES.
+ * must never mutate tenant_messages; increment 3's ackMessage below is the
+ * ONLY writer of `read_at` in this codebase). UNACKED ONLY (gate fix,
+ * msgchannel-inc23-gate-2026-08-06 F1 — increment 3 shipped the ack writer
+ * without this filter, so an acked message kept resurfacing here, and four
+ * public tool/API descriptions claimed the opposite as fact). Newest first,
+ * expired rows filtered out, capped at MAX_SURFACED_MESSAGES. list_messages
+ * (below) is the surface for acked history — this preview never shows it.
  */
 export function listSurfacedTenantMessages(ctx: TenantContext): TenantMessage[] {
   const now = ctx.clock.now();
@@ -149,8 +187,8 @@ export function listSurfacedTenantMessages(ctx: TenantContext): TenantMessage[] 
     .exec<TenantMessageRow>(
       `SELECT id, kind, severity, body, action_hint, source, created_at, read_at
        FROM tenant_messages
-       WHERE tenant_id = ? AND (expires_at IS NULL OR expires_at > ?)
-       ORDER BY (read_at IS NULL) DESC, created_at DESC, rowid DESC
+       WHERE tenant_id = ? AND read_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
+       ORDER BY created_at DESC, rowid DESC
        LIMIT ?`,
       ctx.tenantId,
       now,
@@ -160,33 +198,113 @@ export function listSurfacedTenantMessages(ctx: TenantContext): TenantMessage[] 
   return rows.map(toTenantMessage);
 }
 
+export interface MessageListPage {
+  messages: TenantMessage[];
+  nextCursor: string | null;
+}
+
+interface MessageQueryRow extends TenantMessageRow {
+  rowid: number;
+}
+
+/**
+ * Opaque composite cursor `(unacked, createdAt, rowid)` — the same
+ * "keyset over the ORDER BY columns" shape list-leads.ts/inbox.ts use for
+ * their own 2-column cursors, extended one column to carry the unread/read
+ * partition boundary: a plain `(createdAt, rowid)` cursor can't express
+ * "every unread row sorts before every read row regardless of age" — an old
+ * UNREAD row and a new READ row would otherwise decode to the wrong side of
+ * a page boundary.
+ */
+function encodeMessageCursor(unacked: boolean, createdAt: number, rowid: number): string {
+  return `${unacked ? 1 : 0}:${createdAt}:${rowid}`;
+}
+
+function decodeMessageCursor(cursor: string): { unacked: number; createdAt: number; rowid: number } | null {
+  const match = /^([01]):(-?\d+):(-?\d+)$/.exec(cursor);
+  if (!match) return null;
+  return { unacked: Number(match[1]), createdAt: Number(match[2]), rowid: Number(match[3]) };
+}
+
+/**
+ * list_messages (increment 3) — the full paginated read surface, unlike
+ * listSurfacedTenantMessages's fixed cap-5 preview. SAME unread-first,
+ * newest-first ordering as that surface. A stable keyset cursor (never
+ * OFFSET) so a message emitted mid-pagination can't shift an already-issued
+ * page — list-leads.ts/inbox.ts use the identical rationale for their own
+ * cursors. PURE SELECT, exactly like listSurfacedTenantMessages: never sets
+ * `read_at` (ackMessage below is the only writer of that column).
+ */
+export function listMessagesPage(ctx: TenantContext, query: { cursor?: string; limit: number }): MessageListPage {
+  const now = ctx.clock.now();
+  const conditions: string[] = [`tenant_id = ?`, `(expires_at IS NULL OR expires_at > ?)`];
+  const binds: SqlStorageValue[] = [ctx.tenantId, now];
+
+  const cursor = query.cursor ? decodeMessageCursor(query.cursor) : null;
+  if (cursor) {
+    conditions.push(`((read_at IS NULL) < ? OR ((read_at IS NULL) = ? AND (created_at < ? OR (created_at = ? AND rowid < ?))))`);
+    binds.push(cursor.unacked, cursor.unacked, cursor.createdAt, cursor.createdAt, cursor.rowid);
+  }
+
+  // Fetch one extra row to know whether a next page exists without a second
+  // COUNT query (mirrors list-leads.ts/inbox.ts/activity.ts).
+  binds.push(query.limit + 1);
+
+  const rows = ctx.sql
+    .exec<MessageQueryRow>(
+      `SELECT id, kind, severity, body, action_hint, source, created_at, read_at, rowid as rowid
+       FROM tenant_messages
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY (read_at IS NULL) DESC, created_at DESC, rowid DESC
+       LIMIT ?`,
+      ...binds,
+    )
+    .toArray();
+
+  const hasMore = rows.length > query.limit;
+  const page = hasMore ? rows.slice(0, query.limit) : rows;
+  const last = page[page.length - 1];
+
+  return {
+    messages: page.map(toTenantMessage),
+    nextCursor: hasMore && last ? encodeMessageCursor(last.read_at === null, last.created_at, last.rowid) : null,
+  };
+}
+
+export interface AckMessageResult {
+  acked: true;
+  /** true when the message was ALREADY read before this call — a no-op
+   * success, not an error (see ackMessage's doc). */
+  alreadyAcked: boolean;
+}
+
+/**
+ * ack_message (increment 3) — the ONLY writer of `read_at` in this codebase.
+ * Tenant-scoped by `id + tenant_id` in BOTH the existence check and the
+ * UPDATE (CLAUDE.md rule h): a cross-tenant id 404s exactly like an unknown
+ * one — a tenant can never learn another tenant's message even exists.
+ * IDEMPOTENT: acking an already-read row returns `alreadyAcked: true`
+ * without writing again — an agent retrying a dropped call, or two agent
+ * instances racing to ack the same message, must never see a second write or
+ * an error for doing the safe thing twice.
+ */
+export function ackMessage(ctx: TenantContext, id: string): AckMessageResult {
+  const existing = ctx.sql
+    .exec<{ read_at: number | null }>(`SELECT read_at FROM tenant_messages WHERE id = ? AND tenant_id = ?`, id, ctx.tenantId)
+    .toArray()[0];
+  if (!existing) throw new NotFoundError(`message ${id} not found`);
+  if (existing.read_at !== null) return { acked: true, alreadyAcked: true };
+
+  ctx.sql.exec(`UPDATE tenant_messages SET read_at = ? WHERE id = ? AND tenant_id = ?`, ctx.clock.now(), id, ctx.tenantId);
+  return { acked: true, alreadyAcked: false };
+}
+
 /**
  * Bounded, tenant-scoped cleanup: deletes expired rows and READ rows past
  * READ_RETENTION_MS. Reuses the existing per-tenant deliverability-sweep cron
  * leg (TenantDO.deliverabilitySweep, called by runDeliverabilitySweepAllTenants
  * in scheduled.ts) rather than a new cron.
  */
-/**
- * The `retry_setup` body — STEP-AWARE (gate
- * docs/adversarial/wave-integration-gate-2026-08-05.md finding #2). Wire A
- * fires on any retryable VendorError escaping runSetupInfrastructure, and
- * more than one leg can throw one (setDnsWithRetry, awaitMailboxReady, …).
- * The prior hard-coded DNS sentence disagreed with the REST error body's
- * `step` field whenever the failing leg was NOT DNS — the two customer
- * surfaces must always name the SAME step. `step` is the abstract label
- * `vendor-failure.ts`'s `customerSafeVendorFailure` already derives (the
- * SAME function error-response.ts uses for the REST body), so this is never
- * a second, divergent classification — vendor-blind by construction (never
- * `err.message`, GUARDRAIL B).
- */
-export function retrySetupMessageBody(domain: string | undefined, step: string | undefined): string {
-  if (!domain) {
-    return "Your last setup_infrastructure call has not finished yet. Nothing was lost; retry it with the same idempotency key to finish it.";
-  }
-  const progress = step ? ` — its ${step} is still completing at the vendor` : "";
-  return `Setup for ${domain} has not finished yet${progress}. Nothing was lost; retry setup_infrastructure with the same idempotency key to finish it.`;
-}
-
 export function pruneTenantMessages(ctx: TenantContext): { deleted: number } {
   const now = ctx.clock.now();
   const result = ctx.sql.exec(

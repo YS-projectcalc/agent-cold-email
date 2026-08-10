@@ -23,8 +23,9 @@ import { markDomainIntent, recordDomainIntent } from "./provision-intents.js";
 import { assertWithinProvisioningCap } from "./quota.js";
 import { screenTenant } from "../ofac/screening.js";
 import { alertRegistrarUnarmed } from "./registrar-alert.js";
+import { retrySetupMessageBody } from "./retry-setup-message.js";
 import { withSpendCeiling } from "./spend-ceiling.js";
-import { emitTenantMessage, retrySetupMessageBody } from "./tenant-messages.js";
+import { emitTenantMessage } from "./tenant-messages.js";
 import { RealInboxKitDomainPort } from "../vendors/real/inboxkit-domain-port.js";
 import { assertCompleteRegistrant, readRegistrarOptInState } from "../vendors/registrar-arming.js";
 

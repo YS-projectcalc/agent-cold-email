@@ -3,7 +3,7 @@ info:
   title: agent-cold-email API
   version: "0.2.2"
   description: >
-    Agent-native cold-email infrastructure, live in production. 25 curated
+    Agent-native cold-email infrastructure, live in production. 27 curated
     intents behind one bearer token per tenant (a subset — the /dashboard/*
     session + views endpoints — also accept an httpOnly session cookie minted
     by POST /dashboard/session, for the optional human dashboard SPA; see
@@ -37,6 +37,7 @@ tags:
   - name: webhooks
   - name: byo-domains
   - name: leads
+  - name: messages
   - name: compliance
 
 paths:
@@ -1142,6 +1143,64 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /messages:
+    get:
+      operationId: list_messages
+      tags: [messages]
+      summary: List this tenant's system + operator messages, cursor-paginated.
+      description: >
+        msgchannel increment 3. Unacked messages sort first (newest first
+        within that group), then acked ones (also newest first). Use
+        POST /messages/{id}/ack to acknowledge one by id so it stops
+        resurfacing. GET /infrastructure-status also inlines the newest 5
+        unacked messages for a quick glance — this is the full paginated
+        surface.
+      parameters:
+        - name: cursor
+          in: query
+          schema: { type: string, minLength: 1, maxLength: 500 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: Message list page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageListPage'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /messages/{id}/ack:
+    post:
+      operationId: ack_message
+      tags: [messages]
+      summary: Acknowledge a message by id.
+      description: >
+        msgchannel increment 3. Sets the message read so it stops surfacing
+        as unacked (in list_messages and infrastructure_status's messages[]).
+        Idempotent: acking an already-acked id returns success with no
+        second effect, never an error.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Acknowledged (or already was — idempotent).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AckMessageResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /unsubscribe:
     get:
       operationId: unsubscribe_confirm_page
@@ -1987,3 +2046,33 @@ components:
               lastEventTs: { type: integer, nullable: true }
               createdAt: { type: integer }
         nextCursor: { type: string, nullable: true }
+
+    Message:
+      type: object
+      required: [id, kind, severity, body, actionHint, source, createdAt, readAt]
+      properties:
+        id: { type: string }
+        kind: { type: string }
+        severity: { type: string, enum: [info, action_required] }
+        body: { type: string }
+        actionHint: { type: object, nullable: true }
+        source: { type: string, enum: [system, operator] }
+        createdAt: { type: integer }
+        readAt: { type: integer, nullable: true }
+
+    MessageListPage:
+      type: object
+      required: [messages, nextCursor]
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+        nextCursor: { type: string, nullable: true }
+
+    AckMessageResult:
+      type: object
+      required: [acked, alreadyAcked]
+      properties:
+        acked: { type: boolean, enum: [true] }
+        alreadyAcked: { type: boolean }

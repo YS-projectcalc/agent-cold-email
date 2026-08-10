@@ -1,5 +1,5 @@
 import { runInDurableObject } from "cloudflare:test";
-import { ActivityQueryInput, InboxQueryInput, ListLeadsQueryInput } from "@coldstart/shared";
+import { ActivityQueryInput, InboxQueryInput, ListLeadsQueryInput, ListMessagesQueryInput } from "@coldstart/shared";
 import { beforeAll, describe, expect, it } from "vitest";
 import { ONE_DAY_MS, WARMUP_RAMP_DAYS } from "../src/engine/warmup.js";
 import type { TenantDO } from "../src/tenant-do.js";
@@ -33,6 +33,7 @@ const READ_ONLY_TOOLS = new Set([
   "get_webhooks",
   "get_byo_domains",
   "list_leads",
+  "list_messages",
 ]);
 
 // Tools whose worst-case action is genuinely destructive/irreversible via
@@ -55,8 +56,12 @@ const DESTRUCTIVE_TOOLS = new Set(["launch_campaign", "reply", "pause", "pause_a
 // (creates new resources, never deletes/overwrites existing ones), mark and
 // label_thread (fully reversible triage flags). update_lead joins this set
 // (SPEC.md §22): an upsert that only ever overwrites the disposition fields
-// named in the call — freely revisable, nothing destroyed.
-const ADDITIVE_NONDESTRUCTIVE_TOOLS = new Set(["setup_infrastructure", "mark", "label_thread", "update_lead"]);
+// named in the call — freely revisable, nothing destroyed. ack_message joins
+// this set (msgchannel increment 3): it sets a read flag on an existing row
+// — nothing is destroyed, and re-acking is a safe, idempotent no-op — the
+// same "worst-case action" honesty bar as mark/update_lead, not a resource
+// loss like the DESTRUCTIVE_TOOLS set below.
+const ADDITIVE_NONDESTRUCTIVE_TOOLS = new Set(["setup_infrastructure", "mark", "label_thread", "update_lead", "ack_message"]);
 
 async function listTools(): Promise<ToolListResult["tools"]> {
   const res = await api<{ jsonrpc: "2.0"; id: number; result: ToolListResult }>("/mcp", {
@@ -68,9 +73,9 @@ async function listTools(): Promise<ToolListResult["tools"]> {
 }
 
 describe("tools/list — MCP tool annotations (Anthropic Connectors Directory requirement)", () => {
-  it("every one of the 25 tools carries a non-empty annotations.title", async () => {
+  it("every one of the 27 tools carries a non-empty annotations.title", async () => {
     const tools = await listTools();
-    expect(tools).toHaveLength(25);
+    expect(tools).toHaveLength(27);
     for (const t of tools) {
       expect(t.annotations, `${t.name} is missing annotations`).toBeDefined();
       expect(typeof t.annotations!.title, `${t.name}.annotations.title`).toBe("string");
@@ -115,10 +120,10 @@ describe("tools/list — MCP tool annotations (Anthropic Connectors Directory re
     }
   });
 
-  it("classification covers exactly the 25 tools with no overlap between sets", async () => {
+  it("classification covers exactly the 27 tools with no overlap between sets", async () => {
     const tools = await listTools();
     const classified = new Set([...READ_ONLY_TOOLS, ...DESTRUCTIVE_TOOLS, ...ADDITIVE_NONDESTRUCTIVE_TOOLS]);
-    expect(classified.size).toBe(25);
+    expect(classified.size).toBe(27);
     expect(tools.map((t) => t.name).sort()).toEqual([...classified].sort());
   });
 });
@@ -167,6 +172,11 @@ describe("write-detecting spy — every readOnlyHint:true tool performs ZERO wri
     // list_leads (SPEC.md §22) — a pure JOIN read; must issue ZERO writes even
     // though the fixture tenant already has a real launched lead (fx.campaignId).
     list_leads: (i) => i.listLeads(ListLeadsQueryInput.parse({})),
+    // list_messages (msgchannel increment 3) — a pure SELECT; must issue ZERO
+    // writes even on a virgin tenant with no messages yet (a first-ever call
+    // is exactly the case a lazy-seed bug would trip, same class as
+    // get_dashboard's ensureDefaultViewSeeded above).
+    list_messages: (i) => i.listMessages(ListMessagesQueryInput.parse({})),
   };
 
   let fixture: ReadOnlyFixture;

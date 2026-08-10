@@ -28,3 +28,22 @@ export const AdminScreeningDecisionInput = z.object({
   note: z.string().max(2000).default(""),
 });
 export type AdminScreeningDecisionInput = z.infer<typeof AdminScreeningDecisionInput>;
+
+// msgchannel increment 2 (2026-08-06) — POST /admin/tenants/:id/messages
+// injects a STRUCTURED system->agent message (engine/tenant-messages.ts)
+// into one tenant's own message store, `source='operator'`. `kind` is an
+// ENUM, not free text, so an operator call can never write a kind the
+// agent-facing surface (infrastructure_status/list_messages) doesn't already
+// understand; extend the enum when a second operator kind is actually
+// needed. `severity` mirrors tenant-messages.ts's documented convention
+// (info | action_required). `body` is bounded well past the longest real
+// message body in this codebase today, generous headroom for an operator's
+// own prose, still far short of unbounded. Delivers regardless of the
+// tenant's lifecycle state (gate fix, msgchannel-inc23-gate-2026-08-06 F2) —
+// see emitOperatorMessage's doc for why.
+export const AdminOperatorMessageInput = z.object({
+  kind: z.enum(["operator_notice"]),
+  severity: z.enum(["info", "action_required"]).default("info"),
+  body: z.string().min(1).max(2000),
+});
+export type AdminOperatorMessageInput = z.infer<typeof AdminOperatorMessageInput>;
