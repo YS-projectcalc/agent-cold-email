@@ -18,13 +18,14 @@ import { buildMailboxBilling, syncMailboxQuantity, type MailboxBilling } from ".
 import { assertNotLifecycleFrozen } from "./billing-state.js";
 import { assertBrandOwnership } from "./brand-guard.js";
 import { setDnsWithRetry } from "./domain-dns.js";
-import { provisionMailboxesForDomain } from "./mailbox-provisioning.js";
-import { markDomainIntent, recordDomainIntent } from "./provision-intents.js";
+import { managedMailboxAddress, provisionMailboxesForDomain } from "./mailbox-provisioning.js";
+import { domainIntentKey, markDomainIntent, readDomainIntent, recordDomainIntent, type DomainIntentRow } from "./provision-intents.js";
 import { assertWithinProvisioningCap } from "./quota.js";
 import { screenTenant } from "../ofac/screening.js";
 import { alertRegistrarUnarmed } from "./registrar-alert.js";
+import { retrySetupMessageBody } from "./retry-setup-message.js";
 import { withSpendCeiling } from "./spend-ceiling.js";
-import { emitTenantMessage, retrySetupMessageBody } from "./tenant-messages.js";
+import { emitTenantMessage } from "./tenant-messages.js";
 import { RealInboxKitDomainPort } from "../vendors/real/inboxkit-domain-port.js";
 import { assertCompleteRegistrant, readRegistrarOptInState } from "../vendors/registrar-arming.js";
 
@@ -45,6 +46,80 @@ function ownedDomainNames(ctx: TenantContext): Set<string> {
 
 export function slugify(input: string): string {
   return input.toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 20) || "hello";
+}
+
+/** The live domain a COMMITTED intent already resolved to, or undefined. */
+function liveDomainForIntent(
+  ctx: TenantContext,
+  intent: DomainIntentRow,
+): { id: string; domain: string; dns_status: string } | undefined {
+  if (intent.status !== "committed") return undefined;
+  return ctx.sql
+    .exec<{ id: string; domain: string; dns_status: string }>(
+      `SELECT id, domain, dns_status FROM domains WHERE tenant_id = ? AND domain = ? AND status != 'released' LIMIT 1`,
+      ctx.tenantId,
+      intent.candidate_domain,
+    )
+    .toArray()[0];
+}
+
+/** What a setup_infrastructure call would actually acquire, given what exists. */
+interface ProvisioningPlan {
+  /** Ordinal -> the live domain a prior attempt already committed there. */
+  satisfied: Map<number, { id: string; domain: string }>;
+  /** Domains this call still has to BUY. */
+  newDomains: number;
+  /** Mailbox slots in the request that no live mailbox fills yet. */
+  newMailboxes: number;
+}
+
+/**
+ * Reconciles the request against what the tenant already has (BLOCKING-1).
+ *
+ * `domains`/`inboxesEach` are a TARGET, not a delta: the ordinals a prior call
+ * committed resume, and only the shortfall is bought. Everything downstream that
+ * needs to know "how much will THIS call add" reads it from here — the plan cap,
+ * the quote, the candidate requirement — so a pure retry, which adds nothing,
+ * cannot be rejected by a guard sized against the whole ask. Before this, a
+ * retry at the plan ceiling failed the cap check (existing + the full request),
+ * and a retry that needed no new domain still failed if no FRESH lookalike
+ * happened to be available. Both were convergence failures dressed as 400s.
+ *
+ * Pure reads — safe to run before the lifecycle/brand guards have spent anything.
+ */
+function planProvisioning(ctx: TenantContext, input: SetupInfrastructureInput): ProvisioningPlan {
+  const personaSlug = slugify(input.persona);
+  const satisfied = new Map<number, { id: string; domain: string }>();
+  let newDomains = 0;
+  let newMailboxes = 0;
+
+  for (let domainIndex = 0; domainIndex < input.domains; domainIndex++) {
+    const intent = readDomainIntent(ctx, domainIntentKey(ctx.tenantId, domainIndex));
+    const live = intent ? liveDomainForIntent(ctx, intent) : undefined;
+    if (!live) {
+      newDomains++;
+      newMailboxes += input.inboxesEach;
+      continue;
+    }
+    satisfied.set(domainIndex, { id: live.id, domain: live.domain });
+    // Count the SLOTS, by their deterministic addresses — not the domain's live
+    // mailbox count. A call that changes `persona` targets different addresses,
+    // and counting rows would understate what it is about to buy, which is the
+    // one direction a spend guard must never be wrong in.
+    for (let mailboxIndex = 0; mailboxIndex < input.inboxesEach; mailboxIndex++) {
+      const email = managedMailboxAddress(personaSlug, live.domain, domainIndex, mailboxIndex);
+      const exists = ctx.sql
+        .exec<{ n: number }>(
+          `SELECT COUNT(*) as n FROM mailboxes WHERE tenant_id = ? AND email = ? AND released_at IS NULL`,
+          ctx.tenantId,
+          email,
+        )
+        .one().n;
+      if (exists === 0) newMailboxes++;
+    }
+  }
+
+  return { satisfied, newDomains, newMailboxes };
 }
 
 /**
@@ -146,23 +221,17 @@ export async function provisionDomainWithMailboxes(
   // own a domain the buy leg failed to report.
   const intent = recordDomainIntent(ctx, opts.intentKey, opts.domain);
 
-  // This ORDINAL is already done. Reached when a caller repeats a setup call
-  // WITHOUT an idempotency key: the intent key falls back to tenant+ordinal, so
-  // the repeat resolves to the intent the first call committed. A keyless
-  // identical call is indistinguishable from a retry, so it must CONVERGE —
+  // This ORDINAL is already done. The intent key is the tenant + ordinal
+  // (provision-intents.ts's domainIntentKey), so ANY repeat of a setup call —
+  // keyed, unkeyed, or re-keyed — resolves to the intent the first call
+  // committed. A repeat is indistinguishable from a retry, so it must CONVERGE:
   // return the domain we already have rather than buy another one. (H3b's
   // dedupe hands us a fresh candidate by then, which is why this check is on
   // the INTENT's recorded name, not on `opts.domain`.) A caller who genuinely
-  // wants a second domain sends a distinct Idempotency-Key, which mints a
-  // distinct intent and falls through to the normal buy below.
-  const existing = ctx.sql
-    .exec<{ id: string; domain: string; dns_status: string }>(
-      `SELECT id, domain, dns_status FROM domains WHERE tenant_id = ? AND domain = ? AND status != 'released' LIMIT 1`,
-      ctx.tenantId,
-      intent.candidate_domain,
-    )
-    .toArray()[0];
-  if (intent.status === "committed" && existing) {
+  // wants a second domain raises `domains`, which reaches a HIGHER ordinal with
+  // no committed intent and falls through to the normal buy below.
+  const existing = liveDomainForIntent(ctx, intent);
+  if (existing) {
     // B1 (gate 2026-08-05) — RE-DRIVE DNS BEFORE PROVISIONING ANYTHING.
     // H2's error text promises "retry to finish it", and this branch is the
     // retry — but it used to return without ever calling setDnsWithRetry again
@@ -312,11 +381,10 @@ export async function runSetupInfrastructure(
   // runDeliverabilitySweep, so a test can assert the gate (a) alert content
   // with a SandboxOpsMailer without any production call site needing to change.
   mailer: OpsMailer = createOpsMailer(ctx.env),
-  // H1 — the caller's request idempotency key, threaded in solely to seed
-  // STABLE domain-intent keys. Optional: without one, intents key off the
-  // tenant + ordinal, which still converges for the single-tenant retry that
-  // matters (a caller who omits the key gets less protection, exactly as with
-  // request idempotency itself).
+  // The caller's request idempotency key. It governs RESPONSE REPLAY only
+  // (TenantDO.setupInfrastructure's withRequestIdempotency) and is threaded in
+  // here solely so a retry_setup message can tell the agent which key to resend.
+  // It deliberately has NO say in what gets bought — see domainIntentKey.
   setupKey?: string,
 ): Promise<{ jobId: string; billing: MailboxBilling } | { quoteOnly: true; billing: MailboxBilling }> {
   // Lifecycle freeze — BEFORE any spend. A suspended/disputed/canceled tenant
@@ -328,8 +396,13 @@ export async function runSetupInfrastructure(
   // (ARCHITECTURE.md #8 "enforced in code"). Throws ValidationError -> HTTP 400.
   assertBrandOwnership({ brand: input.brand, primaryDomain: input.primaryDomain });
 
+  // What this call would actually acquire, given the ordinals already committed.
+  // Every guard below is sized against THIS, not the raw ask, so a retry — which
+  // acquires nothing — passes them all.
+  const plan = planProvisioning(ctx, input);
+
   // Plan quota / provisioning-cap guard (B1 brief) — BEFORE any spend.
-  assertWithinProvisioningCap(ctx, { domains: input.domains, mailboxes: input.domains * input.inboxesEach });
+  assertWithinProvisioningCap(ctx, { domains: plan.newDomains, mailboxes: plan.newMailboxes });
 
   // The live provisioned mailbox count (the billing meter) — read for the
   // in-response billing projection (SPEC §18 "no silent capacity addition").
@@ -340,7 +413,7 @@ export async function runSetupInfrastructure(
   // monthly WITHOUT provisioning or mutating the profile — the request is fully
   // validated above so the projection reflects a genuinely-acceptable request.
   if (input.quoteOnly) {
-    return { quoteOnly: true, billing: buildMailboxBilling(ctx, liveProvisioned() + input.domains * input.inboxesEach) };
+    return { quoteOnly: true, billing: buildMailboxBilling(ctx, liveProvisioned() + plan.newMailboxes) };
   }
 
   // H8, asymmetric by risk. Deferring the whole profile write past the reads
@@ -466,14 +539,20 @@ export async function runSetupInfrastructure(
       adoptable.has(c.domain.toLowerCase()) ||
       (c.available !== false && !owned.has(c.domain.toLowerCase())),
   );
-  if (usable.length < input.domains) {
+  // Only the SHORTFALL needs a fresh name. Requiring `input.domains` of them
+  // made a retry depend on the vendor still having lookalikes to sell for
+  // domains the tenant already owns — so a converging call that needed to buy
+  // nothing could still 400 (BLOCKING-1's second half).
+  const fresh = usable.map((c) => c.domain);
+  const noCandidates = (): never => {
     // Deliberately a hard, structured stop rather than the old positional
     // `candidates[i % candidates.length]` wraparound, which silently bought the
     // SAME domain repeatedly within one call at domains >= 6.
     throw new ValidationError(
-      `could not find ${input.domains} available lookalike domain(s) for "${input.brand}" that this account does not already own (found ${usable.length}). Try a different brand/primary domain, or request fewer domains.`,
+      `could not find ${plan.newDomains} available lookalike domain(s) for "${input.brand}" that this account does not already own (found ${fresh.length}). Try a different brand/primary domain, or request fewer domains.`,
     );
-  }
+  };
+  if (fresh.length < plan.newDomains) noCandidates();
 
   // Wire point A (system->agent message channel, increment 1) — tracks which
   // domain the loop below was working on when it threw, so the catch can name
@@ -484,27 +563,28 @@ export async function runSetupInfrastructure(
     const personaSlug = slugify(input.persona);
 
     for (let domainIndex = 0; domainIndex < input.domains; domainIndex++) {
-      const candidate = usable[domainIndex];
-      if (!candidate) continue;
-      inFlightDomain = candidate.domain;
+      // A satisfied ordinal names the domain it already resolved to; every other
+      // one consumes the next fresh candidate. Indexing `usable` by the ordinal
+      // instead would skip a buy whenever an earlier ordinal was already
+      // satisfied — a silent partial provision under a 202.
+      const domain = plan.satisfied.get(domainIndex)?.domain ?? fresh.shift() ?? noCandidates();
+      inFlightDomain = domain;
       await provisionDomainWithMailboxes(ctx, {
-        domain: candidate.domain,
+        domain,
         domainIndex,
         personaSlug,
         inboxesEach: input.inboxesEach,
-        // H1 — the intent key. Derived from the caller's setup idempotency key
-        // (falling back to the tenant when none was supplied) plus the ordinal,
-        // NEVER from the candidate name: a retry has to resolve to the same
-        // intent row even if candidate generation ever changes, which is the
-        // whole point of recording the resolved name rather than deriving it.
-        intentKey: `${setupKey ?? `tenant:${ctx.tenantId}`}#${domainIndex}`,
-        // N2 (gate 2026-08-05, F1) — `candidate.domain` above is only a correct
-        // guess for a FIRST attempt. On a resume, provisionDomainWithMailboxes
-        // actually operates on the intent-resolved domain, which can differ
-        // from this call's fresh `usable[domainIndex]` candidate (the prior
-        // candidate is now excluded from `usable` because it's already owned).
-        // This callback corrects `inFlightDomain` to the real one the instant
-        // it's known, before the catch below ever names it in a customer message.
+        // The intent key — tenant + ordinal, never the caller's key and never
+        // the candidate name: a retry has to resolve to the same intent row even
+        // if candidate generation changes, which is the whole point of recording
+        // the resolved name rather than deriving it. See domainIntentKey.
+        intentKey: domainIntentKey(ctx.tenantId, domainIndex),
+        // N2 (gate 2026-08-05, F1) — a fresh candidate is only a correct guess
+        // for an ordinal nothing has committed yet. On a resume,
+        // provisionDomainWithMailboxes operates on the intent-resolved domain,
+        // which can differ from whatever name was passed in. This callback
+        // corrects `inFlightDomain` to the real one the instant it's known,
+        // before the catch below ever names it in a customer message.
         onDomainResolved: (domain) => {
           inFlightDomain = domain;
         },

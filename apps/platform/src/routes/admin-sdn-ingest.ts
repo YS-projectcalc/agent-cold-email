@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env.js";
 import { RealClock } from "../clock.js";
-import { SDN_INGEST_MAX_BYTES } from "../validate.js";
+import { declaresOverCap, readTextBodyWithCap, SDN_INGEST_MAX_BYTES } from "../validate.js";
 import { ingestSdnCsv, type SdnIngestOutcome } from "../ofac/sdn-ingest.js";
 
 // G1a droplet-relay (design: droplet-relay-2026-07-24) — Treasury's TLS
@@ -35,13 +35,16 @@ const STATUS_BY_REASON: Record<SdnIngestOutcome["reason"], 200 | 400 | 422 | 500
 export const adminSdnIngestRoute = new Hono<{ Bindings: Env }>().post("/admin/sdn/ingest", async (c) => {
   // Body-size cap BEFORE materializing the body — same class of guard every
   // other body-reading route in this codebase applies (validate.ts,
-  // webhooks.ts, lifecycle.ts, mcp.ts).
-  const declaredLength = Number(c.req.header("content-length"));
-  if (Number.isFinite(declaredLength) && declaredLength > SDN_INGEST_MAX_BYTES) {
+  // webhooks.ts, lifecycle.ts, mcp.ts). The declared length is the fast path;
+  // readTextBodyWithCap is what a chunked upload cannot slip past.
+  if (declaresOverCap(c, SDN_INGEST_MAX_BYTES)) {
     return c.json({ error: "request body too large" }, 413);
   }
 
-  const csvText = await c.req.text();
+  const csvText = await readTextBodyWithCap(c, SDN_INGEST_MAX_BYTES);
+  if (csvText === null) {
+    return c.json({ error: "request body too large" }, 413);
+  }
   const now = new RealClock().now();
   const outcome = await ingestSdnCsv(c.env, csvText, now);
   return c.json(outcome, STATUS_BY_REASON[outcome.reason]);

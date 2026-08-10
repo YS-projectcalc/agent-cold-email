@@ -26,7 +26,9 @@ import { RealClock } from "./clock.js";
 import type { Env } from "./env.js";
 import { buildOpsDigest, runDeliverabilitySweepAllTenants, runDunningSweep, runSendPipelineAllTenants, runWarmupCancelSweepAllTenants, runWebhookDeliveriesAllTenants } from "./admin/ops-sweep.js";
 import { runWatchtower } from "./admin/watchtower.js";
-import { createOpsMailer } from "./ops-mail/ops-mailer.js";
+import { reportSweepSignals } from "./admin/sweep-signals.js";
+import { recordSweepHeartbeat } from "./admin/watchtower-infra.js";
+import { createOpsMailer, type OpsMailer } from "./ops-mail/ops-mailer.js";
 import { reapStaleReservations } from "./engine/spend-ceiling.js";
 import { maybeRefreshSdnList } from "./ofac/sdn-refresh.js";
 import { rescreenListUnavailableReviews } from "./ofac/screening-recovery.js";
@@ -51,9 +53,15 @@ async function runLeg<T>(name: string, fallback: T, fn: () => Promise<T>): Promi
   }
 }
 
-export async function runScheduledOpsSweep(env: Env): Promise<void> {
+/**
+ * `mailer` is injectable for the SAME reason `runDunningSweep` and
+ * `runWatchtower` take one: it is how a test asserts what the sweep actually
+ * emailed rather than that its code looks right. Production passes nothing and
+ * gets the real (or dark) channel.
+ */
+export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer } = {}): Promise<void> {
   const now = new RealClock().now();
-  const mailer = createOpsMailer(env);
+  const mailer = opts.mailer ?? createOpsMailer(env);
 
   const deliverability = await runLeg("deliverability", null, () => runDeliverabilitySweepAllTenants(env));
   const dunning = await runLeg("dunning", null, () => runDunningSweep(env, now, mailer));
@@ -98,8 +106,20 @@ export async function runScheduledOpsSweep(env: Env): Promise<void> {
   // time this one starts.
   const sendPipeline = await runLeg("sendPipeline", null, () => runSendPipelineAllTenants(env, now));
 
-  console.log(
-    "scheduled ops sweep",
-    JSON.stringify({ deliverability, dunning, digest, watchtower, warmupCancel, webhooks, spendReservations, sdnRefresh, sdnRecovery, sendPipeline }),
-  );
+  const legs = { deliverability, dunning, digest, watchtower, warmupCancel, webhooks, spendReservations, sdnRefresh, sdnRecovery, sendPipeline };
+
+  // Audit 2026-08-06 (NB-2/NB-3, table row 4) — every leg above already counts
+  // its own failures and `runLeg` already catches a leg-level throw; until now
+  // all of it ended in the log line below and reached no human. Routed through
+  // the SAME throttled state machine as every other check, and damped over
+  // consecutive ticks so an intermittent leg cannot flap.
+  const signalAlerts = await runLeg("sweepSignals", null, () => reportSweepSignals(env, mailer, { legs, digest }, now));
+
+  // The dead-man's heartbeat (BLOCKING-2). LAST, and its own leg: it is the
+  // claim "this tick ran to completion", so it must not be written by any leg
+  // that could still be skipped, and it must be written even when legs above
+  // failed — a D1 outage is not a dead cron, and the alarm must not say it is.
+  await runLeg<void>("heartbeat", undefined, () => recordSweepHeartbeat(env, now));
+
+  console.log("scheduled ops sweep", JSON.stringify({ ...legs, signalAlerts }));
 }

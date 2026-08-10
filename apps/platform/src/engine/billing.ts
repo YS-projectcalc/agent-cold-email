@@ -21,13 +21,14 @@ import {
 import {
   createStripeCheckoutSession,
   ensureStripePrices,
+  getDeclineCode,
   getSubscription,
   setSubscriptionItemQuantity,
   STRIPE_PRICES,
   stripeMode,
   type StripePriceMap,
 } from "../billing/stripe-client.js";
-import { HANDLED_STRIPE_EVENT_TYPES, type StripeEventInput } from "../billing/stripe-webhook.js";
+import { HANDLED_STRIPE_EVENT_TYPES, readIdRef, type StripeEventInput } from "../billing/stripe-webhook.js";
 import type { Env } from "../env.js";
 import { newId } from "../schema.js";
 import { screenTenant } from "../ofac/screening.js";
@@ -315,24 +316,23 @@ function readStripeBillingName(obj: Record<string, unknown>): string | null {
 }
 
 /**
- * Reads the charge decline/failure code from an `invoice.payment_failed` event
- * object (A5). Stripe exposes it in a few shapes depending on expansion; we
- * check the documented locations and fall back to null (unknown -> transient,
- * the safe default). The exact real-Stripe path is verified at activation.
+ * The charge decline code behind a failed invoice (A5), resolved by ASKING
+ * STRIPE. The old parser read it off the event object and was dead on every
+ * real delivery: an unexpanded `invoice.payment_failed` carries `charge` and
+ * `payment_intent` as bare id STRINGS and no failure detail anywhere, so it
+ * always returned null, every real decline graded transient, and the
+ * permanent-decline fast path (lost/stolen/fraudulent -> immediate suspend)
+ * had never once executed against a real event.
+ *
+ * Unknown stays TRANSIENT in every failure direction — no key armed, no ids on
+ * the invoice, Stripe slow, Stripe erroring (getDeclineCode never throws). The
+ * four-strike grace cycle is the safe default; suspending a paying customer off
+ * a failed lookup would be worse than the bug.
  */
-function readDeclineCode(obj: Record<string, unknown>): string | null {
-  const asString = (v: unknown): string | null => (typeof v === "string" && v.length > 0 ? v : null);
-  const nested = (v: unknown, key: string): unknown =>
-    v && typeof v === "object" ? (v as Record<string, unknown>)[key] : undefined;
-
-  return (
-    asString(obj.decline_code) ??
-    asString(obj.failure_code) ??
-    asString(nested(obj.last_payment_error, "decline_code")) ??
-    asString(nested(obj.charge, "failure_code")) ??
-    asString(nested(nested(obj.payment_intent, "last_payment_error"), "decline_code")) ??
-    null
-  );
+async function resolveDeclineCode(ctx: TenantContext, obj: Record<string, unknown>): Promise<string | null> {
+  const secretKey = ctx.env.STRIPE_SECRET_KEY;
+  if (!secretKey) return null; // simulated / unarmed tenant — no Stripe to ask
+  return getDeclineCode(secretKey, readIdRef(obj.charge), readIdRef(obj.payment_intent));
 }
 
 function mapStripeSubscriptionStatus(status: unknown): "active" | "past_due" | "canceled" | null {
@@ -391,6 +391,32 @@ function intendedBillingState(event: StripeEventInput): string | null {
 }
 
 /**
+ * True when THIS dispute's own resolution is already recorded AND that outcome
+ * does not itself warrant a freeze — so re-applying its `charge.dispute.created`
+ * could only write a 'disputed' that nothing left alive can lift (the sole
+ * writer that leaves 'disputed' is this dispute's own closed(won), by then
+ * deduped by `webhook_events`).
+ *
+ * 'lost' is deliberately NOT settled-without-freeze: a lost chargeback's
+ * terminal state IS the freeze (the owner decides via terminate), and on a
+ * closed-first delivery the `closed` branch writes no billing_state at all, so
+ * the late `created` is the only event that can still apply the D5 control.
+ * A dispute we cannot identify is not settled — the rule stays biased toward
+ * applying.
+ */
+function isDisputeSettledWithoutFreeze(ctx: TenantContext, event: StripeEventInput): boolean {
+  const disputeId = event.data.object.id;
+  if (typeof disputeId !== "string") return false;
+  const row = ctx.sql
+    .exec<{ status: string; closed_at: number | null }>(
+      `SELECT status, closed_at FROM disputes WHERE dispute_id = ?`,
+      disputeId,
+    )
+    .toArray()[0];
+  return row !== undefined && row.closed_at !== null && row.status !== "lost";
+}
+
+/**
  * True when this event must be REFUSED as out of order
  * (audit-stripe-webhook-2026-08-06.md finding 3, rescoped by
  * wave2-integration-gate-2026-08-06.md BLOCKING 2).
@@ -431,12 +457,35 @@ function intendedBillingState(event: StripeEventInput): string | null {
  * watermark. Every real Stripe event carries `created`; only synthetic fixtures
  * lack one, and an unordered event must not poison the ordering of real ones.
  *
+ * `charge.dispute.created` is exempt from the per-LANE mark (gate residual
+ * N-1). Even a per-lane mark is broader than the state it protects: the dispute
+ * lane carries every dispute OBJECT, so one dispute's WIN moved the mark past a
+ * DIFFERENT, genuine chargeback emitted earlier and condition (2) then read
+ * 'disputed' vs the 'active' the win had restored as a conflict — the second
+ * chargeback was refused and that tenant never froze. Refusing a freeze drops
+ * the D5 control outright, so the exemption is right for every OTHER dispute.
+ *
+ * It is NOT right for the dispute's own (wave3-integration-gate-2026-08-09.md
+ * B-1): the exemption's justification — "applying it can only lose time, until
+ * its own dispute.closed lifts it" — is false once that dispute.closed has
+ * already been consumed and deduped, which Stripe permits, since it orders
+ * nothing WITHIN a dispute either. So the exemption is bounded by this
+ * dispute's OWN recorded resolution (isDisputeSettledWithoutFreeze) — a
+ * per-object witness, stronger than any timestamp and independent of `created`,
+ * because a dispute is always created before it is resolved. Ordering still
+ * governs `charge.dispute.closed`, which is the direction that can actually
+ * regress — a stale WON must not lift a newer freeze.
+ *
  * Failure direction: a wrong APPLY here can only be an event whose state write
  * agrees with the current state — i.e. it changes no state at all, and only its
  * idempotent side effects run. A wrong REFUSE silently drops a control. The
  * rule is deliberately biased toward applying.
  */
 function isStaleBillingEvent(ctx: TenantContext, event: StripeEventInput): boolean {
+  // Before the `created`-less short circuit on purpose: this is a per-object
+  // ordering witness, not a timestamp comparison, so it holds for an unordered
+  // event too.
+  if (event.type === "charge.dispute.created") return isDisputeSettledWithoutFreeze(ctx, event);
   if (event.created === undefined) return false;
   const lane = stripeEventLane(event.type);
   if (!lane) return false;
@@ -539,6 +588,14 @@ export async function applyStripeWebhookEvent(ctx: TenantContext, event: StripeE
     // billing_state='active' and resurrecting a canceled tenant. Superseded
     // work is not worth finishing; drop the marker and stop.
     if (isStaleBillingEvent(ctx, event)) {
+      // Marked NOT applied for the same reason as a first-delivery refusal
+      // below: an in-flight marker means the earlier attempt never ran to
+      // completion, and we are now refusing to finish it — so this event never
+      // applied, and must not count as a dunning strike. The window is narrow
+      // (it needs the handler to die mid-effect AND a superseding event before
+      // the redelivery) but it is exactly the window an awaited vendor call
+      // inside a handler opens.
+      ctx.sql.exec(`UPDATE webhook_events SET applied = 0 WHERE event_id = ?`, event.id);
       ctx.sql.exec(`DELETE FROM webhook_event_inflight WHERE event_id = ?`, event.id);
       return { applied: false, duplicate: true, stale: true };
     }
@@ -554,6 +611,13 @@ export async function applyStripeWebhookEvent(ctx: TenantContext, event: StripeE
   }
 
   if (isStaleBillingEvent(ctx, event)) {
+    // The claim row stays (it is the replay guard, and a redelivery of this
+    // same event must keep short-circuiting) but is marked NOT applied, so a
+    // refused failure is not a dunning strike — gate residual N-2. Marking
+    // rather than reordering is deliberate: the claim has to precede the
+    // effects on the checkout lane, where skipping the OFAC screen is the
+    // fail-open that ordering was fixed to close.
+    ctx.sql.exec(`UPDATE webhook_events SET applied = 0 WHERE event_id = ?`, event.id);
     return { applied: false, duplicate: false, stale: true };
   }
   recordBillingEventOrder(ctx, event, now);
@@ -681,7 +745,9 @@ async function applyStripeEventEffects(ctx: TenantContext, event: StripeEventInp
       // grade it (permanent -> suspend immediately; transient -> count-based
       // grace). Stored even when the freeze guard below no-ops the state
       // change, so the LATEST code always reflects the most recent failure.
-      const declineCode = readDeclineCode(obj);
+      // The lookup is FIRST, before any durable write: it is the one awaited
+      // call in this branch, so nothing of this event has landed if it dies.
+      const declineCode = await resolveDeclineCode(ctx, obj);
       ctx.sql.exec(`UPDATE tenant_profile SET last_decline_code = ? WHERE id = ?`, declineCode, ctx.tenantId);
       // STICKY: a failed invoice must not overwrite a dispute/cancel freeze.
       ctx.sql.exec(
@@ -724,11 +790,23 @@ async function applyStripeEventEffects(ctx: TenantContext, event: StripeEventInp
       const rawStatus = typeof obj.status === "string" ? obj.status : "";
       const outcome = rawStatus === "won" ? "won" : rawStatus === "lost" ? "lost" : "closed";
       if (disputeId) {
+        // UPSERT, not UPDATE (wave3 gate B-1): Stripe orders nothing, not even
+        // the two events of one dispute, and a plain UPDATE arriving first wrote
+        // zero rows — leaving NO record that this dispute was ever resolved,
+        // which is exactly the witness isStaleBillingEvent needs to refuse the
+        // late `created`. `created_at` is left alone on conflict: it is when WE
+        // first recorded the dispute, and the open row is the earlier truth.
         ctx.sql.exec(
-          `UPDATE disputes SET status = ?, closed_at = ? WHERE dispute_id = ?`,
+          `INSERT INTO disputes (dispute_id, charge_id, amount_cents, reason, status, created_at, closed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (dispute_id) DO UPDATE SET status = excluded.status, closed_at = excluded.closed_at`,
+          disputeId,
+          typeof obj.charge === "string" ? obj.charge : null,
+          typeof obj.amount === "number" ? obj.amount : 0,
+          typeof obj.reason === "string" ? obj.reason : null,
           outcome,
           now,
-          disputeId,
+          now,
         );
       }
       // Won -> lift the freeze WE set (only when still 'disputed', so we never

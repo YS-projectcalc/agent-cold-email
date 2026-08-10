@@ -7,8 +7,11 @@
 // onto tenant_profile.billing_state and reclaim the provisioned infra.
 
 import { newId } from "../schema.js";
+import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { TenantContext } from "../tenant-context.js";
+import { alertUnresolvedDomainConnectionType } from "./byo-teardown-alert.js";
 import { pauseAllCampaigns } from "./campaigns.js";
+import { logAction } from "./deliverability-actions.js";
 import { EngineMailboxClient } from "./engine-mailbox-client.js";
 import { engineConfigFromEnv, revokePushedMailboxCredentials } from "./mailbox-credential-push.js";
 import { suspendTenant } from "./ops-summary.js";
@@ -29,10 +32,17 @@ export interface TeardownSummary {
   reason: TeardownReason;
   /** 'immediate' | 'end_of_period' — how the BILLING side ends (infra reclaim is always immediate). */
   effective: string;
+  /** Count of domains reclaimed from this tenant's active set. A vendor
+   * release call is only ever issued for a 'purchased' domain (ROADMAP.md:32)
+   * — a 'connected'/BYO or 'unknown' domain is counted here too (its LOCAL
+   * record is retired) but the vendor is never touched for it. */
   domainsReleased: number;
   mailboxesReleased: number;
   campaignsStopped: number;
-  /** Unconsumed remainder of the tenant's annual domain registrations we eat by reclaiming mid-term (integer cents). */
+  /** Unconsumed remainder of the tenant's annual domain registrations we eat by
+   * reclaiming mid-term (integer cents) — 'purchased' domains only; we never
+   * paid a registration fee for a 'connected'/BYO/'unknown' domain, so none of
+   * those contribute here (ROADMAP.md:32). */
   annualDomainLiabilityCents: number;
   ts: number;
 }
@@ -147,6 +157,28 @@ export function billableMailboxCount(ctx: TenantContext): number {
  * mailbox we were in the middle of revoking. Retry semantics are unchanged
  * (the loop is driven by `released_at IS NULL`, marked last; the tombstone
  * UPDATE is idempotent on retry, same as the revoke).
+ *
+ * ROADMAP.md:32's principle extends past domains (orchestrator ruling
+ * 2026-08-06): "never issue a vendor-destructive op against a customer-owned
+ * resource at teardown" covers a `provider='byo'` mailbox exactly as it
+ * covers a connected domain — byo-mailbox-composition.ts's `connectByoMailbox`
+ * rows are the customer's OWN pre-existing IMAP/SMTP/OAuth connection,
+ * bypassing vendor provisioning entirely, so `MailboxPort.release` for one
+ * would call a vendor about a mailbox it never issued. Step (2) below skips
+ * the vendor call for those rows ONLY; every other step (tombstone, engine
+ * revoke, `released_at` mark, slot accounting, intent release) proceeds
+ * unchanged — this closes at the ROOT of the shared function, so every
+ * caller (teardownTenant AND deliverability-actions.ts's REPLACE_DOMAIN)
+ * inherits it. Deliberately NOT extended to `provider=''` (unclassified) —
+ * see the `mailboxes.provider` schema doc comment: that value is a ratified,
+ * separate invariant ("'' IS LOAD-BEARING, NOT A BUG... do NOT 'fix' the ''
+ * exclusion") resolved by a human via the U2 pre-arm provenance read, and the
+ * risk direction is the OPPOSITE of the domain case — most `''` rows predate
+ * the discriminator and are genuine vendor-provisioned mailboxes (the one-shot
+ * clock migration already backfills the positive 'byo' signal from
+ * `source='byo_connected'`, so a persisting `''` row is unlikely to be BYO),
+ * so skipping their release would strand a REAL vendor resource, not protect
+ * a customer's one.
  */
 export async function releaseMailboxes(
   ctx: TenantContext,
@@ -154,7 +186,7 @@ export async function releaseMailboxes(
   engineClient: EngineMailboxClient = new EngineMailboxClient(engineConfigFromEnv(ctx.env)),
 ): Promise<ReleaseMailboxesResult> {
   const now = ctx.clock.now();
-  let query = `SELECT id, email, slot_counted FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL`;
+  let query = `SELECT id, email, slot_counted, provider FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL`;
   const params: (string | number)[] = [ctx.tenantId];
   if (opts.domainId) {
     query += ` AND domain_id = ?`;
@@ -165,7 +197,7 @@ export async function releaseMailboxes(
     query += ` LIMIT ?`;
     params.push(opts.limit);
   }
-  const mailboxes = ctx.sql.exec<{ id: string; email: string; slot_counted: number }>(query, ...params).toArray();
+  const mailboxes = ctx.sql.exec<{ id: string; email: string; slot_counted: number; provider: string }>(query, ...params).toArray();
 
   let slotCountedReleased = 0;
   for (const m of mailboxes) {
@@ -179,7 +211,11 @@ export async function releaseMailboxes(
       m.email,
       ctx.tenantId,
     );
-    await ctx.adapters.mailbox.release(m.email, `release-mbx:${ctx.tenantId}:${m.id}`);
+    // Never release a customer-owned BYO connection at the vendor (see the
+    // function doc comment above) — every other step still runs for it.
+    if (m.provider !== "byo") {
+      await ctx.adapters.mailbox.release(m.email, `release-mbx:${ctx.tenantId}:${m.id}`);
+    }
     if (m.slot_counted) slotCountedReleased++;
     // Revoke BEFORE marking released_at (i3i4-r2): a crash in between leaves the
     // row unmarked -> a retry re-attempts release + revoke (both idempotent).
@@ -219,51 +255,87 @@ export async function releaseMailboxes(
  * pushed credentials are best-effort revoked on the engine via
  * revokePushedMailboxCredentials: dark unless the engine is configured, and a
  * revoke failure never blocks or fails the teardown itself.
+ *
+ * `mailer` is a second injectable seam, same pattern, used only for the
+ * unresolved-connection-type founder alert below (ROADMAP.md:32).
  */
 export async function teardownTenant(
   ctx: TenantContext,
   opts: { reason: TeardownReason; effective: string },
   engineClient: EngineMailboxClient = new EngineMailboxClient(engineConfigFromEnv(ctx.env)),
+  mailer: OpsMailer = createOpsMailer(ctx.env),
 ): Promise<TeardownSummary> {
   const existing = readTeardownRecord(ctx);
   if (existing) return existing;
 
   const now = ctx.clock.now();
 
-  // 1. Release domains (belt-and-suspenders tenant scope even though a DO is
-  //    single-tenant — CLAUDE.md rule h). Book each domain's remaining-term
-  //    liability as its own idempotent ledger row (keyed on source_send_id so a
-  //    retry can never double-book) — the ledger SUM is the authoritative total
-  //    the owner digest reads.
+  // 1. Reclaim domains (belt-and-suspenders tenant scope even though a DO is
+  //    single-tenant — CLAUDE.md rule h). Book each RELEASED domain's
+  //    remaining-term liability as its own idempotent ledger row (keyed on
+  //    source_send_id so a retry can never double-book) — the ledger SUM is
+  //    the authoritative total the owner digest reads.
+  //
+  //    ROADMAP.md:32 FOUNDER RULING (2026-08-06) — "NEVER touch a
+  //    customer-connected domain at teardown": the vendor release call below
+  //    fires ONLY for a domain this platform actually registered
+  //    ('purchased'). 'connected' (a customer's own domain, pointed at the
+  //    vendor) and 'unknown' (no discriminator — every BYO row, byo-intake.ts's
+  //    registerByoDomain never sets this column, AND any pre-existing legacy
+  //    row) take the SAME branch: no vendor call, ever — the customer
+  //    disconnects their own domain themselves. This is the OPPOSITE default
+  //    from domain-dns.ts's setDns branch, which treats 'unknown' as
+  //    'purchased': that read is non-destructive (a poll), so guessing wrong
+  //    only stalls; release is destructive and irreversible, so the safe
+  //    guess flips here — "we can't prove we own it" must mean "don't touch
+  //    it", not "assume we do". The annual-domain liability is likewise only
+  //    ever booked for a 'purchased' domain: it represents OUR wholesale
+  //    registration cost, which was never incurred for a domain we didn't
+  //    register.
   const domains = ctx.sql
-    .exec<{ id: string; domain: string; purchased_at: number }>(
-      `SELECT id, domain, purchased_at FROM domains WHERE tenant_id = ? AND status != 'released'`,
+    .exec<{ id: string; domain: string; purchased_at: number; connection_type: string | null }>(
+      `SELECT id, domain, purchased_at, connection_type FROM domains WHERE tenant_id = ? AND status != 'released'`,
       ctx.tenantId,
     )
     .toArray();
 
   let annualDomainLiabilityCents = 0;
   for (const d of domains) {
-    await ctx.adapters.domain.release(d.domain, `release-domain:${ctx.tenantId}:${d.id}`);
-    const liability = computeDomainLiabilityCents(d.purchased_at, now);
-    annualDomainLiabilityCents += liability;
+    const rawType = (d.connection_type ?? "").trim().toLowerCase();
+    const connectionType = rawType === "purchased" || rawType === "connected" ? rawType : "unknown";
+
+    if (connectionType === "purchased") {
+      await ctx.adapters.domain.release(d.domain, `release-domain:${ctx.tenantId}:${d.id}`);
+      const liability = computeDomainLiabilityCents(d.purchased_at, now);
+      annualDomainLiabilityCents += liability;
+      if (liability > 0) {
+        ctx.sql.exec(
+          `INSERT OR IGNORE INTO ledger_entries (id, tenant_id, kind, amount_cents, description, ts, source_send_id)
+           VALUES (?, ?, 'liability', ?, ?, ?, ?)`,
+          newId("ledg"),
+          ctx.tenantId,
+          liability,
+          `annual-domain liability: reclaimed ${d.domain} mid-term`,
+          now,
+          `liability:${ctx.tenantId}:${d.id}`,
+        );
+      }
+    } else if (connectionType === "unknown") {
+      // No proof either way — treated as connected (never released), but
+      // logged AND alerted so a human resolves the ambiguity by hand.
+      logAction(ctx, "DOMAIN_TEARDOWN_UNRESOLVED_CONNECTION_TYPE", d.domain, {
+        reason: "teardown reached this domain with no recorded connection type; treated as connected (never released) — a human should confirm at the vendor",
+      });
+      await alertUnresolvedDomainConnectionType(ctx, d.domain, mailer);
+    }
+    // connectionType === 'connected': known-BYO, no log/alert needed — this is
+    // the expected, unambiguous case the founder ruling exists for.
+
     ctx.sql.exec(
       `UPDATE domains SET status = 'released' WHERE id = ? AND tenant_id = ?`,
       d.id,
       ctx.tenantId,
     );
-    if (liability > 0) {
-      ctx.sql.exec(
-        `INSERT OR IGNORE INTO ledger_entries (id, tenant_id, kind, amount_cents, description, ts, source_send_id)
-         VALUES (?, ?, 'liability', ?, ?, ?, ?)`,
-        newId("ledg"),
-        ctx.tenantId,
-        liability,
-        `annual-domain liability: reclaimed ${d.domain} mid-term`,
-        now,
-        `liability:${ctx.tenantId}:${d.id}`,
-      );
-    }
   }
 
   // 2. Release ALL this tenant's mailboxes back to the vendor (shared helper,

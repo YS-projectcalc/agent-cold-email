@@ -11,6 +11,7 @@ import {
   DomainRelationshipInput,
   LaunchCampaignInput,
   MarkInput,
+  RemoveMailboxesInput,
   ReplyInput,
   SetupInfrastructureInput,
   ThreadLabelInput,
@@ -25,6 +26,12 @@ export const CampaignIdInput = z.object({
 
 export const ThreadIdInput = z.object({
   threadId: z.string().min(1).describe("The thread id, e.g. from inbox() or campaign events."),
+});
+
+// msgchannel increment 3 — ack_message's id-in-URL arg (mirrors ThreadIdInput's
+// shape for the same id-becomes-an-argument reason: MCP tools have no URL).
+export const MessageIdInput = z.object({
+  messageId: z.string().min(1).describe("The message id, from list_messages or infrastructure_status's messages[]."),
 });
 
 // B2 (CLASS B) — optional request-idempotency key for MUTATING tools. An agent
@@ -46,6 +53,13 @@ export const SetupInfrastructureToolInput = SetupInfrastructureInput.extend({ id
 export const LaunchCampaignToolInput = LaunchCampaignInput.extend({ idempotencyKey: idempotencyKeyField });
 
 export const ThreadReplyInput = ThreadIdInput.extend(ReplyInput.shape).extend({ idempotencyKey: idempotencyKeyField });
+
+// BLOCKING-2 (audit-dashboard-idempotency-2026-08-06) — release is irreversible
+// through this API, so of every mutating tool this is the one where a dropped
+// response most needs a safe retry. MCP has no header channel, so the key has to
+// ride in the arguments for the agent surface to have the protection the REST
+// header already gives (SPEC §19.0 parity law).
+export const RemoveMailboxesToolInput = RemoveMailboxesInput.extend({ idempotencyKey: idempotencyKeyField });
 
 export const ThreadMarkInput = ThreadIdInput.extend(MarkInput.shape);
 

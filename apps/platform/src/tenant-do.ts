@@ -9,6 +9,7 @@ import type {
   InboxQueryInput,
   LaunchCampaignInput,
   ListLeadsQueryInput,
+  ListMessagesQueryInput,
   Provenance,
   RegisterByoDomainInput,
   RemoveMailboxesInput,
@@ -23,7 +24,7 @@ import type {
 // Not type-only: demoRun()'s default parameter value needs the runtime
 // schema (`DemoRunInput.parse({})`), not just the inferred type.
 import { DemoRunInput } from "@coldstart/shared";
-import { isPaidPlan, RateLimitError, TenantIsolationError, type Clock } from "@coldstart/shared";
+import { isPaidPlan, RateLimitError, RequestInProgressError, TenantIsolationError, type Clock } from "@coldstart/shared";
 import { DelegatingClock, RealClock, requireVirtualClock, VirtualClock } from "./clock.js";
 import { migrateTenantClockToReal } from "./engine/clock-migration.js";
 import type { StripeEventInput } from "./billing/stripe-webhook.js";
@@ -49,7 +50,15 @@ import { runWarmupCancellationSweep } from "./engine/warmup-cancel.js";
 import { withRequestIdempotency } from "./engine/idempotency.js";
 import { reconcileMailboxCredentialPushes } from "./engine/mailbox-credential-push.js";
 import { runDeliverabilitySweep } from "./engine/deliverability-actions.js";
-import { pruneTenantMessages } from "./engine/tenant-messages.js";
+import {
+  ackMessage,
+  emitOperatorMessage,
+  listMessagesPage,
+  pruneTenantMessages,
+  type AckMessageResult,
+  type EmitOperatorMessageInput,
+  type MessageListPage,
+} from "./engine/tenant-messages.js";
 import { runPollInbox } from "./engine/reply-processor.js";
 import { suppressLead, unsubscribeEmail, type UnsubscribeResult } from "./engine/suppression.js";
 import { upsertLeadDisposition, type LeadDispositionView } from "./engine/lead-dispositions.js";
@@ -174,6 +183,10 @@ export class TenantDO extends DurableObject<Env> {
   // buildAdapters() below.
   private sandboxAdapters: VendorAdapterBundle | null = null;
 
+  // BLOCKING-2 single-flight latch for mailbox release — see removeMailboxes()
+  // for why this is deliberately in-memory and not a durable claim.
+  private releaseInFlight = false;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.ctx.storage.sql.exec(TENANT_DO_SCHEMA);
@@ -267,6 +280,9 @@ export class TenantDO extends DurableObject<Env> {
    */
   private ensureColumnMigrations(): void {
     this.addColumnIfMissing("campaigns", "is_demo", "INTEGER NOT NULL DEFAULT 0");
+    // Campaign double-submit guard (see schema.ts + engine/campaigns.ts).
+    this.addColumnIfMissing("campaigns", "content_hash", "TEXT NOT NULL DEFAULT ''");
+    this.addColumnIfMissing("campaigns", "launched_at_real", "INTEGER NOT NULL DEFAULT 0");
     this.addColumnIfMissing("ledger_entries", "source_send_id", "TEXT");
     this.addColumnIfMissing("tenant_profile", "billing_state", "TEXT NOT NULL DEFAULT 'none'");
     this.addColumnIfMissing("tenant_profile", "stripe_customer_id", "TEXT");
@@ -349,6 +365,10 @@ export class TenantDO extends DurableObject<Env> {
     this.addColumnIfMissing("tenant_profile", "clock_migration_delta_ms", "INTEGER");
     this.addColumnIfMissing("tenant_profile", "clock_migrated_at", "INTEGER");
     this.addColumnIfMissing("deliverability_actions", "alerted_at", "INTEGER");
+    // Gate residual N-2 — "claimed" vs "applied" (see schema.ts). DEFAULT 1
+    // keeps every event an existing DO already recorded counting exactly as it
+    // did before; only events refused from here on read 0.
+    this.addColumnIfMissing("webhook_events", "applied", "INTEGER NOT NULL DEFAULT 1");
     // G1 (ga-gates-design-2026-07-22.md §G1) — OFAC/SDN screening verdict
     // columns (see schema.ts's tenant_profile comment for the field contract).
     this.addColumnIfMissing("tenant_profile", "screening_status", "TEXT NOT NULL DEFAULT 'clear'");
@@ -885,11 +905,50 @@ export class TenantDO extends DurableObject<Env> {
     return startCheckout(this.requireContext(), input, origin);
   }
 
-  // Customer-initiated downgrade (design §2) — releases N mailboxes now + syncs
-  // the lower Stripe quantity (proration none). Tenant-authed, POST /remove-mailboxes.
-  async removeMailboxes(input: RemoveMailboxesInput): Promise<RemoveMailboxesResult> {
-    const result = await removeMailboxes(this.requireContext(), input);
-    return result;
+  /**
+   * Customer-initiated downgrade (design §2) — releases N mailboxes now + syncs
+   * the lower Stripe quantity (proration none). Tenant-authed, POST
+   * /remove-mailboxes.
+   *
+   * BLOCKING-2 (audit-dashboard-idempotency-2026-08-06). "Release N" is
+   * RELATIVE and irreversible through this API, so every unprotected repeat
+   * destroyed another N: a same-key replay released twice, and a concurrent
+   * double-submit released 2N. Two guards, because the two shapes are different
+   * failures:
+   *
+   *  - The KEY, honored durably: a replay returns the recorded response and
+   *    re-releases nothing. This is the one the docs already promised.
+   *  - SINGLE-FLIGHT, for the caller that sends no key (every browser caller):
+   *    at most one release may be running for a tenant at a time. Deliberately
+   *    an in-memory flag rather than a durable claim — both submits necessarily
+   *    reach THIS instance (that is what makes the DO input gate the tenant's
+   *    serialization point), the check-and-set is synchronous so no concurrent
+   *    RPC can interleave before it, and an instance that dies mid-release takes
+   *    the flag with the work. A durable claim would only add a stuck-claim
+   *    failure mode: `releaseMailboxes` is already crash-retry-safe (driven by
+   *    `released_at IS NULL`, with an idempotent release + revoke).
+   *
+   * What neither guard can do is make an UNKEYED sequential retry safe — once
+   * the first call has settled, "release 1 more" is genuinely what a second
+   * unkeyed call says. Callers that need retry safety send the key.
+   */
+  async removeMailboxes(input: RemoveMailboxesInput, idempotencyKey?: string): Promise<RemoveMailboxesResult> {
+    const ctx = this.requireContext();
+    if (this.releaseInFlight) {
+      throw new RequestInProgressError(
+        "a mailbox release is already running for this tenant — wait for it to finish, then check your live mailbox count before retrying",
+      );
+    }
+    this.releaseInFlight = true;
+    try {
+      return await withRequestIdempotency(
+        ctx,
+        idempotencyKey ? `remove_mailboxes:${idempotencyKey}` : undefined,
+        () => removeMailboxes(ctx, input),
+      );
+    } finally {
+      this.releaseInFlight = false;
+    }
   }
 
   async completeCheckoutSimulated(sessionId: string): Promise<CompleteCheckoutResult> {
@@ -972,6 +1031,19 @@ export class TenantDO extends DurableObject<Env> {
     return listLeads(this.requireContext(), query);
   }
 
+  // --- msgchannel increment 3 — list_messages/ack_message. The SAME facade
+  // both the HTTP routes (routes/messages.ts) and the MCP tools call (parity
+  // law), reading/writing the SAME tenant_messages store increment 1's
+  // emitTenantMessage and increment 2's emitOperatorMessage write into. ---
+
+  listMessages(query: ListMessagesQueryInput): MessageListPage {
+    return listMessagesPage(this.requireContext(), query);
+  }
+
+  ackMessage(id: string): AckMessageResult {
+    return ackMessage(this.requireContext(), id);
+  }
+
   // --- D5 lifecycle: voluntary cancel (tenant-authed, POST /cancel) + abuse
   // terminate (ADMIN_TOKEN-authed, POST /admin/tenants/:id/terminate). Both
   // reclaim this tenant's OWN infra only — a DO can physically reach no other
@@ -1023,6 +1095,20 @@ export class TenantDO extends DurableObject<Env> {
   // aggregation reads the D1 tenants_index for the id list, then calls
   // opsSummary() on each tenant's own DO stub — never touches another
   // tenant's SqlStorage directly (ARCHITECTURE.md #3 + CLAUDE.md rule h). ---
+
+  /**
+   * Watchtower canary probe (src/admin/watchtower.ts). Called against a FIXED
+   * canary id that is never a real tenant, so it touches no customer data and
+   * needs no initialized profile — the value is that reaching this line at all
+   * proves the class CONSTRUCTS: the constructor above runs the whole schema +
+   * column migrations, and this repo has twice shipped a change that made that
+   * throw, which 500s every RPC for every tenant simultaneously. The DO probe
+   * used to ping only RateLimiterDO and reported healthy right through it.
+   */
+  async ping(): Promise<boolean> {
+    await this.ctx.storage.get("__watchtower_probe__");
+    return true;
+  }
 
   opsSummary(sinceMs: number): TenantOpsSummary {
     return getOpsSummary(this.requireContext(), sinceMs);
@@ -1082,6 +1168,17 @@ export class TenantDO extends DurableObject<Env> {
   /** G1b admin resolution — POST /admin/tenants/:id/screening {decision:'clear'} (routes/admin-screening.ts). */
   clearScreening(): void {
     clearScreeningStatus(this.requireContext());
+  }
+
+  /**
+   * msgchannel increment 2 — the operator route (POST
+   * /admin/tenants/:id/messages, routes/admin-messages.ts ONLY; never a
+   * tenant-facing route). Throws ValidationError (mapped to HTTP 400) when
+   * this tenant is lifecycle-frozen and the message kind doesn't warrant an
+   * exception — see engine/tenant-messages.ts's emitOperatorMessage doc.
+   */
+  emitOperatorMessage(input: EmitOperatorMessageInput): void {
+    emitOperatorMessage(this.requireContext(), input);
   }
 
   /**

@@ -352,7 +352,18 @@ CREATE TABLE IF NOT EXISTS campaigns (
   send_window_json TEXT NOT NULL,
   timezone TEXT NOT NULL DEFAULT 'UTC',
   is_demo INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  -- Double-submit guard (engine/campaigns.ts). content_hash fingerprints the
+  -- launch request; launched_at_real is a REAL wall-clock stamp, deliberately
+  -- NOT created_at above. created_at runs on the tenant's clock, which is
+  -- virtual and 1440x accelerated for demo/free tenants, so a window measured
+  -- against it would expire in a fraction of a real second. A double-click is a
+  -- real-world event and has to be measured in real time — same reasoning as
+  -- engine/provision-intents.ts's dispatchNow().
+  -- The defaults are what make rows written before this column existed inert:
+  -- '' never equals a fingerprint (they are hex), and 0 is outside every window.
+  content_hash TEXT NOT NULL DEFAULT '',
+  launched_at_real INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS leads (
@@ -511,7 +522,17 @@ CREATE TABLE IF NOT EXISTS checkout_sessions (
 CREATE TABLE IF NOT EXISTS webhook_events (
   event_id TEXT PRIMARY KEY,
   type TEXT NOT NULL,
-  ts INTEGER NOT NULL
+  ts INTEGER NOT NULL,
+  -- 0 when the event was CLAIMED but then refused as out of order
+  -- (wave2-integration-gate-2026-08-06.md N-2). The claim has to come first —
+  -- it is the concurrency guard, and moving it after the staleness check would
+  -- reopen the compliance fail-open that guard-before-effect closed — so a
+  -- refused event unavoidably leaves a row. Before this column, every such row
+  -- counted as a dunning strike (ops-summary.ts reads this table as the failure
+  -- count), and three refused redeliveries could suspend a recovered payer on
+  -- their FIRST genuine failure. DEFAULT 1: an existing row records an event
+  -- that was applied.
+  applied INTEGER NOT NULL DEFAULT 1
 );
 
 -- Guard-before-effect marker for the webhook handler
@@ -611,7 +632,9 @@ CREATE TABLE IF NOT EXISTS deliverability_actions (
 -- redelivered event can never double-apply. Scoped per-DO (one tenant per DO
 -- instance) exactly like webhook_events; keyed on the Stripe dispute id so two
 -- DIFFERENT events referencing the SAME dispute (created then closed) collapse
--- to one row (INSERT OR IGNORE on create, UPDATE on close).
+-- to one row (INSERT OR IGNORE on create, UPSERT on close — the close can be
+-- DELIVERED FIRST, and a row born closed is what tells the late created event
+-- that its dispute is already settled).
 CREATE TABLE IF NOT EXISTS disputes (
   dispute_id TEXT PRIMARY KEY,
   charge_id TEXT,

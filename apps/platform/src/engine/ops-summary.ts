@@ -196,10 +196,15 @@ export function getOpsSummary(ctx: TenantContext, sinceMs: number): TenantOpsSum
   // whole four-strike grace period. `dunning_cycle_basis` (schema.ts) holds the
   // webhook_events rowid at the last billing recovery; 0 when a tenant has
   // never recovered, which counts everything exactly as before.
+  // `applied = 1` excludes events that were CLAIMED and then refused as out of
+  // order (gate residual N-2): those changed no state, so counting them let
+  // three refused redeliveries suspend a recovered payer on their first
+  // genuine failure — the same grace-period skip the basis above exists to stop.
   const billingFailureCount = ctx.sql
     .exec<{ n: number }>(
       `SELECT COUNT(*) as n FROM webhook_events
        WHERE type = 'invoice.payment_failed'
+         AND applied = 1
          AND rowid > (SELECT COALESCE(MAX(basis_rowid), 0) FROM dunning_cycle_basis)`,
     )
     .one().n;

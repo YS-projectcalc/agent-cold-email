@@ -23,6 +23,7 @@ const KNOWN_NON_SPEND_ARMING = new Set([
   "DB",
   "TENANT",
   "SIGNUP_LIMITER",
+  "WATCHTOWER", // the watchtower's own control-state DO — alert throttling + the cron dead-man; no vendor, no spend
   "TOKEN_HASH_PEPPER",
   "WAITLIST",
   "STRIPE_WEBHOOK_SECRET", // verifies inbound events; arms nothing

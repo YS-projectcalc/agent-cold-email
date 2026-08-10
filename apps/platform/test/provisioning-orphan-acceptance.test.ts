@@ -1,5 +1,6 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { domainIntentKey } from "../src/engine/provision-intents.js";
 import { activatePaidPlan, api, mintTenant, seedBenignSdnList, tenantStub } from "./helpers.js";
 import { IK_API_KEY, IK_WORKSPACE_ID } from "./fixtures/inboxkit.js";
 
@@ -341,7 +342,7 @@ describe("ACCEPTANCE — the stranded purchased domain is recovered and provisio
       s.storage.sql.exec(
         `INSERT INTO domain_intents (key, tenant_id, candidate_domain, status, created_at, updated_at)
          VALUES (?, ?, ?, 'committed', 1, 1)`,
-        `${IDEMPOTENCY_KEY}#0`,
+        domainIntentKey(tenantId, 0),
         tenantId,
         ORPHAN,
       );

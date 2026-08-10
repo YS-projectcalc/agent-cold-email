@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { TenantMessage } from "../src/engine/tenant-messages.js";
 import {
+  ackMessage,
   emitTenantMessage,
   listSurfacedTenantMessages,
   pruneTenantMessages,
@@ -152,14 +153,18 @@ describe("listSurfacedTenantMessages — the infrastructure_status read surface"
     expect(messages.map((m) => m.body)).toEqual(["live"]);
   });
 
-  it("surfaces unread rows ahead of read ones, even when the read one is newer", async () => {
+  // Gate fix (msgchannel-inc23-gate-2026-08-06 F1): this preview is
+  // UNACKED-ONLY, not merely unacked-sorted-first — a read row must never
+  // surface here even when it is the newest row in the table. Acked history
+  // is reachable via list_messages instead (test/messages.test.ts).
+  it("excludes read (acked) rows entirely, even when the read one is newer", async () => {
     const { tenantId } = await signup("Unread First Co", "founder@unreadfirst.test");
     await withTenantContext(tenantId, (ctx) => emitTenantMessage(ctx, { kind: "k", severity: "info", body: "unread-old" }));
     await withTenantContext(tenantId, (ctx) =>
       ctx.sql.exec(`INSERT INTO tenant_messages (id, tenant_id, kind, severity, body, source, created_at, read_at) VALUES ('tmsg_readtest', ?, 'k', 'info', 'read-new', 'system', ?, ?)`, tenantId, ctx.clock.now() + 1, ctx.clock.now() + 1),
     );
     const messages = await withTenantContext(tenantId, (ctx) => listSurfacedTenantMessages(ctx));
-    expect(messages.map((m) => m.body)).toEqual(["unread-old", "read-new"]);
+    expect(messages.map((m) => m.body)).toEqual(["unread-old"]);
   });
 
   it("parses action_hint JSON back into an object, and is null when absent", async () => {
@@ -198,6 +203,32 @@ describe("InfrastructureStatus.messages — the field is live on the real GET /i
     expect(status.status).toBe(200);
     expect(status.body.messages).toHaveLength(5);
     expect(status.body.messages[0]!.body).toBe("m-5"); // newest-first among the unread set
+  });
+
+  // Gate fix (msgchannel-inc23-gate-2026-08-06 F1) — the gate's exact repro,
+  // inverted: post a message, see it surface, ack it, then assert it stops
+  // surfacing. Without the fix an acked `action_required` row (carrying an
+  // actionHint an agent could act on twice) kept resurfacing here for the
+  // full 30-day READ_RETENTION_MS window.
+  it("a message stops surfacing here once acked", async () => {
+    const res1 = await api<{ tenantId: string; token: string }>("/signup", {
+      method: "POST",
+      headers: { "CF-Connecting-IP": `test-ip-${crypto.randomUUID()}` },
+      body: JSON.stringify({ brand: "Ack Surface Co", contactEmail: "founder@acksurfaceco.test" }),
+    });
+    const { tenantId, token } = res1.body as { tenantId: string; token: string };
+    await withTenantContext(tenantId, (ctx) =>
+      emitTenantMessage(ctx, { kind: "retry_setup", severity: "action_required", body: "retry it", actionHint: { tool: "setup_infrastructure" } }),
+    );
+
+    const before = await api<{ messages: TenantMessage[] }>("/infrastructure-status", { token });
+    expect(before.body.messages).toHaveLength(1);
+    const messageId = before.body.messages[0]!.id;
+
+    await withTenantContext(tenantId, (ctx) => ackMessage(ctx, messageId));
+
+    const after = await api<{ messages: TenantMessage[] }>("/infrastructure-status", { token });
+    expect(after.body.messages).toEqual([]);
   });
 });
 

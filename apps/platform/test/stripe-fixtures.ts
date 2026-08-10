@@ -87,9 +87,21 @@ export function checkoutSessionCompleted(params: {
  * Deliberately carries no decline code: on a real, unexpanded
  * `invoice.payment_failed` payload `charge` and `payment_intent` are bare id
  * STRINGS, so there is nowhere on the object for one to be. Faking one here
- * would re-commit exactly the sin this file exists to prevent.
+ * would re-commit exactly the sin this file exists to prevent. Reading the code
+ * takes a second Stripe call, which is what engine/billing.ts now does.
+ *
+ * `chargeId: null` models the real invoice whose payment failed before any
+ * Charge existed — Stripe leaves `charge` null there and the payment intent is
+ * the only route to the failure detail.
  */
-export function invoicePaymentFailed(params: { tenantId: string | null; customerId: string; created?: number; attemptCount?: number }) {
+export function invoicePaymentFailed(params: {
+  tenantId: string | null;
+  customerId: string;
+  created?: number;
+  attemptCount?: number;
+  chargeId?: string | null;
+  paymentIntentId?: string;
+}) {
   return eventEnvelope(
     "invoice.payment_failed",
     {
@@ -97,12 +109,12 @@ export function invoicePaymentFailed(params: { tenantId: string | null; customer
       object: "invoice",
       attempt_count: params.attemptCount ?? 1,
       billing_reason: "subscription_cycle",
-      charge: `ch_test_${crypto.randomUUID()}`,
+      charge: params.chargeId === undefined ? `ch_test_${crypto.randomUUID()}` : params.chargeId,
       collection_method: "charge_automatically",
       currency: "usd",
       customer: params.customerId,
       metadata: {},
-      payment_intent: `pi_test_${crypto.randomUUID()}`,
+      payment_intent: params.paymentIntentId ?? `pi_test_${crypto.randomUUID()}`,
       status: "open",
       subscription: "sub_test_fixture",
       subscription_details: params.tenantId ? { metadata: { tenantId: params.tenantId, plan: "managed" } } : { metadata: null },

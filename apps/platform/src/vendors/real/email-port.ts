@@ -57,8 +57,8 @@ export interface EngineClientConfig {
 // The adversary's suggested ~45s would have broken rung 1 (it sits below the
 // engine's own worst-case SMTP transaction), which would abort genuinely slow
 // but succeeding sends; 120s is the largest reduction that satisfies every rung
-// at once. test/send-pipeline-ladder.test.ts asserts the whole ladder so the
-// next constant change cannot quietly re-open R5's incoherence.
+// at once. test/send-pipeline-budget.test.ts's "R5" describe asserts the whole
+// ladder so the next constant change cannot quietly re-open R5's incoherence.
 export const ENGINE_REQUEST_TIMEOUT_MS = 2 * 60 * 1000;
 
 // 4xx statuses the tick should RETRY rather than terminally fail:

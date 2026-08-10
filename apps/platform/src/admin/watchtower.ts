@@ -1,99 +1,51 @@
 // D2 monitoring — the "watchtower". Runs on the ops-sweep cron (wrangler.toml
 // `[triggers]`), probes platform health, and emails the founder via the
 // OpsMailer on a STATE CHANGE only, re-alerting on persistence after a
-// cooldown and sending a recovery email when a check heals. The alert state
-// machine (reconcileAlerts) is the core correctness surface — it is what makes
-// a 5-minute cron cadence safe: it never storms.
+// cooldown and sending a recovery email when a check heals.
 //
-// Split like admin/dunning.ts (decide) + admin/ops-sweep.ts (act): the health
-// PROBES are I/O (evaluateHealthChecks); the state machine is a separate,
-// hard-tested function (reconcileAlerts) driven off a `CheckResult[]` so a
-// test can feed synthetic health without any live probe.
+// Split three ways (CLAUDE.md rule b), by what each part can fail on:
+//  - watchtower-alerts.ts — what an alert IS, how it renders, and the pure
+//    transition rule (the anti-storm guarantee), shared by both stores;
+//  - watchtower-infra.ts + watchtower-do.ts — the checks that CANNOT use D1,
+//    because D1 (or the cron) is what they are alarming on;
+//  - this file — the probes, the per-tenant checks, and the D1-backed state
+//    machine for everything else.
+//
+// ORDERING RULE (audit 2026-08-06, BLOCKING-1): the `d1` probe runs FIRST and
+// every D1-dependent scan below it is skipped when it fails. The old code
+// computed a `d1: unhealthy` result and then aborted on two unguarded D1 reads
+// before returning it, so the one check named for a D1 outage was structurally
+// incapable of reporting one.
 
 import { listAllTenantIds } from "./db.js";
 import type { Env } from "../env.js";
 import type { TenantOpsSummary } from "../engine/ops-summary.js";
-import { escapeHtml } from "../html-escape.js";
 import type { OpsMailer } from "../ops-mail/ops-mailer.js";
-
-// Re-alert cooldown while a check stays unhealthy — a persistent outage emails
-// at most once per 6h regardless of the (5-min) probe cadence.
-export const WATCHTOWER_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+import {
+  alertEmailFor,
+  decideAlert,
+  trySend,
+  CRED_PUSH_AGING_CHECK,
+  MAILBOX_PROVISIONING_CHECK,
+  MAILBOX_REBUY_CHECK,
+  SEND_STARVED_CHECK,
+  TENANT_DO_WEDGED_CHECK,
+  type AlertOutcome,
+  type AlertState,
+  type CheckResult,
+} from "./watchtower-alerts.js";
+import { FAILURE_SIGNAL_WINDOW_MS, gradeFailureSignals } from "./watchtower-grading.js";
+import { reconcileD1Alert, recordWatchtowerCompleted } from "./watchtower-infra.js";
 
 // A probe to the external engine must not hang the whole sweep on a stalled
 // socket — bound it well under any reasonable cron budget.
 const ENGINE_HEALTH_TIMEOUT_MS = 10 * 1000;
 
-// Canary DO instance for the storage probe — a fixed name so it never collides
-// with a real per-IP rate-limiter bucket (those are keyed `signup:<ip>`).
+// Canary DO instance name for the storage probe — fixed, so it never collides
+// with a real per-IP rate-limiter bucket (`signup:<ip>`) and, for TENANT, never
+// with a real tenant id (which is minted, never this literal). The canary
+// TenantDO is not in `tenants_index`, so no sweep ever visits it.
 const DO_PROBE_NAME = "__watchtower_probe__";
-
-/** One health observation. `detail` is the human specifics that ride into the
- * alert body (never just the check name). */
-export interface CheckResult {
-  name: string;
-  healthy: boolean;
-  detail: string;
-}
-
-/** What reconcileAlerts did for one check this sweep — returned for tests +
- * the sweep's structured log line. */
-export type AlertAction = "alerted" | "realerted" | "recovered" | "suppressed" | "healthy";
-export interface AlertOutcome {
-  name: string;
-  action: AlertAction;
-  emailSent: boolean;
-}
-
-interface WatchtowerStateRow {
-  check_name: string;
-  status: "healthy" | "unhealthy";
-  since_ts: number;
-  last_alert_ts: number | null;
-  last_detail: string | null;
-}
-
-// Human labels for the subject line (`[coldrig] <label>: UNHEALTHY`).
-const CHECK_LABELS: Record<string, string> = {
-  d1: "D1 database",
-  do_storage: "Durable Object storage",
-  engine: "Engine /health",
-  failure_signals: "Failure signals",
-};
-
-/**
- * Per-mailbox check-name prefixes (founder ruling 2026-08-06 — a stuck mailbox
- * purchase alerts on entering the stuck state AND on the re-buy's outcome).
- *
- * TWO names, not one, because `reconcileAlerts` suppresses a repeat alert for the
- * same check inside WATCHTOWER_COOLDOWN_MS: a failed re-buy reported under the
- * stuck check would be swallowed seconds after the stuck alert that preceded it.
- * Splitting them makes both outcomes reportable while keeping each one deduped:
- *  - `mailbox_provisioning:<email>` — unhealthy on entering the stuck state;
- *    healthy again once the mailbox is resolved, which sends the RECOVERY email
- *    that reports a SUCCESSFUL re-buy.
- *  - `mailbox_rebuy:<email>` — unhealthy when the re-buy itself failed, or when
- *    the one-re-buy budget is spent and the address is being abandoned.
- */
-const MAILBOX_PROVISIONING_CHECK = "mailbox_provisioning:";
-const MAILBOX_REBUY_CHECK = "mailbox_rebuy:";
-
-/**
- * Wave-2 §1c — the two send-pipeline checks. DISTINCT prefixes from the two
- * above (which the re-buy lane owns) so neither dedups the other away:
- *  - `cred_push_aging:<email>` — one mailbox's credential push has been
- *    'pending' too long on an ACTIVATED tenant. Per-mailbox, because the
- *    remedy is per-mailbox (mint that address a grant) and the alert has to
- *    name it. This is the alarm on the failure mode the picker's per-mailbox
- *    exclusion converts from "the tenant sends nothing" into "this mailbox
- *    sends nothing" — quiet, and quiet is what makes it invisible.
- *  - `send_starved:<tenantId>` — an activated tenant has mail due and ZERO
- *    mailboxes the picker could pick. The whole point of §1c: without it, a
- *    tenant whose every mailbox is excluded looks healthy while sending
- *    nothing, forever.
- */
-const CRED_PUSH_AGING_CHECK = "cred_push_aging:";
-const SEND_STARVED_CHECK = "send_starved:";
 
 /** The watchtower check tracking whether ONE mailbox address is provisioning-stuck. */
 export function mailboxProvisioningCheckName(email: string): string {
@@ -115,48 +67,36 @@ export function sendStarvedCheckName(tenantId: string): string {
   return `${SEND_STARVED_CHECK}${tenantId}`;
 }
 
-function labelFor(name: string): string {
-  if (name.startsWith(MAILBOX_PROVISIONING_CHECK)) {
-    return `Mailbox provisioning ${name.slice(MAILBOX_PROVISIONING_CHECK.length)}`;
-  }
-  if (name.startsWith(MAILBOX_REBUY_CHECK)) {
-    return `Mailbox re-buy ${name.slice(MAILBOX_REBUY_CHECK.length)}`;
-  }
-  if (name.startsWith(CRED_PUSH_AGING_CHECK)) {
-    return `Mailbox credentials ${name.slice(CRED_PUSH_AGING_CHECK.length)}`;
-  }
-  if (name.startsWith(SEND_STARVED_CHECK)) {
-    return `Send capacity ${name.slice(SEND_STARVED_CHECK.length)}`;
-  }
-  return CHECK_LABELS[name] ?? name;
+/** The watchtower check tracking whether ONE tenant's DO is answering at all. */
+export function tenantDoWedgedCheckName(tenantId: string): string {
+  return `${TENANT_DO_WEDGED_CHECK}${tenantId}`;
 }
 
 // --- Health probes -------------------------------------------------------
 
 /**
- * Probe every platform-health check. The engine check is SKIPPED entirely
- * (omitted from the result) when `ENGINE_BASE_URL` is unset — a dark engine is
- * not a failure, so it must never alert or flap. `sinceMs` bounds the
- * failure-signal window to events since the previous sweep.
+ * Probe every platform-health check as of `nowMs`. The engine check is SKIPPED
+ * entirely (omitted from the result) when `ENGINE_BASE_URL` is unset — a dark
+ * engine is not a failure, so it must never alert or flap.
+ *
+ * NEVER THROWS on a D1 outage: the `d1` result is returned alongside whatever
+ * else could still be probed, and the D1-backed scans are skipped. Its caller
+ * routes the `d1` result through a store that does not depend on D1.
  */
-export async function evaluateHealthChecks(env: Env, sinceMs: number): Promise<CheckResult[]> {
+export async function evaluateHealthChecks(env: Env, nowMs: number): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
 
   // D1 reachable (the same SELECT 1 the public /status route uses).
+  let d1Healthy = true;
   try {
     await env.DB.prepare("SELECT 1").first();
     results.push({ name: "d1", healthy: true, detail: "D1 SELECT 1 ok" });
   } catch (err) {
+    d1Healthy = false;
     results.push({ name: "d1", healthy: false, detail: `D1 unreachable: ${errMsg(err)}` });
   }
 
-  // Durable Object subsystem + storage reachable (canary read, no tenant data).
-  try {
-    await env.SIGNUP_LIMITER.get(env.SIGNUP_LIMITER.idFromName(DO_PROBE_NAME)).ping();
-    results.push({ name: "do_storage", healthy: true, detail: "DO storage probe ok" });
-  } catch (err) {
-    results.push({ name: "do_storage", healthy: false, detail: `DO storage probe failed: ${errMsg(err)}` });
-  }
+  results.push(await probeDurableObjectStorage(env));
 
   // Engine /health — ONLY when configured (skip-dark: an unset engine is not
   // a check at all this phase).
@@ -175,39 +115,108 @@ export async function evaluateHealthChecks(env: Env, sinceMs: number): Promise<C
     }
   }
 
-  // Failure-signal scan — NEW terminal-'failed' sends + spam complaints across
-  // all tenants since the last sweep (per-tenant events.ts >= sinceMs). A tick
-  // fan-out at test-mode scale (admin/README.md notes the D1 read-model scale
-  // path); one slow/failed tenant must not blank the whole signal.
+  // Everything below reads D1. With D1 down these scans cannot run, and the
+  // `d1` result above is the honest, complete report of that state.
+  if (!d1Healthy) return results;
+
+  results.push(...(await scanTenants(env, nowMs)));
+  return results;
+}
+
+/**
+ * Durable Object subsystem + storage. Probes BOTH classes (audit BLOCKING-3):
+ * the old probe only pinged a `RateLimiterDO` canary, so a check labelled
+ * "Durable Object storage" reported healthy while every `TenantDO` — the class
+ * holding all customer state — threw on every call. This repo has wedged a
+ * TenantDO at CONSTRUCTION twice (a mid-wave table re-key; a UNIQUE-constraint
+ * throw), and a construction failure takes out every instance of the class at
+ * once, which is exactly what a canary catches immediately.
+ */
+async function probeDurableObjectStorage(env: Env): Promise<CheckResult> {
+  try {
+    await env.SIGNUP_LIMITER.get(env.SIGNUP_LIMITER.idFromName(DO_PROBE_NAME)).ping();
+  } catch (err) {
+    return { name: "do_storage", healthy: false, detail: `RateLimiterDO probe failed: ${errMsg(err)}` };
+  }
+  try {
+    await env.TENANT.get(env.TENANT.idFromName(DO_PROBE_NAME)).ping();
+  } catch (err) {
+    return {
+      name: "do_storage",
+      healthy: false,
+      detail: `TenantDO canary probe failed — the class holding every tenant's state does not construct or read: ${errMsg(err)}`,
+    };
+  }
+  return { name: "do_storage", healthy: true, detail: "DO storage probe ok (RateLimiterDO + TenantDO canary)" };
+}
+
+/**
+ * The per-tenant scan: failure signals plus each tenant's send-pipeline checks.
+ *
+ * WINDOWED, not per-sweep (audit NB-1). The failure-signal count used to cover
+ * only events since the previous sweep, so an intermittent failure rate flipped
+ * the check unhealthy/healthy every 5 minutes — a genuine state change each
+ * time, which the 6h cooldown does not suppress (executed on the old code: 24
+ * emails in 2 h). A trailing window plus a threshold makes an intermittent
+ * fault a single sustained condition, and `gradeFailureSignals` can answer
+ * "hold" so a middling count changes nothing at all.
+ *
+ * A tenant whose DO throws is now REPORTED (audit BLOCKING-3) instead of logged
+ * and skipped: that one catch used to silently drop the tenant's failure
+ * signals, its credential-push checks and its starvation check in a single
+ * pass, leaving the only paying customer unmonitored and unmentioned.
+ */
+async function scanTenants(env: Env, nowMs: number): Promise<CheckResult[]> {
+  const results: CheckResult[] = [];
+  const sinceMs = nowMs - FAILURE_SIGNAL_WINDOW_MS;
   let failed = 0;
   let complaints = 0;
+
   const tenantIds = await listAllTenantIds(env);
   // One read of every check name the state machine has ever recorded. The
-  // wave-2 per-entity checks below use it to stay SILENT about entities they
-  // never alerted on (a "healthy" row per mailbox per tenant would bury the
-  // handful of real platform checks this table exists for — same reasoning as
+  // per-entity checks below use it to stay SILENT about entities they never
+  // alerted on (a "healthy" row per mailbox per tenant would bury the handful
+  // of real platform checks this table exists for — same reasoning as
   // readCheckStatus) while still emitting the healthy result that sends the
   // RECOVERY email for one they did.
   const reported = await readReportedCheckNames(env);
+
   for (const tenantId of tenantIds) {
+    const wedgedName = tenantDoWedgedCheckName(tenantId);
     try {
       const s = await env.TENANT.get(env.TENANT.idFromName(tenantId)).opsSummary(sinceMs);
       failed += s.failureSignalsInWindow.failed;
       complaints += s.failureSignalsInWindow.complaints;
       results.push(...sendPipelineChecks(tenantId, s, reported));
+      if (reported.has(wedgedName)) {
+        results.push({ name: wedgedName, healthy: true, detail: `Tenant ${tenantId} (${s.brand}) is answering again.` });
+      }
     } catch (err) {
-      console.error(`watchtower failure-signal scan failed for tenant ${tenantId}`, err);
+      results.push({
+        name: wedgedName,
+        healthy: false,
+        detail:
+          `Tenant ${tenantId}'s Durable Object threw instead of answering opsSummary: ${errMsg(err)}. ` +
+          `While it stays this way that tenant is invisible to EVERY health check (failure signals, credential pushes, send ` +
+          `starvation) and is skipped by the dunning, deliverability, digest and send-pipeline sweeps as well — it is not sending, ` +
+          `and nothing else will say so.`,
+      });
     }
   }
-  const total = failed + complaints;
-  results.push({
-    name: "failure_signals",
-    healthy: total === 0,
-    detail:
-      total === 0
-        ? "no new failed sends or complaints since last sweep"
-        : `${failed} new terminal-failed send(s) + ${complaints} new complaint(s) since last sweep`,
-  });
+
+  // Global failure-signal roll-up. `null` = inside the dead band: report
+  // nothing, which leaves the check's state (and its cooldown) untouched.
+  const grade = gradeFailureSignals(failed, complaints);
+  if (grade !== null) {
+    const windowMin = Math.round(FAILURE_SIGNAL_WINDOW_MS / 60000);
+    results.push({
+      name: "failure_signals",
+      healthy: grade,
+      detail: grade
+        ? `no failed sends or complaints in the last ${windowMin} min`
+        : `${failed} terminal-failed send(s) + ${complaints} complaint(s) in the last ${windowMin} min, across all tenants`,
+    });
+  }
 
   return results;
 }
@@ -274,13 +283,11 @@ export function sendPipelineChecks(
 // --- Alert state machine (the core correctness surface) ------------------
 
 /**
- * Reconcile probe results against the persisted per-check state and email the
- * founder accordingly. The ONLY email rules:
- *  - healthy -> unhealthy (or first-ever-unhealthy): ALERT now.
- *  - unhealthy -> unhealthy: re-alert ONLY after WATCHTOWER_COOLDOWN_MS since
- *    the last alert; otherwise SUPPRESS (this is the anti-storm guarantee).
- *  - unhealthy -> healthy: RECOVERY email.
- *  - healthy -> healthy (or first-ever-healthy): nothing.
+ * Reconcile probe results against the persisted per-check state (D1) and email
+ * the founder accordingly. The rules themselves live in `decideAlert`
+ * (watchtower-alerts.ts) so the DO-backed store applies exactly the same ones;
+ * this function is the D1 read/apply half.
+ *
  * Every send is wrapped: an OpsMailNotConfiguredError / dark-domain send
  * failure is logged and the state is STILL advanced (so a dark channel does
  * not retry-storm and does not take down the sweep).
@@ -295,55 +302,33 @@ export async function reconcileAlerts(
   const outcomes: AlertOutcome[] = [];
 
   for (const result of results) {
-    const prev = stateByName.get(result.name);
-    let action: AlertAction;
-    let emailSent = false;
-
-    if (result.healthy) {
-      if (prev && prev.status === "unhealthy") {
-        emailSent = await trySend(mailer, recoveryEmail(env, result, prev, nowMs));
-        await upsertWatchtowerState(env, { name: result.name, status: "healthy", sinceTs: nowMs, lastAlertTs: null, detail: result.detail, nowMs });
-        action = "recovered";
-      } else {
-        // Stay/enter healthy — keep the original since_ts if already healthy.
-        const sinceTs = prev && prev.status === "healthy" ? prev.since_ts : nowMs;
-        await upsertWatchtowerState(env, { name: result.name, status: "healthy", sinceTs, lastAlertTs: null, detail: result.detail, nowMs });
-        action = "healthy";
-      }
-    } else {
-      if (!prev || prev.status === "healthy") {
-        emailSent = await trySend(mailer, unhealthyEmail(env, result, nowMs, false));
-        await upsertWatchtowerState(env, { name: result.name, status: "unhealthy", sinceTs: nowMs, lastAlertTs: nowMs, detail: result.detail, nowMs });
-        action = "alerted";
-      } else {
-        const lastAlert = prev.last_alert_ts ?? prev.since_ts;
-        if (nowMs - lastAlert >= WATCHTOWER_COOLDOWN_MS) {
-          emailSent = await trySend(mailer, unhealthyEmail(env, result, prev.since_ts, true));
-          await upsertWatchtowerState(env, { name: result.name, status: "unhealthy", sinceTs: prev.since_ts, lastAlertTs: nowMs, detail: result.detail, nowMs });
-          action = "realerted";
-        } else {
-          // Still unhealthy, within cooldown — record the latest detail, send NOTHING.
-          await upsertWatchtowerState(env, { name: result.name, status: "unhealthy", sinceTs: prev.since_ts, lastAlertTs: prev.last_alert_ts, detail: result.detail, nowMs });
-          action = "suppressed";
-        }
-      }
-    }
-
-    outcomes.push({ name: result.name, action, emailSent });
+    const prev = stateByName.get(result.name) ?? null;
+    const transition = decideAlert(prev, result.healthy, nowMs);
+    const email = alertEmailFor(env, result, transition, prev?.sinceTs ?? null, nowMs);
+    const emailSent = email ? await trySend(mailer, email) : false;
+    await upsertWatchtowerState(env, { name: result.name, state: transition.next, detail: result.detail, nowMs });
+    outcomes.push({ name: result.name, action: transition.action, emailSent });
   }
 
   return outcomes;
 }
 
-/** Full sweep: read the cursor, probe, reconcile, advance the cursor. Called
- * from scheduled.ts (production) with a real OpsMailer; tests drive
- * reconcileAlerts directly with synthetic results. */
+/** Full sweep: probe, reconcile, record the sweep's completion. Called from
+ * scheduled.ts (production) with a real OpsMailer; tests drive
+ * reconcileAlerts directly with synthetic results.
+ *
+ * The `d1` result is reconciled FIRST and through a store that is not D1, and
+ * a D1 outage returns right there: everything below reads the table that is
+ * down, and attempting it would only trade one email for ten stack traces. */
 export async function runWatchtower(env: Env, mailer: OpsMailer, nowMs: number): Promise<AlertOutcome[]> {
-  // First sweep (no cursor) -> empty window (baseline, no spurious alert).
-  const sinceMs = (await readWatchtowerCursor(env)) ?? nowMs;
-  const results = await evaluateHealthChecks(env, sinceMs);
-  const outcomes = await reconcileAlerts(env, mailer, results, nowMs);
-  await writeWatchtowerCursor(env, nowMs);
+  const results = await evaluateHealthChecks(env, nowMs);
+  const d1 = results.find((r) => r.name === "d1") as CheckResult;
+
+  const outcomes: AlertOutcome[] = [await reconcileD1Alert(env, mailer, d1, nowMs)];
+  if (!d1.healthy) return outcomes;
+
+  outcomes.push(...(await reconcileAlerts(env, mailer, results.filter((r) => r.name !== "d1"), nowMs)));
+  await recordWatchtowerCompleted(env, nowMs);
   return outcomes;
 }
 
@@ -370,6 +355,8 @@ export async function readCheckStatus(env: Env, checkName: string): Promise<"hea
  * Unlike `evaluateHealthChecks`'s probes, these checks are raised by whatever
  * observed the condition (engine/mailbox-provisioning.ts) — the cron never
  * produces them, so they stay at whatever state their last report left them.
+ * They are also ONE-SHOT, which is why they are never streak-damped: a repeat
+ * requirement on an event that happens once would silence it forever.
  *
  * NEVER THROWS. The caller is mid-saga around real vendor spend; a D1 hiccup in
  * the notifier must not decide whether a purchase happens or a customer's setup
@@ -391,52 +378,6 @@ export async function reportCheck(
   }
 }
 
-// --- Email bodies --------------------------------------------------------
-
-interface OutgoingAlert {
-  to: string;
-  subject: string;
-  text: string;
-  html: string;
-}
-
-function unhealthyEmail(env: Env, result: CheckResult, sinceTs: number, isReAlert: boolean): OutgoingAlert {
-  const label = labelFor(result.name);
-  const persistence = isReAlert ? `\n\nStill unhealthy since ${new Date(sinceTs).toISOString()} (re-alert after cooldown).` : "";
-  const text = `Check "${label}" (${result.name}) is UNHEALTHY.\n\n${result.detail}${persistence}\n\nThis is an automated coldrig watchtower alert.`;
-  return {
-    to: env.OPS_ALERT_EMAIL,
-    subject: `[coldrig] ${label}: UNHEALTHY`,
-    text,
-    html: `<p>Check <strong>${escapeHtml(label)}</strong> (<code>${escapeHtml(result.name)}</code>) is <strong>UNHEALTHY</strong>.</p><p>${escapeHtml(result.detail)}</p>${isReAlert ? `<p>Still unhealthy since ${escapeHtml(new Date(sinceTs).toISOString())} (re-alert after cooldown).</p>` : ""}<p>This is an automated coldrig watchtower alert.</p>`,
-  };
-}
-
-function recoveryEmail(env: Env, result: CheckResult, prev: WatchtowerStateRow, nowMs: number): OutgoingAlert {
-  const label = labelFor(result.name);
-  const downForMs = nowMs - prev.since_ts;
-  const durationLine = `Was unhealthy for ~${Math.round(downForMs / 60000)} min.`;
-  const text = `Check "${label}" (${result.name}) has RECOVERED.\n\n${result.detail}\n${durationLine}\n\nThis is an automated coldrig watchtower alert.`;
-  return {
-    to: env.OPS_ALERT_EMAIL,
-    subject: `[coldrig] ${label}: RECOVERED`,
-    text,
-    html: `<p>Check <strong>${escapeHtml(label)}</strong> (<code>${escapeHtml(result.name)}</code>) has <strong>RECOVERED</strong>.</p><p>${escapeHtml(result.detail)}</p><p>${escapeHtml(durationLine)}</p><p>This is an automated coldrig watchtower alert.</p>`,
-  };
-}
-
-async function trySend(mailer: OpsMailer, alert: OutgoingAlert): Promise<boolean> {
-  try {
-    await mailer.send(alert);
-    return true;
-  } catch (err) {
-    // Dark channel (OpsMailNotConfiguredError) or a send failure — log, never
-    // throw. The state still advances so the sweep does not retry-storm.
-    console.error(`watchtower: failed to send "${alert.subject}"`, err);
-    return false;
-  }
-}
-
 // --- D1 state helpers ----------------------------------------------------
 
 /**
@@ -450,18 +391,23 @@ export async function readReportedCheckNames(env: Env): Promise<Set<string>> {
   return new Set(result.results.map((row) => row.check_name));
 }
 
-async function readWatchtowerState(env: Env): Promise<Map<string, WatchtowerStateRow>> {
-  const result = await env.DB.prepare(
-    `SELECT check_name, status, since_ts, last_alert_ts, last_detail FROM watchtower_state`,
-  ).all<WatchtowerStateRow>();
-  const map = new Map<string, WatchtowerStateRow>();
-  for (const row of result.results) map.set(row.check_name, row);
+async function readWatchtowerState(env: Env): Promise<Map<string, AlertState>> {
+  const result = await env.DB.prepare(`SELECT check_name, status, since_ts, last_alert_ts FROM watchtower_state`).all<{
+    check_name: string;
+    status: "healthy" | "unhealthy";
+    since_ts: number;
+    last_alert_ts: number | null;
+  }>();
+  const map = new Map<string, AlertState>();
+  for (const row of result.results) {
+    map.set(row.check_name, { status: row.status, sinceTs: row.since_ts, lastAlertTs: row.last_alert_ts });
+  }
   return map;
 }
 
 async function upsertWatchtowerState(
   env: Env,
-  params: { name: string; status: "healthy" | "unhealthy"; sinceTs: number; lastAlertTs: number | null; detail: string; nowMs: number },
+  params: { name: string; state: AlertState; detail: string; nowMs: number },
 ): Promise<void> {
   await env.DB.prepare(
     `INSERT INTO watchtower_state (check_name, status, since_ts, last_alert_ts, last_detail, updated_at)
@@ -473,21 +419,7 @@ async function upsertWatchtowerState(
        last_detail = excluded.last_detail,
        updated_at = excluded.updated_at`,
   )
-    .bind(params.name, params.status, params.sinceTs, params.lastAlertTs, params.detail, params.nowMs)
-    .run();
-}
-
-async function readWatchtowerCursor(env: Env): Promise<number | null> {
-  const row = await env.DB.prepare(`SELECT last_sweep_ts FROM watchtower_cursor WHERE id = 1`).first<{ last_sweep_ts: number }>();
-  return row?.last_sweep_ts ?? null;
-}
-
-async function writeWatchtowerCursor(env: Env, nowMs: number): Promise<void> {
-  await env.DB.prepare(
-    `INSERT INTO watchtower_cursor (id, last_sweep_ts) VALUES (1, ?)
-     ON CONFLICT(id) DO UPDATE SET last_sweep_ts = excluded.last_sweep_ts`,
-  )
-    .bind(nowMs)
+    .bind(params.name, params.state.status, params.state.sinceTs, params.state.lastAlertTs, params.detail, params.nowMs)
     .run();
 }
 

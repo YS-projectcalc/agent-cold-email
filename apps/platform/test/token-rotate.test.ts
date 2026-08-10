@@ -160,10 +160,20 @@ describe("POST /token/rotate — the exact lost-token journey (magic-link recove
     expect(newTokenCheck.status).toBe(200);
     expect((newTokenCheck.body as unknown as { brand: string }).brand).toBe("Lost Token Journey Co");
 
-    // 3. The dashboard session itself survives the rotation (it authenticates
-    // independently of the bearer token — require-auth.ts's two separate
-    // resolvers), so the tenant isn't logged out by rotating.
-    const stillSignedIn = await cookieApi("/account", session);
-    expect(stillSignedIn.status).toBe(200);
+    // 3. The dashboard session does NOT survive the rotation, deliberately.
+    // This assertion used to read the other way — the session authenticates
+    // through a separate resolver (require-auth.ts) that never consults
+    // `api_token_hash`, so rotation left it alive — and that made step 2's
+    // promise hollow: the whole point of the journey is that a leaked
+    // credential stops working, and a leaked token exchanged once for a cookie
+    // kept full tenant authority for 30 more days, including the authority to
+    // rotate again and lock the owner out (BLOCKING-3,
+    // docs/adversarial/audit-dashboard-idempotency-2026-08-06.md). Being signed
+    // out is the cost of that containment; the tenant signs back in with the
+    // token they were just shown.
+    const afterRotation = await cookieApi("/account", session);
+    expect(afterRotation.status).toBe(401);
+    const backIn = await createDashboardSession(newToken);
+    expect((await cookieApi("/account", backIn)).status).toBe(200);
   });
 });

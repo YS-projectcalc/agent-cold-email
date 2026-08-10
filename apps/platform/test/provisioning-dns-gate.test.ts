@@ -12,6 +12,7 @@ import {
   type ReleaseResult,
 } from "@coldstart/shared";
 import { toErrorResponse } from "../src/error-response.js";
+import { domainIntentKey } from "../src/engine/provision-intents.js";
 import { runSetupInfrastructure } from "../src/engine/provisioning.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
 import { activatePaidPlan, mintTenant, tenantStub, withTenantContext } from "./helpers.js";
@@ -170,11 +171,11 @@ describe("LEGACY ROWS — a domain recorded before the discriminator existed is 
    * The incident customer's exact post-hotfix state: a COMMITTED intent plus a
    * domains row with dns_status 'pending' and NO connection_type, so his retry
    * lands in the convergence branch and re-drives DNS against a row that
-   * describes nothing. The intent key must match the one runSetupInfrastructure
-   * derives from the caller's idempotency key, or the retry buys a fresh domain
-   * instead of converging — which is the whole scenario.
+   * describes nothing. The intent must sit at the key runSetupInfrastructure
+   * resolves for ordinal 0, or the retry buys a fresh domain instead of
+   * converging — which is the whole scenario.
    */
-  async function seedLegacyRow(tenantId: string, domain: string, setupKey: string): Promise<void> {
+  async function seedLegacyRow(tenantId: string, domain: string): Promise<void> {
     await runInDurableObject(tenantStub(tenantId), (_i, s) => {
       s.storage.sql.exec(
         `INSERT INTO domains (id, tenant_id, domain, status, purchased_at, dns_status) VALUES ('dom_legacy', ?, ?, 'active', 1, 'pending')`,
@@ -184,7 +185,7 @@ describe("LEGACY ROWS — a domain recorded before the discriminator existed is 
       s.storage.sql.exec(
         `INSERT INTO domain_intents (key, tenant_id, candidate_domain, status, created_at, updated_at)
          VALUES (?, ?, ?, 'committed', 1, 1)`,
-        `${setupKey}#0`,
+        domainIntentKey(tenantId, 0),
         tenantId,
         domain,
       );
@@ -200,7 +201,7 @@ describe("LEGACY ROWS — a domain recorded before the discriminator existed is 
     await activatePaidPlan(tenantId, "managed");
     const { port, log } = domainPort({ dns: "ready" });
     port.listOwnedDomains = async () => [ownedAs("purchased", "legacypurchased0.com")];
-    await seedLegacyRow(tenantId, "legacypurchased0.com", "legacy-1");
+    await seedLegacyRow(tenantId, "legacypurchased0.com");
 
     await runSetup(tenantId, port, "legacypurchased.com", "legacy-1");
 
@@ -214,7 +215,7 @@ describe("LEGACY ROWS — a domain recorded before the discriminator existed is 
     await activatePaidPlan(tenantId, "managed");
     const { port, log } = domainPort({ dns: "ready" });
     port.listOwnedDomains = async () => [ownedAs("connected", "legacyconnected0.com")];
-    await seedLegacyRow(tenantId, "legacyconnected0.com", "legacy-2");
+    await seedLegacyRow(tenantId, "legacyconnected0.com");
 
     await runSetup(tenantId, port, "legacyconnected.com", "legacy-2");
 
@@ -231,7 +232,7 @@ describe("LEGACY ROWS — a domain recorded before the discriminator existed is 
     port.listOwnedDomains = async () => {
       throw new VendorError("inboxkit domains/list -> HTTP 503: upstream busy", true);
     };
-    await seedLegacyRow(tenantId, "legacyunaskable0.com", "legacy-3");
+    await seedLegacyRow(tenantId, "legacyunaskable0.com");
 
     await runSetup(tenantId, port, "legacyunaskable.com", "legacy-3");
 

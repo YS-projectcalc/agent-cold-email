@@ -6,9 +6,10 @@ import { MCP_TOOLS } from "../src/mcp/tools.js";
 // saying the OLD count after the registry grew (see docs/adversarial/
 // fully-live-reframe-2026-07-19.md and wave-integration-review-2026-07-22.md
 // for the prior incidents). The quantity-billing migration added a 25th tool
-// (`remove_mailboxes`); this guard makes the NEXT tool addition fail loudly
-// here instead of shipping a stale count to a buyer-agent's tools/list
-// cross-check.
+// (`remove_mailboxes`); the msgchannel increment 3 build (list_messages/
+// ack_message) added a 26th and 27th. This guard makes the NEXT tool
+// addition fail loudly here instead of shipping a stale count to a
+// buyer-agent's tools/list cross-check.
 //
 // Raw-text imports (Vite `?raw`, resolved at bundle time) — the workers-pool
 // test runtime has no general filesystem access, so a runtime readFileSync
@@ -165,18 +166,19 @@ function claimsToolCountOf(text: string, n: number): boolean {
 
 // Every total-tool-count this claim class has shipped historically (see
 // docs/adversarial/claim-surface-round2-2026-07-20.md, fully-live-reframe-
-// 2026-07-19.md, wave-integration-review-2026-07-22.md) plus the current
-// count — the quantity-billing migration's remove_mailboxes is the 25th.
-const RETIRED_TOOL_COUNTS = [17, 19, 21, 24] as const;
+// 2026-07-19.md, wave-integration-review-2026-07-22.md, toolcount-25-sweep-
+// review-2026-07-27.md) plus the current count — msgchannel increment 3's
+// list_messages/ack_message brought the registry to 27.
+const RETIRED_TOOL_COUNTS = [17, 19, 21, 24, 25] as const;
 
 describe("claim-surface tool-count guard", () => {
   const currentCount = MCP_TOOLS.length;
 
-  it("the live MCP registry currently reports 25 tools (sanity anchor for this guard)", () => {
+  it("the live MCP registry currently reports 27 tools (sanity anchor for this guard)", () => {
     // If this ever fails, every assertion below needs re-grounding against
     // the new count before trusting it — see apps/platform/test/mcp.test.ts
     // for the live-endpoint equivalent of this same assertion.
-    expect(currentCount).toBe(25);
+    expect(currentCount).toBe(27);
   });
 
   it.each(CLAIM_SURFACES)("%s never claims a retired tool count (17/19/21/24)", (label, text) => {
@@ -211,5 +213,29 @@ describe("claim-surface tool-count guard", () => {
 
   it("guide-mcp-cold-email.html's full schema reference includes remove_mailboxes", () => {
     expect(guideMcpColdEmail).toContain("<code>remove_mailboxes</code>");
+  });
+
+  // msgchannel increment 3 (list_messages/ack_message) — the same per-tool
+  // doc-surface checks the quantity-billing migration's remove_mailboxes got
+  // above, so a count-only bump can never ship without the tool ALSO landing
+  // in the docs that enumerate it.
+  it("server-card.json's enumerated tools[] includes list_messages and ack_message", () => {
+    expect(serverCardJson).toContain('"name": "list_messages"');
+    expect(serverCardJson).toContain('"name": "ack_message"');
+  });
+
+  it("README.md's tool table includes list_messages and ack_message", () => {
+    expect(rootReadme).toContain("`list_messages`");
+    expect(rootReadme).toContain("`ack_message`");
+  });
+
+  it("AGENTS.md's tool table includes list_messages and ack_message", () => {
+    expect(agentsMd).toContain("`list_messages`");
+    expect(agentsMd).toContain("`ack_message`");
+  });
+
+  it("guide-mcp-cold-email.html's full schema reference includes list_messages and ack_message", () => {
+    expect(guideMcpColdEmail).toContain("<code>list_messages</code>");
+    expect(guideMcpColdEmail).toContain("<code>ack_message</code>");
   });
 });

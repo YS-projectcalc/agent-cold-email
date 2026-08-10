@@ -3,7 +3,7 @@
   "name": "agent-cold-email",
   "displayName": "Coldrig",
   "version": "0.2.2",
-  "description": "Agent-controlled cold-outreach infrastructure, live in production. One bearer token and 25 focused tools replace multiple vendor accounts, preserve durable infrastructure state, provision isolated domains and mailboxes, run sequences, manage replies and push webhooks, track lead disposition, and enforce guardrails server-side. The customer's own agent remains the strategy and content layer. Free sandbox demo today, no card, no waitlist; real sending runs in production (Gmail API, HTTPS/443). Going live is self-serve (POST /checkout returns a hosted Stripe payment link); the only remaining step is mailbox send-authorization completing on our side after provisioning. Pricing starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox, with no send quota (sends are not the billing meter) and $0 per-send fees.",
+  "description": "Agent-controlled cold-outreach infrastructure, live in production. One bearer token and 27 focused tools replace multiple vendor accounts, preserve durable infrastructure state, provision isolated domains and mailboxes, run sequences, manage replies and push webhooks, track lead disposition, and enforce guardrails server-side. The customer's own agent remains the strategy and content layer. Free sandbox demo today, no card, no waitlist; real sending runs in production (Gmail API, HTTPS/443). Going live is self-serve (POST /checkout returns a hosted Stripe payment link); the only remaining step is mailbox send-authorization completing on our side after provisioning. Pricing starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox, with no send quota (sends are not the billing meter) and $0 per-send fees.",
   "homepage": "https://coldrig.dev/",
   "documentation": "https://coldrig.dev/docs",
   "license": "MIT",
@@ -131,6 +131,14 @@
     {
       "name": "list_leads",
       "description": "List/export leads with their contact-level disposition, cursor-paginated — the export surface (JSON, no separate CSV endpoint)."
+    },
+    {
+      "name": "list_messages",
+      "description": "List this tenant's system + operator messages (a retryable setup step, a credential going live, an operator notice), cursor-paginated, unacked-first."
+    },
+    {
+      "name": "ack_message",
+      "description": "Acknowledge a message by id so it stops surfacing as unacked. Idempotent — acking an already-acked id is a no-op success."
     }
   ],
   "guardrails": [

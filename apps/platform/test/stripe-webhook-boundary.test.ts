@@ -1,4 +1,4 @@
-import { env, runInDurableObject } from "cloudflare:test";
+import { env, evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   api,
@@ -15,6 +15,7 @@ import {
   disputeCreated,
   invoicePaymentFailed,
   stripeCustomerIdFor,
+  subscriptionDeleted,
   subscriptionUpdated,
 } from "./stripe-fixtures.js";
 
@@ -386,6 +387,274 @@ describe("finding 3 rescoped — ordering must protect a lane, never silence ano
     );
     expect(staleWon.body).toMatchObject({ applied: false, stale: true });
     expect((await readProfile(tenantId)).billing_state).toBe("disputed");
+  });
+});
+
+// wave2-integration-gate-2026-08-06.md N-1 + N-2 — the two residuals the
+// per-lane rescoping above left behind. Both are the SAME shape as everything
+// before them: a guard keyed more broadly than the state it protects.
+describe("N-1 — one dispute's lifecycle must not silence a DIFFERENT chargeback", () => {
+  it("freezes on a second, distinct dispute whose event predates the first dispute's win", async () => {
+    const { tenantId } = await mintTenant("Two Disputes Co", "managed");
+    await seedBenignSdnList();
+    await postWebhook(checkoutSessionCompleted({ tenantId, created: T0 }));
+
+    // Dispute A opens, then the tenant WINS it — which puts the dispute lane's
+    // mark at A's resolution and the tenant back to 'active'.
+    await postDisputeWebhook(disputeCreated({ chargeId: "ch_a", disputeId: "dp_a", created: T0 + 200 }), tenantId);
+    expect((await readProfile(tenantId)).billing_state).toBe("disputed");
+    await postDisputeWebhook(disputeClosed({ chargeId: "ch_a", disputeId: "dp_a", status: "won", created: T0 + 800 }), tenantId);
+    expect((await readProfile(tenantId)).billing_state).toBe("active");
+
+    // Dispute B is a REAL second chargeback on a DIFFERENT charge, emitted
+    // between A's open and A's win and delivered late. Nothing about A's
+    // outcome says anything about B, so B must still freeze.
+    const b = await postDisputeWebhook<WebhookResponse>(
+      disputeCreated({ chargeId: "ch_b", disputeId: "dp_b", created: T0 + 400 }),
+      tenantId,
+    );
+    expect(b.body).toMatchObject({ applied: true, frozen: true });
+    expect((await readProfile(tenantId)).billing_state).toBe("disputed");
+  });
+});
+
+// wave3-integration-gate-2026-08-09.md B-1. N-1's exemption was UNCONDITIONAL,
+// and Stripe orders nothing — not even the two events of a SINGLE dispute. When
+// a dispute's `closed` lands before its own `created`, the exemption let the
+// late `created` write 'disputed' with no state guard, and 'disputed' is
+// terminal: the only writer that leaves it is that dispute's closed(won), which
+// has already been consumed and deduped. No alert, no self-heal, and the
+// recovery `billing-state.ts` prints ("reactivate via POST /checkout") is itself
+// scoped `billing_state != 'disputed'` — the tenant was bricked forever.
+//
+// The discriminator is the dispute's OWN recorded resolution, which is a
+// stronger ordering witness than any timestamp (a dispute is always created
+// before it is resolved). That means `dispute.closed` has to leave a row even
+// when it arrives first, which a plain UPDATE did not.
+describe("B-1 — a dispute's late `created` must not re-freeze what its own resolution already settled", () => {
+  it("does not brick the tenant when dispute.closed(won) is delivered BEFORE that dispute's created", async () => {
+    const { tenantId } = await mintTenant("Closed First Co", "managed");
+    await seedBenignSdnList();
+    await postWebhook(checkoutSessionCompleted({ tenantId, created: T0 }));
+
+    // The WIN lands first. There is no freeze to lift, so it changes no tenant
+    // state — but it must still record that this dispute is over.
+    const won = await postDisputeWebhook<WebhookResponse>(
+      disputeClosed({ chargeId: "ch_reorder", disputeId: "dp_reorder", status: "won", created: T0 + 500 }),
+      tenantId,
+    );
+    expect(won.body.applied).toBe(true);
+    expect((await readProfile(tenantId)).billing_state).toBe("active");
+
+    const settled = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
+      state.storage.sql
+        .exec<{ status: string; closed_at: number | null }>(`SELECT status, closed_at FROM disputes WHERE dispute_id = ?`, "dp_reorder")
+        .toArray(),
+    );
+    expect(settled).toHaveLength(1);
+    expect(settled[0]?.status).toBe("won");
+    expect(settled[0]?.closed_at).not.toBeNull();
+
+    // Its own `created`, emitted 400s earlier, arrives late. Applying it now
+    // freezes a tenant nothing can ever unfreeze.
+    const late = await postDisputeWebhook<WebhookResponse>(
+      disputeCreated({ chargeId: "ch_reorder", disputeId: "dp_reorder", created: T0 + 100 }),
+      tenantId,
+    );
+    expect(late.body).toMatchObject({ applied: false, stale: true });
+    expect(late.body.frozen).toBeFalsy();
+    expect((await readProfile(tenantId)).billing_state).toBe("active");
+
+    // The refusal is not a dunning strike either (N-2 holds for this path too).
+    const events = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
+      state.storage.sql
+        .exec<{ applied: number }>(`SELECT applied FROM webhook_events WHERE type = 'charge.dispute.created'`)
+        .toArray(),
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0]?.applied).toBe(0);
+  });
+
+  // Same brick, non-`won` terminal outcome: an inquiry/warning that closed
+  // writes NO billing_state (intendedBillingState is null for it), so a late
+  // `created` after it would freeze with nothing left alive to lift the freeze.
+  it("does not brick the tenant when a non-won dispute.closed is delivered before its created", async () => {
+    const { tenantId } = await mintTenant("Warning Closed Co", "managed");
+    await seedBenignSdnList();
+    await postWebhook(checkoutSessionCompleted({ tenantId, created: T0 }));
+
+    await postDisputeWebhook(
+      disputeClosed({ chargeId: "ch_warning", disputeId: "dp_warning", status: "warning_closed", created: T0 + 500 }),
+      tenantId,
+    );
+    const late = await postDisputeWebhook<WebhookResponse>(
+      disputeCreated({ chargeId: "ch_warning", disputeId: "dp_warning", created: T0 + 100 }),
+      tenantId,
+    );
+    expect(late.body).toMatchObject({ applied: false, stale: true });
+    expect((await readProfile(tenantId)).billing_state).toBe("active");
+  });
+
+  // The direction that must NOT be narrowed: a LOST chargeback's terminal state
+  // IS the freeze (the owner decides via terminate). Delivered closed-first,
+  // the `closed` branch writes no billing_state at all, so the late `created`
+  // is the only event that can still apply the D5 control — it must apply.
+  it("still freezes on a late created when the dispute was LOST", async () => {
+    const { tenantId } = await mintTenant("Lost First Co", "managed");
+    await seedBenignSdnList();
+    await postWebhook(checkoutSessionCompleted({ tenantId, created: T0 }));
+
+    await postDisputeWebhook(
+      disputeClosed({ chargeId: "ch_lost_first", disputeId: "dp_lost_first", status: "lost", created: T0 + 500 }),
+      tenantId,
+    );
+    expect((await readProfile(tenantId)).billing_state).toBe("active");
+
+    const late = await postDisputeWebhook<WebhookResponse>(
+      disputeCreated({ chargeId: "ch_lost_first", disputeId: "dp_lost_first", created: T0 + 100 }),
+      tenantId,
+    );
+    expect(late.body).toMatchObject({ applied: true, frozen: true });
+    expect((await readProfile(tenantId)).billing_state).toBe("disputed");
+
+    // One row per dispute, and the recorded outcome is still the resolution —
+    // the late `created`'s INSERT OR IGNORE must not reopen it.
+    const rows = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
+      state.storage.sql.exec<{ status: string }>(`SELECT status FROM disputes WHERE dispute_id = ?`, "dp_lost_first").toArray(),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.status).toBe("lost");
+  });
+});
+
+describe("N-2 — an event REFUSED as stale must not count as a dunning strike", () => {
+  it("a recovered payer is not suspended on their first genuine failure after three refused stale ones", async () => {
+    const { tenantId } = await mintTenant("Refused Strikes Co", "managed");
+    await seedBenignSdnList();
+    await postWebhook(checkoutSessionCompleted({ tenantId, created: T0 }));
+
+    // A real failure, then a real recovery — which closes the dunning cycle.
+    await postWebhook(invoicePaymentFailed({ tenantId, customerId: stripeCustomerIdFor(tenantId), created: T0 + 100 }));
+    await postWebhook(subscriptionUpdated({ tenantId, status: "active", created: T0 + 200 }));
+    expect((await readProfile(tenantId)).billing_state).toBe("active");
+
+    // Stripe lands three DISTINCT failures it had been retrying from before the
+    // recovery. Each is correctly refused and changes no state...
+    for (let i = 0; i < 3; i++) {
+      const stale = await postWebhook<WebhookResponse>(
+        invoicePaymentFailed({ tenantId, customerId: stripeCustomerIdFor(tenantId), created: T0 + 100 }),
+      );
+      expect(stale.body).toMatchObject({ applied: false, stale: true });
+    }
+    expect((await readProfile(tenantId)).billing_state).toBe("active");
+
+    // ...so a genuinely NEW failure is strike ONE of a new cycle, not strike
+    // four. The claim row exists for all four (dedup must stay claim-first);
+    // only the APPLIED one is a strike.
+    const fresh = await postWebhook<WebhookResponse>(
+      invoicePaymentFailed({ tenantId, customerId: stripeCustomerIdFor(tenantId), created: T0 + 300 }),
+    );
+    expect(fresh.body.applied).toBe(true);
+
+    const summary = await tenantStub(tenantId).opsSummary(Date.now());
+    expect(summary.billingState).toBe("past_due");
+    expect(summary.billingFailureCount).toBe(1);
+  });
+
+  // The COMPLETION-PASS half of the same rule. A handler that dies mid-effect
+  // leaves its claim row (applied defaults to 1) plus an in-flight marker; if a
+  // newer event supersedes it before Stripe redelivers, the completion pass
+  // refuses to finish it — so that event never applied and must not be a strike
+  // either. The crash itself is an infrastructure event and cannot be forced
+  // in-process, so the half-applied state is written DIRECTLY here; what is
+  // under test is the refusal path's semantics, not the crash.
+  it("a REFUSED completion pass does not count the half-applied event as a strike", async () => {
+    const { tenantId } = await mintTenant("Half Applied Strike Co", "managed");
+    await seedBenignSdnList();
+    await postWebhook(checkoutSessionCompleted({ tenantId, created: T0 }));
+
+    // The exact durable residue of an attempt that claimed the event and then
+    // died before its effects landed.
+    const halfApplied = invoicePaymentFailed({
+      tenantId,
+      customerId: stripeCustomerIdFor(tenantId),
+      created: T0 + 100,
+    });
+    await runInDurableObject(tenantStub(tenantId), async (_i, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO webhook_events (event_id, type, ts) VALUES (?, 'invoice.payment_failed', ?)`,
+        halfApplied.id,
+        Date.now(),
+      );
+      state.storage.sql.exec(
+        `INSERT INTO webhook_event_inflight (event_id, started_at) VALUES (?, ?)`,
+        halfApplied.id,
+        Date.now(),
+      );
+    });
+
+    // A newer event supersedes it. `subscription.deleted` on purpose: it moves
+    // the billing lane's mark and conflicts with 'past_due' WITHOUT recording a
+    // dunning-cycle basis, which a recovery would — a moved basis would hide
+    // the strike for the wrong reason and make this test vacuous.
+    await postWebhook(subscriptionDeleted({ tenantId, created: T0 + 200 }));
+    expect((await readProfile(tenantId)).billing_state).toBe("canceled");
+
+    const redelivery = await postWebhook<WebhookResponse>(halfApplied);
+    expect(redelivery.body).toMatchObject({ applied: false, duplicate: true, stale: true });
+
+    const row = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
+      state.storage.sql
+        .exec<{ applied: number }>(`SELECT applied FROM webhook_events WHERE event_id = ?`, halfApplied.id)
+        .one(),
+    );
+    // The claim row SURVIVES (it is the replay guard) but reads not-applied.
+    expect(row.applied).toBe(0);
+    expect((await tenantStub(tenantId).opsSummary(Date.now())).billingFailureCount).toBe(0);
+  });
+
+  // The gate's N-3 standing hazard: `CREATE TABLE IF NOT EXISTS` never alters
+  // an existing table, so a new column is unreachable on every DO that already
+  // exists unless the constructor back-fills it. Every test DO is created fresh
+  // from the current schema, which is exactly why that class is invisible here
+  // — so this test manufactures the pre-column shape and reconstructs for real.
+  it("back-fills `applied` on a DO that predates the column, without reclassifying its history", async () => {
+    const { tenantId } = await mintTenant("Pre-Column DO Co", "managed");
+    await seedBenignSdnList();
+    await postWebhook(checkoutSessionCompleted({ tenantId, created: T0 }));
+    await postWebhook(invoicePaymentFailed({ tenantId, customerId: stripeCustomerIdFor(tenantId), created: T0 + 100 }));
+
+    // Rewind this DO to the table it had before this change shipped, rows and
+    // all. (Rebuilt rather than `ALTER TABLE ... DROP COLUMN`: SQLite rewrites
+    // the stored CREATE TABLE text on a drop and chokes on the comments in it.)
+    await runInDurableObject(tenantStub(tenantId), async (_i, state) => {
+      const sql = state.storage.sql;
+      const rows = sql
+        .exec<{ event_id: string; type: string; ts: number }>(`SELECT event_id, type, ts FROM webhook_events`)
+        .toArray();
+      sql.exec(`DROP TABLE webhook_events`);
+      sql.exec(`CREATE TABLE webhook_events (event_id TEXT PRIMARY KEY, type TEXT NOT NULL, ts INTEGER NOT NULL)`);
+      for (const row of rows) {
+        sql.exec(`INSERT INTO webhook_events (event_id, type, ts) VALUES (?, ?, ?)`, row.event_id, row.type, row.ts);
+      }
+    });
+    const dropped = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
+      state.storage.sql.exec<{ name: string }>(`PRAGMA table_info(webhook_events)`).toArray(),
+    );
+    expect(dropped.some((c) => c.name === "applied")).toBe(false);
+
+    await evictDurableObject(tenantStub(tenantId));
+    // Any RPC re-instantiates the DO, running the real constructor.
+    const summary = await tenantStub(tenantId).opsSummary(Date.now());
+
+    // The column is back AND the pre-existing failure still counts: DEFAULT 1
+    // means "an event already recorded was applied", so no tenant's dunning
+    // cycle silently resets at deploy.
+    expect(summary.billingFailureCount).toBe(1);
+    const columns = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
+      state.storage.sql.exec<{ name: string }>(`PRAGMA table_info(webhook_events)`).toArray(),
+    );
+    expect(columns.some((c) => c.name === "applied")).toBe(true);
   });
 });
 
