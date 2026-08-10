@@ -44,7 +44,8 @@ const ASSIGNED_NS = ["alexandra.ns.cloudflare.com", "phil.ns.cloudflare.com"];
 interface VendorDomain {
   name: string;
   status: string;
-  connection_type: string;
+  /** Omitted for a domain the vendor does not classify — the 'unknown' branch. */
+  connection_type?: string;
   assigned_mailboxes: number;
   dns_propagation_status: string;
   nameserver_match_status: string;
@@ -57,7 +58,7 @@ interface VendorDomain {
  * the real adapters call, holds the state they mutate, and — critically —
  * refuses the operations the live vendor refuses.
  */
-function fakeInboxKit(seed: { domains: VendorDomain[] }) {
+function fakeInboxKit(seed: { domains: VendorDomain[]; mailboxBuyFailure?: { status: number; message: string } }) {
   const domains = new Map(seed.domains.map((d) => [d.name.toLowerCase(), { ...d }]));
   const mailboxes = new Map<string, { uid: string; username: string; domain_name: string; status: string }>();
   const calls: { path: string; body: unknown }[] = [];
@@ -107,6 +108,11 @@ function fakeInboxKit(seed: { domains: VendorDomain[] }) {
       return json({ error: false, result: [{ name: requested, nameservers: ASSIGNED_NS, uid: "dom-x" }] });
     }
     if (path === "/mailboxes/buy") {
+      // The vendor's mailbox PROCESSING is where it configures a purchased
+      // domain's DNS, so a failure in that work surfaces here and nowhere else.
+      if (seed.mailboxBuyFailure) {
+        return json({ error: true, message: seed.mailboxBuyFailure.message }, seed.mailboxBuyFailure.status);
+      }
       for (const m of (body.mailboxes as { username: string; domain_name: string }[]) ?? []) {
         const email = `${m.username}@${m.domain_name}`;
         // ACCEPTED, not created: the vendor answers "scheduled". This is the
@@ -157,6 +163,10 @@ function fakeInboxKit(seed: { domains: VendorDomain[] }) {
     /** The vendor finishes creating every scheduled mailbox. */
     activateMailboxes() {
       for (const m of mailboxes.values()) m.status = "active";
+    },
+    /** The workspace's own view of a domain — used to assert what did NOT move. */
+    domainState(domain: string): VendorDomain | undefined {
+      return domains.get(domain.toLowerCase());
     },
   };
 }
@@ -222,12 +232,17 @@ describe("ACCEPTANCE — the stranded purchased domain is recovered and provisio
     Object.assign(env, saved);
   });
 
-  it("adopts the orphan, waits for real propagation, waits for the real mailbox, and never buys twice", async () => {
+  it("MORDY'S LIVE SHAPE: the purchased domain's never-updating propagation fields no longer block the mailbox", async () => {
+    // THE DEADLOCK, end to end (InboxKit support, 2026-08-10, verbatim: "The
+    // domain goauthorpitchdesk.com is now active, and the DNS will be configured
+    // during mailbox processing"). On a PURCHASED domain the vendor's propagation
+    // checker never runs before a mailbox exists, so these two fields are
+    // "pending" on day 1 and "pending" on day 6 — every retry re-read them and
+    // stalled. This fixture therefore NEVER propagates: the customer's provisioning
+    // has to finish anyway, or it never finishes at all.
     const { token, tenantId } = await mintTenant("Author Pitch Desk", "managed");
     await activatePaidPlan(tenantId, "managed");
 
-    // The workspace as polled live: our domain, registered BY the vendor, with
-    // its nameservers assigned but not yet observed anywhere in DNS.
     const vendor = fakeInboxKit({
       domains: [
         {
@@ -243,50 +258,53 @@ describe("ACCEPTANCE — the stranded purchased domain is recovered and provisio
       ],
     });
 
-    // ── Attempt 1: the domain is recovered; DNS is genuinely not ready yet. ──
+    // ── Attempt 1: the domain is recovered and the mailbox order is placed.
+    //    The vendor accepts it ("scheduled") without the mailbox existing yet. ──
     const first = await post(token);
 
     expect(vendor.countOf("/domains/register")).toBe(0); // $12.50 recovered, not re-spent
-    expect(vendor.countOf("/mailboxes/buy")).toBe(0); // never onto un-propagated DNS
-    expect(first.status).toBe(502);
-    expect(first.body.retryable).toBe(true);
-    const domainsAfterFirst = await readDomains(tenantId);
-    expect(domainsAfterFirst).toEqual([{ domain: ORPHAN, dns_status: "pending", connection_type: "purchased" }]);
-
-    // ── Attempt 2: DNS has propagated; the mailbox buy lands but the vendor
-    //    has not finished creating the mailbox. ──
-    vendor.propagate(ORPHAN);
-    const second = await post(token);
-
-    expect((await readDomains(tenantId))[0]!.dns_status).toBe("ready");
-    expect(vendor.countOf("/mailboxes/buy")).toBe(1);
+    expect(vendor.countOf("/mailboxes/buy")).toBe(1); // PRE-FIX: 0, forever
     expect(vendor.countOf("/warmup/add")).toBe(0); // not enrolled before it exists
     expect(await readMailboxes(tenantId)).toEqual([]); // and not billed for
-    expect(second.status).toBe(502);
-    expect(second.body.retryable).toBe(true);
+    expect(first.status).toBe(502);
+    expect(first.body.retryable).toBe(true);
+    expect(await readDomains(tenantId)).toEqual([{ domain: ORPHAN, dns_status: "ready", connection_type: "purchased" }]);
 
-    // ── Attempt 3: the vendor has caught up. Resume, do not re-buy. ──
+    // ── Attempt 2: the vendor has caught up. Resume, do not re-buy. ──
     vendor.activateMailboxes();
-    const third = await post(token);
+    const second = await post(token);
 
-    expect(third.status).toBe(202);
-    expect(vendor.countOf("/mailboxes/buy")).toBe(1); // ONE purchase across all three attempts
+    expect(second.status).toBe(202);
+    expect(vendor.countOf("/mailboxes/buy")).toBe(1); // ONE purchase across both attempts
     expect(vendor.countOf("/warmup/add")).toBe(1);
     expect(vendor.countOf("/domains/register")).toBe(0);
     expect(await readMailboxes(tenantId)).toEqual([{ email: "sender11@goauthorpitchdesk.com" }]);
 
-    // THE ROOT CAUSE, asserted directly: the connect-an-existing-domain
-    // handshake is never run against a domain the vendor registered. Pre-fix
-    // this fired on every attempt and 404'd every time.
+    // THE DEADLOCK PROOF: provisioning completed while the two fields the old
+    // gate waited on never moved — exactly as they never moved for six days live.
+    expect(vendor.domainState(ORPHAN)).toMatchObject({
+      dns_propagation_status: "pending",
+      nameserver_match_status: "pending",
+      actual_nameservers: [],
+    });
+
+    // The 2026-08-05 root cause stays fixed: the connect-an-existing-domain
+    // handshake is never run against a domain the vendor registered.
     expect(vendor.calls.filter((c) => c.path.startsWith("/domains/nameservers"))).toEqual([]);
   });
 
-  it("NS delegation landed but mail DNS still pending: 202-with-a-billed-mailbox must NOT happen", async () => {
-    // The combined-diff gate's EXECUTED repro (2026-08-06 finding #1). Readiness
-    // short-circuited on a nameserver match and never consulted the vendor's
-    // `dns_propagation_status`, so this exact vendor state returned 202 with
-    // provisionedAfter:1, one /mailboxes/buy and one /warmup/add — real spend and
-    // a recurring subscription on a domain whose mail DNS does not work.
+  it("a domain the vendor does NOT classify still waits: 202-with-a-billed-mailbox must not happen", async () => {
+    // The combined-diff gate's EXECUTED repro (2026-08-06 finding #1), kept on the
+    // branch where it still governs. Readiness short-circuited on a nameserver
+    // match and never consulted `dns_propagation_status`, so this exact vendor
+    // state returned 202 with provisionedAfter:1, one /mailboxes/buy and one
+    // /warmup/add — real spend and a recurring subscription on a domain whose mail
+    // DNS does not work.
+    //
+    // The 2026-08-10 contract fact licenses skipping the propagation verdicts for
+    // domains the vendor REGISTERED. It says nothing about a domain we cannot
+    // classify, so an unclassified one keeps the full wait — and this asserts the
+    // fix did not widen past its evidence.
     const { token, tenantId } = await mintTenant("Author Pitch Desk", "managed");
     await activatePaidPlan(tenantId, "managed");
     const vendor = fakeInboxKit({
@@ -294,7 +312,6 @@ describe("ACCEPTANCE — the stranded purchased domain is recovered and provisio
         {
           name: ORPHAN,
           status: "active",
-          connection_type: "purchased",
           assigned_mailboxes: 0,
           dns_propagation_status: "pending",
           nameserver_match_status: "pending",
@@ -312,7 +329,7 @@ describe("ACCEPTANCE — the stranded purchased domain is recovered and provisio
     expect(vendor.countOf("/mailboxes/buy")).toBe(0); // no spend
     expect(vendor.countOf("/warmup/add")).toBe(0); // no recurring subscription
     expect(await readMailboxes(tenantId)).toEqual([]); // nothing billable
-    expect((await readDomains(tenantId))[0]!.dns_status).toBe("pending");
+    expect(await readDomains(tenantId)).toEqual([{ domain: ORPHAN, dns_status: "pending", connection_type: "unknown" }]);
 
     // The vendor finishes the mail DNS — NOW it may proceed.
     vendor.propagate(ORPHAN);
@@ -380,6 +397,42 @@ describe("ACCEPTANCE — the stranded purchased domain is recovered and provisio
     expect(vendor.countOf("/mailboxes/buy")).toBe(1);
   });
 
+  it("the vendor failing DURING mailbox processing still surfaces, retryable, with nothing billed", async () => {
+    // The safety that REPLACES the propagation wait on a purchased domain. Our
+    // gate no longer proves the mail DNS is live before the buy — the vendor sets
+    // it up as part of mailbox processing — so the mailbox leg is where that work
+    // failing has to become visible. It does: the buy's own error grade survives
+    // (a 5xx is retryable), and no mailbox row is written, so nothing is billed
+    // for a domain whose DNS the vendor did not finish.
+    const { token, tenantId } = await mintTenant("Author Pitch Desk", "managed");
+    await activatePaidPlan(tenantId, "managed");
+    const vendor = fakeInboxKit({
+      domains: [
+        {
+          name: ORPHAN,
+          status: "active",
+          connection_type: "purchased",
+          assigned_mailboxes: 0,
+          dns_propagation_status: "pending",
+          nameserver_match_status: "pending",
+          nameservers: ASSIGNED_NS,
+          actual_nameservers: [],
+        },
+      ],
+      mailboxBuyFailure: { status: 500, message: "failed to configure DNS for domain" },
+    });
+
+    const res = await post(token);
+
+    expect(res.status).toBe(502);
+    expect(res.body.retryable).toBe(true);
+    expect(res.body.step).toBe("mailbox purchase");
+    expect(vendor.countOf("/warmup/add")).toBe(0);
+    expect(await readMailboxes(tenantId)).toEqual([]);
+    // And the vendor's own words never reach the customer.
+    expect(JSON.stringify(res.body)).not.toMatch(/inboxkit|configure DNS for domain/i);
+  });
+
   it("the customer never sees the provider's name or endpoints in any of those responses", async () => {
     const { token, tenantId } = await mintTenant("Author Pitch Desk", "managed");
     await activatePaidPlan(tenantId, "managed");
@@ -402,8 +455,10 @@ describe("ACCEPTANCE — the stranded purchased domain is recovered and provisio
     const serialized = JSON.stringify(res.body);
     expect(serialized).not.toMatch(/inboxkit/i);
     expect(serialized).not.toMatch(/domains\/|mailboxes\/|warmup\//);
-    // Still actionable: WHICH step, and whether retrying helps.
-    expect(res.body.step).toBe("domain DNS setup");
+    // Still actionable: WHICH step, and whether retrying helps. The purchased
+    // domain now clears the DNS gate on the vendor's contract, so the honest
+    // stopping point is the mailbox the vendor has accepted but not yet created.
+    expect(res.body.step).toBe("mailbox purchase");
     expect(res.body.retryable).toBe(true);
 
     // The activity feed the agent reads back is clean too.
