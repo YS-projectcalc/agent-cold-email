@@ -1,11 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
-import {
-  reconcileAlerts,
-  runWatchtower,
-  WATCHTOWER_COOLDOWN_MS,
-  type CheckResult,
-} from "../src/admin/watchtower.js";
+import { reconcileAlerts, runWatchtower } from "../src/admin/watchtower.js";
+import { WATCHTOWER_COOLDOWN_MS, type CheckResult } from "../src/admin/watchtower-alerts.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
 import type { OpsMailer, OpsEmailMessage } from "../src/ops-mail/ops-mailer.js";
 import { signup } from "./helpers.js";

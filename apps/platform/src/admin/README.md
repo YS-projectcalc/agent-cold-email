@@ -57,12 +57,30 @@ closed (401 on every call) rather than falling open. Set it via
   emails a suspend notice (tenant + founder copy) via the OpsMailer
   (`../ops-mail/`) on a newly-applied suspend — best-effort, never blocking
   the suspend.
-- `watchtower.ts` — **D2 monitoring**: health probes (D1, DO storage, engine
-  `/health` when configured, a cross-tenant failure-signal scan) + the
-  founder-alert STATE MACHINE (`reconcileAlerts`) — alerts on a health CHANGE,
-  re-alerts on persistence after a 6h cooldown, recovers on heal, never
-  storms. Dedupe state in D1 (`migrations/0008_watchtower.sql`). Runs on the
-  ops-sweep cron.
+- `watchtower.ts` — **D2 monitoring**: health probes (D1, DO storage across
+  BOTH DO classes, engine `/health` when configured, a cross-tenant
+  failure-signal scan, a per-tenant "this DO is not answering" check) + the
+  D1-backed founder-alert state machine (`reconcileAlerts`) — alerts on a
+  health CHANGE, re-alerts on persistence after a 6h cooldown, recovers on
+  heal, never storms. Dedupe state in D1 (`migrations/0008_watchtower.sql`).
+  Runs on the ops-sweep cron.
+- `watchtower-alerts.ts` — the alert VOCABULARY: what a `CheckResult` is, how
+  its email renders, and `decideAlert`, the PURE transition rule. Extracted
+  because two stores now back the same machine and the anti-storm rules must be
+  identical in both.
+- `watchtower-grading.ts` — PURE observation damping between "what one probe
+  saw this tick" and "what the state machine is told" (trailing window +
+  threshold for event counts; N-up/M-down streak for per-tick booleans). A
+  `null` grade means HOLD: report nothing, change nothing.
+- `watchtower-infra.ts` + `../watchtower-do.ts` — the checks that CANNOT use
+  D1, because D1 or the cron is what they are alarming on: the `d1` check is
+  throttled in Durable Object storage, and a DO ALARM is the in-platform
+  dead-man for the cron itself. `GET /status` serves sweep freshness from here
+  so an external prober is a real dead-man too.
+- `sweep-signals.ts` — routes the cron sweep's OWN return values (per-leg
+  `errors` / `budgetExpiries` / `skippedForLegDeadline`, a leg that threw, and
+  the digest's gave-up warmup cancellations) into the same throttled alert
+  path. Before this they were counted and then logged to nobody.
 - `support-inbound.ts` — **D1**: the inbound support@ handler
   (`handleInboundSupportEmail`) wired to the Worker's `email()` export
   (`../index.ts`). Parses the raw MIME (postal-mime), runs `support-kb.ts`
@@ -124,7 +142,10 @@ unsendable email is caught and logged.
   sending enable coldrig.dev` so `OPS_EMAIL.send()` isn't `E_SENDER_NOT_VERIFIED`.
 - **D2 watchtower alerts**: `watchtower.ts` emails the founder on a health
   state change. Same sending prerequisite as dunning + a 5-min EXTERNAL prober
-  (an in-CF watchtower can't report CF being down).
+  (an in-CF watchtower can't report CF being down). The prober should treat any
+  non-2xx from `GET /status` as an incident — that route now reports DEGRADED
+  when the ops sweep has gone stale, which is what makes it a dead-man rather
+  than a liveness check for the Worker alone.
 - **D2/D6 cron schedule**: the `[triggers]` cron in `wrangler.toml` is now
   ARMED (every 5 min). It goes live on the next deploy; the email legs stay
   log-only until the sending domain is onboarded.

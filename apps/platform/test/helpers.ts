@@ -3,6 +3,7 @@ import type { Clock, TenantPlan } from "@coldstart/shared";
 import { generateApiToken, hashApiToken } from "../src/auth.js";
 import { RealClock, VirtualClock } from "../src/clock.js";
 import { insertTenantIndex } from "../src/db.js";
+import type { Env } from "../src/env.js";
 import { readActivationState } from "../src/engine/activation.js";
 import { normalizeName, tokenize } from "../src/ofac/normalize.js";
 import { swapInSdnList } from "../src/ofac/sdn-list.js";
@@ -349,4 +350,34 @@ export async function cookieApi<T = unknown>(
     body = text;
   }
   return { status: res.status, body: body as T };
+}
+
+/**
+ * A D1 binding that is fully down — every statement throws, exactly as a real
+ * D1 outage presents (`D1_ERROR: Network connection lost.`). Used by the
+ * watchtower's D1-independence tests (audit BLOCKING-1): the platform's only
+ * human-facing channel must still produce an email when this is the binding.
+ */
+export function deadDb(): D1Database {
+  const boom = () => {
+    throw new Error("D1_ERROR: Network connection lost.");
+  };
+  return {
+    prepare: () => ({
+      bind: () => ({ first: boom, all: boom, run: boom }),
+      first: boom,
+      all: boom,
+      run: boom,
+    }),
+    batch: boom,
+    exec: boom,
+    dump: boom,
+    withSession: boom,
+  } as unknown as D1Database;
+}
+
+/** `env` with a dead D1 binding and everything else (DO namespaces, the ops
+ * mail binding) intact — the shape a D1 outage actually has in production. */
+export function envWithDeadDb(): Env {
+  return { ...env, DB: deadDb() } as unknown as Env;
 }
