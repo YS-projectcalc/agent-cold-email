@@ -10,9 +10,18 @@ const SETTINGS_REFRESH_SECONDS = 30;
 
 export function SettingsPage() {
   const { tenantId, logout } = useAuth();
-  const infra = useInfrastructureStatus(SETTINGS_REFRESH_SECONDS);
-  const account = useAccount(SETTINGS_REFRESH_SECONDS);
   const rotateToken = useRotateToken();
+  // Rotation now revokes every dashboard session for the tenant, including this
+  // one (BLOCKING-3, docs/adversarial/audit-dashboard-idempotency-2026-08-06.md
+  // — a leaked token exchanged for a cookie used to outlive its own rotation).
+  // So the next poll after a rotation 401s and the global handler bounces the
+  // page to the token gate — which would tear down the ONE and ONLY display of
+  // the new token, 30 seconds after it appears, while the user is still copying
+  // it. Freezing this page's polling the moment a token is on screen is what
+  // keeps the credential recoverable; the user leaves deliberately, via Sign out.
+  const rotated = rotateToken.data !== undefined;
+  const infra = useInfrastructureStatus(SETTINGS_REFRESH_SECONDS, !rotated);
+  const account = useAccount(SETTINGS_REFRESH_SECONDS, !rotated);
   const [confirmingRotate, setConfirmingRotate] = useState(false);
 
   return (
@@ -73,7 +82,8 @@ export function SettingsPage() {
           <p className="font-semibold text-ink">Rotate API token</p>
           <p className="mt-1 text-xs leading-5 text-ink-muted">
             The full token is never stored recoverably — rotation is the only way to regain access if it's lost, or to replace one you suspect leaked. Your old token stops
-            working immediately; update your MCP config (or any other client) with the new one.
+            working immediately, and every browser session for this account is signed out with it, so a leaked token can't be traded for a session that outlives the
+            rotation. Update your MCP config (or any other client) with the new one.
           </p>
           {rotateToken.data ? (
             <div className="mt-3 rounded-[var(--radius-card)] border border-line bg-[#151820] p-4 text-white">
@@ -82,6 +92,9 @@ export function SettingsPage() {
                 <CopyButton value={rotateToken.data.token} label="Copy token" />
               </div>
               <code className="block overflow-x-auto whitespace-nowrap font-mono text-sm text-[#dfe4ef]">{rotateToken.data.token}</code>
+              <p className="mt-3 text-xs leading-5 text-[#9fa6b3]">
+                Copy this now. Rotating signs out every browser session for this account, including this one — sign back in with the new token when you're done.
+              </p>
             </div>
           ) : confirmingRotate ? (
             <div className="mt-3 rounded-[var(--radius-card)] border border-warn-border bg-warn-bg p-3">

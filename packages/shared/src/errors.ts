@@ -208,6 +208,28 @@ export class RevConflictError extends Error {
 }
 
 /**
+ * Thrown when a launch repeats a campaign this tenant launched moments ago with
+ * byte-identical content, and no idempotency key distinguished the two.
+ *
+ * Auto-send is armed, so a duplicate campaign is duplicate REAL cold outreach to
+ * the same prospects — quota burn and deliverability damage that cannot be taken
+ * back once the tick sends it. A double-click and a dropped-response retry are
+ * indistinguishable from a deliberate relaunch at the API, so the launch is
+ * REFUSED rather than silently deduped: `existingCampaignId` names what already
+ * exists, which is what a caller needs either to stop or to go look. The Worker
+ * maps it to HTTP 409.
+ */
+export class DuplicateCampaignError extends Error {
+  constructor(
+    message: string,
+    public readonly existingCampaignId: string,
+  ) {
+    super(message);
+    this.name = "DuplicateCampaignError";
+  }
+}
+
+/**
  * Thrown when a mutating intent is retried with the same Idempotency-Key while
  * the FIRST call for that key is still executing — a 'pending' claim row exists
  * (engine/idempotency.ts's claim-then-execute). RETRYABLE by design: the client

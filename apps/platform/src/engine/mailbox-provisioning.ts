@@ -87,6 +87,23 @@ interface ProvisionedMailboxRecord {
 }
 
 /**
+ * The address of ONE managed mailbox slot. Deterministic in the persona and the
+ * two ordinals, which is what lets a retry resolve to the SAME address (and so
+ * the same address-derived intent) instead of buying a new mailbox — and lets
+ * `setup_infrastructure` count, before spending anything, how many of a
+ * request's slots are already filled (engine/provisioning.ts's planProvisioning).
+ * Derived in one place so those two consumers can never disagree.
+ */
+export function managedMailboxAddress(
+  personaSlug: string,
+  domain: string,
+  domainOrdinal: number,
+  mailboxIndex: number,
+): string {
+  return `${personaSlug}${domainOrdinal + 1}${mailboxIndex + 1}@${domain}`;
+}
+
+/**
  * Provisions `inboxesEach` PLATFORM-OWNED mailboxes on an ALREADY-OWNED domain
  * row. `domainOrdinal` only affects the generated local-part numbering
  * (uniqueness only requires the local part be unique WITHIN this one domain,
@@ -112,8 +129,8 @@ export async function provisionMailboxesForDomain(
   const mailboxEmails: string[] = [];
 
   for (let mailboxIndex = 0; mailboxIndex < opts.inboxesEach; mailboxIndex++) {
-    const localPart = `${opts.personaSlug}${opts.domainOrdinal + 1}${mailboxIndex + 1}`;
-    const email = `${localPart}@${opts.domain}`;
+    const email = managedMailboxAddress(opts.personaSlug, opts.domain, opts.domainOrdinal, mailboxIndex);
+    const localPart = email.slice(0, email.indexOf("@"));
     // ADDRESS-DERIVED (N4). The key used to embed the domain ordinal, which made
     // it underivable from the mailbox itself — so teardown could not invalidate
     // the claim, and a re-provision after cancellation replayed a claim about a

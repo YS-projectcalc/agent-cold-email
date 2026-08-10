@@ -84,13 +84,23 @@ paths:
         provisioning occurs.
 
 
-        Idempotency-Key contract: an identical retry — the same key resent,
-        or the key omitted both times — CONVERGES onto the domains/mailboxes
-        already provisioned rather than buying again. Provisioning
-        ADDITIONAL infrastructure beyond what a prior call already
-        provisioned requires a NEW, distinct Idempotency-Key; reusing an old
-        one (or omitting the header twice) is indistinguishable from a retry
-        and returns the existing result, not a second purchase.
+        `domains` and `inboxesEach` describe the infrastructure you want to
+        HAVE, not an amount to add. Each call reconciles: domains already
+        provisioned for this account are kept and resumed, and only the
+        shortfall is bought. So provisioning MORE means asking for a larger
+        number — `domains: 2` after a call that provisioned one buys the
+        second; raising `inboxesEach` tops each domain up to the new
+        per-domain count.
+
+
+        Retry contract: repeating a call NEVER buys a second time, whatever
+        you do with the Idempotency-Key — resend the same one, send a
+        different one, or send none at all. The key governs response replay
+        only (a replay of a completed keyed call returns that call's recorded
+        result without re-running it); it has no bearing on what is
+        purchased. This is a change from earlier behaviour, in which a NEW
+        key opened a second purchase — retrying with a fresh key bought a
+        second lookalike domain and a duplicate set of billable mailboxes.
 
 
         `registerDomains` (real domain purchases on the platform's own
@@ -101,20 +111,18 @@ paths:
 
 
         If fewer available, not-already-owned lookalike domains exist than
-        `domains` requests, the call fails with 400 naming how many were
+        the call still has to BUY, it fails with 400 naming how many were
         found — never a silent partial provision or a repeat purchase of one
-        domain.
+        domain. A call that needs to buy nothing (a pure retry) does not need
+        any candidate to be available and cannot fail this way.
 
 
         A domain's DNS setup may still be completing when this call returns
         — the domain is recorded either way and is never lost. There is no
         autonomous background retry: completing it is the caller's job.
-        Retry the SAME call — same Idempotency-Key, or omitted identically
-        both times — to converge onto that domain and finish its DNS setup;
-        a distinct key is for provisioning genuinely new infrastructure, not
-        for completing DNS on infrastructure this call already started.
-        There is no per-domain DNS field to poll: GET /infrastructure-status
-        reports a domain count, not per-domain detail.
+        Repeat the same call to converge onto that domain and finish its DNS
+        setup. There is no per-domain DNS field to poll: GET
+        /infrastructure-status reports a domain count, not per-domain detail.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -170,6 +178,18 @@ paths:
       description: >
         The caller supplies the offer and sequence content — this API does
         not generate outreach copy.
+
+
+        Duplicate protection: a launch whose name, offer, sequence, lead list
+        and schedule are identical to one this account launched in the last
+        60 seconds is REFUSED with 409 `duplicate_campaign`, carrying
+        `existingCampaignId`. Campaigns send real mail, so a double-click or
+        a retried request must not contact the same prospects twice. A
+        deliberate relaunch of identical content after that window is
+        allowed, and any campaign that differs in any field launches
+        immediately. To retry a call whose response you lost, resend it with
+        the same Idempotency-Key: that replays the original result instead of
+        being refused.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -190,6 +210,19 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: >
+            Refused as a duplicate submit, or a request with this
+            Idempotency-Key is still executing. The duplicate case carries
+            `code: duplicate_campaign` and `existingCampaignId`.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+                  code: { type: string }
+                  existingCampaignId: { type: string }
     get:
       operationId: list_campaigns
       tags: [campaigns]
@@ -1282,13 +1315,25 @@ components:
       in: header
       required: false
       description: >
-        Optional. Resend the SAME key on retry to avoid duplicate campaigns:
-        the first call runs, a replay with the same key returns the recorded
-        result without re-executing. Note the mechanism differs by
-        transport — REST takes this as the `Idempotency-Key` header (this
-        parameter); the MCP `launch_campaign` tool takes the equivalent
-        value as an `idempotencyKey` argument field instead, since MCP
-        tool calls have no separate header channel.
+        Optional, and strongly recommended on every mutating call. Resend the
+        SAME key on retry: the first call runs, a replay with the same key
+        returns the recorded result without re-executing — no duplicate
+        campaign, no duplicate send, no second release of mailboxes. Honored
+        on POST /campaigns, /setup-infrastructure, /remove-mailboxes and
+        /threads/{id}/reply.
+
+
+        It is a REPLAY key, never a request discriminator: on
+        /setup-infrastructure, changing it or omitting it does not cause
+        anything extra to be provisioned. On /remove-mailboxes it is the only
+        thing that makes a retry safe, because `count` is relative and
+        releasing mailboxes cannot be undone through this API.
+
+
+        The mechanism differs by transport — REST takes this as the
+        `Idempotency-Key` header (this parameter); the MCP tools take the
+        equivalent value as an `idempotencyKey` argument field instead, since
+        MCP tool calls have no separate header channel.
       schema: { type: string, minLength: 1, maxLength: 200 }
 
   responses:
@@ -1315,9 +1360,13 @@ components:
             properties: { error: { type: string } }
     RequestInProgress:
       description: >
-        A request with this Idempotency-Key is already executing — a
-        concurrent retry arrived before the first call finished. Retryable
-        by design: retry shortly, once the first call has recorded its result.
+        The work this request asks for is already running — either a call
+        with this Idempotency-Key has not finished yet, or (on
+        /remove-mailboxes, where only one release may run at a time per
+        account) an unkeyed release is in flight. Retryable by design: retry
+        once the first call has recorded its result. After a refused release,
+        re-read your live mailbox count before deciding to retry — the call
+        that is running may already be doing what you asked.
       content:
         application/json:
           schema:

@@ -99,6 +99,44 @@ export function recordDomainIntent(ctx: TenantContext, key: string, candidateDom
 }
 
 /**
+ * The domain buy-intent key for one ORDINAL of a tenant's managed infrastructure.
+ *
+ * TENANT-GLOBAL, never namespaced by the caller's request idempotency key
+ * (BLOCKING-1, docs/adversarial/audit-dashboard-idempotency-2026-08-06.md). It
+ * used to be `${setupKey ?? tenant}#${ordinal}`, which made the caller's key
+ * decide whether a retry adopted the prior purchase or opened a fresh intent and
+ * bought a second domain — so supplying a key, or changing one, was LESS
+ * retry-safe than sending none. Since the key is optional on the MCP schema and
+ * absent from every dashboard call, unkeyed-then-keyed was the default
+ * trajectory, not an edge case.
+ *
+ * With the ordinal alone, `domains`/`inboxesEach` are a TARGET the call
+ * reconciles toward: ordinals already committed resume, the shortfall is bought,
+ * and no key permutation can change what gets purchased. Same shape and same
+ * reasoning as `mailboxIntentKey` below — the key names the RESOURCE SLOT, not
+ * the request that first asked for it.
+ */
+export function domainIntentKey(tenantId: string, domainIndex: number): string {
+  return `tenant:${tenantId}#${domainIndex}`;
+}
+
+/**
+ * The domain intent recorded at `key`, or undefined — READ-ONLY, unlike
+ * `recordDomainIntent`, which writes one. Planning a call has to ask which
+ * ordinals are already committed WITHOUT minting 'intent' rows for ordinals it
+ * may never reach.
+ */
+export function readDomainIntent(ctx: TenantContext, key: string): DomainIntentRow | undefined {
+  return ctx.sql
+    .exec<DomainIntentRow>(
+      `SELECT key, candidate_domain, status FROM domain_intents WHERE key = ? AND tenant_id = ?`,
+      key,
+      ctx.tenantId,
+    )
+    .toArray()[0];
+}
+
+/**
  * L2 — the durable mailbox buy-intent record, keyed by the address itself.
  *
  * The key is derivable from the email ALONE (`mailboxIntentKey`) so teardown can

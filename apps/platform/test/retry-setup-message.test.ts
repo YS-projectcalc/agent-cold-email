@@ -190,13 +190,26 @@ describe("retry_setup tenant message — fires when setDns retry is exhausted", 
         ).catch((e: unknown) => e),
       );
 
-    await run();
-    await run();
-    await run();
+    const outcomes = [await run(), await run(), await run()];
+
+    // Every attempt has to REACH the wire-A catch for the dedup to be what
+    // holds the count at 1. Retries 2 and 3 used to die earlier and cheaper, on
+    // the ValidationError this file's own multiCandidateStuckDnsDomainPort
+    // comment calls "the gate's traced false-green cause": the single-candidate
+    // fixture leaves `usable` empty once attempt 1 owns that name, and the
+    // candidate requirement was sized against the whole ask rather than the
+    // shortfall. A retry that needs to buy NOTHING no longer needs a candidate
+    // at all (BLOCKING-1), so all three now converge onto the same domain, fail
+    // the same retryable way, and genuinely exercise GUARDRAIL A.
+    for (const outcome of outcomes) {
+      expect(outcome).toBeInstanceOf(VendorError);
+      expect((outcome as VendorError).retryable).toBe(true);
+    }
 
     const messages = await withTenantContext(tenantId, (ctx) => listSurfacedTenantMessages(ctx));
     expect(messages).toHaveLength(1);
-  });
+    // Three real DNS retry cycles, each with setDnsWithRetry's in-call backoff.
+  }, 20_000);
 
   it("GUARDRAIL B — the stored body/actionHint never leaks the raw vendor error text or an internal marker", async () => {
     const { tenantId } = await signup("Retry Secret Co", "founder@retrysecret.test");

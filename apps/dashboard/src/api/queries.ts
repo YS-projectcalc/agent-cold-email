@@ -158,10 +158,11 @@ export function useMetrics(refreshSeconds: number) {
   });
 }
 
-export function useInfrastructureStatus(refreshSeconds: number) {
+export function useInfrastructureStatus(refreshSeconds: number, enabled = true) {
   return useQuery({
     queryKey: ["infrastructure-status"],
     queryFn: () => apiRequest<InfrastructureStatus>("/infrastructure-status"),
+    enabled,
     ...pollingOptions(refreshSeconds),
   });
 }
@@ -202,10 +203,11 @@ export function useInbox(params: { limit?: number; label?: string }, refreshSeco
   });
 }
 
-export function useAccount(refreshSeconds: number) {
+export function useAccount(refreshSeconds: number, enabled = true) {
   return useQuery({
     queryKey: ["account"],
     queryFn: () => apiRequest<AccountSummary>("/account"),
+    enabled,
     ...pollingOptions(refreshSeconds),
   });
 }

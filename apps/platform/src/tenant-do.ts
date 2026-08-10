@@ -23,7 +23,7 @@ import type {
 // Not type-only: demoRun()'s default parameter value needs the runtime
 // schema (`DemoRunInput.parse({})`), not just the inferred type.
 import { DemoRunInput } from "@coldstart/shared";
-import { isPaidPlan, RateLimitError, TenantIsolationError, type Clock } from "@coldstart/shared";
+import { isPaidPlan, RateLimitError, RequestInProgressError, TenantIsolationError, type Clock } from "@coldstart/shared";
 import { DelegatingClock, RealClock, requireVirtualClock, VirtualClock } from "./clock.js";
 import { migrateTenantClockToReal } from "./engine/clock-migration.js";
 import type { StripeEventInput } from "./billing/stripe-webhook.js";
@@ -174,6 +174,10 @@ export class TenantDO extends DurableObject<Env> {
   // buildAdapters() below.
   private sandboxAdapters: VendorAdapterBundle | null = null;
 
+  // BLOCKING-2 single-flight latch for mailbox release — see removeMailboxes()
+  // for why this is deliberately in-memory and not a durable claim.
+  private releaseInFlight = false;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.ctx.storage.sql.exec(TENANT_DO_SCHEMA);
@@ -267,6 +271,9 @@ export class TenantDO extends DurableObject<Env> {
    */
   private ensureColumnMigrations(): void {
     this.addColumnIfMissing("campaigns", "is_demo", "INTEGER NOT NULL DEFAULT 0");
+    // Campaign double-submit guard (see schema.ts + engine/campaigns.ts).
+    this.addColumnIfMissing("campaigns", "content_hash", "TEXT NOT NULL DEFAULT ''");
+    this.addColumnIfMissing("campaigns", "launched_at_real", "INTEGER NOT NULL DEFAULT 0");
     this.addColumnIfMissing("ledger_entries", "source_send_id", "TEXT");
     this.addColumnIfMissing("tenant_profile", "billing_state", "TEXT NOT NULL DEFAULT 'none'");
     this.addColumnIfMissing("tenant_profile", "stripe_customer_id", "TEXT");
@@ -885,11 +892,50 @@ export class TenantDO extends DurableObject<Env> {
     return startCheckout(this.requireContext(), input, origin);
   }
 
-  // Customer-initiated downgrade (design §2) — releases N mailboxes now + syncs
-  // the lower Stripe quantity (proration none). Tenant-authed, POST /remove-mailboxes.
-  async removeMailboxes(input: RemoveMailboxesInput): Promise<RemoveMailboxesResult> {
-    const result = await removeMailboxes(this.requireContext(), input);
-    return result;
+  /**
+   * Customer-initiated downgrade (design §2) — releases N mailboxes now + syncs
+   * the lower Stripe quantity (proration none). Tenant-authed, POST
+   * /remove-mailboxes.
+   *
+   * BLOCKING-2 (audit-dashboard-idempotency-2026-08-06). "Release N" is
+   * RELATIVE and irreversible through this API, so every unprotected repeat
+   * destroyed another N: a same-key replay released twice, and a concurrent
+   * double-submit released 2N. Two guards, because the two shapes are different
+   * failures:
+   *
+   *  - The KEY, honored durably: a replay returns the recorded response and
+   *    re-releases nothing. This is the one the docs already promised.
+   *  - SINGLE-FLIGHT, for the caller that sends no key (every browser caller):
+   *    at most one release may be running for a tenant at a time. Deliberately
+   *    an in-memory flag rather than a durable claim — both submits necessarily
+   *    reach THIS instance (that is what makes the DO input gate the tenant's
+   *    serialization point), the check-and-set is synchronous so no concurrent
+   *    RPC can interleave before it, and an instance that dies mid-release takes
+   *    the flag with the work. A durable claim would only add a stuck-claim
+   *    failure mode: `releaseMailboxes` is already crash-retry-safe (driven by
+   *    `released_at IS NULL`, with an idempotent release + revoke).
+   *
+   * What neither guard can do is make an UNKEYED sequential retry safe — once
+   * the first call has settled, "release 1 more" is genuinely what a second
+   * unkeyed call says. Callers that need retry safety send the key.
+   */
+  async removeMailboxes(input: RemoveMailboxesInput, idempotencyKey?: string): Promise<RemoveMailboxesResult> {
+    const ctx = this.requireContext();
+    if (this.releaseInFlight) {
+      throw new RequestInProgressError(
+        "a mailbox release is already running for this tenant — wait for it to finish, then check your live mailbox count before retrying",
+      );
+    }
+    this.releaseInFlight = true;
+    try {
+      return await withRequestIdempotency(
+        ctx,
+        idempotencyKey ? `remove_mailboxes:${idempotencyKey}` : undefined,
+        () => removeMailboxes(ctx, input),
+      );
+    } finally {
+      this.releaseInFlight = false;
+    }
   }
 
   async completeCheckoutSimulated(sessionId: string): Promise<CompleteCheckoutResult> {

@@ -18,10 +18,16 @@ export const checkoutRoute = new Hono<{ Bindings: Env; Variables: AuthedVariable
   // Customer-initiated downgrade (design §2) — releases N mailboxes now and
   // syncs the lower Stripe quantity (no mid-cycle credit). `acknowledged: true`
   // is the quoted consent (RemoveMailboxesInput).
+  //
+  // BLOCKING-2 (audit-dashboard-idempotency-2026-08-06): this route accepted an
+  // `Idempotency-Key` header and dropped it on the floor, so a client following
+  // the platform's own documented retry rule released N mailboxes TWICE. A
+  // header named Idempotency-Key that is ignored is worse than none — it turns
+  // a correct client into a destructive one. The key is honored now.
   .post("/remove-mailboxes", async (c) => {
     const parsed = await parseJsonBody(c, RemoveMailboxesInput);
     if (!parsed.ok) return parsed.response;
-    const result = await c.get("tenantStub").removeMailboxes(parsed.data);
+    const result = await c.get("tenantStub").removeMailboxes(parsed.data, c.req.header("Idempotency-Key"));
     return c.json(result, 200);
   });
 
