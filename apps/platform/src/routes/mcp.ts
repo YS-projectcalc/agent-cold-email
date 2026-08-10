@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env.js";
 import { handleMcpRequest, MCP_INFO } from "../mcp/handler.js";
+import { declaresOverCap, readTextBodyWithCap } from "../validate.js";
 
 // Hosted MCP endpoint (streamable HTTP, JSON-RPC 2.0). Deliberately mounted
 // OUTSIDE the `requireAuth` Hono middleware group in index.ts: auth here is
@@ -23,17 +24,19 @@ const MCP_BODY_MAX_BYTES = 64 * 1024;
 export const mcpRoute = new Hono<{ Bindings: Env }>()
   .get("/mcp", (c) => jsonResponse(MCP_INFO, 200))
   .post("/mcp", async (c) => {
-    const declaredLength = Number(c.req.header("content-length"));
-    if (Number.isFinite(declaredLength) && declaredLength > MCP_BODY_MAX_BYTES) {
-      return jsonResponse(
-        { jsonrpc: "2.0", id: null, error: { code: -32600, message: "request body too large" } },
-        413,
-      );
-    }
+    const tooLarge = () =>
+      jsonResponse({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "request body too large" } }, 413);
+    if (declaresOverCap(c, MCP_BODY_MAX_BYTES)) return tooLarge();
+
+    // The declared length above is a hint an attacker simply omits; the capped
+    // read is what actually bounds the bytes (validate.ts, finding 7). The
+    // 64 KB ceiling is unchanged — only its enforceability is.
+    const text = await readTextBodyWithCap(c, MCP_BODY_MAX_BYTES);
+    if (text === null) return tooLarge();
 
     let raw: unknown;
     try {
-      raw = await c.req.json();
+      raw = JSON.parse(text);
     } catch {
       return jsonResponse({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error: invalid JSON body" } }, 400);
     }

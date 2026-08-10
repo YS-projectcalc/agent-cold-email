@@ -358,6 +358,10 @@ export class TenantDO extends DurableObject<Env> {
     this.addColumnIfMissing("tenant_profile", "clock_migration_delta_ms", "INTEGER");
     this.addColumnIfMissing("tenant_profile", "clock_migrated_at", "INTEGER");
     this.addColumnIfMissing("deliverability_actions", "alerted_at", "INTEGER");
+    // Gate residual N-2 — "claimed" vs "applied" (see schema.ts). DEFAULT 1
+    // keeps every event an existing DO already recorded counting exactly as it
+    // did before; only events refused from here on read 0.
+    this.addColumnIfMissing("webhook_events", "applied", "INTEGER NOT NULL DEFAULT 1");
     // G1 (ga-gates-design-2026-07-22.md §G1) — OFAC/SDN screening verdict
     // columns (see schema.ts's tenant_profile comment for the field contract).
     this.addColumnIfMissing("tenant_profile", "screening_status", "TEXT NOT NULL DEFAULT 'clear'");

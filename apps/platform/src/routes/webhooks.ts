@@ -5,7 +5,7 @@ import { getChargeCustomerId } from "../billing/stripe-client.js";
 import { alertUnroutableStripeEvent } from "../billing/webhook-routing-alert.js";
 import { RealClock } from "../clock.js";
 import { lookupTenantById, lookupTenantIdByStripeCustomer, recordStripeCustomerTenant } from "../db.js";
-import { SMALL_BODY_MAX_BYTES } from "../validate.js";
+import { declaresOverCap, readTextBodyWithCap, SMALL_BODY_MAX_BYTES } from "../validate.js";
 
 // POST /webhooks/stripe — UNAUTHENTICATED (Stripe calls this, no bearer token
 // to present); authenticity comes ENTIRELY from the `Stripe-Signature` header
@@ -21,10 +21,10 @@ import { SMALL_BODY_MAX_BYTES } from "../validate.js";
 export const webhooksRoute = new Hono<{ Bindings: Env }>().post("/webhooks/stripe", async (c) => {
   // Body-size cap BEFORE materializing the (unauthenticated, unthrottled) body
   // — the exact parse-cost amplifier class panel-02 closed on /signup
-  // (adversarial panel-03 finding #8). Cap first, THEN read the raw text the
-  // signature is computed over.
-  const declaredLength = Number(c.req.header("content-length"));
-  if (Number.isFinite(declaredLength) && declaredLength > SMALL_BODY_MAX_BYTES) {
+  // (adversarial panel-03 finding #8). This header check is only the cheap
+  // pre-filter for an honest client; the enforcement a caller cannot opt out of
+  // is on bytes actually read, below (finding 7).
+  if (declaresOverCap(c, SMALL_BODY_MAX_BYTES)) {
     return c.json({ error: "request body too large" }, 413);
   }
 
@@ -35,9 +35,12 @@ export const webhooksRoute = new Hono<{ Bindings: Env }>().post("/webhooks/strip
     return c.json({ error: "webhook not configured (STRIPE_WEBHOOK_SECRET unset) — event rejected" }, 503);
   }
 
-  // Signature verification needs the RAW body bytes — read text() before any
-  // JSON parsing (a re-serialized body would not match the signature).
-  const raw = await c.req.text();
+  // Signature verification needs the RAW body bytes — read the text before any
+  // JSON parsing (a re-serialized body would not match the signature). Read
+  // through the byte-counting cap: a chunked delivery declares no
+  // content-length, so the header check above cannot see it (finding 7).
+  const raw = await readTextBodyWithCap(c, SMALL_BODY_MAX_BYTES);
+  if (raw === null) return c.json({ error: "request body too large" }, 413);
 
   const signatureHeader = c.req.header("stripe-signature");
   if (!signatureHeader || !(await verifyStripeSignature(raw, signatureHeader, webhookSecret))) {

@@ -511,7 +511,17 @@ CREATE TABLE IF NOT EXISTS checkout_sessions (
 CREATE TABLE IF NOT EXISTS webhook_events (
   event_id TEXT PRIMARY KEY,
   type TEXT NOT NULL,
-  ts INTEGER NOT NULL
+  ts INTEGER NOT NULL,
+  -- 0 when the event was CLAIMED but then refused as out of order
+  -- (wave2-integration-gate-2026-08-06.md N-2). The claim has to come first —
+  -- it is the concurrency guard, and moving it after the staleness check would
+  -- reopen the compliance fail-open that guard-before-effect closed — so a
+  -- refused event unavoidably leaves a row. Before this column, every such row
+  -- counted as a dunning strike (ops-summary.ts reads this table as the failure
+  -- count), and three refused redeliveries could suspend a recovered payer on
+  -- their FIRST genuine failure. DEFAULT 1: an existing row records an event
+  -- that was applied.
+  applied INTEGER NOT NULL DEFAULT 1
 );
 
 -- Guard-before-effect marker for the webhook handler

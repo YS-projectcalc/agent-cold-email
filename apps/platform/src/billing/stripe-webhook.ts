@@ -148,8 +148,10 @@ function readString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-/** A Stripe id field is either the bare id or, when expanded, the object. */
-function readIdRef(value: unknown): string | null {
+/** A Stripe id field is either the bare id or, when expanded, the object.
+ *  Exported because engine/billing.ts reads the same `charge`/`payment_intent`
+ *  fields off an invoice to look its decline code up. */
+export function readIdRef(value: unknown): string | null {
   const direct = readString(value);
   if (direct) return direct;
   if (value && typeof value === "object") return readString((value as { id?: unknown }).id);

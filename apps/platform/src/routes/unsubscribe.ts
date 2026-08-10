@@ -3,7 +3,7 @@ import { UnsubscribeQuery } from "@coldstart/shared";
 import type { Env } from "../env.js";
 import { escapeHtml } from "../html-escape.js";
 import { verifyUnsubscribeToken } from "../unsubscribe-token.js";
-import { SMALL_BODY_MAX_BYTES } from "../validate.js";
+import { declaresOverCap, SMALL_BODY_MAX_BYTES } from "../validate.js";
 
 // B4 opt-out — the hosted RFC 8058 one-click unsubscribe endpoint. Public and
 // UNAUTHENTICATED (a mail client POSTs here with no bearer token to present,
@@ -71,12 +71,17 @@ export const unsubscribeRoute = new Hono<{ Bindings: Env }>()
   })
   .post("/unsubscribe", async (c) => {
     // RFC 8058's client-sent `List-Unsubscribe=One-Click` marker in the POST
-    // body carries no information THIS route needs (the query string's
-    // signed token is the actual credential) — so the body is never read,
-    // only cap-checked before anything else, mirroring webhooks.ts's same
-    // parse-cost-amplifier discipline on an unauthenticated route.
-    const declaredLength = Number(c.req.header("content-length"));
-    if (Number.isFinite(declaredLength) && declaredLength > SMALL_BODY_MAX_BYTES) {
+    // body carries no information THIS route needs (the query string's signed
+    // token is the actual credential) — so the body is NEVER READ.
+    //
+    // Deliberately the one body-cap that stays declared-length-only, exempt
+    // from finding 7's byte-counting fix: readTextBodyWithCap has to CONSUME a
+    // body to measure it, which here would mean reading bytes we otherwise
+    // never touch — strictly more parse cost, not less. Not reading is the
+    // stronger guard, and the declared check is kept as a courtesy fast-fail.
+    // (body-cap-coverage.test.ts enforces the general rule and cites this
+    // route as the reasoned exception.)
+    if (declaresOverCap(c, SMALL_BODY_MAX_BYTES)) {
       return c.text("request body too large", 413);
     }
 
