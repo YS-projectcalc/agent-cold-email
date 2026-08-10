@@ -1,3 +1,4 @@
+import { SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { api, signup } from "./helpers.js";
 
@@ -65,6 +66,69 @@ describe("body-size cap before JSON.parse (413)", () => {
     const bigBody = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: { pad: "x".repeat(70_000) } });
     const res = await api("/mcp", { method: "POST", body: bigBody });
     expect(res.status).toBe(413);
+  });
+
+  // audit-stripe-webhook-2026-08-06.md finding 7, swept off the webhook onto the
+  // rest of the class. Every cap above read the DECLARED content-length, which a
+  // chunked request simply does not send — so the three 413s above were the only
+  // shape that was ever blocked, and the same request delivered as a stream sailed
+  // through into the parse. These deliver the identical bytes with no
+  // content-length; `api()` cannot express that, so they drive SELF.fetch directly.
+  function streamed(text: string): ReadableStream<Uint8Array> {
+    const bytes = new TextEncoder().encode(text);
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let i = 0; i < bytes.length; i += 1024) controller.enqueue(bytes.slice(i, i + 1024));
+        controller.close();
+      },
+    });
+  }
+
+  it("rejects an oversized /signup body delivered CHUNKED, with no content-length", async () => {
+    const bigBody = JSON.stringify({ brand: "x".repeat(9000), contactEmail: "chunked@body-test.example" });
+    const res = await SELF.fetch("https://example.com/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json", "CF-Connecting-IP": "192.0.2.202" },
+      body: streamed(bigBody),
+    });
+    expect(res.status).toBe(413);
+  });
+
+  it("rejects an oversized /mcp body delivered CHUNKED, keeping the JSON-RPC error envelope", async () => {
+    const bigBody = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: { pad: "x".repeat(70_000) } });
+    const res = await SELF.fetch("https://example.com/mcp", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: streamed(bigBody),
+    });
+    expect(res.status).toBe(413);
+    // /mcp answers in JSON-RPC, not the platform's `{error}` shape — the shared
+    // reader returns null rather than a ready-made Response for exactly this.
+    const body = (await res.json()) as { jsonrpc: string; error: { code: number } };
+    expect(body.jsonrpc).toBe("2.0");
+    expect(body.error.code).toBe(-32600);
+  });
+
+  it("rejects an oversized /demo/run body delivered CHUNKED (the route that had NO cap at all)", async () => {
+    const { token } = await signup("Demo Cap Co", "demo-cap@body-test.example");
+    const res = await SELF.fetch("https://example.com/demo/run", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: streamed(JSON.stringify({ leads: 3, pad: "x".repeat(9000) })),
+    });
+    expect(res.status).toBe(413);
+  });
+
+  it("still accepts a normal /mcp request delivered chunked and under the cap (control)", async () => {
+    const res = await SELF.fetch("https://example.com/mcp", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: streamed(JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/list" })),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: number; result?: { tools: unknown[] } };
+    expect(body.id).toBe(7);
+    expect(body.result?.tools.length).toBeGreaterThan(0);
   });
 
   it("still accepts a normal small /signup body (control)", async () => {

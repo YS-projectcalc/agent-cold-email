@@ -15,6 +15,7 @@ import {
   disputeCreated,
   invoicePaymentFailed,
   stripeCustomerIdFor,
+  subscriptionDeleted,
   subscriptionUpdated,
 } from "./stripe-fixtures.js";
 
@@ -449,6 +450,58 @@ describe("N-2 — an event REFUSED as stale must not count as a dunning strike",
     const summary = await tenantStub(tenantId).opsSummary(Date.now());
     expect(summary.billingState).toBe("past_due");
     expect(summary.billingFailureCount).toBe(1);
+  });
+
+  // The COMPLETION-PASS half of the same rule. A handler that dies mid-effect
+  // leaves its claim row (applied defaults to 1) plus an in-flight marker; if a
+  // newer event supersedes it before Stripe redelivers, the completion pass
+  // refuses to finish it — so that event never applied and must not be a strike
+  // either. The crash itself is an infrastructure event and cannot be forced
+  // in-process, so the half-applied state is written DIRECTLY here; what is
+  // under test is the refusal path's semantics, not the crash.
+  it("a REFUSED completion pass does not count the half-applied event as a strike", async () => {
+    const { tenantId } = await mintTenant("Half Applied Strike Co", "managed");
+    await seedBenignSdnList();
+    await postWebhook(checkoutSessionCompleted({ tenantId, created: T0 }));
+
+    // The exact durable residue of an attempt that claimed the event and then
+    // died before its effects landed.
+    const halfApplied = invoicePaymentFailed({
+      tenantId,
+      customerId: stripeCustomerIdFor(tenantId),
+      created: T0 + 100,
+    });
+    await runInDurableObject(tenantStub(tenantId), async (_i, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO webhook_events (event_id, type, ts) VALUES (?, 'invoice.payment_failed', ?)`,
+        halfApplied.id,
+        Date.now(),
+      );
+      state.storage.sql.exec(
+        `INSERT INTO webhook_event_inflight (event_id, started_at) VALUES (?, ?)`,
+        halfApplied.id,
+        Date.now(),
+      );
+    });
+
+    // A newer event supersedes it. `subscription.deleted` on purpose: it moves
+    // the billing lane's mark and conflicts with 'past_due' WITHOUT recording a
+    // dunning-cycle basis, which a recovery would — a moved basis would hide
+    // the strike for the wrong reason and make this test vacuous.
+    await postWebhook(subscriptionDeleted({ tenantId, created: T0 + 200 }));
+    expect((await readProfile(tenantId)).billing_state).toBe("canceled");
+
+    const redelivery = await postWebhook<WebhookResponse>(halfApplied);
+    expect(redelivery.body).toMatchObject({ applied: false, duplicate: true, stale: true });
+
+    const row = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
+      state.storage.sql
+        .exec<{ applied: number }>(`SELECT applied FROM webhook_events WHERE event_id = ?`, halfApplied.id)
+        .one(),
+    );
+    // The claim row SURVIVES (it is the replay guard) but reads not-applied.
+    expect(row.applied).toBe(0);
+    expect((await tenantStub(tenantId).opsSummary(Date.now())).billingFailureCount).toBe(0);
   });
 
   // The gate's N-3 standing hazard: `CREATE TABLE IF NOT EXISTS` never alters

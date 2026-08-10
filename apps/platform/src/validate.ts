@@ -6,10 +6,11 @@ import type { ZodType } from "zod";
 // @coldstart/shared before touching the DO.
 
 // Default request-body cap. Small-schema routes (signup, waitlist, setup) pass
-// a tight cap; launch_campaign passes a large one (up to 5000 leads). A
-// Content-Length above the cap is rejected 413 BEFORE c.req.json() materializes
-// and parses the whole body — adversarial panel-02: parse-before-validate on
-// unauthenticated, unthrottled endpoints is a cheap CPU/memory amplifier.
+// a tight cap; launch_campaign passes a large one (up to 5000 leads). An
+// over-cap body is rejected 413 before it is parsed — adversarial panel-02:
+// parse-before-validate on unauthenticated, unthrottled endpoints is a cheap
+// CPU/memory amplifier. Enforced on BYTES READ, not on a declared
+// Content-Length the client controls (readTextBodyWithCap, below).
 export const SMALL_BODY_MAX_BYTES = 8 * 1024; // signup, waitlist, setup_infrastructure
 export const LARGE_BODY_MAX_BYTES = 4 * 1024 * 1024; // launch_campaign (5000 leads)
 // SPEC.md §19.3 — a dashboard view's layout can carry up to 50 widgets, each
@@ -34,27 +35,30 @@ export function parseBoolQueryParam(raw: string | undefined): boolean | undefine
 }
 
 /**
- * Reads a request body as text, stopping at `maxBytes` of ACTUAL bytes read.
+ * THE one sanctioned way to read a request body in this codebase. Returns the
+ * body text, or `null` when it exceeds `maxBytes` of ACTUAL bytes read.
  *
- * A declared-`Content-Length` check — what every cap in this file and in the
- * routes does — only stops an HONEST client: a chunked/streamed request carries
- * no such header, so
- * `Number(undefined)` is NaN, `Number.isFinite` is false, and the cap is skipped
- * entirely — the full body is materialised anyway
- * (audit-stripe-webhook-2026-08-06.md finding 7). Enforcing on bytes read is the
- * only cap a client cannot opt out of; the stream is CANCELLED at the ceiling,
- * so an over-cap body is never fully buffered.
+ * A declared-`Content-Length` check only stops an HONEST client: a
+ * chunked/streamed request carries no such header, so `Number(undefined)` is
+ * NaN, `Number.isFinite` is false, and the cap is skipped entirely while the
+ * full body is materialised anyway (audit-stripe-webhook-2026-08-06.md finding
+ * 7 — the cap on the unauthenticated Stripe webhook, which every other
+ * body-reading route in the app had copied). Counting bytes as they arrive is
+ * the only cap a client cannot opt out of, and the stream is CANCELLED at the
+ * ceiling so an over-cap body is never fully buffered.
+ *
+ * `null` rather than a ready-made 413 Response: /mcp answers over-cap in a
+ * JSON-RPC error envelope and /unsubscribe in plain text, so the status body is
+ * the caller's to shape. `body-cap-coverage.test.ts` fails if any route reads a
+ * body without coming through here.
  *
  * Decoding happens once over the joined bytes, never per chunk — a multi-byte
  * UTF-8 character can straddle a chunk boundary, and the result has to be the
- * exact string the sender's signature was computed over.
+ * exact string a signature was computed over.
  */
-export async function readTextBodyWithCap(
-  c: Context,
-  maxBytes: number,
-): Promise<{ ok: true; text: string } | { ok: false; response: Response }> {
+export async function readTextBodyWithCap(c: Context, maxBytes: number): Promise<string | null> {
   const body = c.req.raw.body;
-  if (!body) return { ok: true, text: "" };
+  if (!body) return "";
 
   const reader = body.getReader();
   const chunks: Uint8Array[] = [];
@@ -65,7 +69,7 @@ export async function readTextBodyWithCap(
     total += value.byteLength;
     if (total > maxBytes) {
       await reader.cancel();
-      return { ok: false, response: c.json({ error: "request body too large" }, 413) };
+      return null;
     }
     chunks.push(value);
   }
@@ -76,7 +80,17 @@ export async function readTextBodyWithCap(
     joined.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return { ok: true, text: new TextDecoder().decode(joined) };
+  return new TextDecoder().decode(joined);
+}
+
+/**
+ * The cheap pre-filter every capped route runs before touching the stream: an
+ * honest client that DECLARES an over-cap body is rejected without reading a
+ * byte. Never the enforcement on its own — see readTextBodyWithCap.
+ */
+export function declaresOverCap(c: Context, maxBytes: number): boolean {
+  const declaredLength = Number(c.req.header("content-length"));
+  return Number.isFinite(declaredLength) && declaredLength > maxBytes;
 }
 
 export async function parseJsonBody<T>(
@@ -89,14 +103,22 @@ export async function parseJsonBody<T>(
   // spec-mandated exception, not drift (see routes/dashboard.ts).
   invalidStatus: 400 | 422 = 400,
 ): Promise<{ ok: true; data: T } | { ok: false; response: Response }> {
-  const declaredLength = Number(c.req.header("content-length"));
-  if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+  if (declaresOverCap(c, maxBytes)) {
+    return { ok: false, response: c.json({ error: "request body too large" }, 413) };
+  }
+
+  // Was `c.req.json()`, which reads the WHOLE body regardless of the cap above
+  // — so all 25 call sites inherited finding 7's bypass, on unauthenticated
+  // routes (/signup, /api/waitlist) included. The capped read closes them at
+  // this one choke point.
+  const text = await readTextBodyWithCap(c, maxBytes);
+  if (text === null) {
     return { ok: false, response: c.json({ error: "request body too large" }, 413) };
   }
 
   let raw: unknown;
   try {
-    raw = await c.req.json();
+    raw = JSON.parse(text);
   } catch {
     return { ok: false, response: c.json({ error: "invalid JSON body" }, invalidStatus) };
   }

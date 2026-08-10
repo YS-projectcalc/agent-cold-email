@@ -551,6 +551,14 @@ export async function applyStripeWebhookEvent(ctx: TenantContext, event: StripeE
     // billing_state='active' and resurrecting a canceled tenant. Superseded
     // work is not worth finishing; drop the marker and stop.
     if (isStaleBillingEvent(ctx, event)) {
+      // Marked NOT applied for the same reason as a first-delivery refusal
+      // below: an in-flight marker means the earlier attempt never ran to
+      // completion, and we are now refusing to finish it — so this event never
+      // applied, and must not count as a dunning strike. The window is narrow
+      // (it needs the handler to die mid-effect AND a superseding event before
+      // the redelivery) but it is exactly the window an awaited vendor call
+      // inside a handler opens.
+      ctx.sql.exec(`UPDATE webhook_events SET applied = 0 WHERE event_id = ?`, event.id);
       ctx.sql.exec(`DELETE FROM webhook_event_inflight WHERE event_id = ?`, event.id);
       return { applied: false, duplicate: true, stale: true };
     }
