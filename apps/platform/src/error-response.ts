@@ -30,6 +30,7 @@ interface StructuredError extends Error {
   missingFields?: string[];
   currentRev?: number;
   currentLayout?: unknown;
+  existingCampaignId?: string;
   reason?: string;
   step?: string;
 }
@@ -61,6 +62,14 @@ export function toErrorResponse(err: unknown): ErrorResponse {
   if (name === "TenantIsolationError") return { status: 403, body: { error: message } };
   if (name === "RateLimitError") return { status: 429, body: { error: message } };
   if (name === "RequestInProgressError") return { status: 409, body: { error: message } };
+  // The refusal has to carry the campaign that already exists, or the caller
+  // cannot tell a duplicate-submit refusal from a real failure to launch.
+  if (name === "DuplicateCampaignError") {
+    return {
+      status: 409,
+      body: { error: message, code: "duplicate_campaign", existingCampaignId: error?.existingCampaignId },
+    };
+  }
 
   // G5 gate (a) — customer body stays GENERIC (N-G5-1): err.message names
   // internal env vars + arming docs, which belong in the founder ops alert

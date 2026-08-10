@@ -45,20 +45,45 @@ export async function lookupTenantByTokenHash(env: Env, tokenHash: string): Prom
 }
 
 /**
- * Token rotation's ONE write site (routes/token-rotate.ts) — `api_token_hash`
- * is the ONLY place a bearer-token hash is persisted (grep-verified: no
- * per-DO cache of it exists; every auth check re-reads this column fresh via
- * `lookupTenantByTokenHash`). A single `UPDATE` is itself the atomicity
- * guarantee: the column always holds EXACTLY one hash, so there is no window
- * where a fresh SELECT sees neither the old nor the new token as valid — the
- * swap from old to new happens in the one statement, not a delete-then-insert
- * pair. Two concurrent rotations for the same tenant both run this UPDATE;
- * D1/SQLite serializes writes to a row, so whichever commits LAST is the sole
- * surviving hash — "exactly one winner" falls out of that ordering, not a
- * separate compare-and-swap.
+ * Token rotation's ONE write site (routes/token-rotate.ts): swap the bearer
+ * token hash AND destroy every dashboard session the old token minted.
+ *
+ * BLOCKING-3 (docs/adversarial/audit-dashboard-idempotency-2026-08-06.md).
+ * Rotation used to write `api_token_hash` alone. `resolveTenantFromDashboardSession`
+ * (require-auth.ts) never consults that column — a cookie session is resolved
+ * from `dashboard_sessions` and checked only for expiry and tenant status — so
+ * a leaked token that had been exchanged for a cookie kept FULL tenant
+ * authority for the session's remaining 30 days after the "recovery" step,
+ * including the authority to rotate the token again and lock the real owner
+ * out. Nothing else could revoke it: `deleteDashboardSession` is per-hash, so
+ * logout only ever cleared the caller's own browser.
+ *
+ * `api_token_hash` is still the ONLY place a bearer-token hash is persisted
+ * (grep-verified: no per-DO cache of it exists; every auth check re-reads this
+ * column fresh via `lookupTenantByTokenHash`), and the column always holds
+ * EXACTLY one hash, so there is no window where neither the old nor the new
+ * token authenticates. Two concurrent rotations both run this; D1/SQLite
+ * serializes writes to a row, so whichever commits LAST is the sole surviving
+ * hash — "exactly one winner" falls out of that ordering, not a separate CAS.
+ *
+ * The purge and the swap go in ONE `batch()` (a single D1 transaction) rather
+ * than two awaited statements. Sequenced, either order leaves a hole: purge
+ * first and the still-valid old token can mint a fresh session in the gap that
+ * outlives the rotation; swap first and a failure before the purge reports a
+ * successful rotation while the attacker's cookie lives on. Atomically there is
+ * no in-between state to exploit or to half-fail into.
+ *
+ * NO session is exempt, including the one that asked for the rotation. Exempting
+ * the caller would hand the attack back to the attacker: the audit showed the
+ * holder of a stolen cookie can rotate, so a carve-out would preserve exactly
+ * the session that should not survive. The human rotating from Settings is
+ * signed out and signs back in with the token they were just shown.
  */
-export async function updateTenantIndexApiTokenHash(env: Env, id: string, newTokenHash: string): Promise<void> {
-  await env.DB.prepare(`UPDATE tenants_index SET api_token_hash = ? WHERE id = ?`).bind(newTokenHash, id).run();
+export async function rotateApiTokenAndRevokeSessions(env: Env, id: string, newTokenHash: string): Promise<void> {
+  await env.DB.batch([
+    env.DB.prepare(`DELETE FROM dashboard_sessions WHERE tenant_id = ?`).bind(id),
+    env.DB.prepare(`UPDATE tenants_index SET api_token_hash = ? WHERE id = ?`).bind(newTokenHash, id),
+  ]);
 }
 
 /** Looked up by id (not token hash) — the only thing a resolved dashboard
@@ -110,15 +135,47 @@ export async function lookupTenantIdByStripeCustomer(env: Env, stripeCustomerId:
 // never-store-the-plaintext-credential discipline as tenants_index's bearer
 // token hash (CLAUDE.md rule g). ---
 
+/**
+ * How many dashboard sessions one tenant may hold at once.
+ *
+ * BLOCKING-3 (adjacent): `POST /dashboard/session` is an unauthenticated mint
+ * whose replay was unbounded — the audit turned one bearer token into 25
+ * independent 30-day sessions, each a durable row, with no rate limit and no
+ * expiry sweep anywhere. Sized for how a human actually uses the product (a
+ * couple of browsers, a phone, the odd re-login) with room to spare, so the
+ * ceiling only ever bites a replay.
+ */
+export const MAX_DASHBOARD_SESSIONS_PER_TENANT = 10;
+
+/**
+ * Mints a session row and evicts the tenant's oldest beyond the cap, atomically
+ * (one `batch()`), so the table can never be observed over the ceiling.
+ *
+ * Ordered by `created_at` then `rowid`: several mints can land in the same
+ * millisecond, and rowid is monotonic in insertion order, so "oldest" stays a
+ * total order instead of an arbitrary tie-break.
+ */
 export async function insertDashboardSession(
   env: Env,
   params: { sessionHash: string; tenantId: string; createdAt: number; expiresAt: number },
 ): Promise<void> {
-  await env.DB.prepare(
-    `INSERT INTO dashboard_sessions (session_hash, tenant_id, created_at, expires_at) VALUES (?, ?, ?, ?)`,
-  )
-    .bind(params.sessionHash, params.tenantId, params.createdAt, params.expiresAt)
-    .run();
+  await env.DB.batch([
+    env.DB
+      .prepare(`INSERT INTO dashboard_sessions (session_hash, tenant_id, created_at, expires_at) VALUES (?, ?, ?, ?)`)
+      .bind(params.sessionHash, params.tenantId, params.createdAt, params.expiresAt),
+    env.DB
+      .prepare(
+        `DELETE FROM dashboard_sessions
+          WHERE tenant_id = ?1
+            AND session_hash NOT IN (
+              SELECT session_hash FROM dashboard_sessions
+               WHERE tenant_id = ?1
+               ORDER BY created_at DESC, rowid DESC
+               LIMIT ?2
+            )`,
+      )
+      .bind(params.tenantId, MAX_DASHBOARD_SESSIONS_PER_TENANT),
+  ]);
 }
 
 export interface DashboardSessionRow {

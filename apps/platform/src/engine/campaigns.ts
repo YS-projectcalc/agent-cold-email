@@ -1,10 +1,63 @@
 import type { LaunchCampaignInput } from "@coldstart/shared";
-import { NotFoundError } from "@coldstart/shared";
+import { DuplicateCampaignError, NotFoundError } from "@coldstart/shared";
+import { RealClock } from "../clock.js";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
 import { assertNotLifecycleFrozen } from "./billing-state.js";
 import { type EventCounts, emptyEventCounts } from "./reporting.js";
 import { ONE_DAY_MS } from "./warmup.js";
+
+/**
+ * How long an identical launch is treated as a repeat of the one before it
+ * rather than a new campaign. Covers the two shapes that produce an accidental
+ * duplicate — a double-click (sub-second) and an agent retrying a dropped
+ * response (seconds) — while staying far short of any interval over which
+ * relaunching a byte-identical campaign to the same lead list is a plausible
+ * thing to mean. Deliberate repeats outside it are allowed, unchanged.
+ */
+const DUPLICATE_LAUNCH_WINDOW_MS = 60_000;
+
+/** FNV-1a, seeded — synchronous by necessity; see campaignFingerprint. */
+function fnv1a32(text: string, seed: number): number {
+  let hash = seed;
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+/**
+ * A stable fingerprint of everything a launch actually asks for.
+ *
+ * SYNCHRONOUS ON PURPOSE. `launchCampaign` performs no I/O, which is exactly why
+ * two concurrent launches cannot interleave: a Durable Object's input gate opens
+ * on I/O, so the second RPC does not start until the first has committed its
+ * row and can therefore see it. Hashing with `crypto.subtle` would make this
+ * function async, open the gate mid-launch, and reintroduce the very race the
+ * guard exists to close — so a small hand-rolled hash is the correct trade, not
+ * a shortcut.
+ *
+ * Fields are serialized as ordered ARRAYS, never as objects, so the value cannot
+ * drift with key ordering. Two seeds plus the input length widen the fingerprint
+ * well past a single 32-bit hash; a collision would cost one caller an explicit
+ * 409 naming the campaign it collided with, never a lost or merged launch.
+ */
+function campaignFingerprint(input: LaunchCampaignInput): string {
+  const canonical = JSON.stringify([
+    input.name,
+    input.offer,
+    input.timezone,
+    input.sendWindow.startHour,
+    input.sendWindow.endHour,
+    input.stopOnReply,
+    input.sequence.map((s) => [s.step, s.subject, s.body, s.delayDays]),
+    input.leads.map((l) => [l.email, l.firstName, l.company]),
+  ]);
+  const a = fnv1a32(canonical, 0x811c9dc5).toString(16).padStart(8, "0");
+  const b = fnv1a32(canonical, 0x01000193).toString(16).padStart(8, "0");
+  return `${a}${b}${canonical.length.toString(16)}`;
+}
 
 /**
  * launch_campaign — SPEC.md §6. Every sequence step for every non-suppressed
@@ -28,10 +81,36 @@ export function launchCampaign(
 
   const now = ctx.clock.now();
   const campaignId = newId("camp");
+  // Double-submit guard (ELEVATED, audit-dashboard-idempotency-2026-08-06). An
+  // idempotency key already made a keyed retry safe on both transports; this is
+  // for the caller that sends none — which is every browser caller, and the
+  // dashboard does not disable the button while the launch is pending. Skipped
+  // for /demo/run: it provisions nothing real, sends nothing real, and being
+  // re-runnable on demand is the point of it.
+  const contentHash = opts.isDemo ? "" : campaignFingerprint(input);
+  const launchedAtReal = new RealClock().now();
+  if (contentHash !== "") {
+    const duplicate = ctx.sql
+      .exec<{ id: string }>(
+        `SELECT id FROM campaigns
+          WHERE tenant_id = ? AND content_hash = ? AND launched_at_real > ?
+          ORDER BY launched_at_real DESC LIMIT 1`,
+        ctx.tenantId,
+        contentHash,
+        launchedAtReal - DUPLICATE_LAUNCH_WINDOW_MS,
+      )
+      .toArray()[0];
+    if (duplicate) {
+      throw new DuplicateCampaignError(
+        `an identical campaign ("${input.name}", same offer, sequence and lead list) was launched moments ago and is already active — this launch was refused so the same prospects are not contacted twice. Check that campaign before relaunching; to retry a call whose response you lost, resend it with the same idempotencyKey instead.`,
+        duplicate.id,
+      );
+    }
+  }
 
   ctx.sql.exec(
-    `INSERT INTO campaigns (id, tenant_id, name, status, sequence_json, stop_on_reply, send_window_json, timezone, is_demo, created_at)
-     VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO campaigns (id, tenant_id, name, status, sequence_json, stop_on_reply, send_window_json, timezone, is_demo, created_at, content_hash, launched_at_real)
+     VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)`,
     campaignId,
     ctx.tenantId,
     input.name,
@@ -41,6 +120,8 @@ export function launchCampaign(
     input.timezone,
     opts.isDemo ? 1 : 0,
     now,
+    contentHash,
+    launchedAtReal,
   );
 
   for (const lead of input.leads) {

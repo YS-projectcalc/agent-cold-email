@@ -56,17 +56,22 @@ const REGISTRANT = {
 };
 
 describe("H3b — candidate selection dedupes owned domains and honors availability (F1+F3)", () => {
-  it("a SECOND setup call provisions a DIFFERENT domain, never the one call 1 bought", async () => {
+  it("a call that EXPANDS the target provisions a DIFFERENT domain, never the one call 1 bought", async () => {
     // THE incident shape: lookalike generation is stateless and deterministic,
     // so call 2 regenerated call 1's domain and the vendor rejected it as
     // "already owned by your team" — a guaranteed failure on every retry.
     const { tenantId, token } = await mintTenant("Dedupe Co", "managed");
     await activatePaidPlan(tenantId, "managed");
 
-    // DISTINCT Idempotency-Keys — the two calls are deliberate provisionings,
-    // not a retry. A KEYLESS repeat is indistinguishable from a retry and
-    // deliberately converges instead (see the keyless test below), which is what
-    // keeps a dropped-response retry from double-charging.
+    // Expansion is expressed by asking for a LARGER `domains` target, not by
+    // changing the Idempotency-Key. This assertion used to drive two calls with
+    // distinct keys, which is how the platform used to say "provision more" —
+    // and that is exactly what made a retry carrying a fresh key buy a second
+    // lookalike domain plus duplicate billable mailboxes (BLOCKING-1,
+    // docs/adversarial/audit-dashboard-idempotency-2026-08-06.md). The key is a
+    // response-replay key now and has no say in what gets bought; the numbers
+    // do. What this test guards is unchanged: the SECOND domain must never be
+    // the first one regenerated.
     const first = await api("/setup-infrastructure", {
       method: "POST",
       token,
@@ -81,12 +86,13 @@ describe("H3b — candidate selection dedupes owned domains and honors availabil
       method: "POST",
       token,
       headers: { "Idempotency-Key": "dedupe-call-2" },
-      body: setupBody("Dedupe Co", "dedupeco.com", 1, 1),
+      body: setupBody("Dedupe Co", "dedupeco.com", 2, 1),
     });
     expect(second.status).toBe(202);
 
     const afterSecond = await readDomains(tenantId);
     expect(afterSecond).toHaveLength(2);
+    expect(afterSecond[0]).toBe(afterFirst[0]); // the first is kept, not replaced
     expect(afterSecond[1]).not.toBe(afterFirst[0]); // the whole point
     expect(new Set(afterSecond).size).toBe(2);
   });

@@ -352,7 +352,18 @@ CREATE TABLE IF NOT EXISTS campaigns (
   send_window_json TEXT NOT NULL,
   timezone TEXT NOT NULL DEFAULT 'UTC',
   is_demo INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  -- Double-submit guard (engine/campaigns.ts). content_hash fingerprints the
+  -- launch request; launched_at_real is a REAL wall-clock stamp, deliberately
+  -- NOT created_at above. created_at runs on the tenant's clock, which is
+  -- virtual and 1440x accelerated for demo/free tenants, so a window measured
+  -- against it would expire in a fraction of a real second. A double-click is a
+  -- real-world event and has to be measured in real time — same reasoning as
+  -- engine/provision-intents.ts's dispatchNow().
+  -- The defaults are what make rows written before this column existed inert:
+  -- '' never equals a fingerprint (they are hex), and 0 is outside every window.
+  content_hash TEXT NOT NULL DEFAULT '',
+  launched_at_real INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS leads (
