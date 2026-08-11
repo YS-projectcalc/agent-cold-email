@@ -167,18 +167,18 @@ function claimsToolCountOf(text: string, n: number): boolean {
 // Every total-tool-count this claim class has shipped historically (see
 // docs/adversarial/claim-surface-round2-2026-07-20.md, fully-live-reframe-
 // 2026-07-19.md, wave-integration-review-2026-07-22.md, toolcount-25-sweep-
-// review-2026-07-27.md) plus the current count — msgchannel increment 3's
-// list_messages/ack_message brought the registry to 27.
-const RETIRED_TOOL_COUNTS = [17, 19, 21, 24, 25] as const;
+// review-2026-07-27.md) plus the current count — msgchannel Inc5's
+// contact_operator (founder-ratified 2026-08-11) brought the registry to 28.
+const RETIRED_TOOL_COUNTS = [17, 19, 21, 24, 25, 27] as const;
 
 describe("claim-surface tool-count guard", () => {
   const currentCount = MCP_TOOLS.length;
 
-  it("the live MCP registry currently reports 27 tools (sanity anchor for this guard)", () => {
+  it("the live MCP registry currently reports 28 tools (sanity anchor for this guard)", () => {
     // If this ever fails, every assertion below needs re-grounding against
     // the new count before trusting it — see apps/platform/test/mcp.test.ts
     // for the live-endpoint equivalent of this same assertion.
-    expect(currentCount).toBe(27);
+    expect(currentCount).toBe(28);
   });
 
   it.each(CLAIM_SURFACES)("%s never claims a retired tool count (17/19/21/24)", (label, text) => {
@@ -237,5 +237,23 @@ describe("claim-surface tool-count guard", () => {
   it("guide-mcp-cold-email.html's full schema reference includes list_messages and ack_message", () => {
     expect(guideMcpColdEmail).toContain("<code>list_messages</code>");
     expect(guideMcpColdEmail).toContain("<code>ack_message</code>");
+  });
+
+  // msgchannel Inc5 (founder-ratified 2026-08-11) — contact_operator, the
+  // same per-tool doc-surface checks list_messages/ack_message got above.
+  it("server-card.json's enumerated tools[] includes contact_operator", () => {
+    expect(serverCardJson).toContain('"name": "contact_operator"');
+  });
+
+  it("README.md's tool table includes contact_operator", () => {
+    expect(rootReadme).toContain("`contact_operator`");
+  });
+
+  it("AGENTS.md's tool table includes contact_operator", () => {
+    expect(agentsMd).toContain("`contact_operator`");
+  });
+
+  it("guide-mcp-cold-email.html's full schema reference includes contact_operator", () => {
+    expect(guideMcpColdEmail).toContain("<code>contact_operator</code>");
   });
 });

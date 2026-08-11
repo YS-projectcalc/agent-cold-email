@@ -27,6 +27,11 @@ export interface SupportTicketRow {
  * inbound email can't create two tickets. `messageId` NULL (operator/console
  * tickets) never dedupes — NULLs are distinct in SQLite. Returns `true` only
  * when a NEW row was recorded (mirrors insertDunningEventIfNew).
+ *
+ * `source`/`emailSentAt` (msgchannel Inc5, migrations/0017) default to
+ * 'email'/null — every pre-existing caller (support-inbound.ts,
+ * routes/admin-support.ts) omits both and is byte-identical; only
+ * engine/contact-operator.ts passes `source: 'agent'`.
  */
 export async function insertSupportTicket(
   env: Env,
@@ -41,11 +46,13 @@ export async function insertSupportTicket(
     status: "open" | "escalated";
     createdAt: number;
     messageId?: string | null;
+    source?: "email" | "agent";
+    emailSentAt?: number | null;
   },
 ): Promise<boolean> {
   const result = await env.DB.prepare(
-    `INSERT OR IGNORE INTO support_tickets (id, from_email, subject, body, tenant_id, category, draft, status, created_at, message_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR IGNORE INTO support_tickets (id, from_email, subject, body, tenant_id, category, draft, status, created_at, message_id, source, email_sent_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       params.id,
@@ -58,9 +65,74 @@ export async function insertSupportTicket(
       params.status,
       params.createdAt,
       params.messageId ?? null,
+      params.source ?? "email",
+      params.emailSentAt ?? null,
     )
     .run();
   return (result.meta.changes ?? 0) > 0;
+}
+
+/**
+ * msgchannel Inc5 abuse guards (engine/contact-operator.ts) — everything the
+ * storm guard needs about this tenant's agent-sourced tickets in ONE query:
+ * dedup (identical-body match within the window) and the rate cap (row
+ * count + the oldest row's timestamp, to compute `retryAfter`) share the
+ * SAME 1h window, so one read covers both checks. Bounded to 200 rows as a
+ * hard safety cap — the rate limit itself keeps real volume far below that.
+ */
+export async function listRecentAgentSupportTickets(
+  env: Env,
+  tenantId: string,
+  sinceMs: number,
+): Promise<Array<{ id: string; body: string; createdAt: number }>> {
+  const result = await env.DB.prepare(
+    `SELECT id, body, created_at FROM support_tickets
+     WHERE tenant_id = ? AND source = 'agent' AND created_at > ?
+     ORDER BY created_at DESC LIMIT 200`,
+  )
+    .bind(tenantId, sinceMs)
+    .all<{ id: string; body: string; created_at: number }>();
+  return result.results.map((r) => ({ id: r.id, body: r.body, createdAt: r.created_at }));
+}
+
+/**
+ * msgchannel Inc5 ops-email throttle (engine/contact-operator.ts) — the last
+ * REAL send time for this tenant's agent-sourced tickets (null = never
+ * emailed), and how many since-then tickets were suppressed by the throttle
+ * (never individually emailed) — the "and N more messages" count the NEXT
+ * send folds in.
+ */
+export async function agentContactEmailThrottleState(
+  env: Env,
+  tenantId: string,
+): Promise<{ lastEmailAt: number | null; pendingSinceLastEmail: number }> {
+  const lastEmailRow = await env.DB.prepare(
+    `SELECT MAX(email_sent_at) as last_email FROM support_tickets WHERE tenant_id = ? AND source = 'agent' AND email_sent_at IS NOT NULL`,
+  )
+    .bind(tenantId)
+    .first<{ last_email: number | null }>();
+  const lastEmailAt = lastEmailRow?.last_email ?? null;
+
+  const pendingRow = await env.DB.prepare(
+    `SELECT COUNT(*) as n FROM support_tickets WHERE tenant_id = ? AND source = 'agent' AND email_sent_at IS NULL AND created_at > ?`,
+  )
+    .bind(tenantId, lastEmailAt ?? 0)
+    .first<{ n: number }>();
+
+  return { lastEmailAt, pendingSinceLastEmail: pendingRow?.n ?? 0 };
+}
+
+/**
+ * msgchannel Inc5 — stamps `email_sent_at` on ONE ticket AFTER its ops email
+ * has actually been sent (never before — engine/contact-operator.ts inserts
+ * every ticket with `email_sent_at: null` first, so a send that throws
+ * leaves the row honestly un-emailed and its message rolls into the NEXT
+ * successful send's "and N more" count, mirroring support-inbound.ts's own
+ * "the ticket is already persisted, which is the durable record" posture for
+ * its best-effort forward leg).
+ */
+export async function markSupportTicketEmailed(env: Env, id: string, sentAt: number): Promise<void> {
+  await env.DB.prepare(`UPDATE support_tickets SET email_sent_at = ? WHERE id = ?`).bind(sentAt, id).run();
 }
 
 interface SupportTicketD1Row {

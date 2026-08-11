@@ -137,6 +137,19 @@ export const MarkInput = z.object({
 });
 export type MarkInput = z.infer<typeof MarkInput>;
 
+// msgchannel Inc5 (founder-ratified 2026-08-11) — the agent->operator
+// direction (the reverse of tenant_messages' system/operator->agent channel).
+// `body` shares AdminOperatorMessageInput's own 2000-char bound (admin/
+// schemas.ts) — both ends of the same conversation, same ceiling.
+// `needs_human` doesn't change what gets stored/sent structurally; it flags
+// the ops email/ticket so an operator triaging the digest can tell "routine"
+// from "an agent is stuck and waiting on a human" at a glance.
+export const ContactOperatorInput = z.object({
+  body: z.string().min(1).max(2000),
+  urgency: z.enum(["normal", "needs_human"]).default("normal"),
+});
+export type ContactOperatorInput = z.infer<typeof ContactOperatorInput>;
+
 // Money path — the quantity-billing migration (design §2/§3) replaces the
 // retired plan-tier enum with a mailbox count + billing interval. Checkout
 // subscribes the tenant to the single `managed` plan on the per-mailbox curve:

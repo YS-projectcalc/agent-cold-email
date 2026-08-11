@@ -3,7 +3,7 @@ info:
   title: agent-cold-email API
   version: "0.2.2"
   description: >
-    Agent-native cold-email infrastructure, live in production. 27 curated
+    Agent-native cold-email infrastructure, live in production. 28 curated
     intents behind one bearer token per tenant (a subset — the /dashboard/*
     session + views endpoints — also accept an httpOnly session cookie minted
     by POST /dashboard/session, for the optional human dashboard SPA; see
@@ -1234,6 +1234,54 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /messages/contact-operator:
+    post:
+      operationId: contact_operator
+      tags: [messages]
+      summary: Reach a human operator.
+      description: >
+        msgchannel Inc5 (founder-ratified 2026-08-11) — the reverse leg: an
+        agent contacting a human, not the system/operator->agent direction
+        list_messages/ack_message read. Files a support ticket and notifies
+        the operator. Works in EVERY account state, including
+        suspended/canceling — this is exactly the channel for "why is my
+        account suspended?". The operator's reply arrives as a message on
+        THIS account (poll GET /messages or infrastructure_status's
+        messages[] — there is no separate reply-fetch endpoint). Retrying
+        with the IDENTICAL body within an hour is safe: it returns the SAME
+        ticketId and never files a second ticket or sends a second alert, so
+        no Idempotency-Key is needed. Rate-limited to 5 calls/hour per
+        tenant.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContactOperatorInput'
+      responses:
+        '201':
+          description: Ticket recorded (or an identical-body dedup hit within the last hour, same ticketId).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContactOperatorResult'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          description: >
+            More than 5 contact_operator calls from this tenant in the last
+            hour. `retryAfter` (seconds) names when the window next has room.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error: { type: string }
+                  retryAfter: { type: integer, description: "Seconds until this tenant's rate window has room again." }
+
   /unsubscribe:
     get:
       operationId: unsubscribe_confirm_page
@@ -2125,3 +2173,21 @@ components:
       properties:
         acked: { type: boolean, enum: [true] }
         alreadyAcked: { type: boolean }
+
+    ContactOperatorInput:
+      type: object
+      required: [body]
+      properties:
+        body: { type: string, minLength: 1, maxLength: 2000 }
+        urgency:
+          type: string
+          enum: [normal, needs_human]
+          default: normal
+          description: "Flags the ops alert/ticket for triage — doesn't change delivery."
+
+    ContactOperatorResult:
+      type: object
+      required: [ticketId, note]
+      properties:
+        ticketId: { type: string }
+        note: { type: string, description: "Tells the caller where the operator's reply will surface (list_messages / infrastructure_status.messages[])." }

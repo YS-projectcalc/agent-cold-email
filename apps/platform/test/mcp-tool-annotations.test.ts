@@ -60,8 +60,11 @@ const DESTRUCTIVE_TOOLS = new Set(["launch_campaign", "reply", "pause", "pause_a
 // this set (msgchannel increment 3): it sets a read flag on an existing row
 // — nothing is destroyed, and re-acking is a safe, idempotent no-op — the
 // same "worst-case action" honesty bar as mark/update_lead, not a resource
-// loss like the DESTRUCTIVE_TOOLS set below.
-const ADDITIVE_NONDESTRUCTIVE_TOOLS = new Set(["setup_infrastructure", "mark", "label_thread", "update_lead", "ack_message"]);
+// loss like the DESTRUCTIVE_TOOLS set below. contact_operator joins this set
+// (msgchannel Inc5): files a support ticket + notifies a human — never
+// destroys anything, and a same-body retry safely collapses to the original
+// ticket (the dedup guard) rather than creating a second one.
+const ADDITIVE_NONDESTRUCTIVE_TOOLS = new Set(["setup_infrastructure", "mark", "label_thread", "update_lead", "ack_message", "contact_operator"]);
 
 async function listTools(): Promise<ToolListResult["tools"]> {
   const res = await api<{ jsonrpc: "2.0"; id: number; result: ToolListResult }>("/mcp", {
@@ -73,9 +76,9 @@ async function listTools(): Promise<ToolListResult["tools"]> {
 }
 
 describe("tools/list — MCP tool annotations (Anthropic Connectors Directory requirement)", () => {
-  it("every one of the 27 tools carries a non-empty annotations.title", async () => {
+  it("every one of the 28 tools carries a non-empty annotations.title", async () => {
     const tools = await listTools();
-    expect(tools).toHaveLength(27);
+    expect(tools).toHaveLength(28);
     for (const t of tools) {
       expect(t.annotations, `${t.name} is missing annotations`).toBeDefined();
       expect(typeof t.annotations!.title, `${t.name}.annotations.title`).toBe("string");
@@ -120,10 +123,10 @@ describe("tools/list — MCP tool annotations (Anthropic Connectors Directory re
     }
   });
 
-  it("classification covers exactly the 27 tools with no overlap between sets", async () => {
+  it("classification covers exactly the 28 tools with no overlap between sets", async () => {
     const tools = await listTools();
     const classified = new Set([...READ_ONLY_TOOLS, ...DESTRUCTIVE_TOOLS, ...ADDITIVE_NONDESTRUCTIVE_TOOLS]);
-    expect(classified.size).toBe(27);
+    expect(classified.size).toBe(28);
     expect(tools.map((t) => t.name).sort()).toEqual([...classified].sort());
   });
 });

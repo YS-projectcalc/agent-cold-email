@@ -1,4 +1,4 @@
-// The 27 MCP tools (tools 13-15 added by SPEC.md §19.5, tools 16-17 by the
+// The 28 MCP tools (tools 13-15 added by SPEC.md §19.5, tools 16-17 by the
 // §19.0 parity-gap follow-up, tools 18-19 by the ROADMAP.md WIN-THE-COMPARISON
 // (d) webhooks lane, tools 20-21 by SPEC.md §20's BYO domain intake, tools
 // 22-24 by SPEC.md §22's warm-lead thin layer (increments #1-#3, founder-gated
@@ -6,14 +6,16 @@
 // tools 26-27 by the msgchannel system->agent message channel's increment 3
 // (list_messages/ack_message — increment 1 was the emit+read wiring behind
 // infrastructure_status's messages[] field, increment 2 the admin-only
-// operator route with no MCP tool of its own) — AGENTS.md's public tool table
-// is a canonical doc folded by the orchestrator, not updated here).
+// operator route with no MCP tool of its own), tool 28 (contact_operator) by
+// msgchannel Inc5 (founder-ratified 2026-08-11) — the reverse, agent->operator
+// leg — AGENTS.md's public tool table is a canonical doc folded by the
+// orchestrator, not updated here).
 // Each tool dispatches to the SAME TenantDO method the equivalent HTTP route
 // calls (src/routes/*.ts) — the MCP surface is a second transport onto the
 // exact same facade, never a parallel implementation (CLAUDE.md rule c).
 
 import type { ZodType } from "zod";
-import { ActivityQueryInput, InboxQueryInput, ListLeadsQueryInput, ListMessagesQueryInput, SuppressLeadInput, UpdateLeadInput } from "@coldstart/shared";
+import { ActivityQueryInput, ContactOperatorInput, InboxQueryInput, ListLeadsQueryInput, ListMessagesQueryInput, SuppressLeadInput, UpdateLeadInput } from "@coldstart/shared";
 import type { TenantDO } from "../tenant-do.js";
 import {
   CampaignIdInput,
@@ -359,5 +361,18 @@ export const MCP_TOOLS: McpTool<any>[] = [
     // nothing operational is destroyed, freely re-callable).
     { title: "Acknowledge Message", destructiveHint: false },
     (stub, args) => stub.ackMessage(args.messageId),
+  ),
+  // msgchannel Inc5 (founder-ratified 2026-08-11) — tool 28. The reverse leg:
+  // an agent reaching a human, not the system/operator->agent direction
+  // tools 26-27 read. Works in EVERY lifecycle state, including a suspended
+  // tenant (see engine/contact-operator.ts's header doc, gate F2).
+  tool(
+    "contact_operator",
+    "Reach a human operator — for anything list_messages/infrastructure_status can't answer (a stuck vendor issue, a billing question, an account-level ask). Inputs: body (1-2000 chars), urgency ('normal' | 'needs_human', default 'normal'). Files a support ticket and notifies the operator; returns { ticketId, note }. Works in EVERY account state, including suspended/canceling — this is exactly the channel for 'why is my account suspended?'. The operator's reply arrives as a message on THIS account (poll list_messages / infrastructure_status.messages[] — there is no separate reply-fetch call). Retrying with the IDENTICAL body within an hour is safe: it returns the SAME ticketId and does not file a second ticket or send a second alert, so no separate idempotency key is needed. Rate-limited to 5 calls/hour per tenant — a 429 names retryAfter (seconds) when hit.",
+    ContactOperatorInput,
+    // Files a ticket + notifies a human — never destroys anything, and a
+    // retry (same body) safely collapses to the original ticket.
+    { title: "Contact Operator", destructiveHint: false },
+    (stub, args) => stub.contactOperator(args),
   ),
 ];
