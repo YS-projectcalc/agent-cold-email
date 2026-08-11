@@ -113,13 +113,37 @@ const SURFACES_THAT_STATE_THE_COUNT = new Set([
 ]);
 
 /**
+ * Strips "N<arrow>M" transition phrases ("27→28", "25 → 28", "27->28") out
+ * of the flattened text before any digit-window claim check runs. A
+ * transition phrase narrates HISTORY ("the registry went from 27 to 28
+ * tools") — it is not a standalone claim that the count IS 27, but every
+ * digit-window matcher below only checks "is N followed by tool/intent
+ * within a window", and an arrow-then-M sits comfortably inside a 30-char
+ * window, so "27→28 tools" false-positived as a standalone "27 tools" claim
+ * (found live in HANDOFF.md:9 — same substring-on-a-mention shape as this
+ * repo's other known class, workflow-verdict-parse-substring-bug). Masking
+ * removes BOTH numbers of the pair, so neither reads as adjacent to "tool"
+ * afterward, while a genuinely standalone "27 tools" claim (no arrow) is
+ * completely untouched by this strip and still matches below.
+ *
+ * Scoped to the literal arrow tokens this corpus actually uses (→, ASCII
+ * ->) — a plain hyphenated range ("27-28") is a different, unused shape
+ * here and is deliberately NOT stripped by this pass.
+ */
+function maskTransitionPhrases(text: string): string {
+  return text.replace(/\b\d{1,3}\s*(?:→|->)\s*\d{1,3}\b/g, "");
+}
+
+/**
  * Does `text` claim the tool count is exactly `n`? A claim is `n` (word-
  * boundaried, so "24" never matches inside "2024" or "$249") sitting within
  * ~30 characters BEFORE "tool"/"intent" (the shape of every claim in this
  * class: "24 tools", "24-tool surface", "all 24 tools", "24 intent-level
  * tools", "the 24 intents", "24 curated\n    intents" — YAML-wrapped prose is
  * whitespace-normalized first so a mid-sentence line break can't hide a
- * match).
+ * match), with any "N<arrow>M" transition phrase masked out first
+ * (maskTransitionPhrases above) so a historical "27→28" mention is never
+ * read as a standalone "27" claim.
  *
  * Deliberately targets SPECIFIC numbers (the historically-retired counts
  * 17/19/21/24, and the current 25) rather than flagging "any number near the
@@ -143,16 +167,25 @@ const SURFACES_THAT_STATE_THE_COUNT = new Set([
  *     few rows above (compare-vs-smartlead-instantly.html)
  */
 function claimsToolCountOf(text: string, n: number): boolean {
-  const flat = text.replace(/\s+/g, " ");
+  const flat = maskTransitionPhrases(text.replace(/\s+/g, " "));
   // (?<!-) excludes a date suffix like "2026-07-21" or "07-21" — this corpus
   // never hyphenates a number ONTO a tool-count claim from the left (only
   // "24-tool" style, hyphen on the right, which still matches fine).
   const forwardRe = new RegExp(`(?<!-)\\b${n}\\b.{0,30}?\\b(tool|tools|intent|intents)\\b`, "i");
   if (forwardRe.test(flat)) return true;
 
+  // Shares the SAME substring-on-a-mention exposure as forwardRe above (a
+  // transition phrase "kept to 25→27" would literally contain "kept to 25"
+  // with a valid word boundary right after it) — no corpus text exhibits
+  // this today, but it is the same matcher class, so it runs against the
+  // SAME masked `flat` text rather than the raw one.
   const keptToRe = new RegExp(`kept to ${n}\\b`, "i");
   if (keptToRe.test(flat)) return true;
 
+  // NOT in the same class: this pattern requires a comma IMMEDIATELY after
+  // the digit ("<td>N,"), so an arrow-then-M ("<td>27→28,") can never satisfy
+  // it — the class sweep confirmed zero occurrences of this shape in the
+  // corpus either way, so it is left on the raw (unmasked) `text`/`lines`.
   const lines = text.split("\n");
   const bareCountCellRe = new RegExp(`^\\s*<td>${n},`);
   for (let i = 0; i < lines.length; i++) {
@@ -179,6 +212,27 @@ describe("claim-surface tool-count guard", () => {
     // the new count before trusting it — see apps/platform/test/mcp.test.ts
     // for the live-endpoint equivalent of this same assertion.
     expect(currentCount).toBe(28);
+  });
+
+  // Regression pin for the substring-on-a-mention false positive found live
+  // in HANDOFF.md:9 ("...tools — tool count now 28, was 25 — gate F1/F2
+  // fixes..." wrapped a "27→28 tools" transition phrase around a real "27"
+  // history mention). Exercises claimsToolCountOf directly rather than via a
+  // real doc, so this stays green regardless of future prose edits.
+  it("a transition-arrow phrase ('27→28 tools') is NOT read as a standalone claim of the retired number", () => {
+    expect(claimsToolCountOf("New tool (27→28 tools) + REST parity", 27)).toBe(false);
+  });
+
+  it("the ASCII arrow variant ('27->28 tools') is likewise not a standalone claim", () => {
+    expect(claimsToolCountOf("registry went 27->28 tools this session", 27)).toBe(false);
+  });
+
+  it("a spaced arrow ('25 → 28 tools') is likewise not a standalone claim", () => {
+    expect(claimsToolCountOf("count moved 25 → 28 tools in one pass", 25)).toBe(false);
+  });
+
+  it("but a GENUINELY standalone retired claim ('the server exposes 27 tools') still fails the guard", () => {
+    expect(claimsToolCountOf("the server exposes 27 tools", 27)).toBe(true);
   });
 
   it.each(CLAIM_SURFACES)("%s never claims a retired tool count (17/19/21/24)", (label, text) => {
