@@ -91,12 +91,17 @@ export async function insertSupportTicket(
  *
  * This is a RECORD write, never a decision input: the guard's own state lives
  * in DO storage (engine/contact-operator-guard.ts) precisely because reading
- * D1 to decide cannot be atomic.
+ * D1 to decide cannot be atomic. Scoped by `tenantId` as well as id — the ids
+ * are DO-local UUIDs so a collision is not a practical risk, but this is a
+ * cross-tenant table and CLAUDE.md rule (h) wants the scope on every query
+ * (its DO-side twins stampEmailed/releaseEmailClaim both carry it).
  */
-export async function markSupportTicketsEmailed(env: Env, ids: string[], sentAt: number): Promise<void> {
+export async function markSupportTicketsEmailed(env: Env, tenantId: string, ids: string[], sentAt: number): Promise<void> {
   if (ids.length === 0) return;
-  await env.DB.prepare(`UPDATE support_tickets SET email_sent_at = ? WHERE id IN (${ids.map(() => "?").join(", ")})`)
-    .bind(sentAt, ...ids)
+  await env.DB.prepare(
+    `UPDATE support_tickets SET email_sent_at = ? WHERE tenant_id = ? AND id IN (${ids.map(() => "?").join(", ")})`,
+  )
+    .bind(sentAt, tenantId, ...ids)
     .run();
 }
 

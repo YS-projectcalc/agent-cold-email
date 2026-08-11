@@ -7,7 +7,7 @@ import { contactOperator } from "../src/engine/contact-operator.js";
 import { emitOperatorMessage } from "../src/engine/tenant-messages.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
 import { newId } from "../src/schema.js";
-import { adminApi, api, failPayment, mintTenant, withTenantContext } from "./helpers.js";
+import { adminApi, api, envWithFailingD1Statements, failPayment, mintTenant, withTenantContext } from "./helpers.js";
 
 // msgchannel Inc5 (founder-ratified 2026-08-11) — the agent->operator
 // direction: MCP tool `contact_operator` (28th tool) + its REST parity route
@@ -325,6 +325,126 @@ describe("contact_operator (msgchannel Inc5) — the agent->operator direction",
       // Every admitted urgent call bypasses the throttle, so all 5 email —
       // and 5/hour is exactly the designed ceiling, not 30.
       expect(await opsEmailCount(tenantId)).toBe(5);
+    });
+  });
+
+  // The seam the round-1 fix opened: the admission is committed to DO storage
+  // BEFORE the D1 record it authorizes exists. Under a partial D1 degradation
+  // (reads fine, the support_tickets write leg failing — a total outage never
+  // gets here, auth resolves the tenant through D1 first) that window used to
+  // leave a committed admission with no ticket, and since dedup reads the DO
+  // log, the RETRY was answered from the phantom: 201 + "their reply will
+  // arrive" + a ticketId that does not exist, sticky for the whole hour
+  // (gate ROUND 2, N-1).
+  describe("partial D1 degradation between admission and record (gate R2 N-1)", () => {
+    const FAILS_TICKET_WRITE = /INSERT OR IGNORE INTO support_tickets/;
+
+    it("a failed ticket write leaves no phantom — the retry files a REAL ticket, never a nonexistent id", async () => {
+      const { tenantId } = await mintTenant("Contact Op Phantom Co", "managed");
+      const mailer = new SandboxOpsMailer();
+      const degraded = envWithFailingD1Statements(FAILS_TICKET_WRITE);
+      const body = "my card failed and I cannot reach anyone";
+
+      await expect(
+        withTenantContext(tenantId, (ctx) => contactOperator({ ...ctx, env: degraded }, { body, urgency: "normal" }, mailer)),
+      ).rejects.toThrow(/D1_ERROR/);
+      expect(await ticketCount(tenantId)).toBe(0);
+      expect(mailer.sent).toHaveLength(0);
+
+      // D1 recovers and the agent retries the SAME message.
+      const retry = await withTenantContext(tenantId, (ctx) => contactOperator(ctx, { body, urgency: "normal" }, mailer));
+      const stored = await env.DB.prepare(`SELECT id FROM support_tickets WHERE id = ?`).bind(retry.ticketId).first<{ id: string }>();
+      expect(stored?.id).toBe(retry.ticketId);
+      expect(await ticketCount(tenantId)).toBe(1);
+      // The promise in the note is now backed by a record AND a push.
+      expect(mailer.sent).toHaveLength(1);
+      expect(mailer.sent[0]?.text).toContain(body);
+    });
+
+    it("a failed ticket write releases both slots — the next message emails and the cap is not burnt", async () => {
+      const { tenantId } = await mintTenant("Contact Op Phantom Slots Co", "managed");
+      const mailer = new SandboxOpsMailer();
+      const degraded = envWithFailingD1Statements(FAILS_TICKET_WRITE);
+
+      await expect(
+        withTenantContext(tenantId, (ctx) => contactOperator({ ...ctx, env: degraded }, { body: "lost message", urgency: "normal" }, mailer)),
+      ).rejects.toThrow(/D1_ERROR/);
+
+      // A DIFFERENT message: it must not be held behind an email slot that a
+      // never-sent email claimed.
+      await withTenantContext(tenantId, (ctx) => contactOperator(ctx, { body: "a second, different problem", urgency: "normal" }, mailer));
+      expect(mailer.sent).toHaveLength(1);
+      expect(mailer.sent[0]?.text).toContain("a second, different problem");
+
+      // And the failed call did not burn one of the tenant's 5 hourly slots:
+      // four more distinct messages still fit.
+      for (let i = 0; i < 4; i++) {
+        await withTenantContext(tenantId, (ctx) => contactOperator(ctx, { body: `follow-up ${i}`, urgency: "normal" }, mailer));
+      }
+      expect(await ticketCount(tenantId)).toBe(5);
+    });
+
+    it("a failed contact-email READ compensates the same way (both D1 legs are inside the window)", async () => {
+      const { tenantId } = await mintTenant("Contact Op Phantom Read Co", "managed");
+      const mailer = new SandboxOpsMailer();
+      const degraded = envWithFailingD1Statements(/SELECT contact_email FROM tenants_index/);
+
+      await expect(
+        withTenantContext(tenantId, (ctx) => contactOperator({ ...ctx, env: degraded }, { body: "read leg down", urgency: "normal" }, mailer)),
+      ).rejects.toThrow(/D1_ERROR/);
+
+      const retry = await withTenantContext(tenantId, (ctx) => contactOperator(ctx, { body: "read leg down", urgency: "normal" }, mailer));
+      const stored = await env.DB.prepare(`SELECT id FROM support_tickets WHERE id = ?`).bind(retry.ticketId).first<{ id: string }>();
+      expect(stored?.id).toBe(retry.ticketId);
+    });
+  });
+
+  describe("24h retention prune (gate R2 NEW-2)", () => {
+    it("drops aged rows but KEEPS one whose send is recent, so pruning cannot reset the throttle clock", async () => {
+      const { tenantId } = await mintTenant("Contact Op Prune Co", "managed");
+      const mailer = new SandboxOpsMailer();
+      const now = Date.now();
+      const day = 24 * 60 * 60 * 1000;
+
+      // Seeded straight into the guard's own log: aged+delivered (prunable),
+      // aged+held (prunable), aged row whose SEND is recent (must survive —
+      // it is the tenant's throttle clock), and a fresh row.
+      await withTenantContext(tenantId, (ctx) => {
+        const rows: Array<[string, number, number | null]> = [
+          ["log_aged_emailed", now - day - 60_000, now - day - 30_000],
+          ["log_aged_held", now - day - 60_000, null],
+          ["log_aged_but_sent_recently", now - 30 * 60 * 60 * 1000, now - 60_000],
+          ["log_fresh", now - 60_000, now - 60_000],
+        ];
+        for (const [id, createdAt, emailedAt] of rows) {
+          ctx.sql.exec(
+            `INSERT INTO agent_contact_log (id, tenant_id, body, urgency, created_at, emailed_at) VALUES (?, ?, ?, ?, ?, ?)`,
+            id,
+            tenantId,
+            `body of ${id}`,
+            "normal",
+            createdAt,
+            emailedAt,
+          );
+        }
+      });
+
+      // Any call runs the prune first.
+      await withTenantContext(tenantId, (ctx) => contactOperator(ctx, { body: "triggers the prune", urgency: "normal" }, mailer));
+
+      const surviving = await withTenantContext(tenantId, (ctx) =>
+        ctx.sql.exec<{ id: string }>(`SELECT id FROM agent_contact_log WHERE tenant_id = ? ORDER BY id`, tenantId).toArray().map((r) => r.id),
+      );
+      expect(surviving).toContain("log_aged_but_sent_recently");
+      expect(surviving).toContain("log_fresh");
+      expect(surviving).not.toContain("log_aged_emailed");
+      expect(surviving).not.toContain("log_aged_held");
+
+      // The behavioural reason the dual cutoff matters: that preserved row is
+      // this tenant's last send, so the new message is HELD, not emailed. If
+      // the prune dropped it on created_at alone the throttle would reset and
+      // this would send.
+      expect(mailer.sent).toHaveLength(0);
     });
   });
 

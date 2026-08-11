@@ -35,7 +35,7 @@ import { escapeHtml } from "../html-escape.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import { RealClock } from "../clock.js";
 import type { TenantContext } from "../tenant-context.js";
-import { admitContactOperatorCall, type HeldMessage, MAX_CALLS_PER_WINDOW, releaseEmailClaim } from "./contact-operator-guard.js";
+import { admitContactOperatorCall, type HeldMessage, MAX_CALLS_PER_WINDOW, releaseEmailClaim, revokeAdmission } from "./contact-operator-guard.js";
 
 export interface ContactOperatorResult {
   ticketId: string;
@@ -68,37 +68,52 @@ export async function contactOperator(
   }
 
   const { ticketId, emailNow, held, heldOverflow } = admission;
-  const contactEmail = await lookupTenantContactEmail(ctx.env, ctx.tenantId);
+  const heldIds = held.map((h) => h.id);
   const urgencyTag = input.urgency === "needs_human" ? " [needs human]" : "";
 
-  // Category 'other' + status 'escalated': this is not an FAQ-answerable
-  // inbound email (no draftAnswerFor classification applies — the message is
-  // an agent's own prose, always routed to a human), and `source='agent'`
-  // (migrations/0017) is the field that actually distinguishes this from an
-  // email-triaged ticket, per the brief.
-  await insertSupportTicket(ctx.env, {
-    id: ticketId,
-    // A synthetic, clearly-labeled fallback when no contact email is on file
-    // (test tenants minted via mintTenant, or a signup that predates
-    // migrations/0007) — never a real deliverable address, and nothing in
-    // this codebase sends TO from_email (routes/admin-support.ts's own doc:
-    // "'Reply' is a later, owner-reviewed action").
-    fromEmail: contactEmail ?? `agent:${ctx.tenantId}`,
-    subject: `Agent message from tenant ${ctx.tenantId}${urgencyTag}`,
-    body: input.body,
-    tenantId: ctx.tenantId,
-    category: "other",
-    draft: null,
-    status: "escalated",
-    createdAt: now,
-    source: "agent",
-  });
+  // COMPENSATION BOUNDARY. The admission above is already durable, so every
+  // D1 statement it authorizes lives inside this try: if any of them fails,
+  // the admission is revoked before the error leaves, and the tenant is back
+  // to "never called". Without it, a partial D1 degradation left the log row
+  // committed with no ticket behind it, and dedup — which reads that log —
+  // answered the agent's retry with a 201 and a ticket id that did not exist
+  // (gate ROUND 2, N-1). Failing loudly is the only honest outcome here: the
+  // agent retries, and the retry either files a real ticket or throws.
+  try {
+    const contactEmail = await lookupTenantContactEmail(ctx.env, ctx.tenantId);
+
+    // Category 'other' + status 'escalated': this is not an FAQ-answerable
+    // inbound email (no draftAnswerFor classification applies — the message is
+    // an agent's own prose, always routed to a human), and `source='agent'`
+    // (migrations/0017) is the field that actually distinguishes this from an
+    // email-triaged ticket, per the brief.
+    await insertSupportTicket(ctx.env, {
+      id: ticketId,
+      // A synthetic, clearly-labeled fallback when no contact email is on file
+      // (test tenants minted via mintTenant, or a signup that predates
+      // migrations/0007) — never a real deliverable address, and nothing in
+      // this codebase sends TO from_email (routes/admin-support.ts's own doc:
+      // "'Reply' is a later, owner-reviewed action").
+      fromEmail: contactEmail ?? `agent:${ctx.tenantId}`,
+      subject: `Agent message from tenant ${ctx.tenantId}${urgencyTag}`,
+      body: input.body,
+      tenantId: ctx.tenantId,
+      category: "other",
+      draft: null,
+      status: "escalated",
+      createdAt: now,
+      source: "agent",
+    });
+  } catch (recordErr) {
+    revokeAdmission(ctx, ticketId, heldIds);
+    throw recordErr;
+  }
 
   if (emailNow) {
     // The guard already stamped these as emailed to claim the slot; the D1
     // rows are stamped only once the send really lands, and the claim is
     // released if it doesn't.
-    const claimed = [ticketId, ...held.map((h) => h.id)];
+    const claimed = [ticketId, ...heldIds];
     const text = composeOpsEmailText(ctx.tenantId, ticketId, input, held, heldOverflow);
     try {
       await mailer.send({
@@ -107,7 +122,7 @@ export async function contactOperator(
         text,
         html: `<p>${escapeHtml(text).replace(/\n/g, "<br>")}</p>`,
       });
-      await markSupportTicketsEmailed(ctx.env, claimed, now);
+      await markSupportTicketsEmailed(ctx.env, ctx.tenantId, claimed, now);
     } catch (mailErr) {
       // Best-effort — mirrors registrar-alert.ts/support-inbound.ts: an
       // unsendable ops email must never fail the tenant-facing call, and the

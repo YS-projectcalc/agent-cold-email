@@ -296,3 +296,249 @@ on a row whose body is unverified agent prose. Cheap to surface; harmless if rul
 - `markSupportTicketEmailed` (`:130`) sits inside the `try`, so a D1 failure *after* a
   successful send is logged as "send failed" and the ticket re-emails next call. Cosmetic
   duplicate-email risk, orders of magnitude below finding #1.
+
+---
+---
+
+# ROUND 2 — re-attack of the fix (2026-08-11)
+
+**HEAD** `1130344a0e55853b3082eb2a66408a5208f12e66` (`git rev-parse HEAD`; parent `9c22b07`,
+the round-1 commit). **Reviewed diff** `git diff 9c22b07..HEAD` — 26 files, +1069/−218.
+Read-only git; execution in fresh `git archive` sandboxes (`r2-sandbox`, `r2-probe`).
+
+## ROUND 2 VERDICT — **NO-SHIP** (1 NEW BLOCKING; all round-1 items CLOSED)
+
+**Every item on the round-2 checklist (a)–(f) PASSES.** The round-1 blocker is genuinely and
+completely closed, and all six riders are closed with it — I re-ran my own original breaks
+verbatim and they now fail to break anything. The fix is the right fix, made the right way,
+in the right place.
+
+**But the fix introduced a new defect on its own seam** (regression ring, lens 7): the guard
+now commits its admission to DO storage *before* the D1 record it authorizes is written, with
+no compensation and no reconciler. Under a partial D1 degradation the channel returns
+`"Recorded for the operator"` for a message that reaches no operator surface at all, and the
+new `(body, urgency)` dedup makes that false success **sticky for the full hour**. That is a
+confident-wrong success on the platform's only agent→human escape hatch, so it blocks.
+
+**Battery re-run independently:**
+
+```
+apps/platform  npx vitest run   →  Test Files 167 passed (167)   Tests 1557 passed (1557)
+npm run typecheck (root)        →  dashboard / engine / platform / agent-cold-email / shared, rc=0
+```
+
+Exactly the builder's claimed `167f/1557t` (+10) and typecheck ×5.
+
+**The builder's RED/GREEN is real, and I re-derived it independently at both commits** rather
+than accepting it. The builder reports pristine-HEAD 50-parallel → 43 admitted, fixed → 5. My
+own numbers, measured at each commit through the production HTTP path:
+
+| attack | round 1 (`9c22b07`) | round 2 (`1130344`) |
+|---|---|---|
+| 100 parallel REST, distinct bodies | 96 tickets / 96 ops emails | **5 tickets / 1 ops email** |
+| 40 parallel MCP `tools/call` | 25 tickets / 25 ops emails | **5 tickets / 1 ops email** |
+| 200 direct `admitContactOperatorCall` | n/a | **5 admitted / 1 email slot / 195 rate_limited** |
+
+The added tests are load-bearing, not coverage theater: the new file carries three real
+`Promise.all` bursts (50 parallel REST, 25 parallel MCP), and my round-1 run proves those
+assertions red on the parent commit.
+
+---
+
+## Round-2 checklist results
+
+### (a) The original breaks — PASS
+
+`R2-A1` 100 parallel REST → `201=5, 429=95`, exactly 5 tickets, 1 ops email.
+`R2-A2` 40 parallel MCP → exactly 5 tickets, 1 ops email.
+`R2-N3` 200 synchronous in-DO calls to the guard alone → `admitted=5, rate_limited=195,
+emailSlotsClaimed=1`.
+
+**Atomicity verified by reading, not just by test.** `engine/contact-operator-guard.ts`
+contains no `await`, no `async`, no `env.DB`, no `fetch` — grep for those tokens returns only
+comment lines (`:5`, `:8`, `:13`, `:16`). Every statement is `ctx.sql.exec(...)` (synchronous
+DO SQLite). The three helpers it calls (`newId`, `stampEmailed`, and the `sql.exec` calls
+themselves) are all synchronous; nothing it touches can open the input gate. The file states
+the invariant as a standing rule at `:5` — *"THIS FILE CONTAINS NO `await`, AND MUST NOT GROW
+ONE"* — which is the right way to make the property survive future edits.
+
+### (b) The new guard's own edges — PASS (with one caveat, documented)
+
+- **Three coupled decisions under interleaving.** `R2-B1`: 40 mixed parallel calls (identical
+  body at both urgencies + fresh + urgent, interleaved in one `Promise.all`) → DO log rows = 5,
+  D1 tickets = 5, ops emails = 4. Dedup, cap, and email-slot agree exactly; no split-brain
+  between the log and D1.
+- **Held body across the 10-minute boundary.** `R2-B2`: burst 1 emails message 1 and holds
+  `HELD BODY ALPHA`; after the window reopens, burst 2's email **carries ALPHA's text** (not a
+  count); burst 3, another window later, does **not** re-carry it. ALPHA appears in exactly 1
+  of 3 emails — neither dropped nor doubled.
+- **Failed send releases the claim.** `R2-B3`: a throwing mailer leaves `emailed_at = NULL`,
+  and the next successful send carries *both* the failed body and the new one.
+- **24h prune caveat.** `R2-B4`: a held row aged past retention is pruned and its text is never
+  emailed — but **its D1 support_tickets row survives** (`d1 bodies` includes
+  `HELD THEN PRUNED`), so the message remains on the operator's digest. That is the acceptable
+  half of the caveat and it is real. What is *not* asserted anywhere is the prune itself; see
+  NEW-2 below.
+- **Storage bound.** `R2-N5` (run in isolation; it only timed out in the full file because my
+  own probe drives 160 HTTP calls): 8 reopened windows → 40 log rows, inside the file's claimed
+  ~120 ceiling. The prune's dual cutoff correctly preserves a row whose `emailed_at` is recent
+  even when its `created_at` is old, so pruning cannot reset the throttle clock.
+
+### (c) `needs_human` bypasses the throttle, not the cap — PASS
+
+`R2-C1`: 30 parallel urgent → exactly 5 tickets, 5 ops emails (bounded by the cap, as the
+comment at guard `:128-130` claims). `R2-C2`: the round-1 finding #2 scenario replayed — a
+routine message followed immediately by `URGENT: sending is down for all mailboxes` now
+produces 2 emails and the urgent text **is** delivered. Round-1 finding #2 is closed.
+
+### (d) The riders — PASS
+
+- **NB3 fence.** `R2-D1`: the tag is `crypto.randomUUID().slice(0,8)` generated at compose
+  time; two consecutive emails carried two distinct tags (`6f178e94`, `0491b8d3`). A body that
+  embeds a forged `----- END tenant-agent-authored content [00000000] -----` cannot close the
+  real fence, and the agent has no oracle for the tag (it appears only in the operator's email,
+  never in any tenant-visible response). Every server-composed line sits outside the fence.
+- **NB4 controls.** `R2-D2`: NUL, RTL override, and ZWNBSP all → `400`, no D1 row. Legitimate
+  prose with `\n`, `\t`, `\r\n` still → `201`, so the refusal is not over-broad. `R2-D3`: the
+  operator-side `regarding` is held to the same rule (both → `400`).
+- **NB6 dedup identity.** `R2-D4`: same text at `normal` vs `needs_human` → two distinct
+  tickets; a true replay at the same urgency still dedupes. Escalation is no longer swallowed.
+- **NB7 digest.** `R2-D5`: the digest DTO now carries `source: "agent"`.
+- **NB5 doc claim.** `contact-operator.ts:24-28` and the tool description now state the
+  admin-TERMINATED exception explicitly instead of claiming "EVERY account state".
+
+### (e) New-table safety — PASS
+
+`agent_contact_log` is a brand-new table, so there is no prior shape to reshape and the N-3
+class cannot apply. `TENANT_DO_SCHEMA` is exec'd **unconditionally in the DO constructor**
+(`tenant-do.ts:194`), which runs on every instantiation including rehydration of a DO created
+before this deploy, so an existing tenant's DO acquires the table on its next construction —
+no migration step, no version gate to skip. It is deliberately *not* in
+`ensureColumnMigrations()` (`:195`), which is correct: that path is for altering existing
+tables. A fresh-DO test does not hide anything here precisely because there is no legacy shape.
+`R2-N4` confirms per-tenant isolation of the new table under a 40-call cross-tenant burst
+(A=5, B=5).
+
+### (f) Consumer sweep — PASS
+
+`listRecentAgentSupportTickets`, `agentContactEmailThrottleState`, and
+`markSupportTicketEmailed` (singular) are deleted with **zero remaining references** anywhere
+in `apps/` or `packages/`. `SupportTicketRow.source` is added, `SupportTicketD1Row` and
+`fromD1Row` map it, and `listOpenAndEscalatedSupportTickets` selects it. Typecheck clean ×5.
+
+---
+
+## NEW BLOCKING finding (outside the round-1 checklist — regression ring)
+
+### N-1. BLOCKING · lens 7 (regression ring) + 6 · The guard commits the admission before the D1 record it authorizes, so a partial D1 failure yields a phantom ticket and a sticky false "Recorded for the operator"
+
+`contact-operator.ts` now commits the admission at `:61` (synchronous, durable in DO storage)
+and only then does `await lookupTenantContactEmail` (`:71`, a D1 read) and
+`await insertSupportTicket` (`:79`, a D1 write). If anything in that window throws, the DO log
+row stays committed while D1 has no ticket — and because the log row is what dedup reads, the
+retry is answered from the phantom.
+
+**This is a consequence of the fix.** Before it, the guard's first act was a D1 *read*, so a
+D1 failure threw before anything was recorded and retries behaved correctly. Moving the
+decision into DO storage decoupled the decision from the record, and nothing was added to
+re-couple them.
+
+**Reachability — pinned precisely, and it is narrower than a total outage.** A *total* D1
+outage never reaches this code: auth resolves the tenant via D1
+(`require-auth.ts:63` → `lookupTenantByTokenHash`), so the request 401s/500s earlier. The
+reachable shape is **reads healthy, the `support_tickets` write leg failing** — an ordinary D1
+partial degradation, and one this repo already models with `deadDb()` helpers. Executed with a
+D1 wrapper that passes everything through except `INSERT OR IGNORE INTO support_tickets`:
+
+```
+R2-N6  call 1 (write leg degraded) : threw D1_ERROR  → D1 tickets=0, opsEmails=0
+       agent retries the SAME message after recovery:
+       returned  ticketId=sup_f96beb15-…
+       returned  note="Recorded for the operator. Their reply will arrive as a message
+                       on this account — check list_messages or infrastructure_status's messages[]."
+       ticket exists in D1 = FALSE      D1 tickets = 0      ops emails = 0
+       operator ever received the text  = FALSE
+
+R2-N8  4 / 4 subsequent retries also returned a phantom ticketId
+       (the dedup window is 1h, so the false success persists for the hour)
+
+R2-N7  CONTROL — same degradation, but the retry uses a DIFFERENT body:
+       lands correctly, D1 tickets=1, id resolves.  ← the defect is specifically the
+       dedup-on-a-phantom path, not general breakage
+```
+
+**Two losses compound.** The failed call burns a rate slot *and* the email slot: the guard
+stamps `emailed_at = now` at `:162` to claim the send, but the throw happens at `:71`/`:79`,
+before the mailer block at `:97` — so `releaseEmailClaim` (which only runs in the mailer's
+`catch`) never fires. The throttle clock is advanced by an email that was never sent, holding
+back the *next* tenant message for 10 minutes too.
+
+**No recovery exists.** `agent_contact_log` is read by exactly one thing —
+`contact-operator-guard.ts` itself (grep-verified across `apps/` and `packages/`). There is no
+sweep, no reconciler, and no alarm that would ever notice a log row whose D1 ticket is missing
+or whose claimed email never went out. The body is sitting in DO storage and nothing will ever
+deliver it.
+
+**Why this blocks rather than becoming a residual.** The outcome is not a dropped call the
+agent can detect — it is an affirmative success response, carrying the platform's own promise
+that a human will reply, on the one channel a customer reaches for when things are broken. A
+correlated failure (D1 write degradation) is exactly when that channel is most used. A
+well-behaved agent stops retrying on `201`.
+
+**Self-refutation performed.** (a) *Is the injected failure realistic?* It is narrower than
+what I first tested — I discarded the total-outage variant precisely because auth fails first,
+and re-derived the finding under reads-healthy/write-failing, which is a real D1 degradation
+mode. (b) *Is there a compensating path I missed?* Grep says no consumer of the log table
+besides the guard. (c) *Is it a strict improvement over round 1 anyway?* No — on this
+particular path round 1 failed loudly (guard read D1 first, so nothing was committed and
+retries worked); this path is new. (d) *Is it in scope, or goalpost-moving?* It is checklist
+item (b), "the new guard's own edges" — the seam between the guard's commit and the effect it
+authorizes.
+
+**What would clear it (cheap):** wrap the post-admission work in a `try` and, on failure,
+compensate synchronously — `DELETE FROM agent_contact_log WHERE id = ?` (and the released
+email claim) before rethrowing. That restores round-1's honest-failure behaviour on the error
+path while keeping the atomicity that fixed finding #1. A reconcile sweep would also work but
+is far more machinery. Acceptance proof: re-run `R2-N6`/`R2-N8` and require the retry either
+to file a real ticket or to throw — never to return a ticketId that does not exist.
+
+---
+
+## Round-2 attacks that failed
+
+- Re-ran both round-1 breaks verbatim (100 parallel REST, 40 parallel MCP) — both now hold at
+  exactly 5 tickets / 1 email.
+- Drove the guard directly with 200 in-DO callers, bypassing HTTP entirely — 5 admitted, 1
+  email slot. The atomicity is a property of the guard, not of transport timing.
+- Interleaved all three coupled decisions (dedup / cap / email-slot) in one 40-way burst
+  looking for disagreement between the DO log and D1 — they agreed exactly.
+- Tried to double-email or drop a held body across the throttle boundary (three bursts) —
+  carried exactly once.
+- Tried to make the throttle clock survive a pruned row, and to reset it via the prune — the
+  dual `created_at`/`emailed_at` cutoff prevents both.
+- Tried to forge the untrusted-content fence with a guessed tag — tags are per-email random and
+  the agent never observes one.
+- Tried control/bidi characters on both the agent and operator legs — refused at the boundary,
+  while ordinary multi-line prose still passes.
+- Tried to exceed the storage bound over 8 reopened rate windows — 40 rows against a ~120 ceiling.
+- Tried cross-tenant interference through the new shared-named DO table — isolated.
+- Looked for stale callers of the three deleted D1 helpers — none.
+
+## Round-2 UNVERIFIABLE
+
+- Production-edge behaviour at true scale remains unmeasured (workerd locally only). The fix's
+  correctness no longer depends on timing, so this is much less load-bearing than in round 1.
+- Whether Cloudflare's Email Service alters the fence markers in transit (real binding is dark
+  in test). Resolved by one real send post-activation.
+
+## NEW (out-of-scope) observations — round 2, no verdict weight
+
+- **NEW-1.** `markSupportTicketsEmailed` (`admin/db.ts`) updates `WHERE id IN (...)` with **no
+  `tenant_id` scope**, unlike its DO-side twins `stampEmailed`/`releaseEmailClaim`, which both
+  scope by tenant. The ids are DO-local UUIDs so collision is not a practical risk, but
+  CLAUDE.md rule (h) asks for tenant scoping in every query and the asymmetry is one word to fix.
+- **NEW-2.** The 24h prune has no test of its own. `R2-B4` exercises it only incidentally
+  (I aged the rows by hand). A row-count assertion after a prune would pin the dual-cutoff
+  reasoning, which is the subtlest logic in the guard.
+- **NEW-3.** Round-1 NEW observations still stand: the ops digest is unbounded and
+  all-tenants, and no ticket-close path exists.

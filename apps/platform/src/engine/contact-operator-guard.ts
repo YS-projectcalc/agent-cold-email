@@ -167,6 +167,39 @@ export function admitContactOperatorCall(ctx: TenantContext, input: ContactOpera
 }
 
 /**
+ * Undoes an admission whose D1 support_tickets record could not be written,
+ * so the tenant's state reverts to "this call never happened".
+ *
+ * The admission is committed here BEFORE the record it authorizes exists —
+ * that ordering is what makes the cap atomic, and it cannot be reversed. So
+ * the seam needs a compensation: without one, a partial D1 degradation (reads
+ * healthy, the ticket write failing) left a committed log row with no ticket,
+ * and since dedup reads this table the retry was answered from that phantom —
+ * a 201 carrying "their reply will arrive" for a message no operator would
+ * ever see, sticky for the full dedup hour (gate
+ * docs/adversarial/msgchannel-inc5-gate-2026-08-11.md ROUND 2, N-1).
+ *
+ * Synchronous, like everything else here: it must not introduce an await
+ * between the admission and its undo.
+ *
+ * KNOWN RESIDUAL, deliberately not closed here. Compensation is after-the-
+ * fact, so a CONCURRENT identical (body, urgency) call that dedups against
+ * this row in the window before it is revoked still receives its id. Closing
+ * that needs a two-phase confirmed flag (dedup ignores unconfirmed rows and
+ * asks the caller to retry), which costs an extra DO write on every
+ * successful call and a new tenant-visible error — a design change, not a
+ * patch. The sequential retry path the gate blocked on IS closed: it now
+ * fails loudly instead of returning a phantom.
+ */
+export function revokeAdmission(ctx: TenantContext, ticketId: string, heldIds: string[]): void {
+  ctx.sql.exec(`DELETE FROM agent_contact_log WHERE tenant_id = ? AND id = ?`, ctx.tenantId, ticketId);
+  // Deleting the row above frees this call's own rate slot and, if it had
+  // claimed the email slot, the throttle clock with it. The messages it was
+  // going to carry have to go back on the held list separately.
+  releaseEmailClaim(ctx, heldIds);
+}
+
+/**
  * Returns claimed rows to "held" after a send actually failed, so their bodies
  * roll into the next successful email instead of being silently marked
  * delivered — the durable-record posture registrar-alert.ts/support-inbound.ts
