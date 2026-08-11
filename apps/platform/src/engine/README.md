@@ -275,6 +275,21 @@ untouched — the demo path and the existing test surface still drive them with
 no activation predicate — but "no production driver" is the part of this
 section that is now historical, not the RPC shape itself.
 
+## msgchannel Inc5 — the agent->operator leg
+
+- `contact-operator.ts` — `contact_operator` (MCP) / `POST /messages/contact-operator`:
+  files a `source='agent'` support ticket in D1 and pushes ONE ops email
+  through the shared `OpsMailer`. Owns the D1 write and the email composition,
+  including the untrusted-content fence around every agent-authored body (an
+  ops email's server-composed lines must stay unforgeable by the text they
+  quote).
+- `contact-operator-guard.ts` — that channel's dedup / 5-per-hour cap /
+  ops-email throttle, over DO-local `agent_contact_log`. **Contains no
+  `await` by design** — the whole decision runs inside one closed DO input
+  gate, which is the only reason the cap holds under a concurrent burst. See
+  the file header and `docs/adversarial/msgchannel-inc5-gate-2026-08-11.md`
+  finding #1 for what happens when the same logic reads and writes D1.
+
 ## How to run
 
 Part of `apps/platform`; exercised by `apps/platform/test/*.test.ts`.

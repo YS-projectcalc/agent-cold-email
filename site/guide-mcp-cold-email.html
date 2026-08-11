@@ -256,7 +256,7 @@
   <pre><code>{ messageId: string }</code></pre>
 
   <h3><code>contact_operator</code></h3>
-  <p>Reach a human operator — files a support ticket and notifies the operator. Works in EVERY account state, including suspended/canceling. The reply arrives as a message on this account (<code>list_messages</code> / <code>infrastructure_status</code>'s <code>messages[]</code> — there is no separate reply-fetch call). Retrying with the identical body within an hour is safe: same <code>ticketId</code>, no second alert. Rate-limited to 5 calls/hour per tenant.</p>
+  <p>Reach a human operator — files a support ticket and notifies the operator. Works in every account state a tenant token still authenticates in, including dunning-suspended, canceling and canceled (an admin-terminated abuse account is the one exception — its token 401s at auth). The reply arrives as a message on this account (<code>list_messages</code> / <code>infrastructure_status</code>'s <code>messages[]</code> — there is no separate reply-fetch call). Retrying with the identical body and urgency within an hour is safe: same <code>ticketId</code>, no second alert — re-sending the same text at a higher urgency is an escalation and files a new ticket. <code>needs_human</code> also bypasses the ~10-minute alert throttle. Rate-limited to 5 calls/hour per tenant.</p>
   <pre><code>{
   body: string (1-2000 chars),
   urgency?: "normal" | "needs_human"   // default "normal"

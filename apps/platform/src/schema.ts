@@ -1010,6 +1010,32 @@ CREATE TABLE IF NOT EXISTS tenant_messages (
 -- read_at IS NULL DESC in the emit-side SELECT), newest first, per tenant.
 CREATE INDEX IF NOT EXISTS idx_tenant_messages_unread
   ON tenant_messages(tenant_id, read_at, created_at);
+
+-- msgchannel Inc5 storm-guard state (engine/contact-operator-guard.ts) — the
+-- agent->operator direction's dedup / 5-per-hour cap / ops-email throttle.
+-- DO-LOCAL, not D1, and that is the whole point: the guard is a
+-- read-modify-write, and only DO SQLite (synchronous, no await inside the
+-- decision) keeps the input gate closed across it. The first cut of this
+-- feature kept the same state in D1; every await on env.DB reopened the
+-- gate, so 100 concurrent calls all read an empty window and 96 tickets +
+-- 96 ops emails went out past a cap of 5 (gate
+-- docs/adversarial/msgchannel-inc5-gate-2026-08-11.md finding #1). Same
+-- reasoning as demo_run_state above and rate-limiter-do.ts:8-11.
+-- id IS the support_tickets id minted for the call, so a dedup hit can
+-- return the original ticket id without reading D1 at all. emailed_at is
+-- the throttle clock AND the "has this message's text actually reached the
+-- operator" flag: NULL means held, and a held row's BODY (not just its
+-- count) is folded into the next email that does go out.
+CREATE TABLE IF NOT EXISTS agent_contact_log (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  body TEXT NOT NULL,
+  urgency TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  emailed_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_agent_contact_log_window
+  ON agent_contact_log(tenant_id, created_at);
 `;
 
 export function newId(prefix: string): string {

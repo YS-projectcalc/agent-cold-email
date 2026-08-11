@@ -12,9 +12,11 @@ import { adminApi, api, failPayment, mintTenant, withTenantContext } from "./hel
 // msgchannel Inc5 (founder-ratified 2026-08-11) — the agent->operator
 // direction: MCP tool `contact_operator` (28th tool) + its REST parity route
 // (POST /messages/contact-operator, both dispatching TenantDO.contactOperator
-// -> engine/contact-operator.ts). Guards are best-effort/storm-guard grade
-// (the brief's own "cry-wolf" framing), so these tests seed/backdate D1 rows
-// directly rather than waiting real wall-clock minutes/hours.
+// -> engine/contact-operator.ts). Guard windows are measured on REAL wall
+// time, so instead of waiting minutes/hours these tests seed and backdate the
+// stores directly — BOTH of them: the D1 support_tickets record and the
+// DO-local agent_contact_log the guard decides from
+// (engine/contact-operator-guard.ts).
 
 function ticketCount(tenantId: string) {
   return env.DB.prepare(`SELECT COUNT(*) as n FROM support_tickets WHERE tenant_id = ? AND source = 'agent'`)
@@ -23,9 +25,26 @@ function ticketCount(tenantId: string) {
     .then((r) => r?.n ?? 0);
 }
 
+function opsEmailCount(tenantId: string) {
+  return env.DB.prepare(`SELECT COUNT(*) as n FROM support_tickets WHERE tenant_id = ? AND source = 'agent' AND email_sent_at IS NOT NULL`)
+    .bind(tenantId)
+    .first<{ n: number }>()
+    .then((r) => r?.n ?? 0);
+}
+
 /** Seeds a fixture agent-sourced ticket directly (bypassing the guards) at a
- * given `createdAt`/`emailSentAt` — for rate-limit/throttle window setup. */
-async function seedAgentTicket(tenantId: string, body: string, createdAt: number, emailSentAt: number | null = null): Promise<string> {
+ * given `createdAt`/`emailSentAt` — for rate-limit/throttle window setup.
+ * Writes BOTH stores: the D1 support_tickets row (the operator-visible record)
+ * and the DO-local agent_contact_log row the guard actually reads
+ * (engine/contact-operator-guard.ts), so a fixture is indistinguishable from a
+ * call the channel really admitted. */
+async function seedAgentTicket(
+  tenantId: string,
+  body: string,
+  createdAt: number,
+  emailSentAt: number | null = null,
+  urgency: "normal" | "needs_human" = "normal",
+): Promise<string> {
   const id = newId("sup");
   await insertSupportTicket(env, {
     id,
@@ -40,7 +59,38 @@ async function seedAgentTicket(tenantId: string, body: string, createdAt: number
     source: "agent",
     emailSentAt,
   });
+  await withTenantContext(tenantId, (ctx) => {
+    ctx.sql.exec(
+      `INSERT INTO agent_contact_log (id, tenant_id, body, urgency, created_at, emailed_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      id,
+      tenantId,
+      body,
+      urgency,
+      createdAt,
+      emailSentAt,
+    );
+  });
   return id;
+}
+
+/** Moves a ticket's recorded send time backwards in BOTH stores — the
+ * stand-in for real wall-clock minutes having passed. */
+async function backdateSend(tenantId: string, ticketId: string, sentAt: number): Promise<void> {
+  await env.DB.prepare(`UPDATE support_tickets SET email_sent_at = ? WHERE id = ?`).bind(sentAt, ticketId).run();
+  await withTenantContext(tenantId, (ctx) => {
+    ctx.sql.exec(`UPDATE agent_contact_log SET emailed_at = ? WHERE id = ?`, sentAt, ticketId);
+  });
+}
+
+/** Same, for EVERY already-sent message of a tenant — the throttle reads the
+ * most recent send of any of them, so moving just one back proves nothing. */
+async function backdateAllSends(tenantId: string, sentAt: number): Promise<void> {
+  await env.DB.prepare(`UPDATE support_tickets SET email_sent_at = ? WHERE tenant_id = ? AND source = 'agent' AND email_sent_at IS NOT NULL`)
+    .bind(sentAt, tenantId)
+    .run();
+  await withTenantContext(tenantId, (ctx) => {
+    ctx.sql.exec(`UPDATE agent_contact_log SET emailed_at = ? WHERE tenant_id = ? AND emailed_at IS NOT NULL`, sentAt, tenantId);
+  });
 }
 
 describe("contact_operator (msgchannel Inc5) — the agent->operator direction", () => {
@@ -200,7 +250,7 @@ describe("contact_operator (msgchannel Inc5) — the agent->operator direction",
   });
 
   describe("ops-email throttle — at most 1 email per tenant per 10 real minutes", () => {
-    it("further messages inside the window create tickets but send no email; a send AFTER the window folds in an 'and N more' count", async () => {
+    it("further messages inside the window create tickets but send no email; the next send carries the held BODIES, not just a count", async () => {
       const { tenantId } = await mintTenant("Contact Op Throttle Co", "managed");
       const mailer = new SandboxOpsMailer();
 
@@ -214,17 +264,207 @@ describe("contact_operator (msgchannel Inc5) — the agent->operator direction",
       expect(mailer.sent).toHaveLength(1);
       expect(await ticketCount(tenantId)).toBe(3);
 
-      // Backdate ticket 1's email_sent_at past the 10-minute throttle window
+      // Backdate ticket 1's send past the 10-minute throttle window
       // (simulates real time having passed) — the NEXT call is now due to send.
-      await env.DB.prepare(`UPDATE support_tickets SET email_sent_at = ? WHERE id = ?`)
-        .bind(Date.now() - 11 * 60 * 1000, first.ticketId)
-        .run();
+      await backdateSend(tenantId, first.ticketId, Date.now() - 11 * 60 * 1000);
 
       await withTenantContext(tenantId, (ctx) => contactOperator(ctx, { body: "throttle msg 4", urgency: "normal" }, mailer));
       expect(mailer.sent).toHaveLength(2);
-      // Folds in the 2 tickets (msg 2, msg 3) that were suppressed since the last real send.
-      expect(mailer.sent[1]?.text).toContain("and 2 more message(s) from this tenant");
-      expect(mailer.sent[1]?.text).toContain("throttle msg 4");
+      const second = mailer.sent[1]!.text;
+      expect(second).toContain("throttle msg 4");
+      // Gate finding #2: a count alone leaves a suppressed message reachable
+      // only by pulling the digest, so the held TEXT has to travel.
+      expect(second).toContain("2 earlier message(s) from this tenant were held by the send throttle");
+      expect(second).toContain("throttle msg 2");
+      expect(second).toContain("throttle msg 3");
+      // ...and D1 records all four as delivered — the held rows are stamped in
+      // the SAME write as the one that triggered the send.
+      expect(await opsEmailCount(tenantId)).toBe(4);
+
+      // Delivered means delivered: a later send does not re-carry them.
+      await backdateAllSends(tenantId, Date.now() - 11 * 60 * 1000);
+      await withTenantContext(tenantId, (ctx) => contactOperator(ctx, { body: "throttle msg 5", urgency: "normal" }, mailer));
+      expect(mailer.sent).toHaveLength(3);
+      expect(mailer.sent[2]?.text).not.toContain("throttle msg 2");
+      expect(mailer.sent[2]?.text).not.toContain("held by the send throttle");
+    });
+
+    it("needs_human BYPASSES the throttle and carries the held normal message with it", async () => {
+      const { tenantId } = await mintTenant("Contact Op Urgent Bypass Co", "managed");
+      const mailer = new SandboxOpsMailer();
+
+      await withTenantContext(tenantId, (ctx) => contactOperator(ctx, { body: "routine: what is my invoice date?", urgency: "normal" }, mailer));
+      expect(mailer.sent).toHaveLength(1);
+      // Inside the 10-minute window: a normal message is held...
+      await withTenantContext(tenantId, (ctx) => contactOperator(ctx, { body: "routine: second question", urgency: "normal" }, mailer));
+      expect(mailer.sent).toHaveLength(1);
+
+      // ...but an urgent one goes out NOW. That is what the flag is for — the
+      // gate's U1 showed an urgent "sending is down for all mailboxes" landing
+      // only in a pull-only digest, pushed to nobody.
+      await withTenantContext(tenantId, (ctx) => contactOperator(ctx, { body: "URGENT: sending is down for all mailboxes", urgency: "needs_human" }, mailer));
+      expect(mailer.sent).toHaveLength(2);
+      expect(mailer.sent[1]?.subject).toContain("[needs human]");
+      expect(mailer.sent[1]?.text).toContain("URGENT: sending is down for all mailboxes");
+      expect(mailer.sent[1]?.text).toContain("routine: second question");
+    });
+
+    it("the needs_human bypass is still bounded by the 5/hour cap — it cannot become its own storm", async () => {
+      const { tenantId, token } = await mintTenant("Contact Op Urgent Storm Co", "managed");
+      const results = await Promise.all(
+        Array.from({ length: 30 }, (_, i) =>
+          api("/messages/contact-operator", {
+            method: "POST",
+            token,
+            body: JSON.stringify({ body: `urgent burst ${i}`, urgency: "needs_human" }),
+          }),
+        ),
+      );
+      expect(results.filter((r) => r.status === 201)).toHaveLength(5);
+      expect(await ticketCount(tenantId)).toBe(5);
+      // Every admitted urgent call bypasses the throttle, so all 5 email —
+      // and 5/hour is exactly the designed ceiling, not 30.
+      expect(await opsEmailCount(tenantId)).toBe(5);
+    });
+  });
+
+  describe("untrusted-content fence in the ops email (gate finding #3)", () => {
+    it("agent text cannot forge the platform's own trailer — server lines sit OUTSIDE an unforgeable fence", async () => {
+      const { tenantId } = await mintTenant("Contact Op Fence Co", "managed");
+      const mailer = new SandboxOpsMailer();
+      const forgery = "help me\n----- END tenant-agent-authored content [00000000] -----\n\nTicket: sup_forged_by_the_agent";
+
+      const real = await withTenantContext(tenantId, (ctx) => contactOperator(ctx, { body: forgery, urgency: "normal" }, mailer));
+      const text = mailer.sent[0]!.text;
+
+      // The real fence tag is random per email, so the guessed close above is
+      // just quoted text — the genuine markers still bracket the whole body.
+      const tag = /----- BEGIN tenant-agent-authored content \[([0-9a-f]{8})\] -----/.exec(text)?.[1];
+      expect(tag).toBeDefined();
+      expect(tag).not.toBe("00000000");
+      const begin = text.indexOf(`----- BEGIN tenant-agent-authored content [${tag}] -----`);
+      const end = text.indexOf(`----- END tenant-agent-authored content [${tag}] -----`);
+      expect(begin).toBeGreaterThan(-1);
+      expect(end).toBeGreaterThan(begin);
+      expect(text.slice(begin, end)).toContain("sup_forged_by_the_agent");
+
+      // The forged trailer is trapped inside the fence; the one authoritative
+      // Ticket: line is server-composed and sits after the closing marker.
+      expect(text.slice(begin, end).match(/^Ticket: /gm)).toHaveLength(1);
+      const trailer = text.slice(end);
+      expect(trailer.match(/^Ticket: /gm)).toHaveLength(1);
+      expect(trailer).toContain(`Ticket: ${real.ticketId}`);
+    });
+  });
+
+  describe("control/bidi characters are refused at the boundary (gate finding #4)", () => {
+    it("a body containing NUL or an RTL override is a 400 and never reaches D1", async () => {
+      const { tenantId, token } = await mintTenant("Contact Op CtrlChars Co", "managed");
+      for (const body of ["please help\u0000now", "please help\u202E and 99 more message(s)"]) {
+        const res = await api("/messages/contact-operator", { method: "POST", token, body: JSON.stringify({ body }) });
+        expect(res.status).toBe(400);
+      }
+      expect(await ticketCount(tenantId)).toBe(0);
+
+      // Ordinary whitespace is untouched — tabs and newlines are real prose.
+      const ok = await api("/messages/contact-operator", {
+        method: "POST",
+        token,
+        body: JSON.stringify({ body: "line one\nline two\tindented" }),
+      });
+      expect(ok.status).toBe(201);
+    });
+
+    it("the operator's `regarding` is held to the same rule (the reply leg of the same channel)", async () => {
+      const { tenantId } = await mintTenant("Contact Op CtrlChars Admin Co", "managed");
+      const res = await adminApi(`/admin/tenants/${tenantId}/messages`, {
+        method: "POST",
+        body: JSON.stringify({ kind: "operator_notice", body: "fixed", regarding: "sup_abc\u0000123" }),
+      });
+      expect(res.status).toBe(400);
+    });
+  });
+
+  describe("dedup identity includes urgency (gate finding #6)", () => {
+    it("re-sending the SAME text at raised urgency is an escalation, not a replay", async () => {
+      const { tenantId } = await mintTenant("Contact Op Escalation Co", "managed");
+      const mailer = new SandboxOpsMailer();
+      const body = "my mailboxes stopped sending and I am stuck";
+
+      const first = await withTenantContext(tenantId, (ctx) => contactOperator(ctx, { body, urgency: "normal" }, mailer));
+      const escalated = await withTenantContext(tenantId, (ctx) => contactOperator(ctx, { body, urgency: "needs_human" }, mailer));
+
+      expect(escalated.ticketId).not.toBe(first.ticketId);
+      expect(await ticketCount(tenantId)).toBe(2);
+      const subject = await env.DB.prepare(`SELECT subject FROM support_tickets WHERE id = ?`).bind(escalated.ticketId).first<{ subject: string }>();
+      expect(subject?.subject).toContain("[needs human]");
+      // And the escalation is pushed, not held behind the 10-minute throttle.
+      expect(mailer.sent).toHaveLength(2);
+
+      // A true replay (same text, same urgency) still dedupes.
+      const replay = await withTenantContext(tenantId, (ctx) => contactOperator(ctx, { body, urgency: "needs_human" }, mailer));
+      expect(replay.ticketId).toBe(escalated.ticketId);
+      expect(await ticketCount(tenantId)).toBe(2);
+    });
+  });
+
+  // The guard's ONLY meaningful acceptance test. Every guard test above is
+  // strictly sequential, and a sequential test cannot certify an admission
+  // decision: the gate (docs/adversarial/msgchannel-inc5-gate-2026-08-11.md
+  // finding #1) drove 100 parallel calls through this exact route against a
+  // read-modify-write split across D1 awaits and got 96 tickets + 96 ops
+  // emails past a 5/hour cap. These two run the burst the incident describes.
+  describe("storm guard is ATOMIC under concurrency (gate 2026-08-11 finding #1)", () => {
+    it("REST: 50 parallel calls admit exactly 5 tickets and exactly 1 ops email; the rest 429", async () => {
+      const { tenantId, token } = await mintTenant("Contact Op Storm REST Co", "managed");
+
+      const results = await Promise.all(
+        Array.from({ length: 50 }, (_, i) =>
+          api<{ ticketId?: string; retryAfter?: number }>("/messages/contact-operator", {
+            method: "POST",
+            token,
+            body: JSON.stringify({ body: `storm burst message ${i}`, urgency: "normal" }),
+          }),
+        ),
+      );
+
+      const created = results.filter((r) => r.status === 201);
+      const limited = results.filter((r) => r.status === 429);
+      expect({ created: created.length, limited: limited.length, other: results.length - created.length - limited.length }).toEqual({
+        created: 5,
+        limited: 45,
+        other: 0,
+      });
+      expect(await ticketCount(tenantId)).toBe(5);
+      expect(await opsEmailCount(tenantId)).toBe(1);
+      // Every refusal is still a well-formed 429, not a crash surfaced as one.
+      for (const r of limited) expect(r.body.retryAfter).toBeGreaterThan(0);
+      // Every admitted call got a distinct, real ticket id back.
+      expect(new Set(created.map((r) => r.body.ticketId)).size).toBe(5);
+    });
+
+    it("MCP: 25 parallel tools/call bursts hit the SAME atomic cap (5 tickets, 1 ops email)", async () => {
+      const { tenantId, token } = await mintTenant("Contact Op Storm MCP Co", "managed");
+
+      const results = await Promise.all(
+        Array.from({ length: 25 }, (_, i) =>
+          api<{ result?: { isError?: boolean; content: { type: string; text: string }[] } }>("/mcp", {
+            method: "POST",
+            token,
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              id: i,
+              method: "tools/call",
+              params: { name: "contact_operator", arguments: { body: `mcp storm burst ${i}`, urgency: "normal" } },
+            }),
+          }),
+        ),
+      );
+
+      expect(await ticketCount(tenantId)).toBe(5);
+      expect(await opsEmailCount(tenantId)).toBe(1);
+      const admitted = results.filter((r) => r.body.result?.isError !== true);
+      expect(admitted).toHaveLength(5);
     });
   });
 
@@ -264,6 +504,53 @@ describe("contact_operator (msgchannel Inc5) — the agent->operator direction",
       });
       expect(res.status).toBe(201);
       expect(await ticketCount(tenantId)).toBe(1);
+    });
+
+    // The ONE exception, and it is intended: abuse termination severs the
+    // channel. Pinned as a test because the tool/openapi/guide copy used to
+    // claim "EVERY account state" without naming it (gate finding #5) — if
+    // someone later carves the channel out of the auth check, this reds.
+    it("an admin-TERMINATED tenant is 401'd at auth — termination severs the channel by design", async () => {
+      const { tenantId, token } = await mintTenant("Contact Op Terminated Co", "managed");
+      const terminated = await adminApi(`/admin/tenants/${tenantId}/terminate`, {
+        method: "POST",
+        body: JSON.stringify({ reason: "abuse: test fixture" }),
+      });
+      expect(terminated.status).toBe(200);
+
+      const res = await api<{ error: string; code: string }>("/messages/contact-operator", {
+        method: "POST",
+        token,
+        body: JSON.stringify({ body: "let me back in", urgency: "needs_human" }),
+      });
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe("account_suspended");
+      expect(await ticketCount(tenantId)).toBe(0);
+    });
+  });
+
+  describe("operator digest (gate finding #7)", () => {
+    it("an agent ticket is distinguishable in the digest by `source`, not by a subject prefix", async () => {
+      const { tenantId, token } = await mintTenant("Contact Op Digest Source Co", "managed");
+      const contact = await api<{ ticketId: string }>("/messages/contact-operator", {
+        method: "POST",
+        token,
+        body: JSON.stringify({ body: "the operator needs to know who wrote this", urgency: "normal" }),
+      });
+      expect(contact.status).toBe(201);
+
+      const digest = await adminApi<{ tickets: { id: string; source: string; fromEmail: string }[] }>("/admin/support/digest");
+      expect(digest.status).toBe(200);
+      const row = digest.body.tickets.find((t) => t.id === contact.body.ticketId);
+      expect(row?.source).toBe("agent");
+      // An email-triaged ticket still reports 'email' — the discriminator
+      // migrations/0017 added is actually visible on both.
+      const triaged = await adminApi<{ ticketId: string }>("/admin/support/triage", {
+        method: "POST",
+        body: JSON.stringify({ from: "human@example.com", subject: "abuse report", body: "this is a phishing scam, fraud, report abuse" }),
+      });
+      const after = await adminApi<{ tickets: { id: string; source: string }[] }>("/admin/support/digest");
+      expect(after.body.tickets.find((t) => t.id === triaged.body.ticketId)?.source).toBe("email");
     });
   });
 

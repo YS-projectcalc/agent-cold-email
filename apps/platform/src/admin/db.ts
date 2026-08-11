@@ -19,6 +19,13 @@ export interface SupportTicketRow {
   draft: string | null;
   status: "open" | "escalated" | "closed";
   createdAt: number;
+  // msgchannel Inc5 (migrations/0017) — 'email' (triaged inbound support mail)
+  // vs 'agent' (a tenant's coding agent calling contact_operator). The whole
+  // reason 0017 added the column is that the operator has to be able to tell
+  // them apart, and an agent ticket's `fromEmail` is the tenant's REAL contact
+  // address on a body the customer never wrote, so the digest must say so
+  // rather than leave it inferable from a subject prefix.
+  source: "email" | "agent";
 }
 
 /**
@@ -73,66 +80,24 @@ export async function insertSupportTicket(
 }
 
 /**
- * msgchannel Inc5 abuse guards (engine/contact-operator.ts) — everything the
- * storm guard needs about this tenant's agent-sourced tickets in ONE query:
- * dedup (identical-body match within the window) and the rate cap (row
- * count + the oldest row's timestamp, to compute `retryAfter`) share the
- * SAME 1h window, so one read covers both checks. Bounded to 200 rows as a
- * hard safety cap — the rate limit itself keeps real volume far below that.
- */
-export async function listRecentAgentSupportTickets(
-  env: Env,
-  tenantId: string,
-  sinceMs: number,
-): Promise<Array<{ id: string; body: string; createdAt: number }>> {
-  const result = await env.DB.prepare(
-    `SELECT id, body, created_at FROM support_tickets
-     WHERE tenant_id = ? AND source = 'agent' AND created_at > ?
-     ORDER BY created_at DESC LIMIT 200`,
-  )
-    .bind(tenantId, sinceMs)
-    .all<{ id: string; body: string; created_at: number }>();
-  return result.results.map((r) => ({ id: r.id, body: r.body, createdAt: r.created_at }));
-}
-
-/**
- * msgchannel Inc5 ops-email throttle (engine/contact-operator.ts) — the last
- * REAL send time for this tenant's agent-sourced tickets (null = never
- * emailed), and how many since-then tickets were suppressed by the throttle
- * (never individually emailed) — the "and N more messages" count the NEXT
- * send folds in.
- */
-export async function agentContactEmailThrottleState(
-  env: Env,
-  tenantId: string,
-): Promise<{ lastEmailAt: number | null; pendingSinceLastEmail: number }> {
-  const lastEmailRow = await env.DB.prepare(
-    `SELECT MAX(email_sent_at) as last_email FROM support_tickets WHERE tenant_id = ? AND source = 'agent' AND email_sent_at IS NOT NULL`,
-  )
-    .bind(tenantId)
-    .first<{ last_email: number | null }>();
-  const lastEmailAt = lastEmailRow?.last_email ?? null;
-
-  const pendingRow = await env.DB.prepare(
-    `SELECT COUNT(*) as n FROM support_tickets WHERE tenant_id = ? AND source = 'agent' AND email_sent_at IS NULL AND created_at > ?`,
-  )
-    .bind(tenantId, lastEmailAt ?? 0)
-    .first<{ n: number }>();
-
-  return { lastEmailAt, pendingSinceLastEmail: pendingRow?.n ?? 0 };
-}
-
-/**
- * msgchannel Inc5 — stamps `email_sent_at` on ONE ticket AFTER its ops email
- * has actually been sent (never before — engine/contact-operator.ts inserts
- * every ticket with `email_sent_at: null` first, so a send that throws
- * leaves the row honestly un-emailed and its message rolls into the NEXT
- * successful send's "and N more" count, mirroring support-inbound.ts's own
+ * msgchannel Inc5 — stamps `email_sent_at` on every ticket an ops email
+ * actually carried, AFTER the send lands (never before — engine/
+ * contact-operator.ts inserts every ticket with `email_sent_at: null` first,
+ * so a send that throws leaves the rows honestly un-emailed and their text
+ * rolls into the NEXT successful send, mirroring support-inbound.ts's own
  * "the ticket is already persisted, which is the durable record" posture for
- * its best-effort forward leg).
+ * its best-effort forward leg). Takes a LIST because one email carries the
+ * new ticket plus every message the throttle had held back.
+ *
+ * This is a RECORD write, never a decision input: the guard's own state lives
+ * in DO storage (engine/contact-operator-guard.ts) precisely because reading
+ * D1 to decide cannot be atomic.
  */
-export async function markSupportTicketEmailed(env: Env, id: string, sentAt: number): Promise<void> {
-  await env.DB.prepare(`UPDATE support_tickets SET email_sent_at = ? WHERE id = ?`).bind(sentAt, id).run();
+export async function markSupportTicketsEmailed(env: Env, ids: string[], sentAt: number): Promise<void> {
+  if (ids.length === 0) return;
+  await env.DB.prepare(`UPDATE support_tickets SET email_sent_at = ? WHERE id IN (${ids.map(() => "?").join(", ")})`)
+    .bind(sentAt, ...ids)
+    .run();
 }
 
 interface SupportTicketD1Row {
@@ -145,6 +110,7 @@ interface SupportTicketD1Row {
   draft: string | null;
   status: "open" | "escalated" | "closed";
   created_at: number;
+  source: "email" | "agent";
 }
 
 function fromD1Row(row: SupportTicketD1Row): SupportTicketRow {
@@ -158,13 +124,14 @@ function fromD1Row(row: SupportTicketD1Row): SupportTicketRow {
     draft: row.draft,
     status: row.status,
     createdAt: row.created_at,
+    source: row.source,
   };
 }
 
 /** GET /admin/support/digest — every ticket still needing the owner's attention (brief: "open/escalated tickets"). */
 export async function listOpenAndEscalatedSupportTickets(env: Env): Promise<SupportTicketRow[]> {
   const result = await env.DB.prepare(
-    `SELECT id, from_email, subject, body, tenant_id, category, draft, status, created_at
+    `SELECT id, from_email, subject, body, tenant_id, category, draft, status, created_at, source
      FROM support_tickets WHERE status IN ('open', 'escalated') ORDER BY created_at DESC`,
   ).all<SupportTicketD1Row>();
   return result.results.map(fromD1Row);
