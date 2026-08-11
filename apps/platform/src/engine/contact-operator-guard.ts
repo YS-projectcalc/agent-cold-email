@@ -42,6 +42,14 @@ const LOG_RETENTION_MS = 24 * 60 * 60 * 1000;
 // Ceiling on how many held bodies one email carries. Unreachable in practice
 // (the cap admits 5/hour and any send drains everything held), but an ops
 // email must have a bounded size no matter what the log looks like.
+//
+// Gate NEW observation (docs/adversarial/inc5-reconcile-sweep-gate-2026-08-11.md):
+// this constant is also what keeps stampEmailed's (below) own `ids.length`
+// under DO SqlStorage's 100-bound-parameter ceiling — its only caller
+// (admitContactOperatorCall) always passes `held`, sliced to this value. That
+// coupling is safe by construction (both live in this one file, ~15 lines
+// apart) — unlike releaseEmailClaim, which is exported and chunks itself
+// instead of trusting a remote invariant (see its own comment below).
 const MAX_HELD_BODIES_PER_EMAIL = 10;
 
 export interface HeldMessage {
@@ -199,6 +207,17 @@ export function revokeAdmission(ctx: TenantContext, ticketId: string, heldIds: s
   releaseEmailClaim(ctx, heldIds);
 }
 
+// Ids per releaseEmailClaim statement. Gate NON-BLOCKING-2 (docs/
+// adversarial/inc5-reconcile-sweep-gate-2026-08-11.md): DO SqlStorage
+// enforces the SAME 100-bound-parameter ceiling D1 does (measured: 99 ids
+// OK, 100 -> "too many SQL variables"). Every caller today stays under it
+// only via MAX_HELD_BODIES_PER_EMAIL (<=10), a constant that lives in THIS
+// file but whose bound this EXPORTED function has no way to enforce on a
+// caller in a different file (contact-operator-reconcile.ts's reconcile
+// sweep included) — chunking here makes the function safe on its own terms
+// instead of depending on that remote invariant staying true.
+const RELEASE_EMAIL_CLAIM_CHUNK_SIZE = 99;
+
 /**
  * Returns claimed rows to "held" after a send actually failed, so their bodies
  * roll into the next successful email instead of being silently marked
@@ -207,11 +226,14 @@ export function revokeAdmission(ctx: TenantContext, ticketId: string, heldIds: s
  */
 export function releaseEmailClaim(ctx: TenantContext, ids: string[]): void {
   if (ids.length === 0) return;
-  ctx.sql.exec(
-    `UPDATE agent_contact_log SET emailed_at = NULL WHERE tenant_id = ? AND id IN (${ids.map(() => "?").join(", ")})`,
-    ctx.tenantId,
-    ...ids,
-  );
+  for (let i = 0; i < ids.length; i += RELEASE_EMAIL_CLAIM_CHUNK_SIZE) {
+    const chunk = ids.slice(i, i + RELEASE_EMAIL_CLAIM_CHUNK_SIZE);
+    ctx.sql.exec(
+      `UPDATE agent_contact_log SET emailed_at = NULL WHERE tenant_id = ? AND id IN (${chunk.map(() => "?").join(", ")})`,
+      ctx.tenantId,
+      ...chunk,
+    );
+  }
 }
 
 function stampEmailed(ctx: TenantContext, ids: string[], at: number): void {

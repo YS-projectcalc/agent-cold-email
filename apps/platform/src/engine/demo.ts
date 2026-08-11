@@ -74,9 +74,19 @@ function resetPriorDemoState(ctx: TenantContext): void {
   ctx.sql.exec(`DELETE FROM leads WHERE tenant_id = ? AND campaign_id IN (${placeholders})`, ...scope);
   ctx.sql.exec(`DELETE FROM campaigns WHERE tenant_id = ? AND id IN (${placeholders})`, ...scope);
 
-  if (demoThreadIds.length > 0) {
-    const threadPlaceholders = demoThreadIds.map(() => "?").join(", ");
-    ctx.sql.exec(`DELETE FROM thread_labels WHERE thread_id IN (${threadPlaceholders})`, ...demoThreadIds);
+  // Chunked at <=99 ids per statement — DO SqlStorage enforces the same
+  // 100-bound-parameter ceiling D1 does (contact-operator-guard.test.ts
+  // measured it directly: 99 ids OK, 100 -> "too many SQL variables"; class
+  // sweep, docs/adversarial/inc5-reconcile-sweep-gate-2026-08-11.md). Unlike
+  // demoCampaignIds above (bounded to <=3 by DemoRunInput's own
+  // campaigns.max(3)), demoThreadIds is one id per LEAD — up to
+  // DemoRunInput's leads.max(200) — so a single prior 200-lead run reaches
+  // this ceiling on the VERY NEXT /demo/run call's cleanup.
+  const THREAD_LABEL_CHUNK_SIZE = 99;
+  for (let i = 0; i < demoThreadIds.length; i += THREAD_LABEL_CHUNK_SIZE) {
+    const chunk = demoThreadIds.slice(i, i + THREAD_LABEL_CHUNK_SIZE);
+    const threadPlaceholders = chunk.map(() => "?").join(", ");
+    ctx.sql.exec(`DELETE FROM thread_labels WHERE thread_id IN (${threadPlaceholders})`, ...chunk);
   }
 }
 

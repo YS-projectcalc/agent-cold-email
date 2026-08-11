@@ -61,6 +61,7 @@ import {
   type MessageListPage,
 } from "./engine/tenant-messages.js";
 import { contactOperator, type ContactOperatorResult } from "./engine/contact-operator.js";
+import { reconcileOrphanedAdmissions } from "./engine/contact-operator-reconcile.js";
 import { runPollInbox } from "./engine/reply-processor.js";
 import { suppressLead, unsubscribeEmail, type UnsubscribeResult } from "./engine/suppression.js";
 import { upsertLeadDisposition, type LeadDispositionView } from "./engine/lead-dispositions.js";
@@ -1166,6 +1167,13 @@ export class TenantDO extends DurableObject<Env> {
     // cleanup of expired/old-read tenant_messages rows, reusing this existing
     // per-tenant cron leg rather than a new cron (engine/tenant-messages.ts).
     pruneTenantMessages(ctx);
+    // msgchannel Inc5 fast-follow — reconciles agent_contact_log admissions
+    // an isolate death left with no D1 support_tickets record (engine/
+    // contact-operator-reconcile.ts). REAL wall-clock, not ctx.clock: the
+    // log's own created_at is always real time (contact-operator-guard.ts's
+    // documented invariant — a demo tenant's up-to-1440x VirtualClock must
+    // never gate this), so the reap threshold has to be measured the same way.
+    await reconcileOrphanedAdmissions(ctx, new RealClock().now());
     return result;
   }
 
