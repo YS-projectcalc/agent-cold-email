@@ -542,3 +542,159 @@ to file a real ticket or to throw — never to return a ticketId that does not e
   reasoning, which is the subtlest logic in the guard.
 - **NEW-3.** Round-1 NEW observations still stand: the ops digest is unbounded and
   all-tenants, and no ticket-close path exists.
+
+---
+---
+
+# ROUND 3 — final re-attack (2026-08-11)
+
+**HEAD** `83ed2a00c535e413a923e9692a73bd54e428635a` (`git rev-parse HEAD`; parent `1130344`).
+**Reviewed diff** `git diff 1130344..HEAD` — 6 files, +478/−31. Read-only git; execution in
+fresh `git archive` sandboxes (`r3-sandbox`, `r3-probe`).
+
+## ROUND 3 VERDICT — **SHIP** (0 blocking; 1 residual ledgered, with a correction to its mitigation plan)
+
+N-1 is closed. Every round-3 checklist item passes, no new seam was opened by the
+compensation, and the round-1 atomicity is intact. The known residual is real — I reproduced
+it — and it is **exactly as narrow as the ruling assumed**: unreachable under a single fault,
+unreachable without concurrency, and it requires an identical `(body, urgency)` twin. I agree
+it is ship-acceptable.
+
+**One correction the ledger entry must carry:** the proposed reconcile-sweep fast-follow
+(over log-rows-with-no-D1-ticket) **does not close this residual.** After revocation there is
+no log row left to reconcile — I measured zero. The sweep is still worth building because it
+closes isolate-death, which is a different and genuinely uncovered case, but it should not be
+recorded as the fix for the concurrent-twin residual. Only the two-phase confirmed flag the
+guard's own doc describes would close that.
+
+**Battery re-run independently:**
+
+```
+apps/platform  npx vitest run   →  Test Files 167 passed (167)   Tests 1561 passed (1561)
+npm run typecheck (root)        →  5 workspaces, 0 TS errors
+```
+
+Exactly the builder's claimed `167f/1561t` (+4) and typecheck ×5.
+
+---
+
+## Checklist results
+
+### (a) The N-1 break, re-run exactly — PASS
+
+Driven with `envWithFailingD1Statements` (reads healthy, one statement failing) — the
+reachability model I established in round 2, which the builder adopted verbatim in
+`helpers.ts:dbFailingStatements`.
+
+```
+R3-A1  ticket-WRITE leg fails → call throws; agent_contact_log rows after = 0 (revoked)
+       retry → ticketId RESOLVES in D1, 1 ops email, operator received the text.   ✅
+R3-A3  contact-email READ leg fails → identical compensation, log rows = 0, retry real. ✅
+R3-A4  5 sequential retries under SUSTAINED write failure → threw 5/5, phantom 0/5,
+       log = 0.  The round-2 stickiness (4/4 phantom for the dedup hour) is gone.   ✅
+R3-A2  both slots released: after a revoked call the next message emails IMMEDIATELY
+       (1 email, so the throttle clock was not burnt) and the cap still admits
+       exactly 5 (so the rate slot was not burnt).                                  ✅
+```
+
+### (b) The compensation is synchronous and does not leak into the happy path — PASS
+
+`revokeAdmission` (`contact-operator-guard.ts:196`) is `ctx.sql.exec` DELETE scoped by
+`tenant_id AND id`, then the equally synchronous `releaseEmailClaim`. Grepping the guard for
+`await|async|env.DB|fetch(` still returns comment lines only, so there is **no await between
+the admission commit and its undo** — the compensation cannot itself open a gate. The
+`try` boundary in `contact-operator.ts:80-116` wraps **only** the two D1 record legs; the
+mailer block sits outside it, so a send failure does not revoke an admission whose ticket
+landed (I checked this specifically as an over-trigger attack — the boundary is drawn
+correctly).
+
+`R3-B1`: 100 parallel healthy calls → `201=5, 429=95`, D1 = 5, log = 5, emails = 1.
+Round-1 atomicity intact.
+
+### (c) The known residual — CONFIRMED NARROW, ruling upheld
+
+I tried to widen it along all three axes the ruling depends on:
+
+```
+R3-C1  SINGLE fault, NO concurrency (sequential, D1 degraded)
+       → log rows left behind = 0.  No doomed row can ever be deduped against.   NOT REACHABLE
+R3-C2  CONCURRENCY, NO fault (20 parallel identical bodies, healthy D1)
+       → 1 D1 ticket, 1 distinct returned id, 0 phantom ids.                      NOT REACHABLE
+R3-C4  DOUBLE FAULT but DISTINCT bodies (5 parallel, D1 degraded)
+       → 0 phantoms, 0 log residue.  Identical (body,urgency) IS required.        NOT REACHABLE
+R3-C3  THE DOUBLE FAULT (3 parallel IDENTICAL, D1 degraded)
+       → results: ["threw", "ok:sup_0a9b16ff…", "ok:sup_0a9b16ff…"]
+         D1 tickets = 0, log rows = 0, PHANTOM returns = 2                        REPRODUCES
+R3-C5  is the phantom lasting?  log rows after the burst = 0, and a post-recovery
+       sequential retry files a REAL ticket.                                      SELF-HEALS
+```
+
+So the residual requires **concurrency AND a partial D1 fault AND an identical
+`(body, urgency)` twin**, all three, and it leaves no lasting state. That matches the ruling.
+
+**Two honest refinements to the ruling's reasoning, neither of which changes the verdict:**
+
+1. *"the ORIGINATING call throws (agent gets a signal)"* — true but thin. Of three concurrent
+   twins, **one threw and two returned a phantom `201`**. The signal is the minority response.
+   An agent that fans out N identical retries sees one error and N−1 successes and will
+   reasonably conclude success. The mitigating fact is not the error signal; it is that the
+   trigger needs a simultaneous identical twin during a D1 degradation, and that the message
+   loss is transient (the next retry after recovery lands).
+2. *"a reconcile sweep over log-rows-with-no-D1-ticket … also covers isolate-death"* — the
+   isolate-death half is right, and that case is genuinely uncovered today, so the sweep is
+   worth building. But it **cannot** cover the C3 residual: `R3-C3`/`R3-C5` both measured
+   **zero** surviving log rows, because revocation is what removes them. Ledger it as
+   "closes isolate-death; the concurrent-twin residual needs the two-phase confirmed flag."
+
+### (d) New seams from the compensation — PASS
+
+```
+R3-D1  OVER-DELETE: 1 doomed + 2 healthy concurrent callers
+       → outcomes ["threw","ok","ok"]; D1 bodies == log bodies == ["healthy one","healthy two"]
+       The DELETE is keyed on the caller's OWN minted id (+ tenant_id); it cannot
+       reach a concurrent caller's row.                                              ✅
+R3-D2  HELD RESURFACE: a revoked call that had CLAIMED a held message
+       → MSG A carried in exactly 1 email, MSG B in exactly 1 email.
+       Releasing the claim is always correct here because the revoke path runs
+       strictly BEFORE the mailer block, so the email provably never went out.       ✅
+R3-D3  24h prune test: the builder's new test is real, not coverage theater — it seeds
+       aged+delivered / aged+held / aged-but-sent-recently / fresh, asserts exactly which
+       survive, AND asserts the behavioural consequence (the new message is HELD, proving
+       the preserved row still anchors the throttle clock).                          ✅
+```
+
+## Round-3 attacks that failed
+
+- Re-ran the N-1 break on both D1 legs, sequentially and under sustained failure — compensated
+  every time, never a phantom.
+- Tried to make the compensation over-trigger by failing the mailer instead of D1 — the `try`
+  boundary excludes the mailer, so the admission correctly survives.
+- Tried to make `revokeAdmission` delete a concurrent healthy caller's admission — keyed on the
+  caller's own id plus tenant, so no.
+- Tried to resurface an already-delivered message through the claim release — carried once.
+- Tried to widen the residual to a single fault, to no-fault concurrency, and to distinct
+  bodies — none reachable.
+- Tried to leave a lasting phantom after a double-fault burst — self-heals to zero rows.
+- Re-ran the round-1 100-parallel healthy burst to confirm the compensation did not reintroduce
+  a race — still exactly 5 tickets / 1 email.
+
+## Round-3 UNVERIFIABLE
+
+- The C3 residual can only be driven at engine level, because a partial D1 degradation cannot
+  be injected through the live HTTP route (the route uses the Worker's real binding). Note the
+  direction of the error: three calls entering the function inside one `withTenantContext` are
+  *more* tightly interleaved than three separate DO RPCs would be, so the measured window is an
+  **upper bound** on real reachability — the production residual is at most this narrow.
+- Production-edge behaviour at scale, and the real Email Service's handling of the fence
+  markers, remain unmeasured (unchanged from rounds 1-2, and no longer load-bearing).
+
+## NEW (out-of-scope) observations — round 3, no verdict weight
+
+- **NEW-4.** Because a revoked call frees its own rate slot, the 5/hour cap is not enforced
+  while every call is failing: `R3-D3` ran 30 sequential calls under a sustained write outage —
+  30 throws, 0 tickets, 0 emails, 0 log rows, but 2 D1 round-trips each, uncapped, against an
+  already-degraded D1. It fails closed on every effect, and the agent is receiving errors, so
+  this is a mild retry-amplification note rather than a defect — worth a line in the ledger
+  beside the reconcile sweep.
+- **NEW-5.** Round-1/2 NEW observations still stand (unbounded all-tenant ops digest, no
+  ticket-close path).
