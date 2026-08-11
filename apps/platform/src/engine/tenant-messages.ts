@@ -121,6 +121,10 @@ export interface EmitOperatorMessageInput {
   kind: string;
   severity: TenantMessageSeverity;
   body: string;
+  // msgchannel Inc5 — optional back-reference (e.g. a contact_operator
+  // ticket id) surfaced verbatim on the emitted message's actionHint.regarding
+  // (admin/schemas.ts's AdminOperatorMessageInput doc has the full rationale).
+  regarding?: string;
 }
 
 /**
@@ -143,7 +147,13 @@ export interface EmitOperatorMessageInput {
  * maintain because there is no default-deny to exempt from.
  */
 export function emitOperatorMessage(ctx: TenantContext, input: EmitOperatorMessageInput): void {
-  emitTenantMessage(ctx, { kind: input.kind, severity: input.severity, body: input.body, source: "operator" });
+  emitTenantMessage(ctx, {
+    kind: input.kind,
+    severity: input.severity,
+    body: input.body,
+    source: "operator",
+    actionHint: input.regarding ? { regarding: input.regarding } : undefined,
+  });
 }
 
 interface TenantMessageRow {

@@ -1,7 +1,8 @@
 import { Hono } from "hono";
-import { ListMessagesQueryInput } from "@coldstart/shared";
+import { ContactOperatorInput, ListMessagesQueryInput } from "@coldstart/shared";
 import type { Env } from "../env.js";
 import type { AuthedVariables } from "../require-auth.js";
+import { parseJsonBody } from "../validate.js";
 
 // msgchannel increment 3 (2026-08-06) — REST facade for the SAME TenantDO
 // methods the MCP tools list_messages/ack_message call (parity law, matching
@@ -27,4 +28,14 @@ export const messagesRoute = new Hono<{ Bindings: Env; Variables: AuthedVariable
     const id = c.req.param("id");
     const result = await c.get("tenantStub").ackMessage(id);
     return c.json(result);
+  })
+  // msgchannel Inc5 (founder-ratified 2026-08-11) — REST parity for the MCP
+  // `contact_operator` tool (mcp/tools.ts), the SAME TenantDO RPC (parity
+  // law). Body-keyed (mirrors leads.ts's suppress/disposition routes) — there
+  // is no id to put in the URL, this call MINTS a new ticket id.
+  .post("/messages/contact-operator", async (c) => {
+    const parsed = await parseJsonBody(c, ContactOperatorInput);
+    if (!parsed.ok) return parsed.response;
+    const result = await c.get("tenantStub").contactOperator(parsed.data);
+    return c.json(result, 201);
   });

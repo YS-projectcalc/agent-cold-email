@@ -64,6 +64,9 @@ const EXPECTED_TOOL_NAMES = [
   // msgchannel increment 3 — tools 26-27 (system->agent message channel).
   "list_messages",
   "ack_message",
+  // msgchannel Inc5 (founder-ratified 2026-08-11) — tool 28, the reverse
+  // (agent->operator) leg.
+  "contact_operator",
 ];
 
 describe("POST /mcp — hosted MCP JSON-RPC 2.0 endpoint", () => {
@@ -94,12 +97,12 @@ describe("POST /mcp — hosted MCP JSON-RPC 2.0 endpoint", () => {
     expect(res.body).toBeUndefined();
   });
 
-  it("tools/list returns exactly the 27 tools with a JSON-Schema inputSchema each — no auth required", async () => {
+  it("tools/list returns exactly the 28 tools with a JSON-Schema inputSchema each — no auth required", async () => {
     const res = await api<JsonRpcSuccess<ToolListResult>>("/mcp", { method: "POST", body: rpc("tools/list") });
     expect(res.status).toBe(200);
     const names = res.body.result.tools.map((t) => t.name);
     expect(names).toEqual(EXPECTED_TOOL_NAMES);
-    expect(res.body.result.tools).toHaveLength(27);
+    expect(res.body.result.tools).toHaveLength(28);
     for (const t of res.body.result.tools) {
       expect(typeof t.description).toBe("string");
       expect(t.description.length).toBeGreaterThan(0);

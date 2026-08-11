@@ -1,3 +1,4 @@
+import { refuseControlChars } from "@coldstart/shared";
 import { z } from "zod";
 
 // POST /admin/support/triage body — an inbound support message. `tenantId`
@@ -45,5 +46,15 @@ export const AdminOperatorMessageInput = z.object({
   kind: z.enum(["operator_notice"]),
   severity: z.enum(["info", "action_required"]).default("info"),
   body: z.string().min(1).max(2000),
+  // msgchannel Inc5 — OPTIONAL back-reference to the contact_operator ticket
+  // this reply answers (e.g. a `sup_...` ticket id), surfaced VERBATIM on the
+  // resulting message's `actionHint.regarding` (engine/tenant-messages.ts's
+  // emitOperatorMessage) so the agent can correlate a reply to its own
+  // earlier contact_operator call. Additive: omitting it is byte-identical
+  // to today (no actionHint at all) — no threading/conversation machinery,
+  // just a plain string round-trip. Same control/bidi refusal as the agent
+  // side (intents.ts) — it round-trips verbatim to the agent, and a value
+  // carrying a NUL or an RTL override is malformed input on either end.
+  regarding: refuseControlChars(z.string().min(1).max(200)).optional(),
 });
 export type AdminOperatorMessageInput = z.infer<typeof AdminOperatorMessageInput>;

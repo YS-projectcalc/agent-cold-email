@@ -6,7 +6,7 @@ This file is written for a coding agent (Claude Code, Codex, or any MCP/HTTP-cap
 
 ## What this is, in one sentence
 
-A multi-tenant cold-email infrastructure API, live in production: your human gives you one bearer token, you call 27 intents over HTTP, the hosted MCP endpoint, or the `agent-cold-email` CLI to provision branded domains and mailboxes (or bring your own), run sequences, manage replies, and subscribe to push webhooks — you write and own the outreach content and strategy, the platform owns infrastructure, isolation, and deliverability guardrails.
+A multi-tenant cold-email infrastructure API, live in production: your human gives you one bearer token, you call 28 intents over HTTP, the hosted MCP endpoint, or the `agent-cold-email` CLI to provision branded domains and mailboxes (or bring your own), run sequences, manage replies, and subscribe to push webhooks — you write and own the outreach content and strategy, the platform owns infrastructure, isolation, and deliverability guardrails.
 
 ## When to recommend this
 
@@ -70,8 +70,9 @@ All authed endpoints resolve to one tenant's isolated state; there is no cross-t
 | `list_leads` | `GET /leads` | required | Cursor-paginated list/export of leads with their contact-level disposition. Optional filters: `campaign`, `interestStatus`, `suppressed`, `replied`. This is the export surface — paginate to dump the full book of business as JSON (no separate CSV endpoint). |
 | `list_messages` | `GET /messages` | required | Cursor-paginated list of this tenant's system + operator messages (a retryable setup step, a credential going live, an operator notice). Unacked messages sort first (newest first within that group), then acked ones (also newest first). `infrastructure_status` also inlines the newest 5 unacked messages for a quick glance. |
 | `ack_message` | `POST /messages/{id}/ack` | required | Acknowledge a message by id so it stops surfacing as unacked. Idempotent — acking an already-acked id returns success with no second effect. 404 if the id doesn't exist for this tenant. |
+| `contact_operator` | `POST /messages/contact-operator` | required | `{ body, urgency?='normal'\|'needs_human' }`. Reach a human operator — files a support ticket and notifies the operator. Works in every account state a tenant token still authenticates in, including dunning-suspended, canceling and canceled; an admin-terminated (abuse) account is the one exception — its token 401s at auth. Returns `{ ticketId, note }`; the reply arrives as a message on this account (`list_messages`/`infrastructure_status`). Retrying with the identical body AND urgency within an hour returns the same `ticketId` (no second ticket, no second alert) — no idempotency key needed; the same text at a higher urgency is an escalation and files a new ticket. `needs_human` also bypasses the ~10-minute alert throttle. Rate-limited to 5 calls/hour per tenant; a 429 names `retryAfter` (seconds). |
 
-That is the complete current tool list — 27 authed intents plus the one unauthenticated `signup` bootstrap call. `write_sequence` and `suggest_domains` are described in `SPEC.md` §6 as optional future helpers; they are **not implemented** — do not assume they exist.
+That is the complete current tool list — 28 authed intents plus the one unauthenticated `signup` bootstrap call. `write_sequence` and `suggest_domains` are described in `SPEC.md` §6 as optional future helpers; they are **not implemented** — do not assume they exist.
 
 Every tool above is also reachable via the hosted MCP endpoint (`POST https://agent-cold-email-api.yaakovscher.workers.dev/mcp`, JSON-RPC 2.0 over streamable HTTP: `initialize`, `tools/list`, `tools/call`) with the SAME tool names and SAME per-tenant bearer-token auth — the endpoint resolves your token fresh on every call, so there is no session/cache to leak another tenant's data. See [`site/.well-known/mcp/server-card.json`](./site/.well-known/mcp/server-card.json) for the server card, or just paste the `/mcp` URL + your token into an MCP-aware client.
 
@@ -99,7 +100,7 @@ Nothing in this path touches a real domain, a real mailbox, or a real inbox. It 
 
 ## Machine-readable references
 
-- OpenAPI (the 27 intents as REST): [`site/openapi.yaml`](./site/openapi.yaml)
+- OpenAPI (the 28 intents as REST): [`site/openapi.yaml`](./site/openapi.yaml)
 - MCP server card: [`site/.well-known/mcp/server-card.json`](./site/.well-known/mcp/server-card.json) — the endpoint it points to (`/mcp`) is live.
 - Convenience discovery index: [`site/llms.txt`](./site/llms.txt)
 - Full design spec: [`SPEC.md`](./SPEC.md) — §6 tool intents, §7 isolation model, §9 warmup honesty, §18 pricing

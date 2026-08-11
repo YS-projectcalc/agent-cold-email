@@ -19,6 +19,13 @@ export interface SupportTicketRow {
   draft: string | null;
   status: "open" | "escalated" | "closed";
   createdAt: number;
+  // msgchannel Inc5 (migrations/0017) — 'email' (triaged inbound support mail)
+  // vs 'agent' (a tenant's coding agent calling contact_operator). The whole
+  // reason 0017 added the column is that the operator has to be able to tell
+  // them apart, and an agent ticket's `fromEmail` is the tenant's REAL contact
+  // address on a body the customer never wrote, so the digest must say so
+  // rather than leave it inferable from a subject prefix.
+  source: "email" | "agent";
 }
 
 /**
@@ -27,6 +34,11 @@ export interface SupportTicketRow {
  * inbound email can't create two tickets. `messageId` NULL (operator/console
  * tickets) never dedupes — NULLs are distinct in SQLite. Returns `true` only
  * when a NEW row was recorded (mirrors insertDunningEventIfNew).
+ *
+ * `source`/`emailSentAt` (msgchannel Inc5, migrations/0017) default to
+ * 'email'/null — every pre-existing caller (support-inbound.ts,
+ * routes/admin-support.ts) omits both and is byte-identical; only
+ * engine/contact-operator.ts passes `source: 'agent'`.
  */
 export async function insertSupportTicket(
   env: Env,
@@ -41,11 +53,13 @@ export async function insertSupportTicket(
     status: "open" | "escalated";
     createdAt: number;
     messageId?: string | null;
+    source?: "email" | "agent";
+    emailSentAt?: number | null;
   },
 ): Promise<boolean> {
   const result = await env.DB.prepare(
-    `INSERT OR IGNORE INTO support_tickets (id, from_email, subject, body, tenant_id, category, draft, status, created_at, message_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR IGNORE INTO support_tickets (id, from_email, subject, body, tenant_id, category, draft, status, created_at, message_id, source, email_sent_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       params.id,
@@ -58,9 +72,37 @@ export async function insertSupportTicket(
       params.status,
       params.createdAt,
       params.messageId ?? null,
+      params.source ?? "email",
+      params.emailSentAt ?? null,
     )
     .run();
   return (result.meta.changes ?? 0) > 0;
+}
+
+/**
+ * msgchannel Inc5 — stamps `email_sent_at` on every ticket an ops email
+ * actually carried, AFTER the send lands (never before — engine/
+ * contact-operator.ts inserts every ticket with `email_sent_at: null` first,
+ * so a send that throws leaves the rows honestly un-emailed and their text
+ * rolls into the NEXT successful send, mirroring support-inbound.ts's own
+ * "the ticket is already persisted, which is the durable record" posture for
+ * its best-effort forward leg). Takes a LIST because one email carries the
+ * new ticket plus every message the throttle had held back.
+ *
+ * This is a RECORD write, never a decision input: the guard's own state lives
+ * in DO storage (engine/contact-operator-guard.ts) precisely because reading
+ * D1 to decide cannot be atomic. Scoped by `tenantId` as well as id — the ids
+ * are DO-local UUIDs so a collision is not a practical risk, but this is a
+ * cross-tenant table and CLAUDE.md rule (h) wants the scope on every query
+ * (its DO-side twins stampEmailed/releaseEmailClaim both carry it).
+ */
+export async function markSupportTicketsEmailed(env: Env, tenantId: string, ids: string[], sentAt: number): Promise<void> {
+  if (ids.length === 0) return;
+  await env.DB.prepare(
+    `UPDATE support_tickets SET email_sent_at = ? WHERE tenant_id = ? AND id IN (${ids.map(() => "?").join(", ")})`,
+  )
+    .bind(sentAt, tenantId, ...ids)
+    .run();
 }
 
 interface SupportTicketD1Row {
@@ -73,6 +115,7 @@ interface SupportTicketD1Row {
   draft: string | null;
   status: "open" | "escalated" | "closed";
   created_at: number;
+  source: "email" | "agent";
 }
 
 function fromD1Row(row: SupportTicketD1Row): SupportTicketRow {
@@ -86,13 +129,14 @@ function fromD1Row(row: SupportTicketD1Row): SupportTicketRow {
     draft: row.draft,
     status: row.status,
     createdAt: row.created_at,
+    source: row.source,
   };
 }
 
 /** GET /admin/support/digest — every ticket still needing the owner's attention (brief: "open/escalated tickets"). */
 export async function listOpenAndEscalatedSupportTickets(env: Env): Promise<SupportTicketRow[]> {
   const result = await env.DB.prepare(
-    `SELECT id, from_email, subject, body, tenant_id, category, draft, status, created_at
+    `SELECT id, from_email, subject, body, tenant_id, category, draft, status, created_at, source
      FROM support_tickets WHERE status IN ('open', 'escalated') ORDER BY created_at DESC`,
   ).all<SupportTicketD1Row>();
   return result.results.map(fromD1Row);

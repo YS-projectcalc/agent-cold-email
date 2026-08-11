@@ -33,6 +33,7 @@ interface StructuredError extends Error {
   existingCampaignId?: string;
   reason?: string;
   step?: string;
+  retryAfter?: number;
 }
 
 /**
@@ -60,7 +61,13 @@ export function toErrorResponse(err: unknown): ErrorResponse {
   if (name === "ValidationError") return { status: 400, body: { error: message } };
   if (name === "NotFoundError") return { status: 404, body: { error: message } };
   if (name === "TenantIsolationError") return { status: 403, body: { error: message } };
-  if (name === "RateLimitError") return { status: 429, body: { error: message } };
+  // msgchannel Inc5 — retryAfter (seconds) is present only when the throw
+  // site supplied one (contact_operator's storm guard); every other
+  // RateLimitError site (demo-run) omits it and keeps its plain body.
+  if (name === "RateLimitError") {
+    const retryAfter = error?.retryAfter;
+    return { status: 429, body: { error: message, ...(retryAfter !== undefined ? { retryAfter } : {}) } };
+  }
   if (name === "RequestInProgressError") return { status: 409, body: { error: message } };
   // The refusal has to carry the campaign that already exists, or the caller
   // cannot tell a duplicate-submit refusal from a real failure to launch.

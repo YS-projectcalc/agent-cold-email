@@ -137,6 +137,45 @@ export const MarkInput = z.object({
 });
 export type MarkInput = z.infer<typeof MarkInput>;
 
+// C0/C1 controls (minus the three whitespace characters real prose uses) plus
+// the bidi/format family. A NUL in an email body is a spam-filter and
+// log-hygiene liability, and a U+202E override can visually REORDER text so
+// that agent-authored prose renders as though it were one of the platform's
+// own server-composed trailer lines — the twin of the untrusted-content fence
+// in engine/contact-operator.ts (gate msgchannel-inc5-2026-08-11 finding #4).
+// Refused at the boundary rather than stripped: this text becomes the durable
+// operator-visible record, and silently rewriting a customer's support message
+// is worse than telling its agent the message was malformed.
+const CONTROL_OR_BIDI_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069\uFEFF]/;
+
+export function hasControlOrBidiChars(value: string): boolean {
+  return CONTROL_OR_BIDI_CHARS.test(value);
+}
+
+/** Shared refinement for any free-text field that reaches an ops email or the operator digest. */
+export function refuseControlChars<T extends z.ZodType<string>>(schema: T) {
+  return schema.refine((v) => !hasControlOrBidiChars(v), {
+    message: "must not contain control or bidirectional-override characters (tab, newline and carriage return are allowed)",
+  });
+}
+
+// msgchannel Inc5 (founder-ratified 2026-08-11) — the agent->operator
+// direction (the reverse of tenant_messages' system/operator->agent channel).
+// `body` shares AdminOperatorMessageInput's own 2000-char bound (admin/
+// schemas.ts) — both ends of the same conversation, same ceiling.
+// `needs_human` doesn't change what gets stored structurally; it flags the
+// ops email/ticket so an operator triaging the digest can tell "routine" from
+// "an agent is stuck and waiting on a human" at a glance, and it BYPASSES the
+// ops-email throttle (engine/contact-operator-guard.ts) — an urgent message
+// that only lands in a pull-only digest is the flag not doing its job. It is
+// still bounded by the 5-calls/hour cap, so the bypass can't become a storm
+// vector of its own.
+export const ContactOperatorInput = z.object({
+  body: refuseControlChars(z.string().min(1).max(2000)),
+  urgency: z.enum(["normal", "needs_human"]).default("normal"),
+});
+export type ContactOperatorInput = z.infer<typeof ContactOperatorInput>;
+
 // Money path — the quantity-billing migration (design §2/§3) replaces the
 // retired plan-tier enum with a mailbox count + billing interval. Checkout
 // subscribes the tenant to the single `managed` plan on the per-mailbox curve:

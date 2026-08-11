@@ -172,9 +172,18 @@ export class TenantIsolationError extends Error {
  * The Worker's onError maps this to HTTP 429. Used by the demo-run throttle
  * (TenantDO.demoRun); the /signup per-IP limiter returns 429 directly at the
  * HTTP layer without throwing (see routes/signup.ts).
+ *
+ * `retryAfter` (seconds) is OPTIONAL — msgchannel Inc5's contact_operator
+ * storm guard (engine/contact-operator.ts) is the first caller to pass it, so
+ * a caller can tell an agent exactly when its window clears instead of just
+ * "try again"; every existing throw site (demo-run) omits it and is
+ * unaffected (error-response.ts only includes the field when present).
  */
 export class RateLimitError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    public readonly retryAfter?: number,
+  ) {
     super(message);
     this.name = "RateLimitError";
   }

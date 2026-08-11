@@ -111,10 +111,10 @@ npx agent-cold-email campaign launch --file campaign.json</code></pre>
   -H 'Content-Type: application/json' \
   -d '{"mailboxes":5}'
 # → { "mode": "stripe", "url": "https://checkout.stripe.com/...", "sessionId": "cs_..." }</code></pre>
-  <p><code>POST /checkout</code> returns a hosted Stripe payment link — open the <code>url</code> and pay. This endpoint is HTTP-only; it is not one of the 27 MCP tools, so an agent operating purely over MCP should hand this step to the owner (or call it directly if the agent has HTTP access). <strong>Promotion codes are entered on Stripe's own checkout page</strong>, via its "Add promotion code" link — the API deliberately has no coupon-code field of its own. The <code>mailboxes</code> field seeds the initial quote only — the subscription charge actually follows your provisioned mailbox count (5-mailbox floor, $10/month each beyond), which then tracks up or down as mailboxes provision or are released. After payment, real mailbox provisioning is automatic; the only remaining step is mailbox send-authorization completing on our side.</p>
+  <p><code>POST /checkout</code> returns a hosted Stripe payment link — open the <code>url</code> and pay. This endpoint is HTTP-only; it is not one of the 28 MCP tools, so an agent operating purely over MCP should hand this step to the owner (or call it directly if the agent has HTTP access). <strong>Promotion codes are entered on Stripe's own checkout page</strong>, via its "Add promotion code" link — the API deliberately has no coupon-code field of its own. The <code>mailboxes</code> field seeds the initial quote only — the subscription charge actually follows your provisioned mailbox count (5-mailbox floor, $10/month each beyond), which then tracks up or down as mailboxes provision or are released. After payment, real mailbox provisioning is automatic; the only remaining step is mailbox send-authorization completing on our side.</p>
 
   <h2 id="tools">Tool reference</h2>
-  <p>All 27 authed intents, plus the one unauthenticated bootstrap call. Full JSON Schemas: <a href="openapi.yaml">openapi.yaml</a>.</p>
+  <p>All 28 authed intents, plus the one unauthenticated bootstrap call. Full JSON Schemas: <a href="openapi.yaml">openapi.yaml</a>.</p>
   <table>
     <thead><tr><th>Tool</th><th>HTTP</th><th>Body / params</th></tr></thead>
     <tbody>

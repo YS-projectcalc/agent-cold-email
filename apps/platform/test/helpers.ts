@@ -381,3 +381,31 @@ export function deadDb(): D1Database {
 export function envWithDeadDb(): Env {
   return { ...env, DB: deadDb() } as unknown as Env;
 }
+
+/**
+ * A D1 binding where reads and most writes work normally but any statement
+ * matching `sqlPattern` throws — a PARTIAL degradation, which is the only
+ * D1 failure shape most engine code can actually observe. A total outage
+ * never reaches an engine function: auth resolves the tenant through D1
+ * (`require-auth.ts` -> `lookupTenantByTokenHash`), so the request fails
+ * upstream. Anything that commits state before its D1 record has to survive
+ * THIS shape, not just `deadDb()`.
+ */
+export function dbFailingStatements(sqlPattern: RegExp): D1Database {
+  const real = env.DB;
+  const boom = () => {
+    throw new Error("D1_ERROR: Network connection lost.");
+  };
+  const dead = { bind: () => dead, first: boom, all: boom, run: boom, raw: boom };
+  return {
+    prepare: (query: string) => (sqlPattern.test(query) ? dead : real.prepare(query)),
+    batch: (statements: D1PreparedStatement[]) => real.batch(statements),
+    exec: (query: string) => real.exec(query),
+    withSession: (constraint?: string) => real.withSession(constraint),
+  } as unknown as D1Database;
+}
+
+/** `env` whose D1 fails only on statements matching `sqlPattern`. */
+export function envWithFailingD1Statements(sqlPattern: RegExp): Env {
+  return { ...env, DB: dbFailingStatements(sqlPattern) } as unknown as Env;
+}

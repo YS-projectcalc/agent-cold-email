@@ -4,6 +4,7 @@ import type {
   ActivityQueryInput,
   CheckoutInput,
   ConnectByoMailboxInput,
+  ContactOperatorInput,
   DashboardLayout,
   DomainPort,
   InboxQueryInput,
@@ -59,6 +60,7 @@ import {
   type EmitOperatorMessageInput,
   type MessageListPage,
 } from "./engine/tenant-messages.js";
+import { contactOperator, type ContactOperatorResult } from "./engine/contact-operator.js";
 import { runPollInbox } from "./engine/reply-processor.js";
 import { suppressLead, unsubscribeEmail, type UnsubscribeResult } from "./engine/suppression.js";
 import { upsertLeadDisposition, type LeadDispositionView } from "./engine/lead-dispositions.js";
@@ -1042,6 +1044,20 @@ export class TenantDO extends DurableObject<Env> {
 
   ackMessage(id: string): AckMessageResult {
     return ackMessage(this.requireContext(), id);
+  }
+
+  /**
+   * msgchannel Inc5 — the reverse leg (agent->operator), called by BOTH
+   * `contact_operator` (MCP) and POST /messages/contact-operator (REST —
+   * routes/messages.ts), the same parity shape as list_messages/ack_message
+   * above. No mailer param exposed on the RPC surface (defaults inside
+   * engine/contact-operator.ts, same as setupInfrastructure's own
+   * `runSetupInfrastructure(ctx, input, undefined, ...)` — a test that needs
+   * to inspect the ops email injects a SandboxOpsMailer by calling
+   * contactOperator directly via withTenantContext instead of through this RPC).
+   */
+  async contactOperator(input: ContactOperatorInput): Promise<ContactOperatorResult> {
+    return contactOperator(this.requireContext(), input);
   }
 
   // --- D5 lifecycle: voluntary cancel (tenant-authed, POST /cancel) + abuse
