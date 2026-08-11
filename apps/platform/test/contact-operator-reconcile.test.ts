@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { insertSupportTicket } from "../src/admin/db.js";
 import { runDeliverabilitySweepAllTenants } from "../src/admin/ops-sweep.js";
 import { contactOperator } from "../src/engine/contact-operator.js";
+import { EMAIL_THROTTLE_MS } from "../src/engine/contact-operator-guard.js";
 import { ISOLATE_DEATH_REAP_TTL_MS, reconcileOrphanedAdmissions } from "../src/engine/contact-operator-reconcile.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
 import { newId } from "../src/schema.js";
@@ -141,25 +142,37 @@ describe("reconcileOrphanedAdmissions — isolate-death fast-follow", () => {
     await withTenantContext(wedgedTenant, (ctx) => seedLogRow(ctx.sql, wedgedTenant, wedgedOrphan, old));
     await withTenantContext(healthyTenant, (ctx) => seedLogRow(ctx.sql, healthyTenant, healthyOrphan, old));
 
-    // Fault-inject the real path: patch env.DB.prepare so the reconcile's
-    // ticket lookup throws ONLY when bound to the wedged tenant's id —
-    // mirrors spend-ceiling.test.ts's own per-row fault-injection technique.
+    // Fault-inject the real path. The candidate lookup now goes through
+    // env.DB.batch() (gate BLOCKING-1 fix), one round trip for a whole
+    // tenant's chunks — a real D1 connection failure fails that WHOLE batch
+    // call, not one statement inside it, so the injection has to fail at the
+    // batch() layer rather than swapping out an individual statement's
+    // .bind() return value for an incompatible stub (that shape mismatch
+    // used to reach batch() and throw ITS OWN unrelated Zod parse error
+    // instead of the intended simulated failure — same assertions passed,
+    // wrong mechanism). Mirrors spend-ceiling.test.ts's per-row
+    // fault-injection technique, adapted to a batched call: tag which bound
+    // statements belong to the wedged tenant, then fail the whole batch if
+    // any of them are in it.
     const originalPrepare = env.DB.prepare.bind(env.DB);
+    const originalBatch = env.DB.batch.bind(env.DB);
+    const poisonedStatements = new WeakSet<D1PreparedStatement>();
     (env.DB as any).prepare = (sql: string) => {
       const stmt = originalPrepare(sql);
       if (!sql.startsWith("SELECT id FROM support_tickets WHERE tenant_id")) return stmt;
       const originalBind = stmt.bind.bind(stmt);
       stmt.bind = (...args: unknown[]) => {
-        if (args[0] === wedgedTenant) {
-          return {
-            all: async () => {
-              throw new Error("simulated transient D1 read failure");
-            },
-          } as any;
-        }
-        return originalBind(...args);
+        const bound = originalBind(...args);
+        if (args[0] === wedgedTenant) poisonedStatements.add(bound);
+        return bound;
       };
       return stmt;
+    };
+    (env.DB as any).batch = (statements: D1PreparedStatement[]) => {
+      if (statements.some((s) => poisonedStatements.has(s))) {
+        return Promise.reject(new Error("simulated transient D1 read failure"));
+      }
+      return originalBatch(statements);
     };
 
     try {
@@ -167,6 +180,7 @@ describe("reconcileOrphanedAdmissions — isolate-death fast-follow", () => {
       expect(summary.errors).toBeGreaterThanOrEqual(1);
     } finally {
       env.DB.prepare = originalPrepare;
+      env.DB.batch = originalBatch;
     }
 
     // The wedged tenant's orphan is untouched — its whole deliverabilitySweep
@@ -188,5 +202,91 @@ describe("wired into TenantDO.deliverabilitySweep() — the existing cron leg", 
     await tenantStub(tenantId).deliverabilitySweep();
 
     expect(await withTenantContext(tenantId, (ctx) => logRowIds(ctx.sql, tenantId))).toHaveLength(0);
+  });
+});
+
+// Gate BLOCKING-1 (docs/adversarial/inc5-reconcile-sweep-gate-2026-08-11.md):
+// the candidate-ticket lookup built ONE D1 statement with 1 + candidates.length
+// bound parameters, no chunk, no LIMIT — D1's real ceiling is 100 bound
+// parameters per statement (ofac/sdn-list.ts:13-19, empirically confirmed),
+// and the guard's own header documents ~120 rows as its steady-state max at
+// 5 admissions/hour × 24h retention. 120 > 100, so the sweep died exactly
+// when the log was largest — the storm state it exists to clean up after —
+// and threw the whole tenant's deliverabilitySweep() down with it.
+describe("chunking against the D1 100-bound-parameter ceiling (gate BLOCKING-1)", () => {
+  it("reaps ALL of 150 orphans in one call — no D1_ERROR, no partial reap", async () => {
+    const { tenantId } = await mintTenant("Reconcile Chunk150 Co", "managed");
+    const now = Date.now();
+    const old = now - ISOLATE_DEATH_REAP_TTL_MS - 60_000;
+    await withTenantContext(tenantId, (ctx) => {
+      for (let i = 0; i < 150; i++) seedLogRow(ctx.sql, tenantId, newId("sup"), old, null, `orphan body ${i}`);
+    });
+
+    const result = await withTenantContext(tenantId, (ctx) => reconcileOrphanedAdmissions(ctx, now));
+    expect(result.reaped).toBe(150);
+    expect(await withTenantContext(tenantId, (ctx) => logRowIds(ctx.sql, tenantId))).toHaveLength(0);
+  });
+
+  it.each([99, 100, 101])("chunk-boundary: reaps exactly %d orphans with no D1_ERROR", async (count) => {
+    const { tenantId } = await mintTenant(`Reconcile Chunk${count} Co`, "managed");
+    const now = Date.now();
+    const old = now - ISOLATE_DEATH_REAP_TTL_MS - 60_000;
+    await withTenantContext(tenantId, (ctx) => {
+      for (let i = 0; i < count; i++) seedLogRow(ctx.sql, tenantId, newId("sup"), old, null, `boundary body ${i}`);
+    });
+
+    const result = await withTenantContext(tenantId, (ctx) => reconcileOrphanedAdmissions(ctx, now));
+    expect(result.reaped).toBe(count);
+    expect(await withTenantContext(tenantId, (ctx) => logRowIds(ctx.sql, tenantId))).toHaveLength(0);
+  });
+
+  it("a chunk boundary does not misclassify a ticketed row as orphaned (100+1 mixed set)", async () => {
+    const { tenantId } = await mintTenant("Reconcile ChunkMixed Co", "managed");
+    const now = Date.now();
+    const old = now - ISOLATE_DEATH_REAP_TTL_MS - 60_000;
+    const healthyIds: string[] = [];
+    await withTenantContext(tenantId, async (ctx) => {
+      // 100 orphans (no D1 ticket) straddling a chunk boundary, plus one
+      // healthy ticketed row seeded LAST so it lands in whichever chunk the
+      // boundary puts it in — proves chunking doesn't drop a real ticket's
+      // "still exists" signal at the seam.
+      for (let i = 0; i < 100; i++) seedLogRow(ctx.sql, tenantId, newId("sup"), old, null, `orphan ${i}`);
+      const healthyId = newId("sup");
+      healthyIds.push(healthyId);
+      await insertSupportTicket(env, {
+        id: healthyId,
+        fromEmail: `agent:${tenantId}`,
+        subject: "seed",
+        body: "a real, completed call",
+        tenantId,
+        category: "other",
+        draft: null,
+        status: "escalated",
+        createdAt: old,
+        source: "agent",
+      });
+      seedLogRow(ctx.sql, tenantId, healthyId, old, null, "a real, completed call");
+    });
+
+    const result = await withTenantContext(tenantId, (ctx) => reconcileOrphanedAdmissions(ctx, now));
+    expect(result.reaped).toBe(100);
+    expect(await withTenantContext(tenantId, (ctx) => logRowIds(ctx.sql, tenantId))).toEqual(healthyIds);
+  });
+});
+
+// Gate NON-BLOCKING-1 correction + "load-bearing, undocumented invariant"
+// observation: the sender row that stamps a batch is always younger than
+// ISOLATE_DEATH_REAP_TTL_MS (it is the call that just ran), so it is never a
+// reap candidate and its emailed_at stamp survives — but ONLY as long as
+// ISOLATE_DEATH_REAP_TTL_MS stays greater than EMAIL_THROTTLE_MS. If the reap
+// TTL were ever lowered below the throttle window, a sender row could become
+// reap-eligible before the throttle it anchors expires, and reconcile's
+// held-claim release would null out a live throttle clock — a real bypass,
+// not a cosmetic one. Mirrors this repo's R5 ordering-ladder pattern
+// (test/send-pipeline-budget.test.ts) — an assertion, not just a comment,
+// because a comment did not stop the ladder from breaking there either.
+describe("R-inc5 — the reap-vs-throttle ordering ladder is internally coherent", () => {
+  it("rung 1: the isolate-death reap TTL exceeds the ops-email throttle window", () => {
+    expect(ISOLATE_DEATH_REAP_TTL_MS).toBeGreaterThan(EMAIL_THROTTLE_MS);
   });
 });

@@ -45,7 +45,30 @@ export interface ContactOperatorReconcileResult {
   reaped: number;
 }
 
+// Rows per candidate-ticket-lookup statement. Gate BLOCKING-1 (docs/
+// adversarial/inc5-reconcile-sweep-gate-2026-08-11.md): the original code
+// built ONE `IN (...)` statement with `1 + candidates.length` bound
+// parameters — no chunk, no LIMIT — and D1's REAL per-statement ceiling is
+// 100 bound parameters (ofac/sdn-list.ts:13-19, empirically confirmed: 101
+// throws, 100 succeeds). The guard's own header documents ~120 rows as this
+// table's steady-state maximum at 5 admissions/hour × 24h retention — above
+// the ceiling, so the sweep died exactly when the log was largest, which is
+// exactly the storm state it exists to clean up after, and took the whole
+// tenant's deliverabilitySweep() down with it (a false platform-health page
+// after 3 consecutive cycles, watchtower-grading.ts's LEG_ALERT_AFTER_SWEEPS).
+// 99 ids + 1 for tenant_id stays AT the measured ceiling; chunked statements
+// are queued into one env.DB.batch() call (the sdn-list.ts INSERT_BATCH_SIZE
+// precedent) so a large backlog still costs one network round trip, not one
+// per chunk.
+const CANDIDATE_CHUNK_SIZE = 99;
+
 type CandidateRow = { id: string; emailed_at: number | null };
+
+function chunk<T>(items: readonly T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
 
 /**
  * Finds this tenant's agent_contact_log admissions older than
@@ -71,11 +94,15 @@ export async function reconcileOrphanedAdmissions(ctx: TenantContext, nowMs: num
     .toArray();
   if (candidates.length === 0) return { reaped: 0 };
 
-  const placeholders = candidates.map(() => "?").join(", ");
-  const ticketed = await ctx.env.DB.prepare(`SELECT id FROM support_tickets WHERE tenant_id = ? AND id IN (${placeholders})`)
-    .bind(ctx.tenantId, ...candidates.map((c) => c.id))
-    .all<{ id: string }>();
-  const ticketedIds = new Set(ticketed.results.map((r) => r.id));
+  const statements = chunk(candidates, CANDIDATE_CHUNK_SIZE).map((c) => {
+    const placeholders = c.map(() => "?").join(", ");
+    return ctx.env.DB.prepare(`SELECT id FROM support_tickets WHERE tenant_id = ? AND id IN (${placeholders})`).bind(
+      ctx.tenantId,
+      ...c.map((row) => row.id),
+    );
+  });
+  const results = await ctx.env.DB.batch<{ id: string }>(statements);
+  const ticketedIds = new Set(results.flatMap((r) => r.results.map((row) => row.id)));
 
   const orphans = candidates.filter((c) => !ticketedIds.has(c.id));
   for (const orphan of orphans) {

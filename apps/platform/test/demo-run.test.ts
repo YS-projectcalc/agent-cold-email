@@ -96,6 +96,44 @@ describe("POST /demo/run — sandbox-only accelerated pipeline run", () => {
     });
   });
 
+  // Class sweep (gate NO-SHIP fix round, docs/adversarial/
+  // inc5-reconcile-sweep-gate-2026-08-11.md's BLOCKING-1/NON-BLOCKING-2
+  // shape, found again by the sweep the fix round asked for — pre-existing
+  // on main, unrelated to the Inc5 lane's own diff). resetPriorDemoState's
+  // cleanup of a prior run's thread_labels rows builds ONE `IN (...)` over
+  // ALL of that run's distinct thread ids — one per lead, up to
+  // DemoRunInput's own leads.max(200) — with no chunk. A prior 200-lead run
+  // leaves 200 threads to clean up on the NEXT run, past DO SqlStorage's
+  // 100-bound-parameter ceiling (contact-operator-guard.test.ts measured the
+  // identical ceiling for the same shape).
+  it("a prior 200-lead demo run's thread cleanup does not exceed the DO SqlStorage bound-parameter ceiling", async () => {
+    const { tenantId, token } = await signup("Demo Chunk Co", "demo-chunk@test.example");
+    await api("/setup-infrastructure", {
+      method: "POST",
+      token,
+      body: JSON.stringify({ ...SETUP_BODY, brand: "Demo Chunk Co", primaryDomain: "demochunkco.com" }),
+    });
+
+    await runInDurableObject(tenantStub(tenantId), async (instance, state) => {
+      // First run: leads=200 (DemoRunInput's own max) creates up to 200
+      // distinct threads (one per lead, t_${campaignId}_${leadId}).
+      await instance.demoRun({ leads: 200, campaigns: 1 });
+      const threadCount = () => state.storage.sql.exec<{ n: number }>(`SELECT COUNT(DISTINCT thread_id) as n FROM scheduled_sends`).one().n;
+      expect(threadCount()).toBeGreaterThan(100);
+
+      // Clear the throttle so a second run is allowed — its
+      // resetPriorDemoState step must clean up ALL of the first run's
+      // threads without throwing "too many SQL variables".
+      state.storage.sql.exec(`DELETE FROM demo_run_state`);
+      await expect(instance.demoRun({ leads: 1, campaigns: 1 })).resolves.toBeDefined();
+
+      // The prior run's campaign/leads/sends are genuinely gone (the reset
+      // actually ran to completion, not just avoided throwing).
+      const countDemo = () => state.storage.sql.exec<{ n: number }>(`SELECT COUNT(*) as n FROM campaigns WHERE is_demo = 1`).one().n;
+      expect(countDemo()).toBe(1);
+    });
+  });
+
   it("structurally rejects a non-demo/free-plan tenant with 403 — never exposes tick over HTTP to real tenants", async () => {
     const { token } = await mintTenant("Paid Co", "managed");
     const res = await api("/demo/run", { method: "POST", token });

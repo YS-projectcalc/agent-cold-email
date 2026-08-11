@@ -113,25 +113,28 @@ const SURFACES_THAT_STATE_THE_COUNT = new Set([
 ]);
 
 /**
- * Strips "N<arrow>M" transition phrases ("27→28", "25 → 28", "27->28") out
- * of the flattened text before any digit-window claim check runs. A
- * transition phrase narrates HISTORY ("the registry went from 27 to 28
- * tools") — it is not a standalone claim that the count IS 27, but every
- * digit-window matcher below only checks "is N followed by tool/intent
- * within a window", and an arrow-then-M sits comfortably inside a 30-char
- * window, so "27→28 tools" false-positived as a standalone "27 tools" claim
- * (found live in HANDOFF.md:9 — same substring-on-a-mention shape as this
- * repo's other known class, workflow-verdict-parse-substring-bug). Masking
- * removes BOTH numbers of the pair, so neither reads as adjacent to "tool"
- * afterward, while a genuinely standalone "27 tools" claim (no arrow) is
- * completely untouched by this strip and still matches below.
+ * Strips "N<arrow>M" transition phrases ("27→28", "25 → 28", "27->28") — and
+ * longer chains of them ("17→19→21") — out of the flattened text before any
+ * digit-window claim check runs. A transition phrase narrates HISTORY ("the
+ * registry went from 27 to 28 tools") — it is not a standalone claim that
+ * the count IS 27, but every digit-window matcher below only checks "is N
+ * followed by tool/intent within a window", and an arrow-then-M sits
+ * comfortably inside a 30-char window, so "27→28 tools" false-positived as a
+ * standalone "27 tools" claim (found live in HANDOFF.md:9 — same
+ * substring-on-a-mention shape as this repo's other known class,
+ * workflow-verdict-parse-substring-bug). Masking removes EVERY number in the
+ * chain — matching one or more repeated `<arrow>N` groups, not just a single
+ * pair (gate NON-BLOCKING-3: a single-pair mask left a 3+ step chain's
+ * trailing number dangling next to "tools", e.g. "17→19→21 tools" only
+ * consumed "17→19") — while a genuinely standalone "27 tools" claim (no
+ * arrow) is completely untouched by this strip and still matches below.
  *
  * Scoped to the literal arrow tokens this corpus actually uses (→, ASCII
  * ->) — a plain hyphenated range ("27-28") is a different, unused shape
  * here and is deliberately NOT stripped by this pass.
  */
 function maskTransitionPhrases(text: string): string {
-  return text.replace(/\b\d{1,3}\s*(?:→|->)\s*\d{1,3}\b/g, "");
+  return text.replace(/\b\d{1,3}(?:\s*(?:→|->)\s*\d{1,3})+\b/g, "");
 }
 
 /**
@@ -233,6 +236,22 @@ describe("claim-surface tool-count guard", () => {
 
   it("but a GENUINELY standalone retired claim ('the server exposes 27 tools') still fails the guard", () => {
     expect(claimsToolCountOf("the server exposes 27 tools", 27)).toBe(true);
+  });
+
+  // Gate NON-BLOCKING-3 (docs/adversarial/inc5-reconcile-sweep-gate-2026-08-11.md):
+  // a single-pair mask only consumes the FIRST arrow in a longer chain,
+  // leaving a trailing number dangling next to "tools" — a 3+ step chain
+  // like "17→19→21 tools" masked away the middle number (17→19, correctly)
+  // but left "→21 tools" behind, which still read as a standalone "21"
+  // claim. Zero corpus exposure today (grep-confirmed), but cheap to close:
+  // the mask now consumes the WHOLE chain, not just one pair.
+  it("an arrow CHAIN ('17→19→21 tools') masks every number in the chain, not just the first pair", () => {
+    expect(claimsToolCountOf("grew 17→19→21 tools", 21)).toBe(false);
+    expect(claimsToolCountOf("grew 17→19→21 tools", 19)).toBe(false);
+  });
+
+  it("chain-masking does not swallow an unrelated standalone claim elsewhere in the same text", () => {
+    expect(claimsToolCountOf("grew 17→19→21 tools total; separately the legacy widget reports 24 tools", 24)).toBe(true);
   });
 
   it.each(CLAIM_SURFACES)("%s never claims a retired tool count (17/19/21/24)", (label, text) => {

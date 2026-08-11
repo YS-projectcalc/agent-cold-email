@@ -96,13 +96,31 @@ export async function insertSupportTicket(
  * cross-tenant table and CLAUDE.md rule (h) wants the scope on every query
  * (its DO-side twins stampEmailed/releaseEmailClaim both carry it).
  */
+// Ids per markSupportTicketsEmailed statement. Class sweep (docs/adversarial/
+// inc5-reconcile-sweep-gate-2026-08-11.md, gate NON-BLOCKING-2's shape found
+// again during the fix round's sweep): D1's real per-statement ceiling is
+// 100 bound parameters (ofac/sdn-list.ts:13-19). This statement binds TWO
+// fixed params (sentAt, tenantId) ahead of the ids, so the safe chunk is 98
+// ids (2 + 98 = 100), not the 99 a single-fixed-param statement allows —
+// confirmed by a chunk-boundary test at exactly 99 that reds without this.
+const MARK_EMAILED_CHUNK_SIZE = 98;
+
 export async function markSupportTicketsEmailed(env: Env, tenantId: string, ids: string[], sentAt: number): Promise<void> {
   if (ids.length === 0) return;
-  await env.DB.prepare(
-    `UPDATE support_tickets SET email_sent_at = ? WHERE tenant_id = ? AND id IN (${ids.map(() => "?").join(", ")})`,
-  )
-    .bind(sentAt, tenantId, ...ids)
-    .run();
+  const statements: D1PreparedStatement[] = [];
+  for (let i = 0; i < ids.length; i += MARK_EMAILED_CHUNK_SIZE) {
+    const chunk = ids.slice(i, i + MARK_EMAILED_CHUNK_SIZE);
+    statements.push(
+      env.DB.prepare(
+        `UPDATE support_tickets SET email_sent_at = ? WHERE tenant_id = ? AND id IN (${chunk.map(() => "?").join(", ")})`,
+      ).bind(sentAt, tenantId, ...chunk),
+    );
+  }
+  if (statements.length === 1) {
+    await statements[0]!.run();
+  } else {
+    await env.DB.batch(statements);
+  }
 }
 
 interface SupportTicketD1Row {
