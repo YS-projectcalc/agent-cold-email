@@ -22,6 +22,7 @@ import {
   type DeliverabilityAction,
   type DeliverabilityThresholds,
 } from "./deliverability.js";
+import { replacementDomainIntentKey } from "./provision-intents.js";
 import { provisionDomainWithMailboxes, slugify } from "./provisioning.js";
 import { ONE_DAY_MS } from "./warmup.js";
 
@@ -197,10 +198,11 @@ async function applyReplaceDomain(
         personaSlug: slugify(profile.brand),
         inboxesEach,
         // H1 — REPLACE_DOMAIN has no caller idempotency key, so its intents key
-        // off the burned domain being replaced: a re-swept replacement for the
-        // SAME burn resolves to the same intent row (and so adopts a stranded
-        // buy) rather than minting a fresh one each sweep.
-        intentKey: `replace:${ctx.tenantId}:${action.domain}#${domainIndex}`,
+        // off the burned domain being replaced (replacementDomainIntentKey): a
+        // re-swept replacement for the SAME burn resolves to the same intent
+        // row (and so adopts a stranded buy) rather than minting a fresh one
+        // each sweep.
+        intentKey: replacementDomainIntentKey(ctx.tenantId, action.domain, domainIndex),
       });
 
       logAction(ctx, "REPLACE_DOMAIN", action.domain, {
