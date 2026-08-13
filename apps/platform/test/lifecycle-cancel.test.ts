@@ -192,6 +192,31 @@ describe("POST /cancel — voluntary cancellation + teardown/reclaim (D5)", () =
     });
   });
 
+  it("infrastructure_status counts LIVE domains only — a released one no longer inflates it", async () => {
+    // The customer-visible count an agent polls to decide whether its
+    // infrastructure exists. It was a bare `COUNT(*) FROM domains`, so after a
+    // teardown handed both domains back to the registrar the tool kept
+    // reporting 2 — the same shape as the `mailboxes`-vs-`billableMailboxes`
+    // divergence pinned above, one surface over. FAILS on the old code (it
+    // reports 2 here).
+    const { tenantId, token } = await mintTenant("Cancel Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
+    await provisionAndLaunch(token);
+
+    const before = await api<{ domains: number }>("/infrastructure-status", { token });
+    expect(before.body.domains).toBe(2);
+
+    const cancel = await api<CancelResponse>("/cancel", {
+      method: "POST",
+      token,
+      body: JSON.stringify({ immediate: true }),
+    });
+    expect(cancel.body.teardown?.domainsReleased).toBe(2);
+
+    const after = await api<{ domains: number }>("/infrastructure-status", { token });
+    expect(after.body.domains).toBe(0);
+  });
+
   it("is idempotent — a re-cancel is a no-op that never double-books liability or re-releases infra", async () => {
     const { tenantId, token } = await mintTenant("Cancel Co", "managed");
     await activatePaidPlan(tenantId, "managed");

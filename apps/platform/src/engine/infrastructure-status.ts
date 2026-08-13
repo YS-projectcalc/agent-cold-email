@@ -86,8 +86,20 @@ export async function getInfrastructureStatus(ctx: TenantContext): Promise<Infra
   // from the possibly-stale DB `status` column), so only dailyCap/sentToday
   // need overriding from the snapshot.
   const warmupSnapshot = computeMailboxWarmupSnapshot(ctx);
+  // LIVE domains only. This count is what a customer's agent reads back to
+  // decide whether its infrastructure exists, and an unfiltered COUNT keeps
+  // reporting a domain that teardown handed back to the registrar
+  // (engine/lifecycle.ts's release) — so a canceled-then-reprovisioned tenant
+  // is told it holds more than it does. `status != 'released'` is the same
+  // predicate every reader that acts on a domain already uses
+  // (engine/provisioning.ts's liveDomainForIntent / findAdoptableDomain,
+  // lifecycle.ts's teardown scan), deliberately: a third definition of "live"
+  // is how the two guards in the 2026-08-13 P0 came to disagree.
   const domainCount = ctx.sql
-    .exec<{ n: number }>(`SELECT COUNT(*) as n FROM domains WHERE tenant_id = ?`, ctx.tenantId)
+    .exec<{ n: number }>(
+      `SELECT COUNT(*) as n FROM domains WHERE tenant_id = ? AND status != 'released'`,
+      ctx.tenantId,
+    )
     .one().n;
 
   const signals = gatherMailboxHealth(ctx);

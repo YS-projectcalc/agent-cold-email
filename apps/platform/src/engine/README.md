@@ -43,6 +43,23 @@ into a god file:
   structurally impossible. `clock_mode='real'` is also the interlock the
   auto-send driver's predicate requires, so an unmigrated tenant is never sent
   for. Pure synchronous SQL: no `await` may ever appear inside it.
+- `legacy-domain-intent-keys.ts` — `reconcileLegacyDomainIntentKeys`: the
+  ONE-SHOT, DATED 2026-08-13 rebind of `domain_intents` rows orphaned when the
+  domain buy-intent key changed derivation in `85f48af` with no backfill
+  (ticket `sup_3ca260e4` — a live customer's retry bought a second domain,
+  every time, because the committed intent sat under a key the new code never
+  reads). Called ONLY by `TenantDO`, at constructor rehydrate, so it
+  self-applies on first touch after deploy. Rebinds a COMMITTED legacy-key row
+  to the current derivation's key for its ordinal — or, when that ordinal is
+  already taken, to the first free one at or above the highest in use, so a
+  stranded paid domain becomes additional CAPACITY instead of overwriting a
+  live intent. Rebinding requires a live `domains` row as proof of the
+  resource, and deliberately leaves the deliverability loop's own
+  `replacementDomainIntentKey` rows alone (a second, current writer of the same
+  table). No marker column: the operation is a fixed point, not a shift, so
+  "already done" is observable in the data. `test/persisted-key-derivations.test.ts`
+  is the build-time guard against a repeat; delete this file once no live tenant
+  can hold a pre-`85f48af` intent.
 - `scheduler.ts` — pure send-window + least-loaded-mailbox-with-capacity
   helpers used by `tick.ts` (`isWithinSendWindow` is wired into the tick).
 - `brand-guard.ts` — the lookalike third-party-brand hard-reject validator

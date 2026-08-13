@@ -28,6 +28,7 @@ import { DemoRunInput } from "@coldstart/shared";
 import { isPaidPlan, RateLimitError, RequestInProgressError, TenantIsolationError, type Clock } from "@coldstart/shared";
 import { DelegatingClock, RealClock, requireVirtualClock, VirtualClock } from "./clock.js";
 import { migrateTenantClockToReal } from "./engine/clock-migration.js";
+import { reconcileLegacyDomainIntentKeys } from "./engine/legacy-domain-intent-keys.js";
 import type { StripeEventInput } from "./billing/stripe-webhook.js";
 import type { Env } from "./env.js";
 import {
@@ -205,7 +206,38 @@ export class TenantDO extends DurableObject<Env> {
     if (row) {
       this.tenantId = row.id;
       this.plan = row.plan;
-      this.currentClock = this.selectClockOnRehydrate(row);
+      const clock = this.selectClockOnRehydrate(row);
+      this.currentClock = clock;
+      // AFTER the clock is settled — the rebind stamps `updated_at` on the
+      // tenant's own time base, and for a paid tenant that base is only correct
+      // once the migration above has run.
+      this.reconcileLegacyDomainIntents(row.id, clock.now());
+    }
+  }
+
+  /**
+   * The 2026-08-13 one-shot legacy domain-intent-key rebind
+   * (engine/legacy-domain-intent-keys.ts), applied on first touch after deploy
+   * with no operator step — the same self-applying shape as the clock migration
+   * above, and the same failure posture: a throw has already rolled the whole
+   * rebind set back, so we log loudly and carry on rather than bricking the
+   * tenant's DO permanently.
+   *
+   * Runs on the constructor rather than inside `setupInfrastructure` because
+   * the orphan distorts what a tenant is TOLD it has as well as what a retry
+   * buys — `infrastructure_status` and the provisioning plan both read the
+   * reconciled state on the very next request, whatever that request is.
+   */
+  private reconcileLegacyDomainIntents(tenantId: string, nowMs: number): void {
+    try {
+      const rebinds = reconcileLegacyDomainIntentKeys(this.ctx.storage, tenantId, nowMs);
+      for (const rebind of rebinds) {
+        console.log(
+          `legacy domain-intent key rebound for ${tenantId}: ${rebind.from} -> ${rebind.to} (${rebind.domain}), ordinal ${rebind.originalOrdinal} -> ${rebind.ordinal}`,
+        );
+      }
+    } catch (err) {
+      console.error(`legacy domain-intent key reconciliation FAILED for ${tenantId}; state unchanged, will retry on next construction`, err);
     }
   }
 
@@ -679,11 +711,20 @@ export class TenantDO extends DurableObject<Env> {
     return withRequestIdempotency(
       ctx,
       idempotencyKey ? `setup_infrastructure:${idempotencyKey}` : undefined,
-      // H1 — the same key seeds the durable domain-intent rows, so a retry that
-      // arrives AFTER the outer claim was cleared (the incident's exact path:
-      // idempotency.ts deletes the claim on throw so the saga re-runs) still
-      // resolves to the intent the first attempt recorded, and adopts instead
-      // of re-buying.
+      // The caller's key gates RESPONSE REPLAY ONLY. It has not seeded the
+      // durable domain-intent rows since `85f48af`, which moved them onto
+      // `domainIntentKey`'s tenant+ordinal derivation precisely so that no key
+      // permutation — supplied, omitted, or changed between retries — can
+      // decide whether a retry resumes the prior purchase or buys a second
+      // domain. What makes the retry converge after idempotency.ts clears the
+      // claim on a throw (the incident's exact path: the saga re-runs) is the
+      // intent row at the ORDINAL, not this key.
+      //
+      // The version of this comment that claimed otherwise outlived the change
+      // by four days and is why the 2026-08-13 P0 read as "idempotency not
+      // gating the resume path": intents written under the OLD key were
+      // orphaned, not un-consulted (ticket sup_3ca260e4; the rebind is
+      // engine/legacy-domain-intent-keys.ts).
       () => runSetupInfrastructure(ctx, input, undefined, idempotencyKey),
     );
   }

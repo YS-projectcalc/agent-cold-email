@@ -121,6 +121,47 @@ export function domainIntentKey(tenantId: string, domainIndex: number): string {
 }
 
 /**
+ * The ordinal a key names under the CURRENT derivation, or undefined for a key
+ * `domainIntentKey` could not have produced for this tenant. Its exact inverse,
+ * kept adjacent to it so the pair cannot drift (test/persisted-key-derivations
+ * .test.ts pins the round trip).
+ *
+ * The canonical-integer test is not decoration: `tenant:T#01` and `tenant:T# 1`
+ * both parse as 1 under a lenient parse, yet neither is a key this function's
+ * inverse ever writes — so accepting them would report an ordinal as OCCUPIED
+ * on the strength of a row nothing will ever read back.
+ */
+export function domainIntentOrdinal(tenantId: string, key: string): number | undefined {
+  const prefix = `tenant:${tenantId}#`;
+  if (!key.startsWith(prefix)) return undefined;
+  const suffix = key.slice(prefix.length);
+  if (!/^(0|[1-9][0-9]*)$/.test(suffix)) return undefined;
+  return Number(suffix);
+}
+
+/**
+ * The domain buy-intent key the deliverability loop's REPLACE_DOMAIN burn
+ * replacement writes — the SECOND writer of `domain_intents`, and the reason
+ * "not `domainIntentKey`'s shape" can never by itself mean "orphaned".
+ *
+ * REPLACE_DOMAIN has no caller idempotency key, so its intents key off the
+ * burned domain being replaced: a re-swept replacement for the SAME burn
+ * resolves to the same intent row (and so adopts a stranded buy) rather than
+ * minting a fresh one each sweep. Lives here rather than inline at its call
+ * site because engine/legacy-domain-intent-keys.ts has to recognise these keys
+ * to leave them alone, and a prefix duplicated in two files is a prefix that
+ * eventually disagrees with itself.
+ */
+export function replacementDomainIntentKey(tenantId: string, burnedDomain: string, domainIndex: number): string {
+  return `${replacementDomainIntentKeyPrefix(tenantId)}${burnedDomain}#${domainIndex}`;
+}
+
+/** What every one of this tenant's burn-replacement intent keys starts with. */
+export function replacementDomainIntentKeyPrefix(tenantId: string): string {
+  return `replace:${tenantId}:`;
+}
+
+/**
  * The domain intent recorded at `key`, or undefined — READ-ONLY, unlike
  * `recordDomainIntent`, which writes one. Planning a call has to ask which
  * ordinals are already committed WITHOUT minting 'intent' rows for ordinals it
