@@ -466,6 +466,36 @@ describe("guard C — an aging pending domain becomes a founder signal", () => {
     expect(dnsCheck?.healthy).toBe(false);
     expect(dnsCheck?.name).toBe("domain_dns_aging:agingco0.com");
   });
+
+  it("a domain GIVEN UP on immediately is surfaced too, even though it is far too young for the age test", async () => {
+    // The sharpest failure — a terminal vendor verdict on the FIRST poll — is
+    // given up on within seconds. Keying the founder signal only on the anchor's
+    // age would leave exactly that case with no alert at all.
+    await seedBenignSdnList();
+    const { tenantId } = await mintTenant("Fresh Dead Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
+
+    const now = Date.now();
+    await runInDurableObject(tenantStub(tenantId), (_i, s) => {
+      s.storage.sql.exec(
+        `INSERT INTO domains (id, tenant_id, domain, status, purchased_at, dns_status, connection_type, source, dns_check_count, dns_first_checked_at, dns_gave_up_at)
+         VALUES ('dom_fresh', ?, 'freshdead0.com', 'active', ?, 'pending', 'purchased', 'provisioned', 1, ?, ?)`,
+        tenantId,
+        now,
+        now - 1_000,
+        now - 1_000,
+      );
+    });
+
+    const summary = await tenantStub(tenantId).opsSummary(now - ONE_DAY_MS);
+    expect(summary.sendPipeline.agingPendingDomains.map((d) => d.domain)).toEqual(["freshdead0.com"]);
+    expect(summary.sendPipeline.agingPendingDomains[0]?.gaveUp).toBe(true);
+
+    const checks = sendPipelineChecks(tenantId, summary, new Set<string>());
+    const dnsCheck = checks.find((c) => c.name === "domain_dns_aging:freshdead0.com");
+    expect(dnsCheck?.healthy).toBe(false);
+    expect(dnsCheck?.detail).toMatch(/GIVEN UP/);
+  });
 });
 
 // --- reconcile scope ------------------------------------------------------

@@ -363,7 +363,13 @@ export async function setDnsWithRetry(
 
   // From here the port ANSWERED (or refused permanently), so this call is a real
   // observation about the domain and counts toward the bound.
-  const bound = recordDnsObservation(ctx, domainId, failure.notPropagated);
+  //
+  // A TERMINAL answer counts as an observation too, not just a not-yet. It is
+  // still a check, and stamping the anchor for it is what makes a domain that
+  // goes terminal on its VERY FIRST poll visible to the watchtower's aging query
+  // (engine/ops-summary.ts) — otherwise the sharpest possible failure would be
+  // the one case with no founder signal at all.
+  const bound = recordDnsObservation(ctx, domainId, failure.notPropagated || failure.terminalVendorState !== undefined);
 
   if (failure.terminalVendorState !== undefined) {
     return failTerminal(ctx, domain, domainId, failure, {
@@ -440,8 +446,8 @@ export async function setDnsWithRetry(
  * must not be able to renew the "still propagating" story indefinitely, which is
  * precisely what every per-call backoff budget in this codebase does.
  */
-function recordDnsObservation(ctx: TenantContext, domainId: string, notPropagated: boolean): DnsBoundState {
-  if (notPropagated) {
+function recordDnsObservation(ctx: TenantContext, domainId: string, answered: boolean): DnsBoundState {
+  if (answered) {
     const now = ctx.clock.now();
     ctx.sql.exec(
       `UPDATE domains

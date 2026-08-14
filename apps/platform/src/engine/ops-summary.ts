@@ -344,13 +344,20 @@ function readSendPipelineSignals(ctx: TenantContext): SendPipelineSignals {
 
   // Provisioned (lookalike) domains only: a BYO domain's own intake pipeline
   // owns its DNS wait and has its own 7-day abandon (engine/byo-intake.ts), so
-  // alerting on it here would double-report a bounded condition. 'released' is
-  // excluded — a torn-down domain is not a stalled one.
+  // alerting on it here would double-report a bounded condition. Scoped to
+  // 'active' to match the reconcile's own scope — a burned/released domain is
+  // already being handled by the deliverability loop and is not a stall.
+  //
+  // TWO ways in, and the second is not redundant: a domain whose ANCHOR is older
+  // than the bound (the slow stall — fires even if nobody ever calls
+  // setDnsWithRetry again, which is the whole hazard), OR one already marked
+  // given-up (the sharp failure — a terminal vendor verdict on the first poll is
+  // given up on immediately and would otherwise be too young for the age test).
   const agingPendingDomains = ctx.sql
-    .exec<{ domain: string; dns_first_checked_at: number; dns_gave_up_at: number | null }>(
+    .exec<{ domain: string; dns_first_checked_at: number | null; dns_gave_up_at: number | null }>(
       `SELECT domain, dns_first_checked_at, dns_gave_up_at FROM domains
-        WHERE tenant_id = ? AND source = 'provisioned' AND status != 'released' AND dns_status != 'ready'
-          AND dns_first_checked_at IS NOT NULL AND dns_first_checked_at <= ?
+        WHERE tenant_id = ? AND source = 'provisioned' AND status = 'active' AND dns_status != 'ready'
+          AND (dns_gave_up_at IS NOT NULL OR (dns_first_checked_at IS NOT NULL AND dns_first_checked_at <= ?))
         ORDER BY dns_first_checked_at ASC`,
       ctx.tenantId,
       now - DNS_PENDING_MAX_MS,
@@ -358,7 +365,7 @@ function readSendPipelineSignals(ctx: TenantContext): SendPipelineSignals {
     .toArray()
     .map((row) => ({
       domain: row.domain,
-      pendingForMs: now - row.dns_first_checked_at,
+      pendingForMs: row.dns_first_checked_at === null ? 0 : now - row.dns_first_checked_at,
       gaveUp: row.dns_gave_up_at !== null,
     }));
 
