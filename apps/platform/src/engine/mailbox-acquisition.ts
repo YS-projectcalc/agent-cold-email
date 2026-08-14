@@ -32,7 +32,7 @@
  * Every uncertain branch fails toward NOT SPENDING.
  */
 
-import { VendorError } from "@coldstart/shared";
+import { VendorError, type MailboxReadiness } from "@coldstart/shared";
 import { mailboxProvisioningCheckName, mailboxRebuyCheckName, readCheckStatus, reportCheck } from "../admin/watchtower.js";
 import { RealClock } from "../clock.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
@@ -72,6 +72,14 @@ const MAILBOX_STEP = VENDOR_STEP.mailboxPurchase;
 export type OwnershipVerdict =
   /** The provider lists it (ready or still being created) — it is ours, whoever bought it. */
   | { kind: "present"; state: string }
+  /**
+   * The provider lists it and says it is DEAD (suspended/cancelled/expired).
+   * Distinct from BOTH neighbours on purpose (vendor-verdict class fix): it is
+   * not 'present' — resuming the saga onto it would enrol warmup and write a
+   * billable row for a mailbox that can never send — and it is emphatically not
+   * 'absent', which is the one verdict that can authorize a second purchase.
+   */
+  | { kind: "terminal"; state: string }
   /** Corroborated: repeated lookups agree it does not exist, long enough after the dispatch to mean it. */
   | { kind: "absent" }
   /** No verdict. A lookup failed, or the dispatch is too recent for absence to mean anything. */
@@ -80,9 +88,16 @@ export type OwnershipVerdict =
 /**
  * Asks the provider what it holds for `email`, and grades the answer.
  *
- * The three outcomes are deliberately NOT collapsible into a boolean. "The
- * lookup failed" proves nothing about the mailbox and must never read as
- * "absent" — that is the difference between retrying and buying a second one.
+ * The outcomes are deliberately NOT collapsible into a boolean. "The lookup
+ * failed" proves nothing about the mailbox and must never read as "absent" —
+ * that is the difference between retrying and buying a second one.
+ *
+ * ⚠ The pre-fix mapping was `state !== "absent"` -> present, which quietly
+ * ADOPTED a cancelled mailbox (vendor-verdict class sweep, member
+ * mailbox-acquisition.ts:104): the saga resumed onto it, waited for it to become
+ * ready, and reported "still being created" forever. The `OwnershipVerdict` TYPE
+ * was always right — it was this one mapping that threw the distinction away,
+ * because the port had no way to express it.
  */
 export async function confirmVendorOwnership(
   ctx: TenantContext,
@@ -92,16 +107,33 @@ export async function confirmVendorOwnership(
 ): Promise<OwnershipVerdict> {
   const attempts = backoffMs.length + 1;
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    let state: string;
+    let verdict: MailboxReadiness;
     try {
-      state = await ctx.adapters.mailbox.provisioningState(email);
+      verdict = await ctx.adapters.mailbox.provisioningState(email);
     } catch (err) {
       logVendorFailure(`mailbox ownership check ${email}`, err);
       return { kind: "unconfirmed", reason: "lookup_failed", cause: err };
     }
-    // Anything the provider can name is the provider holding it. Only a total
-    // absence from its records is evidence that a buy produced nothing.
-    if (state !== "absent") return { kind: "present", state };
+    // Exhaustive (guard D2): every arm is classified here, so a new verdict
+    // cannot default into "the provider holds it" or into "buy another one".
+    switch (verdict.kind) {
+      case "ready":
+        return { kind: "present", state: "ready" };
+      case "not_yet":
+        return { kind: "present", state: "pending" };
+      case "terminal":
+        return { kind: "terminal", state: verdict.vendorState };
+      case "inconclusive":
+        // An answer we could not classify is not an answer. Same grade as a
+        // lookup that threw: no re-buy, no adoption, come back later.
+        return { kind: "unconfirmed", reason: "lookup_failed" };
+      case "absent":
+        break;
+      default: {
+        const exhaustive: never = verdict;
+        throw new Error(`unhandled mailbox readiness verdict: ${JSON.stringify(exhaustive)}`);
+      }
+    }
     const pause = backoffMs[attempt - 1];
     if (pause !== undefined && pause > 0) {
       await new Promise((resolve) => setTimeout(resolve, pause));
@@ -208,6 +240,29 @@ export function unresolvedPurchaseError(ctx: TenantContext, email: string, reaso
  * re-buy and still does not exist. PERMANENT: a third purchase is not
  * authorized, so telling the agent to keep retrying would be a lie.
  */
+/**
+ * The customer-visible error for an address the provider holds and reports DEAD.
+ *
+ * PERMANENT, and deliberately NOT a re-buy trigger (vendor-verdict class fix,
+ * money asymmetry): the provider holds something for this address, so buying
+ * again is not a recovery — it is a second charge on top of a mailbox that
+ * already exists and cannot send. The founder alert is what gets it replaced.
+ */
+export function terminalMailboxError(ctx: TenantContext, email: string, vendorState: string): VendorError {
+  logAction(ctx, "MAILBOX_PURCHASE_TERMINAL", email, {
+    reason:
+      "the provider holds this address and reports it as no longer usable — no further purchase was attempted and no billable row was written",
+    step: MAILBOX_STEP,
+    retryable: false,
+    vendorState,
+  });
+  return new VendorError(
+    `mailbox ${email} is held by the provider but reported as no longer usable, so it cannot send. No second purchase was made. The operator has been notified.`,
+    false,
+    { step: MAILBOX_STEP },
+  );
+}
+
 export function abandonedPurchaseError(ctx: TenantContext, email: string): VendorError {
   logAction(ctx, "MAILBOX_PURCHASE_ABANDONED", email, {
     reason: "the automatic retry for this address was already used and the provider still reports nothing — no further purchase will be attempted",

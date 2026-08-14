@@ -120,7 +120,8 @@ describe("RealInboxKitDomainPort — configured (InboxKit)", () => {
     const spy = stubFetchSequence([{ status: 200, body: IK_NAMESERVERS_RESULT }, { status: 200, body: IK_PROPAGATION_CONFIRMED }]);
     const result = await new RealInboxKitDomainPort(CONFIG).setDns("acme-lookalike.com", "k1", "connected");
 
-    expect(result).toEqual({ mx: true, spf: true, dkim: true, dmarc: true, rdns: true });
+    expect(result.verdict).toEqual({ kind: "ready" });
+    expect(result.records).toEqual({ mx: true, spf: true, dkim: true, dmarc: true, rdns: true });
     const [nsUrl] = spy.mock.calls[0]!;
     expect(nsUrl).toBe("https://ik.example.internal/v1/api/domains/nameservers");
     const [propUrl, propInit] = spy.mock.calls[1]!;
@@ -131,7 +132,10 @@ describe("RealInboxKitDomainPort — configured (InboxKit)", () => {
   it("setDns('connected') maps a not-yet-propagated domain onto all-false DnsRecordSet flags (never a false positive)", async () => {
     stubFetchSequence([{ status: 200, body: IK_NAMESERVERS_RESULT }, { status: 200, body: IK_PROPAGATION_PENDING }]);
     const result = await new RealInboxKitDomainPort(CONFIG).setDns("acme-lookalike.com", "k1", "connected");
-    expect(result).toEqual({ mx: false, spf: false, dkim: false, dmarc: false, rdns: false });
+    // NOT_YET, not terminal: the connected flow's customer-side registrar change
+    // genuinely heals on its own, and the vendor said so.
+    expect(result.verdict).toEqual({ kind: "not_yet" });
+    expect(result.records).toEqual({ mx: false, spf: false, dkim: false, dmarc: false, rdns: false });
   });
 
   it("listOwnedDomains() carries the vendor's connection_type instead of dropping it", async () => {

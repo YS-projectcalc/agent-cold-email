@@ -26,6 +26,7 @@ import {
   decideAlert,
   trySend,
   CRED_PUSH_AGING_CHECK,
+  DOMAIN_DNS_AGING_CHECK,
   MAILBOX_PROVISIONING_CHECK,
   MAILBOX_REBUY_CHECK,
   SEND_STARVED_CHECK,
@@ -70,6 +71,11 @@ export function sendStarvedCheckName(tenantId: string): string {
 /** The watchtower check tracking whether ONE tenant's DO is answering at all. */
 export function tenantDoWedgedCheckName(tenantId: string): string {
   return `${TENANT_DO_WEDGED_CHECK}${tenantId}`;
+}
+
+/** The watchtower check tracking ONE provisioned domain whose mail DNS is stalled. */
+export function domainDnsAgingCheckName(domain: string): string {
+  return `${DOMAIN_DNS_AGING_CHECK}${domain}`;
 }
 
 // --- Health probes -------------------------------------------------------
@@ -238,7 +244,45 @@ export function sendPipelineChecks(
   reported: ReadonlySet<string>,
 ): CheckResult[] {
   const results: CheckResult[] = [];
-  const { activated, agingPendingPushes, dueNonDemoPendingSends, eligibleMailboxes } = summary.sendPipeline;
+  const { activated, agingPendingDomains, agingPendingPushes, dueNonDemoPendingSends, eligibleMailboxes, provisionedDomainNames } =
+    summary.sendPipeline;
+
+  // Vendor-verdict class fix, guard C — the escalation edge un-ready domains
+  // owed. CORRECTED (gate delta NOTE 4, docs/adversarial/
+  // vendor-verdict-gate-2026-08-14.md): this is NOT a reader of the
+  // `DOMAIN_DNS_PENDING` action row — nothing reads that row, before or after
+  // this guard. It is an independent query over `domains` (engine/
+  // ops-summary.ts's `agingPendingDomains`). A provisioned domain that has been
+  // un-ready past DNS_PENDING_MAX_MS is a PAID resource that will never carry a
+  // mailbox, and before this nothing anywhere bounded, escalated or even
+  // counted it: no timer, no ceiling, no check keyed on domains at all. Scoped
+  // to activated tenants for the same reason the credential-push check is — an
+  // unactivated tenant's domains are sandbox ones, and alerting on them trains
+  // the founder to ignore the channel.
+  const stalledDomains = activated ? agingPendingDomains : [];
+  for (const stalled of stalledDomains) {
+    const hours = Math.round(stalled.pendingForMs / 3_600_000);
+    results.push({
+      name: domainDnsAgingCheckName(stalled.domain),
+      healthy: false,
+      detail:
+        `Domain ${stalled.domain} (tenant ${tenantId}) has had un-ready mail DNS for ${hours}h. ` +
+        (stalled.gaveUp
+          ? `The platform has GIVEN UP on it: setup calls for it now fail non-retryably, so this domain needs replacing by hand. `
+          : `It is past the point where propagation explains it. `) +
+        `It was paid for and no mailbox will come up on it until it is replaced.`,
+    });
+  }
+  // Clear an aging-domain alert once the domain is ready/released — and only for
+  // domains THIS tenant holds, so one tenant's sweep never clears another's.
+  const stalledNow = new Set(stalledDomains.map((d) => d.domain));
+  for (const name of reported) {
+    if (!name.startsWith(DOMAIN_DNS_AGING_CHECK)) continue;
+    const domain = name.slice(DOMAIN_DNS_AGING_CHECK.length);
+    if (stalledNow.has(domain)) continue;
+    if (!provisionedDomainNames.includes(domain)) continue; // another tenant's domain
+    results.push({ name, healthy: true, detail: `Domain ${domain} (tenant ${tenantId}) now has working mail DNS.` });
+  }
 
   const aging = activated ? agingPendingPushes : [];
   for (const push of aging) {

@@ -12,12 +12,12 @@
 import { describe, expect, it } from "vitest";
 import type {
   CancelWarmupResult,
-  DnsRecordSet,
+  DomainDnsResult,
   DomainPort,
   LookalikeCandidate,
   MailboxHealth,
   MailboxPort,
-  MailboxProvisioningState,
+  MailboxReadiness,
   OwnedDomain,
   ProvisionedMailbox,
   PurchasedDomain,
@@ -42,7 +42,7 @@ class RecordingDomainPort implements DomainPort {
   async buy(): Promise<PurchasedDomain> {
     throw new Error("RecordingDomainPort.buy should never be called by teardownTenant");
   }
-  async setDns(): Promise<DnsRecordSet> {
+  async setDns(): Promise<DomainDnsResult> {
     throw new Error("RecordingDomainPort.setDns should never be called by teardownTenant");
   }
   async release(domain: string, _idempotencyKey: string): Promise<ReleaseResult> {
@@ -71,7 +71,7 @@ class RecordingMailboxPort implements MailboxPort {
   async provision(): Promise<ProvisionedMailbox> {
     throw new Error("RecordingMailboxPort.provision should never be called by releaseMailboxes");
   }
-  async provisioningState(): Promise<MailboxProvisioningState> {
+  async provisioningState(): Promise<MailboxReadiness> {
     throw new Error("RecordingMailboxPort.provisioningState should never be called by releaseMailboxes");
   }
   async getHealth(): Promise<MailboxHealth> {

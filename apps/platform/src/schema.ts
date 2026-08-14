@@ -201,8 +201,28 @@ CREATE TABLE IF NOT EXISTS domains (
   -- Poll-verify bookkeeping for records-to-apply / we-manage-zone DNS
   -- confirmation (SPEC.md §20.1's "no mode silently blocks forever" —
   -- byo-intake.ts's pollByoDomainDns uses these for the 7-day idle timeout).
+  -- Also the ANCHOR + attempt counter for the provisioned (lookalike) flow's
+  -- DNS bound (engine/domain-dns.ts's DNS_PENDING_MAX_MS) — the vendor-verdict
+  -- class fix, facet 2 (docs/adversarial/vendor-verdict-class-sweep-2026-08-14.md).
+  -- Chosen over purchased_at deliberately: purchased_at mixes clock domains
+  -- (a real registrar buy stamps Date.now(), an adopt/sandbox buy stamps
+  -- ctx.clock.now(), and clock-migration.ts does not shift it), so it can sit in
+  -- the real future after a virtual->real migration. These two are stamped from
+  -- ctx.clock and ARE shifted by the migration, so an age computed from them is
+  -- coherent. The two flows never share a row (BYO intake owns source='byo',
+  -- setDnsWithRetry only ever runs on source='provisioned').
   dns_check_count INTEGER NOT NULL DEFAULT 0,
   dns_first_checked_at INTEGER,
+  -- The provisioned flow GAVE UP on this domain's DNS: either the vendor
+  -- reported a terminal registration state (expired/suspended/cancelled), or the
+  -- benign pending state outlived DNS_PENDING_MAX_MS. NULL = still in play.
+  --
+  -- A separate column rather than a new dns_status value ON PURPOSE: every
+  -- reader in this codebase branches on dns_status != 'ready', so a third enum
+  -- value would silently change all of them at once. Cleared when a later poll
+  -- finds the domain genuinely ready, so a registration that recovers is not
+  -- permanently condemned. Same shape as mailboxes.warmup_cancel_gave_up_at.
+  dns_gave_up_at INTEGER,
   -- SPEC.md §20.2's mandatory DMARC p=none observation window before first
   -- send (14 days, or 7 if the pre-flight scan already found enforcement
   -- mode). NULL = no gate (provisioned domains, and BYO domains before this is

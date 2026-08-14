@@ -244,6 +244,17 @@ export function migrateTenantClockToReal(
       deltaMs,
       tenantId,
     ).rowsWritten;
+    // The provisioned flow's DNS give-up marker rides the same anchor, so it
+    // shifts with it — otherwise a migrated tenant's give-up would sit in the
+    // virtual past relative to a real-clock `now` and the recovery/reporting
+    // arithmetic around it would be nonsense (the very mixed-clock hazard that
+    // ruled `purchased_at` out as the anchor; see schema.ts).
+    sql.exec(
+      `UPDATE domains SET dns_gave_up_at = dns_gave_up_at + ?
+       WHERE tenant_id = ? AND dns_gave_up_at IS NOT NULL`,
+      deltaMs,
+      tenantId,
+    );
 
     // NOTHING shifts mailboxes.warmup_started_at, and nothing resets it. The
     // retirement above replaced the design's original reset: sandbox-origin

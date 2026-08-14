@@ -3,7 +3,7 @@ import type {
   Clock,
   MailboxHealth,
   MailboxPort,
-  MailboxProvisioningState,
+  MailboxReadiness,
   ProvisionedMailbox,
   ReleaseResult,
 } from "@coldstart/shared";
@@ -20,15 +20,27 @@ export class SandboxMailboxPort implements MailboxPort {
     return { email: `${localPart}@${domain}`, provider: "sandbox", provisionedAt: this.clock.now() };
   }
 
-  async provisioningState(_email: string): Promise<MailboxProvisioningState> {
+  /**
+   * Mailboxes this sandbox should report as a TERMINAL vendor state (suspended /
+   * cancelled — one that can never send). Empty by default, so existing behavior
+   * is byte-identical.
+   *
+   * Guard D3 of the vendor-verdict class fix: every port implementation must be
+   * able to express "dead", or no fixture can drive the engine's terminal branch
+   * through it. That is the same lesson this method's own comment already
+   * records one incident earlier — an always-succeeds sandbox is where the real
+   * vendor's contract goes to hide.
+   */
+  readonly terminal = new Set<string>();
+
+  async provisioningState(email: string): Promise<MailboxReadiness> {
     // In-process and instantaneous: `provision()` returning IS the mailbox
     // existing, so the async window a real vendor has simply does not exist
-    // here. Always 'ready' keeps every sandbox provision byte-identical to
+    // here. Ready-by-default keeps every sandbox provision byte-identical to
     // before the poll-until-ready gate. A test that needs the async window
-    // injects its own MailboxPort (test/mailbox-provisioning-gate.test.ts) —
-    // exactly the lesson of this incident: the always-succeeds sandbox is where
-    // the real vendor's contract goes to hide.
-    return "ready";
+    // injects its own MailboxPort (test/mailbox-provisioning-gate.test.ts).
+    if (this.terminal.has(email)) return { kind: "terminal", vendorState: "suspended" };
+    return { kind: "ready" };
   }
 
   async getHealth(email: string): Promise<MailboxHealth> {

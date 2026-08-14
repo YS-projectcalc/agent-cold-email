@@ -1,9 +1,10 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import {
+  domainDnsResult,
   RegistrarUnarmedError,
   VendorError,
-  type DnsRecordSet,
+  type DomainDnsResult,
   type DomainConnectionType,
   type DomainPort,
   type LookalikeCandidate,
@@ -12,6 +13,7 @@ import {
   type ReleaseResult,
 } from "@coldstart/shared";
 import { toErrorResponse } from "../src/error-response.js";
+import { DNS_PENDING_MAX_MS } from "../src/engine/domain-dns.js";
 import { domainIntentKey } from "../src/engine/provision-intents.js";
 import { runSetupInfrastructure } from "../src/engine/provisioning.js";
 import { listSurfacedTenantMessages } from "../src/engine/tenant-messages.js";
@@ -58,11 +60,12 @@ function domainPort(opts: {
       log.buys.push(domain);
       return { domain, purchasedAt: Date.now(), registrar: "test", connectionType: opts.connectionType ?? "purchased" };
     },
-    async setDns(domain: string, _key: string, connectionType: DomainConnectionType): Promise<DnsRecordSet> {
+    async setDns(domain: string, _key: string, connectionType: DomainConnectionType): Promise<DomainDnsResult> {
       log.setDns.push({ domain, connectionType });
       if (typeof opts.dns === "object") throw opts.dns.throw;
-      const ready = opts.dns === "ready";
-      return { mx: ready, spf: ready, dkim: ready, dmarc: ready, rdns: ready };
+      // Same two outcomes this fixture always had — "ready" or "the port
+      // answered and it is not in effect yet" — now said in the verdict's words.
+      return domainDnsResult(opts.dns === "ready" ? { kind: "ready" } : { kind: "not_yet" });
     },
     async release(): Promise<ReleaseResult> {
       return { released: true, releasedAt: Date.now() };
@@ -369,6 +372,62 @@ describe("C3 part b — the benign propagation wait is SUCCESS-PENDING; genuine 
     expect(result).not.toHaveProperty("provisioning"); // a completed provision carries no pending marker
     expect(await readMailboxCount(tenantId)).toBe(2);
   });
+});
+
+// Vendor-verdict gate delta (docs/adversarial/vendor-verdict-gate-2026-08-14.md
+// Finding 1) — the 6h give-up bound must not apply to a CONNECTED domain: NS
+// delegation is the customer's OWN registrar's job and routinely takes
+// 24-48h, unlike a purchased domain's ~32s vendor-side registration the bound
+// was sized around.
+describe("FINDING 1 fix — the give-up bound exempts CONNECTED domains", () => {
+  function readGaveUpAt(tenantId: string): Promise<number | null> {
+    return runInDurableObject(tenantStub(tenantId), (_i, s) =>
+      s.storage.sql.exec<{ dns_gave_up_at: number | null }>(`SELECT dns_gave_up_at FROM domains`).one().dns_gave_up_at,
+    );
+  }
+
+  it("a CONNECTED domain at hour 7 is STILL retryable — no give-up marker, no DOMAIN_DNS_GAVE_UP action", async () => {
+    const { tenantId } = await mintTenant("Connected Bound Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
+    const { port } = domainPort({ dns: "not-propagated", connectionType: "connected" });
+
+    const first = await runSetup(tenantId, port, "connectedbound.com", "conn-bound-1");
+    expect(first).toBeInstanceOf(VendorError);
+    expect((first as VendorError).retryable).toBe(true);
+
+    // Age the anchor past the bound.
+    await runInDurableObject(tenantStub(tenantId), (_i, s) =>
+      s.storage.sql.exec(`UPDATE domains SET dns_first_checked_at = dns_first_checked_at - ?`, DNS_PENDING_MAX_MS + 60_000),
+    );
+
+    const second = await runSetup(tenantId, port, "connectedbound.com", "conn-bound-2");
+    expect(second).toBeInstanceOf(VendorError);
+    expect((second as VendorError).retryable).toBe(true); // NOT given up on at hour 7
+
+    expect(await readGaveUpAt(tenantId)).toBeNull();
+    const actions = await readActions(tenantId);
+    expect(actions.some((a) => a.action === "DOMAIN_DNS_GAVE_UP")).toBe(false);
+    expect(await readMailboxCount(tenantId)).toBe(0);
+  }, 30_000);
+
+  it("CONTROL — a PURCHASED domain at hour 7 still gives up non-retryably (unchanged)", async () => {
+    const { tenantId } = await mintTenant("Purchased Bound Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
+    const { port } = domainPort({ dns: "not-propagated" }); // default connectionType 'purchased'
+
+    await runSetup(tenantId, port, "purchasedbound.com", "pur-bound-1");
+    await runInDurableObject(tenantStub(tenantId), (_i, s) =>
+      s.storage.sql.exec(`UPDATE domains SET dns_first_checked_at = dns_first_checked_at - ?`, DNS_PENDING_MAX_MS + 60_000),
+    );
+
+    const second = await runSetup(tenantId, port, "purchasedbound.com", "pur-bound-2");
+    expect(second).toBeInstanceOf(Error);
+    expect((second as VendorError).retryable).toBe(false);
+
+    expect(await readGaveUpAt(tenantId)).not.toBeNull();
+    const actions = await readActions(tenantId);
+    expect(actions.some((a) => a.action === "DOMAIN_DNS_GAVE_UP")).toBe(true);
+  }, 30_000);
 });
 
 void env;

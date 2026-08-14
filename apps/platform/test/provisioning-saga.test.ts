@@ -1,8 +1,9 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import {
+  domainDnsResult,
   VendorError,
-  type DnsRecordSet,
+  type DomainDnsResult,
   type DomainConnectionType,
   type DomainPort,
   type LookalikeCandidate,
@@ -46,14 +47,14 @@ function racingDomainPort(opts: { setDnsFailures: number; owned?: OwnedDomain[] 
       calls.buy.push(domain);
       return { domain, purchasedAt: Date.now(), registrar: "test-registrar", connectionType: "purchased" };
     },
-    async setDns(domain: string, _key: string, connectionType: DomainConnectionType): Promise<DnsRecordSet> {
+    async setDns(domain: string, _key: string, connectionType: DomainConnectionType): Promise<DomainDnsResult> {
       calls.setDns.push(`${domain}:${connectionType}`);
       if (remaining-- > 0) {
         // The exact shape of the incident: the vendor has accepted the order but
         // has not finished registering, so the nameservers call is rejected.
         throw new VendorError("inboxkit domains/nameservers failed: domain not found", true);
       }
-      return { mx: true, spf: true, dkim: true, dmarc: true, rdns: true };
+      return domainDnsResult({ kind: "ready" });
     },
     async release(): Promise<ReleaseResult> {
       return { released: true, releasedAt: Date.now() };

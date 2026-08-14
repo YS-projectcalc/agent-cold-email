@@ -383,6 +383,10 @@ export class TenantDO extends DurableObject<Env> {
     this.addColumnIfMissing("domains", "breaker_tier", "TEXT NOT NULL DEFAULT 'standard'");
     this.addColumnIfMissing("domains", "dns_check_count", "INTEGER NOT NULL DEFAULT 0");
     this.addColumnIfMissing("domains", "dns_first_checked_at", "INTEGER");
+    // Vendor-verdict class fix, facet 2 (see schema.ts). NULL for every
+    // pre-existing row: nothing has been given up on, so an existing DO's
+    // domains keep their exact current behavior until a poll observes one.
+    this.addColumnIfMissing("domains", "dns_gave_up_at", "INTEGER");
     this.addColumnIfMissing("domains", "first_send_eligible_at", "INTEGER");
     this.addColumnIfMissing("mailboxes", "source", "TEXT NOT NULL DEFAULT 'provisioned'");
     this.addColumnIfMissing("mailboxes", "transport_kind", "TEXT NOT NULL DEFAULT 'smtp'");

@@ -3,7 +3,7 @@
 // the pure `evaluate` produced; `runDeliverabilitySweep` is the one entry point
 // the tick calls each cycle (monitor -> decide -> act) BEFORE scheduling sends.
 
-import { RegistrarUnarmedError, VendorError } from "@coldstart/shared";
+import { DomainDnsTerminalError, RegistrarUnarmedError, VendorError } from "@coldstart/shared";
 import { escapeHtml } from "../html-escape.js";
 import { lookupTenantContactEmail } from "../db.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
@@ -88,11 +88,36 @@ function pauseDomainMailboxes(ctx: TenantContext, domainId: string): void {
   );
 }
 
+/**
+ * Replacement ATTEMPTS THAT CONSUMED A DOMAIN in the rolling window.
+ *
+ * It counts two actions, not one. `REPLACE_DOMAIN` is a replacement that
+ * completed. `REPLACE_DOMAIN_TERMINAL` is one that bought a domain and then hit
+ * a TERMINAL vendor verdict on it (vendor-verdict class fix) — money moved, the
+ * domain exists, and it will never work.
+ *
+ * WHY THE SECOND ONE HAS TO COUNT (corrected, gate delta NOTE 3,
+ * docs/adversarial/vendor-verdict-gate-2026-08-14.md — the accounting is
+ * conservative spend-cap consumption, NOT a loop-breaker: `applyReplaceDomain`
+ * flips the burning domain to 'burning' unconditionally BEFORE the attempt, and
+ * `evaluate()` (engine/deliverability.ts) skips any non-'active' domain, so
+ * nothing ever re-enters a REPLACE_DOMAIN for the SAME burn — an infinite
+ * re-buy loop on one domain cannot occur either way). What DOES happen without
+ * counting it: a terminal replacement burned real money (one domain bought)
+ * that a per-window SPEND cap meant to catch would silently miss, since the cap
+ * only ever saw `REPLACE_DOMAIN_FAILED` as free. Counting it is what makes the
+ * cap describe actual spend rather than only successful spend.
+ *
+ * Deliberately narrow: an ordinary transient failure, and a
+ * RegistrarUnarmedError (which never reaches a purchase at all), stay
+ * `REPLACE_DOMAIN_FAILED` and stay uncounted — capping those would withhold
+ * legitimate replacements over conditions that cost nothing and do heal.
+ */
 function countReplacementsInWindow(ctx: TenantContext): number {
   return ctx.sql
     .exec<{ n: number }>(
       `SELECT COUNT(*) as n FROM deliverability_actions
-       WHERE tenant_id = ? AND action = 'REPLACE_DOMAIN' AND ts >= ?`,
+       WHERE tenant_id = ? AND action IN ('REPLACE_DOMAIN', 'REPLACE_DOMAIN_TERMINAL') AND ts >= ?`,
       ctx.tenantId,
       ctx.clock.now() - REPLACEMENT_WINDOW_MS,
     )
@@ -222,15 +247,28 @@ async function applyReplaceDomain(
       // `error: err.message` here shipped the provider's name and endpoint
       // straight into the activity feed.
       logVendorFailure(`REPLACE_DOMAIN ${action.domain}`, err);
+      // A TERMINAL vendor verdict on the replacement's own domain is recorded
+      // under its OWN action, because countReplacementsInWindow counts it
+      // (see that function): the replacement DID buy a domain, and without that
+      // accounting this sweep buys another one every pass, forever. Narrowed by
+      // `instanceof` in-process, where the prototype is intact — this catch is
+      // in the same DO invocation as the throw, unlike the HTTP surface.
+      const terminal = err instanceof DomainDnsTerminalError;
       logAction(
         ctx,
-        "REPLACE_DOMAIN_FAILED",
+        terminal ? "REPLACE_DOMAIN_TERMINAL" : "REPLACE_DOMAIN_FAILED",
         action.domain,
-        customerSafeVendorDetail(err, "automatic domain replacement is paused (provider issue)", {
-          burningDomainId: action.domainId,
-          burnReason: action.reason,
-          note: "burning domain retired + mailboxes released; replacement withheld — isolated so the tick continues",
-        }),
+        customerSafeVendorDetail(
+          err,
+          terminal
+            ? "the replacement domain could not be brought up and has been abandoned — automatic replacement is paused"
+            : "automatic domain replacement is paused (provider issue)",
+          {
+            burningDomainId: action.domainId,
+            burnReason: action.reason,
+            note: "burning domain retired + mailboxes released; replacement withheld — isolated so the tick continues",
+          },
+        ),
       );
     }
   } finally {

@@ -11,6 +11,7 @@
 import { isPaidPlan, monthlyRevenueCents } from "@coldstart/shared";
 import type { TenantContext } from "../tenant-context.js";
 import { readActivationState } from "./activation.js";
+import { DNS_PENDING_MAX_MS } from "./domain-dns.js";
 import { countSendEligibleMailboxes } from "./mailbox-eligibility.js";
 import { getDeliverabilitySummary } from "./reporting.js";
 
@@ -71,6 +72,29 @@ export interface SendPipelineSignals {
   eligibleMailboxes: number;
   /** Credential pushes stuck 'pending' longer than AGING_CRED_PUSH_MS, named. */
   agingPendingPushes: { email: string; pendingForMs: number }[];
+  /**
+   * Provisioned setup domains whose mail DNS has been un-ready longer than
+   * DNS_PENDING_MAX_MS — the escalation edge the vendor-verdict class fix owed
+   * (Finding 3 of the C3 re-attack: `DOMAIN_DNS_PENDING` was logged with ZERO
+   * readers, no timer, no ceiling, so an indefinitely-stalled paid domain paged
+   * nobody). Named, so the founder alert says WHICH domain.
+   *
+   * Keyed on THREE disjuncts, not on `dns_gave_up_at` alone: the give-up is
+   * only stamped when something CALLS setDnsWithRetry, and the whole hazard is
+   * a tenant whose agent has stopped retrying. The anchor (`dns_first_checked_at`)
+   * ages a row that HAS been observed at least once; a NULL anchor is not
+   * covered by that disjunct at all (identical dependency on setDnsWithRetry
+   * having run) — it is the pre-deploy population, aged instead off
+   * `purchased_at` (see the query's own comment, engine/ops-summary.ts).
+   */
+  agingPendingDomains: { domain: string; pendingForMs: number; gaveUp: boolean }[];
+  /**
+   * Every provisioned domain name this tenant holds. Read ONLY as the ownership
+   * set for clearing an aging-domain alert (a check row names a domain, and the
+   * watchtower must not clear another tenant's) — the exact role
+   * `mailboxProvenance` plays for the credential-push checks.
+   */
+  provisionedDomainNames: string[];
 }
 
 export interface MailboxProvenanceRow {
@@ -322,10 +346,64 @@ function readSendPipelineSignals(ctx: TenantContext): SendPipelineSignals {
     .toArray()
     .map((row) => ({ email: row.email, pendingForMs: now - row.updated_at }));
 
+  // Provisioned (lookalike) domains only: a BYO domain's own intake pipeline
+  // owns its DNS wait and has its own 7-day abandon (engine/byo-intake.ts), so
+  // alerting on it here would double-report a bounded condition. Scoped to
+  // 'active' to match the reconcile's own scope — a burned/released domain is
+  // already being handled by the deliverability loop and is not a stall.
+  //
+  // THREE ways in (gate delta, Finding 2, docs/adversarial/
+  // vendor-verdict-gate-2026-08-14.md): a domain whose ANCHOR is older than the
+  // bound (the slow stall — fires even if nobody ever calls setDnsWithRetry
+  // again, which is the whole hazard), one already marked given-up (the sharp
+  // failure — a terminal vendor verdict on the first poll is given up on
+  // immediately and would otherwise be too young for the age test), OR — the
+  // disjunct this wave owed — a row whose anchor is NULL because it predates
+  // this wave's columns entirely, aged instead off `purchased_at`: the ONLY
+  // population the escalation exists for (a tenant whose agent has stopped
+  // retrying) includes rows this deploy has never observed at all, and neither
+  // of the first two disjuncts can ever match a NULL anchor. `purchased_at`
+  // clock skew fails SAFE for this is-it-old test: a future `purchased_at`
+  // simply never satisfies `<= now - DNS_PENDING_MAX_MS`, so it never fires —
+  // the same skew direction that makes `purchased_at` unusable as the BOUND's
+  // own anchor (schema.ts) is harmless here.
+  const agingPendingDomains = ctx.sql
+    .exec<{ domain: string; dns_first_checked_at: number | null; dns_gave_up_at: number | null; purchased_at: number }>(
+      `SELECT domain, dns_first_checked_at, dns_gave_up_at, purchased_at FROM domains
+        WHERE tenant_id = ? AND source = 'provisioned' AND status = 'active' AND dns_status != 'ready'
+          AND (
+            dns_gave_up_at IS NOT NULL
+            OR (dns_first_checked_at IS NOT NULL AND dns_first_checked_at <= ?)
+            OR (dns_first_checked_at IS NULL AND purchased_at <= ?)
+          )
+        ORDER BY dns_first_checked_at ASC`,
+      ctx.tenantId,
+      now - DNS_PENDING_MAX_MS,
+      now - DNS_PENDING_MAX_MS,
+    )
+    .toArray()
+    .map((row) => ({
+      domain: row.domain,
+      // N1 (delta re-gate, non-blocking): the admission criteria (above) and
+      // this arithmetic are two separate pieces of code. A NULL anchor no
+      // longer means "just admitted, age unknown" — the third disjunct admits
+      // rows this deploy never observed, and for those `purchased_at` IS the
+      // age signal (same fallback the admission query itself uses).
+      pendingForMs: row.dns_first_checked_at === null ? now - row.purchased_at : now - row.dns_first_checked_at,
+      gaveUp: row.dns_gave_up_at !== null,
+    }));
+
+  const provisionedDomainNames = ctx.sql
+    .exec<{ domain: string }>(`SELECT domain FROM domains WHERE tenant_id = ? AND source = 'provisioned'`, ctx.tenantId)
+    .toArray()
+    .map((row) => row.domain);
+
   return {
     activated,
     dueNonDemoPendingSends,
     eligibleMailboxes: countSendEligibleMailboxes(ctx, now),
     agingPendingPushes,
+    agingPendingDomains,
+    provisionedDomainNames,
   };
 }

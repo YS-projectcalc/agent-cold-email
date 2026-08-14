@@ -129,6 +129,10 @@ export const MAILBOX_REBUY_CHECK = "mailbox_rebuy:";
 export const CRED_PUSH_AGING_CHECK = "cred_push_aging:";
 export const SEND_STARVED_CHECK = "send_starved:";
 export const TENANT_DO_WEDGED_CHECK = "tenant_do_wedged:";
+// Vendor-verdict class fix (2026-08-14) — the escalation edge a provisioned
+// domain stuck at dns_status != 'ready' never had. Its own prefix so it cannot
+// dedup against, or be deduped by, any mailbox-scoped check.
+export const DOMAIN_DNS_AGING_CHECK = "domain_dns_aging:";
 
 export function labelFor(name: string): string {
   if (name.startsWith(MAILBOX_PROVISIONING_CHECK)) {
@@ -145,6 +149,9 @@ export function labelFor(name: string): string {
   }
   if (name.startsWith(TENANT_DO_WEDGED_CHECK)) {
     return `Tenant state unreachable ${name.slice(TENANT_DO_WEDGED_CHECK.length)}`;
+  }
+  if (name.startsWith(DOMAIN_DNS_AGING_CHECK)) {
+    return `Domain DNS stalled ${name.slice(DOMAIN_DNS_AGING_CHECK.length)}`;
   }
   return CHECK_LABELS[name] ?? name;
 }

@@ -36,6 +36,8 @@ function summaryWith(overrides: Partial<TenantOpsSummary["sendPipeline"]>, mailb
       dueNonDemoPendingSends: 0,
       eligibleMailboxes: 1,
       agingPendingPushes: [],
+      agingPendingDomains: [],
+      provisionedDomainNames: [],
       ...overrides,
     },
     mailboxProvenance: mailboxEmails.map((email) => ({

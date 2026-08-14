@@ -1,14 +1,16 @@
-import { VendorError } from "@coldstart/shared";
+import { domainDnsResult, VendorError } from "@coldstart/shared";
 import type {
-  DnsRecordSet,
   DomainConnectionType,
+  DomainDnsResult,
   DomainPort,
   LookalikeCandidate,
   OwnedDomain,
   PurchasedDomain,
   ReleaseResult,
+  VendorReadiness,
 } from "@coldstart/shared";
 import { InboxKitClient, type InboxKitClientConfig } from "./inboxkit-client.js";
+import { classifyVendorLifecycle, normalizeLifecycleToken } from "./vendor-lifecycle.js";
 
 /**
  * Registrant-of-record contact details InboxKit requires on domain
@@ -87,7 +89,7 @@ export interface InboxKitDomainRegistrant {
  * goauthorpitchdesk.com is now active, and the DNS will be configured during
  * mailbox processing." The two halves differ in WHEN mail DNS exists, not just
  * in which call sets it up — so the propagation verdicts the wave-1 fix waited
- * on are inert on the purchased half. See `polledDomainIsReady`.
+ * on are inert on the purchased half. See `polledDomainVerdict`.
  */
 export class RealInboxKitDomainPort implements DomainPort {
   private readonly client: InboxKitClient;
@@ -229,7 +231,7 @@ export class RealInboxKitDomainPort implements DomainPort {
    * Brings mail DNS up and reports what is ACTUALLY in effect, by the route the
    * domain's connection type calls for (INCIDENT 2026-08-05 root cause).
    */
-  async setDns(domain: string, _idempotencyKey: string, connectionType: DomainConnectionType): Promise<DnsRecordSet> {
+  async setDns(domain: string, _idempotencyKey: string, connectionType: DomainConnectionType): Promise<DomainDnsResult> {
     return connectionType === "connected"
       ? this.setDnsForConnectedDomain(domain)
       : this.pollPurchasedDomainDns(domain, connectionType);
@@ -243,26 +245,30 @@ export class RealInboxKitDomainPort implements DomainPort {
    * yet" but can never fail the way asking to connect an already-connected
    * domain does.
    */
-  private async pollPurchasedDomainDns(domain: string, connectionType: DomainConnectionType): Promise<DnsRecordSet> {
+  private async pollPurchasedDomainDns(domain: string, connectionType: DomainConnectionType): Promise<DomainDnsResult> {
     const record = await this.findDomainRecord(domain);
     if (!record) {
       // Registration is ASYNC — a domain whose order was accepted seconds ago is
       // genuinely not listed yet. This is NOT an error: it is the same "not ready
-      // yet, heals by waiting" condition as a listed-but-not-active record, so it
-      // is reported as an all-false DnsRecordSet, NOT a thrown VendorError.
+      // yet, heals by waiting" condition as a listed-but-in-progress record, so it
+      // is reported as a NOT_YET verdict, NOT a thrown VendorError.
       //
       // WHY A RESULT, NOT A THROW (C3 part b, 2026-08-13). A genuine vendor API
       // failure (`/domains/list` erroring) still THROWS from listDomainRecords
       // above; only the domain-simply-not-listed-yet case returns here. That split
       // is what lets setDnsWithRetry (engine/domain-dns.ts) grade a freshly-bought
       // purchased domain's propagation wait as the benign, non-error "provisioning
-      // in progress" state (its notPropagated branch) while a real API error stays
-      // a surfaced failure — the two used to be one indistinguishable retryable
-      // throw. Attempt count and backoff are unchanged (the caller retries a
-      // not-ready result exactly as it retried this throw).
-      return dnsRecordSet(false);
+      // in progress" state while a real API error stays a surfaced failure.
+      //
+      // ⚠ A registration that FAILED asynchronously and was never listed is
+      // indistinguishable from one accepted two seconds ago — the vendor tells us
+      // nothing either way, so no verdict can separate them here. That case is
+      // closed by the OTHER half of the class fix: the age bound on the durable
+      // pending state (engine/domain-dns.ts's DNS_PENDING_MAX_MS), which turns a
+      // never-arriving 'not_yet' into a visible non-retryable failure.
+      return domainDnsResult({ kind: "not_yet" });
     }
-    return dnsRecordSet(polledDomainIsReady(record, connectionType));
+    return domainDnsResult(polledDomainVerdict(record, connectionType));
   }
 
   /**
@@ -277,16 +283,34 @@ export class RealInboxKitDomainPort implements DomainPort {
    * propagated, InboxKit's own automation owns the domain's mail DNS — so
    * `propagated` maps onto ALL FIVE flags rather than being left granular.
    */
-  private async setDnsForConnectedDomain(domain: string): Promise<DnsRecordSet> {
-    await this.client.request("setDns:nameservers", "POST", "/domains/nameservers", {
+  private async setDnsForConnectedDomain(domain: string): Promise<DomainDnsResult> {
+    const nsBody = await this.client.request<SetNameserversResponse>("setDns:nameservers", "POST", "/domains/nameservers", {
       body: { domains: [domain], mask_forwarding: false },
     });
+    if (nsBody.error) {
+      // Rider (gate delta, docs/adversarial/vendor-verdict-gate-2026-08-14.md
+      // NOTE 2). This response used to be DISCARDED: a 200 {error:true} means
+      // nameservers were never actually set, so the domain would sit
+      // not-propagated forever — a silent stall, surfacing later only as a
+      // "needs to be replaced" verdict at the age bound instead of a visible,
+      // immediate, retryable failure. Follows the sibling check
+      // (`listDomainRecords` above) exactly.
+      throw new VendorError(`inboxkit domains/nameservers failed for ${domain}: ${nsBody.message ?? "no message"}`, true);
+    }
 
     const body = await this.client.request<CheckPropagationResponse>("setDns:check-propagation", "POST", "/domains/nameservers/check-propagation", {
       body: { domains: [domain] },
     });
     const match = body.result?.find((r) => r.name === domain) ?? body.result?.[0];
-    return dnsRecordSet(match?.propagated === true);
+    // No row for this domain in the propagation response is NOT evidence of
+    // anything — it is the check declining to answer. Grading it 'not_yet' would
+    // claim the vendor said "still propagating"; 'inconclusive' says what we
+    // actually know. Both are handled identically (benign + bounded) downstream,
+    // so this costs nothing and keeps the log honest.
+    if (!match) {
+      return domainDnsResult({ kind: "inconclusive", reason: "propagation check returned no row for this domain" });
+    }
+    return domainDnsResult(match.propagated === true ? { kind: "ready" } : { kind: "not_yet" });
   }
 
   async release(domain: string, _idempotencyKey: string): Promise<ReleaseResult> {
@@ -311,6 +335,11 @@ interface RegisterDomainsResponse {
   message?: string;
   url?: string;
   payment_type?: string;
+}
+
+interface SetNameserversResponse {
+  error: boolean;
+  message?: string;
 }
 
 interface CheckPropagationResponse {
@@ -387,7 +416,7 @@ function normalizeConnectionType(raw: string | undefined): DomainConnectionType 
  *
  * ⚠ The wave-1 justification for that asymmetry ("a false not-ready is visible,
  * recoverable and costs nothing") held only where the verdicts eventually
- * ARRIVE. On a purchased domain they never do (see `polledDomainIsReady`), so
+ * ARRIVE. On a purchased domain they never do (see `polledDomainVerdict`), so
  * there a false not-ready was a permanent deadlock, not a cheap retry — which is
  * why these tokens no longer gate that branch at all.
  */
@@ -404,14 +433,27 @@ const READY_STATUS_TOKENS = new Set([
 ]);
 
 /**
- * May the caller provision mailboxes onto this polled domain?
+ * What does the vendor's own record say about this polled domain?
  *
- * `status: "active"` is required either way — an expired or suspended
- * registration can never carry mail, whatever else the record reports. What
- * differs is whether the vendor's two propagation verdicts are consulted at all,
- * and that is decided by the OPERATING connection type (the discriminator the
- * caller resolved), never by the vendor row's own field: reading it off the row
- * would silently import this rule into the connected flow.
+ * ⚠ THE CLASS DEFECT LIVED HERE (docs/adversarial/vendor-verdict-class-sweep-2026-08-14.md;
+ * confirmed live in c3-postship-reattack-2026-08-14.md Finding 1). This function
+ * used to return a BOOLEAN, so its `status !== 'active'` refusal — which is
+ * exactly where the vendor tells us a registration is expired/suspended/gone —
+ * came out the far side as `false`, i.e. an all-false record set, i.e. the same
+ * value a registration accepted two seconds ago produces. The engine's benign
+ * "still propagating" branch then reported HTTP 202 `provisioning:"pending"` to
+ * the customer, forever, on a paid domain that would never carry a mailbox. The
+ * information was never missing; the return type destroyed it. It now returns a
+ * VERDICT, and 'terminal' is a state the benign branch structurally cannot
+ * match.
+ *
+ * `status: "active"` is still required either way — an expired or suspended
+ * registration can never carry mail, whatever else the record reports, and
+ * nothing below relaxes that. What differs is whether the vendor's two
+ * propagation verdicts are consulted at all, and that is decided by the
+ * OPERATING connection type (the discriminator the caller resolved), never by
+ * the vendor row's own field: reading it off the row would silently import this
+ * rule into the connected flow.
  *
  * PURCHASED — the verdicts are NOT consulted. VENDOR CONTRACT, InboxKit support
  * reply 2026-08-10, verbatim: "The domain goauthorpitchdesk.com is now active,
@@ -462,21 +504,30 @@ const READY_STATUS_TOKENS = new Set([
  *    comparison the route re-derived. Two derivations of one fact with
  *    different thresholds is what produced the disagreement in the first place.
  */
-function polledDomainIsReady(record: ListedDomain, connectionType: DomainConnectionType): boolean {
-  if ((record.status ?? "").trim().toLowerCase() !== "active") return false;
-  if (connectionType === "purchased") return true;
-  return isReadyStatus(record.dns_propagation_status) && isReadyStatus(record.nameserver_match_status);
+function polledDomainVerdict(record: ListedDomain, connectionType: DomainConnectionType): VendorReadiness {
+  // The registration's own lifecycle comes first — it dominates every
+  // propagation verdict below it. A dead registration is dead whatever its
+  // propagation fields say.
+  switch (classifyVendorLifecycle(record.status)) {
+    case "terminal":
+      return { kind: "terminal", vendorState: normalizeLifecycleToken(record.status) };
+    case "pending":
+      return { kind: "not_yet" };
+    case "unknown":
+      // An unrecognized (or absent) status token. NOT terminal — the live
+      // vocabulary is unverified and hard-failing a healthy domain on a token we
+      // simply have not seen would be far worse than waiting. Graded exactly
+      // like not_yet by every caller, and bounded by the same age ceiling.
+      return { kind: "inconclusive", reason: `unrecognized provider domain status "${normalizeLifecycleToken(record.status)}"` };
+    case "live":
+      break;
+  }
+  if (connectionType === "purchased") return { kind: "ready" };
+  return isReadyStatus(record.dns_propagation_status) && isReadyStatus(record.nameserver_match_status)
+    ? { kind: "ready" }
+    : { kind: "not_yet" };
 }
 
 function isReadyStatus(raw: string | undefined): boolean {
   return READY_STATUS_TOKENS.has((raw ?? "").trim().toLowerCase());
-}
-
-/**
- * One readiness verdict onto all five DnsRecordSet flags. The port reports a
- * single coarse signal (see setDnsForConnectedDomain's APPROXIMATION note), and
- * every caller gates on ALL flags, so the mapping stays in one place.
- */
-function dnsRecordSet(ready: boolean): DnsRecordSet {
-  return { mx: ready, spf: ready, dkim: ready, dmarc: ready, rdns: ready };
 }

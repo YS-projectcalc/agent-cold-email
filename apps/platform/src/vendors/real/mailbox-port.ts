@@ -3,11 +3,12 @@ import type {
   CancelWarmupResult,
   MailboxHealth,
   MailboxPort,
-  MailboxProvisioningState,
+  MailboxReadiness,
   ProvisionedMailbox,
   ReleaseResult,
 } from "@coldstart/shared";
 import { InboxKitClient, type InboxKitClientConfig } from "./inboxkit-client.js";
+import { classifyVendorLifecycle, normalizeLifecycleToken } from "./vendor-lifecycle.js";
 
 /**
  * Real MailboxPort — InboxKit (ACTIVATION.md Gate 0, founder ruling
@@ -79,16 +80,39 @@ export class RealMailboxPort implements MailboxPort {
    * startWarmup on the next line, so a vendor that hadn't caught up wedged the
    * whole saga.
    *
-   * STATUS TOKENS: 'active' (observed on a live mailbox, test/fixtures/inboxkit.ts)
-   * is the only value read as 'ready'; every other value ('scheduled', and
-   * anything unrecognized) is 'pending'. Same asymmetry as the domain readiness
+   * STATUS TOKENS (vendor-lifecycle.ts holds the one vocabulary): 'active' is
+   * the only value read as ready. Same asymmetry as the domain readiness
    * allowlist: guessing "not ready" costs a retry, guessing "ready" enrolls a
    * paid warmup subscription for a mailbox that may never exist.
+   *
+   * ⚠ THE MAILBOX HALF OF THE VENDOR-VERDICT CLASS (docs/adversarial/
+   * vendor-verdict-class-sweep-2026-08-14.md). This used to map EVERY non-active
+   * token onto 'pending', so a suspended / cancelled / failed mailbox reported
+   * "still being created" and engine/mailbox-provisioning.ts's awaitMailboxReady
+   * threw a RETRYABLE "the provider is still working on it" for it forever. A
+   * terminal token now gets its own verdict, and the engine turns that into a
+   * non-retryable, actionable failure instead of an endless wait.
    */
-  async provisioningState(email: string): Promise<MailboxProvisioningState> {
-    const match = await this.findExactMailbox(email);
-    if (!match) return "absent";
-    return (match.status ?? "").trim().toLowerCase() === "active" ? "ready" : "pending";
+  async provisioningState(email: string): Promise<MailboxReadiness> {
+    const found = await this.findExactMailbox(email);
+    if (found.kind !== "found") return found;
+    switch (classifyVendorLifecycle(found.mailbox.status)) {
+      case "live":
+        return { kind: "ready" };
+      case "terminal":
+        return { kind: "terminal", vendorState: normalizeLifecycleToken(found.mailbox.status) };
+      case "pending":
+        return { kind: "not_yet" };
+      case "unknown":
+        // Unrecognized token: NOT terminal (the live vocabulary is unverified —
+        // hard-failing a healthy mailbox on a token we have not seen is the one
+        // mistake worse than waiting). Every caller grades this exactly like
+        // 'not_yet', and neither one ever authorizes a second purchase.
+        return {
+          kind: "inconclusive",
+          reason: `unrecognized provider mailbox status "${normalizeLifecycleToken(found.mailbox.status)}"`,
+        };
+    }
   }
 
   async getHealth(email: string): Promise<MailboxHealth> {
@@ -291,28 +315,50 @@ export class RealMailboxPort implements MailboxPort {
    * before cancel) so every uid consumer is exact by construction.
    */
   private async resolveMailboxUid(email: string): Promise<string> {
-    const match = await this.findExactMailbox(email);
-    if (!match) {
+    const found = await this.findExactMailbox(email);
+    if (found.kind === "absent") {
       throw new VendorError(`inboxkit has no mailbox matching ${email}`, false);
     }
-    return match.uid;
+    if (found.kind === "inconclusive") {
+      // The lookup did not answer, which is not the same as "no such mailbox".
+      // RETRYABLE, unlike the definite absence above: a permanent grade here
+      // would abandon a mailbox that exists because one list call had a bad day.
+      // The op token stays in the message so vendor-failure.ts derives the
+      // abstract step exactly as it does for every other throw in this adapter.
+      throw new VendorError(`inboxkit mailboxes/list could not resolve ${email}: ${found.reason}`, true);
+    }
+    return found.mailbox.uid;
   }
 
   /**
    * The single keyword lookup + exactness check behind `resolveMailboxUid` and
-   * `provisioningState`. Returns null for "the vendor lists nothing for this
-   * address" so the caller decides what that means — a uid consumer treats it as
-   * a hard error, the provisioning poll treats it as 'not yet'. A NON-EXACT hit
-   * still throws from HERE, for both callers: acting on a near-match is
-   * catastrophic (release() would cancel a DIFFERENT paid mailbox) and reading
-   * one as "provisioned" would confirm a mailbox we never bought.
+   * `provisioningState`. The caller decides what each outcome means — a uid
+   * consumer treats 'absent' as a hard error, the provisioning poll treats it as
+   * "the vendor holds nothing". A NON-EXACT hit still throws from HERE, for both
+   * callers: acting on a near-match is catastrophic (release() would cancel a
+   * DIFFERENT paid mailbox) and reading one as "provisioned" would confirm a
+   * mailbox we never bought.
+   *
+   * ⚠ THE ERRORED-BODY HOLE (found during the vendor-verdict class fix,
+   * 2026-08-14; same class, mailbox half). InboxKitClient only rejects on a
+   * non-2xx HTTP status, and this endpoint answers 200 with `{error: true,
+   * message: ...}` for a workspace-level failure — which left `body.mailboxes`
+   * undefined and made this function return "the vendor lists nothing". 'absent'
+   * is the ONE verdict that feeds the automatic re-buy authorization
+   * (engine/mailbox-acquisition.ts), so a bad list response could buy a second
+   * paid mailbox for an address the vendor already held. A failed lookup proves
+   * nothing and is now 'inconclusive'. (`/domains/list` already checked
+   * `body.error` — this is the sibling that did not.)
    */
-  private async findExactMailbox(email: string): Promise<{ uid: string; status?: string } | null> {
+  private async findExactMailbox(email: string): Promise<FoundMailbox> {
     const body = await this.client.request<ListMailboxesResponse>("resolveMailboxUid", "POST", "/mailboxes/list", {
       body: { keyword: email, limit: 1 },
     });
+    if (body.error) {
+      return { kind: "inconclusive", reason: `provider mailbox lookup failed: ${body.message ?? "no message"}` };
+    }
     const match = body.mailboxes?.[0];
-    if (!match?.uid) return null;
+    if (!match?.uid) return { kind: "absent" };
     const resolvedEmail = `${match.username}@${match.domain_name}`;
     if (resolvedEmail.toLowerCase() !== email.toLowerCase()) {
       throw new VendorError(
@@ -320,9 +366,20 @@ export class RealMailboxPort implements MailboxPort {
         false,
       );
     }
-    return { uid: match.uid, status: match.status };
+    return { kind: "found", mailbox: { uid: match.uid, status: match.status } };
   }
 }
+
+/**
+ * `findExactMailbox`'s three outcomes. 'absent' and 'inconclusive' are the SAME
+ * two arms `MailboxReadiness` carries, deliberately: they are the pair whose
+ * conflation is the class defect, and keeping them apart at the innermost
+ * lookup is what stops either caller from re-collapsing them.
+ */
+type FoundMailbox =
+  | { kind: "found"; mailbox: { uid: string; status?: string } }
+  | { kind: "absent" }
+  | { kind: "inconclusive"; reason: string };
 
 /** An SMTP/IMAP endpoint in the engine's per-mailbox credential shape (apps/engine config.ts). */
 export interface MailboxEndpoint {
