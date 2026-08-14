@@ -435,6 +435,46 @@ export async function readReportedCheckNames(env: Env): Promise<Set<string>> {
   return new Set(result.results.map((row) => row.check_name));
 }
 
+/** One row of the D1-backed per-check state, shaped for a READ surface (the
+ * exact columns `migrations/0008_watchtower.sql` persists, renamed to match
+ * `CheckResult`/`AlertState`'s field names elsewhere in this file). */
+export interface WatchtowerCheckRow {
+  name: string;
+  healthy: boolean;
+  detail: string;
+  sinceTs: number;
+  lastAlertTs: number | null;
+  updatedAt: number;
+}
+
+/**
+ * Every persisted check row, unfiltered — for `GET /admin/ops/checks`
+ * (`../routes/admin-ops.ts`), the operator's own agent polling per-check
+ * health instead of parsing `OPS_ALERT_EMAIL` alerts. Pure SELECT: it shares
+ * `watchtower_state` with `reconcileAlerts` but never writes to it, so this
+ * read path cannot affect alert emission, dedup state or the 6h cooldown.
+ */
+export async function readAllCheckRows(env: Env): Promise<WatchtowerCheckRow[]> {
+  const result = await env.DB.prepare(
+    `SELECT check_name, status, since_ts, last_alert_ts, last_detail, updated_at FROM watchtower_state`,
+  ).all<{
+    check_name: string;
+    status: "healthy" | "unhealthy";
+    since_ts: number;
+    last_alert_ts: number | null;
+    last_detail: string;
+    updated_at: number;
+  }>();
+  return result.results.map((row) => ({
+    name: row.check_name,
+    healthy: row.status === "healthy",
+    detail: row.last_detail,
+    sinceTs: row.since_ts,
+    lastAlertTs: row.last_alert_ts,
+    updatedAt: row.updated_at,
+  }));
+}
+
 async function readWatchtowerState(env: Env): Promise<Map<string, AlertState>> {
   const result = await env.DB.prepare(`SELECT check_name, status, since_ts, last_alert_ts FROM watchtower_state`).all<{
     check_name: string;
