@@ -3,6 +3,7 @@ import { TerminateInput } from "@coldstart/shared";
 import { getTenantIndexById } from "../admin/db.js";
 import { buildOpsDigest, runDunningSweep } from "../admin/ops-sweep.js";
 import { terminateTenantForAbuse } from "../admin/terminate.js";
+import { readAllCheckRows } from "../admin/watchtower.js";
 import { RealClock } from "../clock.js";
 import { listWaitlistEmails } from "../db.js";
 import type { Env } from "../env.js";
@@ -38,6 +39,40 @@ export const adminOpsRoute = new Hono<{ Bindings: Env }>()
     const windowHours = parseWindowHours(c.req.query("hours"));
     const digest = await buildOpsDigest(c.env, new RealClock().now(), windowHours);
     return c.json(digest);
+  })
+  // Founder ORDER 2026-08-14 (ROADMAP.md ## Open) — the operator's own Claude
+  // watch polls per-check state instead of parsing OPS_ALERT_EMAIL alerts.
+  // READ-ONLY (`readAllCheckRows` is a pure SELECT on `watchtower_state`, the
+  // same table `reconcileAlerts` writes) — this route never calls
+  // reconcileAlerts/decideAlert, so it cannot touch alert emission, dedup
+  // state or check registration. Unhealthy checks first; `?unhealthy=1`
+  // returns only those.
+  //
+  // NOT the whole watchtower picture: `d1` and `cron_sweep` (the dead-man)
+  // deliberately live in WatchtowerDO storage instead of this table
+  // (`../watchtower-do.ts:39-42`, 2026-08-06 alerting audit B1/B2 — a check
+  // ON D1 cannot itself be stored IN D1) and NEVER appear here. A consumer
+  // MUST pair this endpoint with `GET /status` (`./status.ts`), which
+  // surfaces both as a 503 `degraded`. Per-row `updatedAt` staleness is this
+  // endpoint's own dead-cron tell: a dead cron stops writing entirely, so
+  // this route keeps serving a frozen, healthy-looking snapshot rather than
+  // ever going empty or erroring.
+  //
+  // No cap/truncation today (YAGNI, CLAUDE.md rule i): at real scale the
+  // table holds hundreds of rows. Growth is monotonic (rows are flipped
+  // healthy, never DELETEd) — that's the already-open `watchtower_state`
+  // unbounded-growth ledger item (ROADMAP.md ## Open, 2026-08-09 wave-3 gate
+  // NB-2); when that item is closed, this endpoint inherits whatever bound
+  // it lands on.
+  .get("/admin/ops/checks", async (c) => {
+    const onlyUnhealthy = c.req.query("unhealthy") === "1";
+    const rows = await readAllCheckRows(c.env);
+    const unhealthyCount = rows.filter((r) => !r.healthy).length;
+    const checks = (onlyUnhealthy ? rows.filter((r) => !r.healthy) : rows)
+      // Stable sort (V8/ES2019+): unhealthy first, healthy after, each group
+      // keeping the D1 read's own order.
+      .sort((a, b) => Number(a.healthy) - Number(b.healthy));
+    return c.json({ checks, unhealthyCount });
   })
   // C6 — the owner's durable waitlist export (adversarial panel-03 finding #9:
   // the funnel had no owner-retrieval path). Ordered newest-first.
