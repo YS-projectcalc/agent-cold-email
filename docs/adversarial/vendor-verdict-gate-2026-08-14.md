@@ -33,4 +33,22 @@ The query (`ops-summary.ts:356-362`): both disjuncts require a column only the N
 ## Recommendation
 Ship; fold both SHOULD-FIXes into this cut (finding 2 means the wave's own motivating customer may still be silent after deploy). Delta re-gate scope agreed: finding 1 (connected exempted, control: purchased still gives up at 6h), finding 2 (NULL-anchor pre-deploy row surfaces, control: no false alert on a healthy young row), regression ring on adjacent behavior, NEW findings reported separately.
 
-*Delta re-gate verdict: appended below when complete.*
+---
+
+# Delta re-gate — HEAD `0bd5ec4` — VERDICT: SHIP
+
+Both SHOULD-FIXes CLOSED by execution with controls; all three riders correct; regression ring clean (all round-1 attacks re-driven verbatim, 9/9 held); ONE NEW non-blocking finding (N1).
+
+- **Finding 1 CLOSED:** the bound now conjuncts `connectionType === "purchased"` (stale-marker short-circuit inside the guard — a connected row seeded with a pre-existing `dns_gave_up_at` is NOT hard-failed). Connected at hour 7 → retryable, no marker, no give-up action, `DOMAIN_DNS_PENDING` still written. CONTROL: purchased at 6h+ still gives up (narrowed, not disarmed). RING: a connected domain stalled past 6h still produces the `domain_dns_aging` check.
+- **Finding 2 CLOSED (Option 1):** third disjunct `OR (dns_first_checked_at IS NULL AND purchased_at <= ?)` (3 placeholders/3 params). Pre-deploy NULL-anchor 3-day row surfaces + alerts; CONTROLS: healthy-young and future-skewed `purchased_at` (virtual→real hazard) stay out — skew fails safe. Original disjuncts + exclusions (ready/byo/burning) re-verified. `purchased_at` is `NOT NULL` (schema.ts:143), so the disjunct can't be NULL-swallowed. Option-3 backfill rejection recorded as correct: it would have armed the ENFORCEMENT bound sharing the column.
+- **Riders:** `scheduled_for_deletion` → real port answers `{kind:"terminal"}` on FIRST poll, engine fails non-retryably immediately (no 6h wait). `setDns:nameservers` `200 {error:true}` → retryable throw, propagation check never runs, anchor NOT stamped (can't age toward give-up); clean-response control unchanged. Comment corrections verified comment-only (diff = ` * ` doc lines exclusively).
+- **Mutations at 1661:** M1 KILLED (12 failed — coverage grew from 9), M2 KILLED (5 failed, provisioning-dns-gate newly biting). Battery: 1 failed | 1660 passed (1661), same pre-existing failure; typecheck 0; dry-run manifest byte-identical, flag absent.
+- **COMPOSITION attack (failed):** exempting connected from the bound does NOT re-open unbounded-stall — a connected domain with permanently-failing nameservers keeps NULL anchor + NULL marker, yet the founder is STILL paged via Finding 2's `purchased_at` disjunct. The two fixes cover each other's gap. `unknown`-type legacy rows likewise bound-exempt, retryable, still paged.
+- **N1 (NEW, non-blocking):** the admitted NULL-anchor rows rendered "un-ready for 0h" beside "past the point where propagation explains it" (mapper still computed `pendingForMs: null → 0`). Class: when a fix widens a query's WHERE, re-check every projection the previous predicate implicitly guaranteed. Fixed same-day (below).
+
+# N1 micro-verify — HEAD `fcf845a` — VERDICT: SHIP, no findings. Cleared for merge + deploy.
+
+Diff audit: exactly 2 files (ops-summary.ts: SELECT gains `purchased_at`, mapper falls back `now - purchased_at` on NULL anchor; test: `/for 72h\./` + anchored-decoy control). WHERE untouched → admission bit-for-bit as gated. Executed: pre-deploy row renders "for 72h."; decoy (purchased 30d ago, anchor 6h) renders "for 6h." — a present anchor always wins; gaveUp arm's correct "0h" (1s-old anchor) preserved. Battery: 1 failed | 1661 passed (1662), same pre-existing; typecheck 0; dry-run manifest byte-identical to both prior runs. Negative-age render on NULL-anchor+gaveUp+future-purchase hand-seeded then REFUTED as unreachable from application code (the give-up's both arms imply the anchor was COALESCE-stamped first; nothing NULLs the anchor back).
+
+## Ship record (2026-08-14)
+Three rounds: `a776b29` SHIP-WITH-NOTES → `0bd5ec4` SHIP → `fcf845a` SHIP. Merged `main` `e5598da` (--no-ff, src byte-identical to gated tree verified), deployed Worker version `71ec2003-c0bd-4dc3-931c-597265031b4e` (100%), live smoke: both hosts /status 200, unauth /account 401, `PROVISIONING_RECONCILE_ENABLED` absent from the deployed manifest (still dark). Residual UNVERIFIABLEs: the live scheduled_for_deletion capture rests on the cron snapshot + builder attestation; Mordy fake-pending state check still needs the founder-held ADMIN_TOKEN (now low-stakes — both branches behave).
