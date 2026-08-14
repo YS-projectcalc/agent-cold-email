@@ -23,7 +23,7 @@
  *    every counter about a new state.
  */
 
-import { isPaidPlan, NotActivatedError, VendorError } from "@coldstart/shared";
+import { isPaidPlan, NotActivatedError, VendorError, type MailboxReadiness } from "@coldstart/shared";
 import type { OpsMailer } from "../ops-mail/ops-mailer.js";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
@@ -36,6 +36,7 @@ import {
   alertMailboxResolved,
   alertMailboxStuck,
   confirmVendorOwnership,
+  terminalMailboxError,
   unresolvedPurchaseError,
 } from "./mailbox-acquisition.js";
 import { maybePushProvisionedMailbox } from "./mailbox-credential-push.js";
@@ -223,11 +224,14 @@ async function runMailboxProvisioningUnit(
  *                             Resume; ask nothing, buy nothing.
  *  - zero dispatches        — nothing has ever been sent for this address. Buy.
  *  - any dispatch on record — ASK THE PROVIDER, whatever the status says. It
- *                             holds it -> adopt. It cannot be asked, or the
- *                             dispatch is too recent for "no" to mean anything
- *                             -> retry later, spend nothing. It confirms nothing
- *                             exists -> the stuck case: ONE guarded re-buy, or a
- *                             hard stop if that re-buy is already spent.
+ *                             holds it -> adopt. It holds it and says it is DEAD
+ *                             -> hard stop + alert, never a re-buy (something
+ *                             exists and was paid for; a second purchase is not
+ *                             a recovery). It cannot be asked, or the dispatch is
+ *                             too recent for "no" to mean anything -> retry
+ *                             later, spend nothing. It confirms nothing exists
+ *                             -> the stuck case: ONE guarded re-buy, or a hard
+ *                             stop if that re-buy is already spent.
  */
 async function acquireMailbox(
   ctx: TenantContext,
@@ -262,6 +266,20 @@ async function acquireMailbox(
     });
     markMailboxIntent(ctx, opts.intentKey, "bought", provider);
     return { provider, provisionedAt: ctx.clock.now() };
+  }
+
+  // The provider holds it and says it is DEAD (vendor-verdict class fix). Not a
+  // resume (warmup-enrolling and billing a mailbox that cannot send), and not a
+  // re-buy (it is not absent — something exists and was paid for). A hard,
+  // alerted stop, so the address gets replaced by a hand rather than spun on.
+  if (verdict.kind === "terminal") {
+    await alertMailboxRebuyFailed(
+      ctx,
+      opts.email,
+      `the provider holds this address and reports it as no longer usable (${verdict.state}) — no re-buy authorized, this address needs a hand`,
+      opts.mailer,
+    );
+    throw terminalMailboxError(ctx, opts.email, verdict.state);
   }
 
   if (verdict.kind === "unconfirmed") {
@@ -384,13 +402,20 @@ async function startWarmupUnlessAlreadyRunning(
  * RETRYABLE, vendor-blind error if it has not. Reporting "still working on it"
  * is the honest answer, and the durable intent means the retry costs nothing
  * but a poll.
+ *
+ * ⚠ EXCEPT WHEN IT IS NOT STILL WORKING ON IT (vendor-verdict class fix,
+ * mailbox half). The port used to fold every non-'active' vendor status into
+ * 'pending', so a SUSPENDED or CANCELLED mailbox was reported here as "still
+ * being created" and this function told the caller to retry — forever. A
+ * terminal verdict now stops the saga NON-retryably, which is the only grade
+ * that makes an agent escalate instead of spin.
  */
 async function awaitMailboxReady(ctx: TenantContext, email: string, backoffMs: number[] = MAILBOX_READY_BACKOFF_MS): Promise<void> {
   const attempts = backoffMs.length + 1;
-  let lastState = "absent";
   for (let attempt = 1; attempt <= attempts; attempt++) {
+    let verdict: MailboxReadiness;
     try {
-      lastState = await ctx.adapters.mailbox.provisioningState(email);
+      verdict = await ctx.adapters.mailbox.provisioningState(email);
     } catch (err) {
       // The lookup itself failed — that proves NOTHING about the mailbox, so it
       // must not be read as "not ready" and definitely not as "absent" (which
@@ -403,7 +428,36 @@ async function awaitMailboxReady(ctx: TenantContext, email: string, backoffMs: n
         { step: MAILBOX_STEP, cause: err },
       );
     }
-    if (lastState === "ready") return;
+    // Exhaustive (guard D2): a new verdict arm must be classified here rather
+    // than silently joining the benign wait.
+    switch (verdict.kind) {
+      case "ready":
+        return;
+      case "terminal":
+        logAction(ctx, "MAILBOX_PROVISION_TERMINAL", email, {
+          reason:
+            "the provider reports this mailbox is no longer usable — it was NOT billed or enrolled in warmup, and no replacement was purchased",
+          step: MAILBOX_STEP,
+          retryable: false,
+          vendorState: verdict.vendorState,
+        });
+        throw new VendorError(
+          `mailbox ${email} was purchased, but the provider now reports it as no longer usable. It was NOT billed or enrolled in ` +
+            `warmup, and no second purchase was made. Retrying will not help — this address needs a hand; contact support.`,
+          false,
+          { step: MAILBOX_STEP },
+        );
+      case "absent":
+      case "not_yet":
+      case "inconclusive":
+        // Still waiting, or an answer that proves nothing. Both cost exactly one
+        // retry and neither authorizes anything.
+        break;
+      default: {
+        const exhaustive: never = verdict;
+        throw new Error(`unhandled mailbox readiness verdict: ${JSON.stringify(exhaustive)}`);
+      }
+    }
     const pause = backoffMs[attempt - 1];
     if (pause !== undefined && pause > 0) {
       await new Promise((resolve) => setTimeout(resolve, pause));

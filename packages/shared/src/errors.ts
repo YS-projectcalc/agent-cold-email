@@ -88,6 +88,38 @@ export class RegistrarUnarmedError extends VendorError {
 }
 
 /**
+ * Thrown by `engine/domain-dns.ts`'s `setDnsWithRetry` when a provisioned
+ * domain's mail DNS WILL NOT come up — the vendor-verdict class fix
+ * (docs/adversarial/vendor-verdict-class-sweep-2026-08-14.md). Two conditions
+ * produce it: the vendor reported a TERMINAL registration state
+ * (expired/suspended/cancelled/…), or the benign "still propagating" state
+ * outlived `DNS_PENDING_MAX_MS`.
+ *
+ * `retryable: false`, and that grade is the whole deliverable. Before it, both
+ * conditions surfaced either as a retryable VendorError (which is how one dead
+ * vendor call became a 24-hour customer retry loop) or — after C3 part b — as an
+ * HTTP 202 `provisioning:"pending"` SUCCESS returned on every call forever, on a
+ * paid domain that would never carry a mailbox. Telling the agent to stop is
+ * what gets a human involved.
+ *
+ * NAME. It keeps `name = "VendorError"` rather than taking a distinct one, for
+ * the same reason `DomainPropagationPendingError` does: error-response.ts and
+ * vendor-failure.ts both discriminate by `name` (an error crossing the
+ * DO->Worker RPC boundary arrives with its own properties but NO prototype, so
+ * `instanceof` is false at the HTTP surface), and the existing
+ * non-retryable-VendorError mapping is already the correct customer response.
+ * It lives HERE rather than beside its thrower so the burn-replacement sweep —
+ * the one consumer that must tell it apart, in-process, by `instanceof` — can
+ * import it without creating a deliverability-actions <-> domain-dns cycle.
+ */
+export class DomainDnsTerminalError extends VendorError {
+  constructor(message: string, step?: string) {
+    super(message, false, { step });
+    this.name = "VendorError";
+  }
+}
+
+/**
  * Thrown by the vendor-spend choke-point (`engine/spend-ceiling.ts`
  * `withSpendCeiling`) when a money-out reserve is REJECTED — either the
  * per-calendar-month spend ceiling (`SPEND_CEILING_CENTS`, G2) or the InboxKit

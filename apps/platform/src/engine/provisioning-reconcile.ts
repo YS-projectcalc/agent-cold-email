@@ -27,9 +27,9 @@
 //    doubling the mailbox count. Those complete via an agent retry instead.
 //
 // SCOPE GUARDS. It touches ONLY current-derivation setup ordinals on
-// 'provisioned', 'active' domains, and NEVER a `replace:` burn-replacement
-// intent (the deliverability loop's second-writer landmine — re-driving one
-// would re-create the P0 orphan defect on the burn route).
+// 'provisioned', 'active', not-given-up-on domains, and NEVER a `replace:`
+// burn-replacement intent (the deliverability loop's second-writer landmine —
+// re-driving one would re-create the P0 orphan defect on the burn route).
 
 import type { TenantContext } from "../tenant-context.js";
 import { logVendorFailure } from "../vendor-failure.js";
@@ -106,12 +106,22 @@ export async function runProvisioningReconcile(ctx: TenantContext): Promise<Prov
 
     // The live setup domain this ordinal committed. Scoped hard: 'provisioned'
     // only (a BYO domain has its own intake pipeline owning its DNS), 'active'
-    // only (a burned/released domain is not ours to complete), matched by the
-    // exact candidate name the intent recorded.
+    // only (a burned/released domain is not ours to complete), NOT given up on
+    // (see below), matched by the exact candidate name the intent recorded.
+    //
+    // `dns_gave_up_at IS NULL` is the vendor-verdict class fix's facet-2 half
+    // reaching this leg: a domain whose registration the provider reports dead,
+    // or whose pending state outlived DNS_PENDING_MAX_MS, is not incomplete work
+    // — it is finished and failed. Without this the level-triggered loop would
+    // re-drive it on every pass forever, which is the same unbounded spin the
+    // customer's own retry loop was, just with nobody watching. A domain that
+    // RECOVERS has its marker cleared by setDnsWithRetry, so it re-enters scope
+    // on its own.
     const domain = ctx.sql
       .exec<LiveSetupDomain>(
         `SELECT id, dns_status FROM domains
-          WHERE tenant_id = ? AND domain = ? AND status = 'active' AND source = 'provisioned' LIMIT 1`,
+          WHERE tenant_id = ? AND domain = ? AND status = 'active' AND source = 'provisioned'
+            AND dns_gave_up_at IS NULL LIMIT 1`,
         ctx.tenantId,
         intent.candidate_domain,
       )

@@ -11,6 +11,7 @@
 import { isPaidPlan, monthlyRevenueCents } from "@coldstart/shared";
 import type { TenantContext } from "../tenant-context.js";
 import { readActivationState } from "./activation.js";
+import { DNS_PENDING_MAX_MS } from "./domain-dns.js";
 import { countSendEligibleMailboxes } from "./mailbox-eligibility.js";
 import { getDeliverabilitySummary } from "./reporting.js";
 
@@ -71,6 +72,25 @@ export interface SendPipelineSignals {
   eligibleMailboxes: number;
   /** Credential pushes stuck 'pending' longer than AGING_CRED_PUSH_MS, named. */
   agingPendingPushes: { email: string; pendingForMs: number }[];
+  /**
+   * Provisioned setup domains whose mail DNS has been un-ready longer than
+   * DNS_PENDING_MAX_MS — the escalation edge the vendor-verdict class fix owed
+   * (Finding 3 of the C3 re-attack: `DOMAIN_DNS_PENDING` was logged with ZERO
+   * readers, no timer, no ceiling, so an indefinitely-stalled paid domain paged
+   * nobody). Named, so the founder alert says WHICH domain.
+   *
+   * Keyed on the ANCHOR's age, not on `dns_gave_up_at`: the give-up is only
+   * stamped when something CALLS setDnsWithRetry, and the whole hazard is a
+   * tenant whose agent has stopped retrying. This fires either way.
+   */
+  agingPendingDomains: { domain: string; pendingForMs: number; gaveUp: boolean }[];
+  /**
+   * Every provisioned domain name this tenant holds. Read ONLY as the ownership
+   * set for clearing an aging-domain alert (a check row names a domain, and the
+   * watchtower must not clear another tenant's) — the exact role
+   * `mailboxProvenance` plays for the credential-push checks.
+   */
+  provisionedDomainNames: string[];
 }
 
 export interface MailboxProvenanceRow {
@@ -322,10 +342,37 @@ function readSendPipelineSignals(ctx: TenantContext): SendPipelineSignals {
     .toArray()
     .map((row) => ({ email: row.email, pendingForMs: now - row.updated_at }));
 
+  // Provisioned (lookalike) domains only: a BYO domain's own intake pipeline
+  // owns its DNS wait and has its own 7-day abandon (engine/byo-intake.ts), so
+  // alerting on it here would double-report a bounded condition. 'released' is
+  // excluded — a torn-down domain is not a stalled one.
+  const agingPendingDomains = ctx.sql
+    .exec<{ domain: string; dns_first_checked_at: number; dns_gave_up_at: number | null }>(
+      `SELECT domain, dns_first_checked_at, dns_gave_up_at FROM domains
+        WHERE tenant_id = ? AND source = 'provisioned' AND status != 'released' AND dns_status != 'ready'
+          AND dns_first_checked_at IS NOT NULL AND dns_first_checked_at <= ?
+        ORDER BY dns_first_checked_at ASC`,
+      ctx.tenantId,
+      now - DNS_PENDING_MAX_MS,
+    )
+    .toArray()
+    .map((row) => ({
+      domain: row.domain,
+      pendingForMs: now - row.dns_first_checked_at,
+      gaveUp: row.dns_gave_up_at !== null,
+    }));
+
+  const provisionedDomainNames = ctx.sql
+    .exec<{ domain: string }>(`SELECT domain FROM domains WHERE tenant_id = ? AND source = 'provisioned'`, ctx.tenantId)
+    .toArray()
+    .map((row) => row.domain);
+
   return {
     activated,
     dueNonDemoPendingSends,
     eligibleMailboxes: countSendEligibleMailboxes(ctx, now),
     agingPendingPushes,
+    agingPendingDomains,
+    provisionedDomainNames,
   };
 }

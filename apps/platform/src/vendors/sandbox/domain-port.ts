@@ -1,7 +1,8 @@
+import { domainDnsResult } from "@coldstart/shared";
 import type {
   Clock,
-  DnsRecordSet,
   DomainConnectionType,
+  DomainDnsResult,
   DomainPort,
   LookalikeCandidate,
   OwnedDomain,
@@ -67,12 +68,31 @@ export class SandboxDomainPort implements DomainPort {
     return { domain, purchasedAt: this.clock.now(), registrar: "sandbox-registrar", connectionType: "purchased" };
   }
 
-  async setDns(_domain: string, _idempotencyKey: string, _connectionType: DomainConnectionType): Promise<DnsRecordSet> {
+  /**
+   * Domains this sandbox should report as a TERMINAL vendor state (expired /
+   * suspended / cancelled — a registration that can never carry mail). Empty by
+   * default, so existing behavior is byte-identical.
+   *
+   * The fault-injection seam guard D3 of the vendor-verdict class fix requires:
+   * a port that CANNOT express "dead" is a port whose contract no fixture can
+   * exercise, which is precisely how the live defect survived every suite (the
+   * same lesson as `unavailable` above, and as `provisioningState`'s always-ready
+   * sandbox one incident earlier). Set by tests to drive the real terminal
+   * branch through the engine.
+   */
+  readonly terminal = new Set<string>();
+
+  /** Domains this sandbox should report as still propagating (benign not-yet). */
+  readonly notYet = new Set<string>();
+
+  async setDns(domain: string, _idempotencyKey: string, _connectionType: DomainConnectionType): Promise<DomainDnsResult> {
     // The sandbox registrar operates both halves identically (there is no real
     // zone and no propagation delay), so the branch a real vendor needs is
     // invisible here — see test/domain-connection-type.test.ts, which drives the
     // real port for it.
-    return { mx: true, spf: true, dkim: true, dmarc: true, rdns: true };
+    if (this.terminal.has(domain)) return domainDnsResult({ kind: "terminal", vendorState: "expired" });
+    if (this.notYet.has(domain)) return domainDnsResult({ kind: "not_yet" });
+    return domainDnsResult({ kind: "ready" });
   }
 
   async release(domain: string, idempotencyKey: string): Promise<ReleaseResult> {

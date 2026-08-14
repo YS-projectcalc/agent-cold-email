@@ -49,6 +49,87 @@ export interface DnsRecordSet {
   rdns: boolean;
 }
 
+/**
+ * What a readiness-polling vendor port ACTUALLY learned — the fix for the
+ * vendor-verdict class (docs/adversarial/vendor-verdict-class-sweep-2026-08-14.md,
+ * confirmed live defect in c3-postship-reattack-2026-08-14.md Finding 1).
+ *
+ * THE DEFECT THIS TYPE MAKES UNREPRESENTABLE. A purchased domain whose
+ * registration had gone terminal (expired / suspended / cancelled) was reported
+ * by the port as an all-false `DnsRecordSet` — byte-identical to a registration
+ * the vendor accepted two seconds ago. The engine's benign "still propagating"
+ * branch matched, so the customer got HTTP 202 `provisioning:"pending"` forever
+ * on a paid domain that would never carry a mailbox. The terminal information
+ * existed at the port (`polledDomainIsReady` read the vendor's status and
+ * returned false) and was destroyed by the return type: five booleans cannot say
+ * "dead". Nothing downstream *could* branch on it — the same drop-the-
+ * discriminator shape as INCIDENT 2026-08-05's `connection_type`.
+ *
+ * Deliberately NOT collapsible into a boolean, exactly like
+ * `engine/mailbox-acquisition.ts`'s `OwnershipVerdict` and
+ * `vendors/real/mailbox-port.ts`'s `warmupSubscriptionState`:
+ *
+ *  - 'ready'        — usable now.
+ *  - 'not_yet'      — a real, benign in-progress state that heals by waiting.
+ *  - 'terminal'     — the vendor says this resource is DEAD. It never heals, so
+ *                     retrying is a spin, not a retry. `vendorState` carries the
+ *                     raw token for operator logs (never a customer surface).
+ *  - 'inconclusive' — we could not classify the answer (an unrecognized status
+ *                     token, an errored lookup body). Proves NOTHING, so it is
+ *                     graded exactly like 'not_yet' at every decision point and
+ *                     is NEVER an authorization for anything.
+ *
+ * LOAD-BEARING ASYMMETRY (do not "simplify" away): guessing not-ready costs a
+ * retry; guessing ready bills a customer monthly for a mailbox on a domain whose
+ * mail DNS does not work. A terminal verdict is therefore a hard, VISIBLE stop —
+ * never a licence to re-buy, and never a step toward 'ready'.
+ */
+export type VendorReadiness =
+  | { kind: "ready" }
+  | { kind: "not_yet" }
+  | { kind: "terminal"; vendorState: string }
+  | { kind: "inconclusive"; reason: string };
+
+/**
+ * Mailbox readiness additionally distinguishes 'absent' — the vendor lists
+ * NOTHING for this address (INCIDENT 2026-08-05, L2). 'absent' is the only
+ * verdict that can ever contribute to authorizing a re-buy, which is precisely
+ * why an unclassifiable or errored lookup must land on 'inconclusive' instead:
+ * a buy the vendor accepted seconds ago is absent too, and so is one whose
+ * lookup simply failed.
+ */
+export type MailboxReadiness = VendorReadiness | { kind: "absent" };
+
+/**
+ * `DomainPort.setDns`'s answer: the VERDICT plus the per-record-type evidence.
+ *
+ * Both halves are load-bearing and neither is redundant. The verdict is what
+ * lets a caller tell 'dead' from 'not yet'; `records` is what preserves the
+ * pre-existing readiness asymmetry — a caller treats the domain as ready only
+ * when the verdict says ready AND every record flag is satisfied, so a port
+ * that reported 'ready' with an unsatisfied flag can never newly promote a
+ * not-ready domain (see engine/domain-dns.ts's isDnsReady).
+ */
+export interface DomainDnsResult {
+  verdict: VendorReadiness;
+  records: DnsRecordSet;
+}
+
+/**
+ * The ONE mapping from a coarse verdict onto the five record flags.
+ *
+ * This REPLACES the per-adapter `dnsRecordSet(ready: boolean)` helper, which
+ * took a bare boolean and was therefore the exact shape of the collapse (guard
+ * D1 of the class fix): there was no way to hand it "dead". A port that reports
+ * granular per-record state builds its own `DomainDnsResult` instead of calling
+ * this; everything that reports one coarse signal routes through here so the
+ * verdict and the flags can never disagree.
+ */
+export function domainDnsResult(verdict: VendorReadiness): DomainDnsResult {
+  const ready = verdict.kind === "ready";
+  return { verdict, records: { mx: ready, spf: ready, dkim: ready, dmarc: ready, rdns: ready } };
+}
+
 /** Result of releasing a provisioned resource back to the vendor (D5 teardown). */
 export interface ReleaseResult {
   released: boolean;
@@ -86,16 +167,23 @@ export interface DomainPort {
   buy(domain: string, idempotencyKey: string): Promise<PurchasedDomain>;
   /**
    * Brings the domain's mail DNS to a usable state and reports what is ACTUALLY
-   * in effect — the returned flags are the readiness signal callers gate on, so
-   * "did not throw" is never a substitute for "is ready".
+   * in effect — the returned verdict/flags are the readiness signal callers gate
+   * on, so "did not throw" is never a substitute for "is ready".
    *
    * `connectionType` selects the operation (INCIDENT 2026-08-05): a 'purchased'
    * domain is polled, a 'connected' one goes through the nameserver handshake.
    * Running the handshake against a purchased domain is not merely redundant —
    * it FAILS permanently, which is what stranded the incident domain through
    * three customer retries.
+   *
+   * An implementation MUST be able to answer `{kind:"terminal"}` for a vendor
+   * state that can never carry mail (expired/suspended/cancelled/…). Returning
+   * a not-ready `DomainDnsResult` for one is the class defect this signature
+   * exists to make unrepresentable — see `VendorReadiness`. A port that cannot
+   * observe readiness at all (the unarmed registrar stub) throws instead, which
+   * is a different and equally visible answer.
    */
-  setDns(domain: string, idempotencyKey: string, connectionType: DomainConnectionType): Promise<DnsRecordSet>;
+  setDns(domain: string, idempotencyKey: string, connectionType: DomainConnectionType): Promise<DomainDnsResult>;
   /**
    * Releases a domain back to the registrar on tenant teardown/reclaim (D5).
    * Idempotency-keyed like every side-effecting op (ARCHITECTURE.md #5). The
@@ -119,29 +207,29 @@ export interface MailboxHealth {
   placementRate: number; // fraction landing in inbox vs spam
 }
 
-/**
- * Vendor-side progress of an ASYNC mailbox buy (INCIDENT 2026-08-05, L2):
- *  - 'absent'  — the vendor does not list this mailbox (yet). A buy it accepted
- *                seconds ago looks exactly like a buy that never happened, so
- *                'absent' is NEVER by itself a licence to buy again.
- *  - 'pending' — listed, but not finished provisioning (InboxKit's 'scheduled').
- *  - 'ready'   — listed and usable.
- * `provision()` returning is only the vendor ACCEPTING the order; every
- * uid-resolving operation (warmup enrollment, health, credentials, release) and
- * the billable local row require 'ready'.
- */
-export type MailboxProvisioningState = "absent" | "pending" | "ready";
-
 export interface MailboxPort {
   provision(domain: string, localPart: string, idempotencyKey: string): Promise<ProvisionedMailbox>;
   /**
-   * Where the vendor has got to with this mailbox. The poll-until-ready gate
-   * between the buy and every uid consumer (INCIDENT 2026-08-05, L2), and the
+   * Where the vendor has got to with this mailbox (INCIDENT 2026-08-05, L2).
+   * The poll-until-ready gate between the buy and every uid consumer, and the
    * "did our buy actually land?" question a retry must ask before it considers
    * buying again — asked of the VENDOR rather than parsed out of an error
    * message, the fragile pattern this codebase has removed twice.
+   *
+   * `provision()` returning is only the vendor ACCEPTING the order; every
+   * uid-resolving operation (warmup enrollment, health, credentials, release)
+   * and the billable local row require 'ready'.
+   *
+   * The verdict (`MailboxReadiness`) replaced a three-value string union whose
+   * 'pending' arm silently absorbed TERMINAL vendor states: a suspended or
+   * cancelled mailbox read as "still being created", so the engine retried it
+   * forever with a retryable error. An implementation MUST answer
+   * `{kind:"terminal"}` for a dead mailbox and `{kind:"inconclusive"}` for a
+   * lookup it could not classify — 'absent' means "the vendor definitively
+   * lists nothing", and is the only verdict that can contribute to authorizing
+   * a second purchase.
    */
-  provisioningState(email: string): Promise<MailboxProvisioningState>;
+  provisioningState(email: string): Promise<MailboxReadiness>;
   getHealth(email: string): Promise<MailboxHealth>;
   startWarmup(email: string, idempotencyKey: string): Promise<{ started: boolean; startedAt: number }>;
   /**
