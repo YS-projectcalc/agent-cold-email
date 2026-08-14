@@ -71,10 +71,18 @@ through the DO.
   health check for a status page. Returns no tenant/admin data.
 - `admin-support.ts` / `admin-ops.ts` — the D1/D2/D6 admin surface
   (`POST /admin/support/triage`, `GET /admin/support/digest`,
-  `POST /admin/ops/dunning-sweep`, `GET /admin/ops/digest`). Gated by
-  `../require-admin-auth.ts` (a SEPARATE `ADMIN_TOKEN` secret bearer, never
-  a tenant token) — mounted as their own Hono group in `index.ts`, not
-  behind `requireAuth`. See `../admin/README.md`.
+  `POST /admin/ops/dunning-sweep`, `GET /admin/ops/digest`,
+  `GET /admin/ops/checks` — read-only per-check watchtower state, pairs with
+  `GET /status` for the two checks it deliberately omits, see its own doc
+  comment, `GET /admin/ops/waitlist`, `POST /admin/tenants/:id/terminate`).
+  Gated by `../require-admin-auth.ts` (a SEPARATE `ADMIN_TOKEN` secret
+  bearer, never a tenant token) — mounted as their own Hono group in
+  `index.ts`, not behind `requireAuth`. See `../admin/README.md`.
+- `admin-screening.ts` — the G1 OFAC/SDN screening review queue:
+  `GET /admin/screening/reviews` (list every tenant currently held) and
+  `POST /admin/tenants/:id/screening` (`{decision:'clear'|'reject', note}`,
+  resolves one). Same `ADMIN_TOKEN` gate as the rest of this list. See
+  `../admin/README.md`'s "G1" section.
 - `admin-messages.ts` — `POST /admin/tenants/:id/messages` (msgchannel
   increment 2, the operator route): drops a structured, enumerated-`kind`
   message into one tenant's own message store (`../engine/tenant-messages.ts`).

@@ -46,9 +46,24 @@ export const adminOpsRoute = new Hono<{ Bindings: Env }>()
   // same table `reconcileAlerts` writes) — this route never calls
   // reconcileAlerts/decideAlert, so it cannot touch alert emission, dedup
   // state or check registration. Unhealthy checks first; `?unhealthy=1`
-  // returns only those. No cap/truncation (YAGNI, CLAUDE.md rule i): at this
-  // build's scale the table is one row per platform/tenant/mailbox check —
-  // the same scale `buildOpsDigest` already fans out over uncapped.
+  // returns only those.
+  //
+  // NOT the whole watchtower picture: `d1` and `cron_sweep` (the dead-man)
+  // deliberately live in WatchtowerDO storage instead of this table
+  // (`../watchtower-do.ts:39-42`, 2026-08-06 alerting audit B1/B2 — a check
+  // ON D1 cannot itself be stored IN D1) and NEVER appear here. A consumer
+  // MUST pair this endpoint with `GET /status` (`./status.ts`), which
+  // surfaces both as a 503 `degraded`. Per-row `updatedAt` staleness is this
+  // endpoint's own dead-cron tell: a dead cron stops writing entirely, so
+  // this route keeps serving a frozen, healthy-looking snapshot rather than
+  // ever going empty or erroring.
+  //
+  // No cap/truncation today (YAGNI, CLAUDE.md rule i): at real scale the
+  // table holds hundreds of rows. Growth is monotonic (rows are flipped
+  // healthy, never DELETEd) — that's the already-open `watchtower_state`
+  // unbounded-growth ledger item (ROADMAP.md ## Open, 2026-08-09 wave-3 gate
+  // NB-2); when that item is closed, this endpoint inherits whatever bound
+  // it lands on.
   .get("/admin/ops/checks", async (c) => {
     const onlyUnhealthy = c.req.query("unhealthy") === "1";
     const rows = await readAllCheckRows(c.env);
