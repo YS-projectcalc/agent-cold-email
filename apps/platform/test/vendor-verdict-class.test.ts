@@ -49,7 +49,7 @@ import { SandboxDomainPort } from "../src/vendors/sandbox/domain-port.js";
 import { SandboxMailboxPort } from "../src/vendors/sandbox/mailbox-port.js";
 import { RealClock } from "../src/clock.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
-import { activatePaidPlan, mintTenant, seedBenignSdnList, tenantStub, withTenantContext } from "./helpers.js";
+import { activatePaidPlan, api, mintTenant, seedBenignSdnList, signup, tenantStub, withTenantContext } from "./helpers.js";
 
 // Local copy of the bound, so this file's arithmetic never depends on the very
 // constant it is asserting into existence (an `undefined` import would silently
@@ -242,14 +242,28 @@ async function runSetup(tenantId: string, port: DomainPort, input: ReturnType<ty
   );
 }
 
-function readDomainRows(tenantId: string): Promise<{ status: string; dns_status: string; dns_gave_up_at: number | null; dns_check_count: number; dns_first_checked_at: number | null }[]> {
+type DomainRow = {
+  status: string;
+  dns_status: string;
+  dns_gave_up_at: number | null;
+  dns_check_count: number;
+  dns_first_checked_at: number | null;
+  [column: string]: SqlStorageValue;
+};
+
+function readDomainRows(tenantId: string): Promise<DomainRow[]> {
   return runInDurableObject(tenantStub(tenantId), (_i, s) =>
     s.storage.sql
-      .exec<{ status: string; dns_status: string; dns_gave_up_at: number | null; dns_check_count: number; dns_first_checked_at: number | null }>(
-        `SELECT status, dns_status, dns_gave_up_at, dns_check_count, dns_first_checked_at FROM domains`,
-      )
+      .exec<DomainRow>(`SELECT status, dns_status, dns_gave_up_at, dns_check_count, dns_first_checked_at FROM domains`)
       .toArray(),
   );
+}
+
+/** The tenant's ONE provisioned domain row — asserts the count so no test reads a phantom. */
+async function readOneDomainRow(tenantId: string): Promise<DomainRow> {
+  const rows = await readDomainRows(tenantId);
+  expect(rows, "expected exactly one domain row").toHaveLength(1);
+  return rows[0] as DomainRow;
 }
 
 function readMailboxCount(tenantId: string): Promise<number> {
@@ -293,10 +307,9 @@ describe("the confirmed defect — a TERMINAL registration is never reported as 
       expect(o, `call ${i} reported success-pending`).not.toMatchObject({ provisioning: "pending" });
     }
 
-    const rows = await readDomainRows(tenantId);
-    expect(rows).toHaveLength(1);
-    expect(rows[0].dns_status).toBe("pending");
-    expect(rows[0].dns_gave_up_at).not.toBeNull();
+    const row = await readOneDomainRow(tenantId);
+    expect(row.dns_status).toBe("pending");
+    expect(row.dns_gave_up_at).not.toBeNull();
     // Exactly ONE domain purchase across all three calls — a terminal verdict
     // must never open a re-buy path.
     expect(log.buys).toHaveLength(1);
@@ -318,10 +331,10 @@ describe("guard B — the durable pending state is BOUNDED", () => {
     expect(outcome).toMatchObject({ provisioning: "pending" });
 
     // The bound's anchor is stamped on the very first not-ready observation.
-    const rows = await readDomainRows(tenantId);
-    expect(rows[0].dns_first_checked_at).not.toBeNull();
-    expect(rows[0].dns_check_count).toBeGreaterThanOrEqual(1);
-    expect(rows[0].dns_gave_up_at).toBeNull();
+    const row = await readOneDomainRow(tenantId);
+    expect(row.dns_first_checked_at).not.toBeNull();
+    expect(row.dns_check_count).toBeGreaterThanOrEqual(1);
+    expect(row.dns_gave_up_at).toBeNull();
   }, 30_000);
 
   it("PAST the bound the same benign not-yet becomes a NON-retryable, visible failure", async () => {
@@ -343,8 +356,7 @@ describe("guard B — the durable pending state is BOUNDED", () => {
     expect(second).not.toMatchObject({ provisioning: "pending" });
     expect((second as { retryable?: boolean }).retryable).toBe(false);
 
-    const rows = await readDomainRows(tenantId);
-    expect(rows[0].dns_gave_up_at).not.toBeNull();
+    expect((await readOneDomainRow(tenantId)).dns_gave_up_at).not.toBeNull();
     expect(await readMailboxCount(tenantId)).toBe(0);
   }, 60_000);
 
@@ -358,15 +370,15 @@ describe("guard B — the durable pending state is BOUNDED", () => {
       s.storage.sql.exec(`UPDATE domains SET dns_first_checked_at = dns_first_checked_at - ?`, SIX_HOURS_MS + 60_000),
     );
     await runSetup(tenantId, p, setupInput("healreg", "healreg.com"), "heal-2");
-    expect((await readDomainRows(tenantId))[0].dns_gave_up_at).not.toBeNull();
+    expect((await readOneDomainRow(tenantId)).dns_gave_up_at).not.toBeNull();
 
     const ready = verdictPort({ kind: "ready" });
     const outcome = await runSetup(tenantId, ready.p, setupInput("healreg", "healreg.com"), "heal-3");
     expect(outcome).not.toBeInstanceOf(Error);
 
-    const rows = await readDomainRows(tenantId);
-    expect(rows[0].dns_status).toBe("ready");
-    expect(rows[0].dns_gave_up_at).toBeNull();
+    const row = await readOneDomainRow(tenantId);
+    expect(row.dns_status).toBe("ready");
+    expect(row.dns_gave_up_at).toBeNull();
     expect(await readMailboxCount(tenantId)).toBe(2);
   }, 90_000);
 });
@@ -446,7 +458,7 @@ describe("guard C — an aging pending domain becomes a founder signal", () => {
 
     const summary = await tenantStub(tenantId).opsSummary(now - ONE_DAY_MS);
     expect(summary.sendPipeline.agingPendingDomains.map((d) => d.domain)).toEqual(["agingco0.com"]);
-    expect(summary.sendPipeline.agingPendingDomains[0].pendingForMs).toBeGreaterThanOrEqual(SIX_HOURS_MS);
+    expect(summary.sendPipeline.agingPendingDomains[0]?.pendingForMs ?? 0).toBeGreaterThanOrEqual(SIX_HOURS_MS);
 
     const checks = sendPipelineChecks(tenantId, summary, new Set<string>());
     const dnsCheck = checks.find((c) => c.name.startsWith("domain_dns_aging:"));
@@ -469,7 +481,7 @@ describe("the reconcile stops re-driving a domain we gave up on", () => {
       s.storage.sql.exec(`UPDATE domains SET dns_first_checked_at = dns_first_checked_at - ?`, SIX_HOURS_MS + 60_000),
     );
     await runSetup(tenantId, p, setupInput("recdead", "recdead.com"), "rec-2");
-    expect((await readDomainRows(tenantId))[0].dns_gave_up_at).not.toBeNull();
+    expect((await readOneDomainRow(tenantId)).dns_gave_up_at).not.toBeNull();
 
     const summary = await withTenantContext(tenantId, (base) =>
       runProvisioningReconcile({ ...base, adapters: { ...base.adapters, domain: p } }),
@@ -509,44 +521,95 @@ function injectComplaints(sql: SqlStorage, tenantId: string, mailboxId: string, 
   }
 }
 
-describe("a TERMINAL burn-replacement counts toward the per-window replacement cap", () => {
-  it("the failed replacement is logged as terminal, so the sweep stops re-buying forever", async () => {
-    await seedBenignSdnList();
-    const { tenantId } = await mintTenant("Burn Term Co", "managed");
-    await activatePaidPlan(tenantId, "managed");
-    const domain = verdictPort({ kind: "ready" });
+/**
+ * Drives ONE burn-replacement sweep whose replacement domain answers `verdict`,
+ * and returns the resulting action counts plus what the replacement port bought.
+ *
+ * Shaped exactly like test/ga-gates-ng5-2-isolation.test.ts (a `signup` demo
+ * tenant + `advanceClock` past the ramp), because `advanceClock` is a
+ * sandbox-only control — an `activatePaidPlan` tenant is migrated to the REAL
+ * clock and the RPC refuses.
+ */
+async function runBurnSweep(
+  brand: string,
+  primaryDomain: string,
+  replacement: VendorReadiness,
+  seedPriorTerminals = 0,
+): Promise<{ counts: Record<string, number>; buys: string[] }> {
+  const { tenantId, token } = await signup(brand, `founder@${primaryDomain}`);
+  const setup = await api("/setup-infrastructure", {
+    method: "POST",
+    token,
+    body: JSON.stringify({
+      brand,
+      primaryDomain,
+      domains: 1,
+      inboxesEach: 1,
+      persona: "Ops",
+      physicalAddress: "1 Test St",
+      senderIdentity: `Ops <o@${primaryDomain}>`,
+    }),
+  });
+  expect(setup.status, `setup failed: ${JSON.stringify(setup.body)}`).toBe(202);
+  await tenantStub(tenantId).advanceClock((WARMUP_RAMP_DAYS + 1) * ONE_DAY_MS);
 
-    // One provisioned domain + mailbox to burn.
-    await withTenantContext(tenantId, (base) =>
-      runSetupInfrastructure(
-        { ...base, adapters: { ...base.adapters, domain: domain.p } },
-        { ...setupInput("burnterm", "burnterm.com"), inboxesEach: 1 },
-        new SandboxOpsMailer(),
-        "burn-setup",
-      ),
+  const port = verdictPort(replacement);
+  const counts = await withTenantContext(tenantId, async (base) => {
+    const mailbox = base.sql.exec<{ id: string }>(`SELECT id FROM mailboxes LIMIT 1`).one();
+    // 20 sends / 5 complaints = 0.25 domain complaint rate, far over
+    // burnComplaintRate, with sends >= minSampleSends.
+    injectComplaints(base.sql, tenantId, mailbox.id, 20, 5);
+    for (let i = 0; i < seedPriorTerminals; i++) {
+      base.sql.exec(
+        `INSERT INTO deliverability_actions (id, tenant_id, action, target, detail_json, ts)
+         VALUES (?, ?, 'REPLACE_DOMAIN_TERMINAL', ?, '{}', ?)`,
+        `dact_seed_${i}`,
+        tenantId,
+        `prior${i}.com`,
+        base.clock.now(),
+      );
+    }
+    await runDeliverabilitySweep(
+      { ...base, adapters: { ...base.adapters, domain: port.p } },
+      DEFAULT_THRESHOLDS,
+      new SandboxOpsMailer(),
     );
-    await tenantStub(tenantId).advanceClock((WARMUP_RAMP_DAYS + 1) * ONE_DAY_MS);
+    return base.sql
+      .exec<{ action: string; n: number }>(
+        `SELECT action, COUNT(*) as n FROM deliverability_actions WHERE tenant_id = ? GROUP BY action`,
+        tenantId,
+      )
+      .toArray();
+  });
+  return { counts: Object.fromEntries(counts.map((r) => [r.action, r.n])), buys: port.log.buys };
+}
 
-    const terminal = verdictPort({ kind: "terminal", vendorState: "expired" });
-    const result = await withTenantContext(tenantId, async (base) => {
-      const mailbox = base.sql.exec<{ id: string }>(`SELECT id FROM mailboxes LIMIT 1`).one();
-      injectComplaints(base.sql, tenantId, mailbox.id, 20, 5);
-      const ctx = { ...base, adapters: { ...base.adapters, domain: terminal.p } };
-      await runDeliverabilitySweep(ctx, DEFAULT_THRESHOLDS, new SandboxOpsMailer());
-      return base.sql
-        .exec<{ action: string; n: number }>(
-          `SELECT action, COUNT(*) as n FROM deliverability_actions WHERE tenant_id = ? GROUP BY action`,
-          tenantId,
-        )
-        .toArray();
-    });
+describe("a TERMINAL burn-replacement counts toward the per-window replacement cap", () => {
+  it("a terminal replacement is recorded under its OWN action, not a generic 'provider issue'", async () => {
+    const { counts, buys } = await runBurnSweep("Burn Term Co", "burnterm.com", { kind: "terminal", vendorState: "expired" });
 
-    const counts = Object.fromEntries(result.map((r) => [r.action, r.n]));
-    // A terminal replacement failure is recorded under its OWN action, which
-    // countReplacementsInWindow counts — a plain REPLACE_DOMAIN_FAILED never
-    // reaches the cap, so the sweep re-buys a fresh domain every pass forever.
+    // Pre-fix this was a REPLACE_DOMAIN_FAILED, which countReplacementsInWindow
+    // ignores — so the next sweep re-entered with a higher domainIndex (a
+    // different intent key, hence a FRESH buy) and did it all again, forever,
+    // with the runaway cap never advancing.
     expect(counts.REPLACE_DOMAIN_TERMINAL).toBe(1);
-    expect(counts.REPLACE_DOMAIN ?? 0).toBe(0);
+    expect(counts.REPLACE_DOMAIN_FAILED ?? 0).toBe(0);
+    expect(counts.REPLACE_DOMAIN ?? 0).toBe(0); // no replacement completed
+    expect(buys).toHaveLength(1); // a domain WAS bought — which is why it must count
+  }, 90_000);
+
+  it("CONTROL — a transient replacement failure still logs the generic action (the cap must not swallow those)", async () => {
+    const { counts } = await runBurnSweep("Burn Trans Co", "burntrans.com", { kind: "not_yet" });
+    expect(counts.REPLACE_DOMAIN_FAILED).toBe(1);
+    expect(counts.REPLACE_DOMAIN_TERMINAL ?? 0).toBe(0);
+  }, 90_000);
+
+  it("once the window holds MAX terminal attempts the replacement is WITHHELD — no further domain is bought", async () => {
+    // The behavioral point of the counting change: three consumed attempts in
+    // the window is the cap, and a terminal attempt is a consumed attempt.
+    const { counts, buys } = await runBurnSweep("Burn Cap Co", "burncap.com", { kind: "terminal", vendorState: "expired" }, 3);
+    expect(counts.REPLACE_DOMAIN_CAPPED).toBe(1);
+    expect(buys).toEqual([]); // the spin is over — nothing else is purchased
   }, 90_000);
 });
 

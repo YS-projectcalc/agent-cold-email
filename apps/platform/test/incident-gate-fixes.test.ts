@@ -2,9 +2,10 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import {
+  domainDnsResult,
   NotActivatedError,
   VendorError,
-  type DnsRecordSet,
+  type DomainDnsResult,
   type DomainConnectionType,
   type DomainPort,
   type LookalikeCandidate,
@@ -64,10 +65,10 @@ function realisticDomainPort(opts: { owned?: OwnedDomain[]; setDnsFailures?: num
       state.buys.push(domain);
       return { domain, purchasedAt: Date.now(), registrar: "test", connectionType: "purchased" };
     },
-    async setDns(domain: string, _key: string, connectionType: DomainConnectionType): Promise<DnsRecordSet> {
+    async setDns(domain: string, _key: string, connectionType: DomainConnectionType): Promise<DomainDnsResult> {
       state.setDns.push(`${domain}:${connectionType}`);
       if (dnsFailures-- > 0) throw new VendorError("inboxkit domains/nameservers failed: domain not found", true);
-      return { mx: true, spf: true, dkim: true, dmarc: true, rdns: true };
+      return domainDnsResult({ kind: "ready" });
     },
     async release(): Promise<ReleaseResult> {
       return { released: true, releasedAt: Date.now() };

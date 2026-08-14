@@ -4,7 +4,7 @@ import type {
   CancelWarmupResult,
   MailboxHealth,
   MailboxPort,
-  MailboxProvisioningState,
+  MailboxReadiness,
   ProvisionedMailbox,
   ReleaseResult,
 } from "@coldstart/shared";
@@ -30,8 +30,8 @@ function countingMailbox(): { port: MailboxPort; provisionCalls: () => number } 
       calls++;
       return { email: `${localPart}@${domain}`, provider: "google", provisionedAt: Date.now() };
     },
-    async provisioningState(): Promise<MailboxProvisioningState> {
-      return "ready";
+    async provisioningState(): Promise<MailboxReadiness> {
+      return { kind: "ready" };
     },
     async startWarmup(): Promise<{ started: boolean; startedAt: number }> {
       return { started: true, startedAt: Date.now() };

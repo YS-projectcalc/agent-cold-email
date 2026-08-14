@@ -1,9 +1,10 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import {
+  domainDnsResult,
   RegistrarUnarmedError,
   VendorError,
-  type DnsRecordSet,
+  type DomainDnsResult,
   type DomainConnectionType,
   type DomainPort,
   type LookalikeCandidate,
@@ -58,11 +59,12 @@ function domainPort(opts: {
       log.buys.push(domain);
       return { domain, purchasedAt: Date.now(), registrar: "test", connectionType: opts.connectionType ?? "purchased" };
     },
-    async setDns(domain: string, _key: string, connectionType: DomainConnectionType): Promise<DnsRecordSet> {
+    async setDns(domain: string, _key: string, connectionType: DomainConnectionType): Promise<DomainDnsResult> {
       log.setDns.push({ domain, connectionType });
       if (typeof opts.dns === "object") throw opts.dns.throw;
-      const ready = opts.dns === "ready";
-      return { mx: ready, spf: ready, dkim: ready, dmarc: ready, rdns: ready };
+      // Same two outcomes this fixture always had — "ready" or "the port
+      // answered and it is not in effect yet" — now said in the verdict's words.
+      return domainDnsResult(opts.dns === "ready" ? { kind: "ready" } : { kind: "not_yet" });
     },
     async release(): Promise<ReleaseResult> {
       return { released: true, releasedAt: Date.now() };

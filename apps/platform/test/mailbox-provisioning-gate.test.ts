@@ -1,14 +1,15 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import {
+  domainDnsResult,
   VendorError,
   type CancelWarmupResult,
-  type DnsRecordSet,
+  type DomainDnsResult,
   type DomainPort,
   type LookalikeCandidate,
   type MailboxHealth,
   type MailboxPort,
-  type MailboxProvisioningState,
+  type MailboxReadiness,
   type OwnedDomain,
   type ProvisionedMailbox,
   type PurchasedDomain,
@@ -63,12 +64,12 @@ function asyncMailboxVendor(opts: { readyAfterChecks?: number; buyThrows?: Vendo
       bought.add(email);
       return { email, provider: "google", provisionedAt: Date.now() };
     },
-    async provisioningState(email: string): Promise<MailboxProvisioningState> {
+    async provisioningState(email: string): Promise<MailboxReadiness> {
       log.stateChecks.push(email);
-      if (!bought.has(email)) return "absent";
+      if (!bought.has(email)) return { kind: "absent" };
       const seen = (checks.get(email) ?? 0) + 1;
       checks.set(email, seen);
-      return seen > readyAfter ? "ready" : "pending";
+      return seen > readyAfter ? { kind: "ready" } : { kind: "not_yet" };
     },
     async startWarmup(email: string): Promise<{ started: boolean; startedAt: number }> {
       log.warmups.push(email);
@@ -108,8 +109,8 @@ function healthyDomainPort(): DomainPort {
     async buy(domain: string): Promise<PurchasedDomain> {
       return { domain, purchasedAt: Date.now(), registrar: "test", connectionType: "purchased" };
     },
-    async setDns(): Promise<DnsRecordSet> {
-      return { mx: true, spf: true, dkim: true, dmarc: true, rdns: true };
+    async setDns(): Promise<DomainDnsResult> {
+      return domainDnsResult({ kind: "ready" });
     },
     async release(): Promise<ReleaseResult> {
       return { released: true, releasedAt: Date.now() };

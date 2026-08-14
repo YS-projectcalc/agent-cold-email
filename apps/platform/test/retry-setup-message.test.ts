@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  domainDnsResult,
   VendorError,
   type CancelWarmupResult,
-  type DnsRecordSet,
+  type DomainDnsResult,
   type DomainPort,
   type LookalikeCandidate,
   type MailboxHealth,
   type MailboxPort,
-  type MailboxProvisioningState,
+  type MailboxReadiness,
   type OwnedDomain,
   type ProvisionedMailbox,
   type PurchasedDomain,
@@ -37,7 +38,7 @@ function stuckDnsDomainPort(setDnsMessage: string): DomainPort {
     async buy(domain: string): Promise<PurchasedDomain> {
       return { domain, purchasedAt: Date.now(), registrar: "test-registrar", connectionType: "purchased" };
     },
-    async setDns(): Promise<DnsRecordSet> {
+    async setDns(): Promise<DomainDnsResult> {
       throw new VendorError(setDnsMessage, true);
     },
     async release(): Promise<ReleaseResult> {
@@ -71,7 +72,7 @@ function multiCandidateStuckDnsDomainPort(): { port: DomainPort; buyCalls: strin
       buyCalls.push(domain);
       return { domain, purchasedAt: Date.now(), registrar: "test-registrar", connectionType: "purchased" };
     },
-    async setDns(): Promise<DnsRecordSet> {
+    async setDns(): Promise<DomainDnsResult> {
       throw new VendorError("inboxkit domains/nameservers failed: domain not found", true);
     },
     async release(): Promise<ReleaseResult> {
@@ -93,8 +94,8 @@ function healthyDomainPort(): DomainPort {
     async buy(domain: string): Promise<PurchasedDomain> {
       return { domain, purchasedAt: Date.now(), registrar: "test-registrar", connectionType: "purchased" };
     },
-    async setDns(): Promise<DnsRecordSet> {
-      return { mx: true, spf: true, dkim: true, dmarc: true, rdns: true };
+    async setDns(): Promise<DomainDnsResult> {
+      return domainDnsResult({ kind: "ready" });
     },
     async release(): Promise<ReleaseResult> {
       return { released: true, releasedAt: Date.now() };
@@ -116,8 +117,8 @@ function stuckMailboxPort(): MailboxPort {
     async provision(domain: string, localPart: string): Promise<ProvisionedMailbox> {
       return { email: `${localPart}@${domain}`, provider: "google", provisionedAt: Date.now() };
     },
-    async provisioningState(): Promise<MailboxProvisioningState> {
-      return "pending"; // never reaches 'ready' within the backoff budget
+    async provisioningState(): Promise<MailboxReadiness> {
+      return { kind: "not_yet" }; // never reaches 'ready' within the backoff budget
     },
     async startWarmup(): Promise<{ started: boolean; startedAt: number }> {
       throw new Error("startWarmup must never be reached before the mailbox is ready");

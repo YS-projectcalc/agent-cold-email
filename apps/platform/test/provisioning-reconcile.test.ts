@@ -1,8 +1,9 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import {
+  domainDnsResult,
   VendorError,
-  type DnsRecordSet,
+  type DomainDnsResult,
   type DomainPort,
   type LookalikeCandidate,
   type OwnedDomain,
@@ -45,12 +46,11 @@ function reconcilePort() {
       log.buys.push(domain);
       return { domain, purchasedAt: Date.now(), registrar: "test", connectionType: "purchased" };
     },
-    async setDns(domain: string): Promise<DnsRecordSet> {
+    async setDns(domain: string): Promise<DomainDnsResult> {
       log.setDns.push(domain);
       const err = throwFor.get(domain);
       if (err) throw err;
-      const r = ready;
-      return { mx: r, spf: r, dkim: r, dmarc: r, rdns: r };
+      return domainDnsResult(ready ? { kind: "ready" } : { kind: "not_yet" });
     },
     async release(): Promise<ReleaseResult> {
       return { released: true, releasedAt: Date.now() };
