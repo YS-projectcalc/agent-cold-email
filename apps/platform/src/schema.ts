@@ -879,6 +879,18 @@ CREATE TABLE IF NOT EXISTS domain_intents (
   -- 'intent' (written, buy not yet confirmed) | 'committed' (we own it, and the
   -- domains row exists) | 'dangling' (the buy leg threw — we MAY own it).
   status TEXT NOT NULL DEFAULT 'intent',
+  -- C3 part d (2026-08-13) — the DESIRED provisioning spec for this ordinal,
+  -- persisted at first buy so the out-of-band provisioning-reconcile sweep can
+  -- re-drive provisionDomainWithMailboxes with the SAME persona + mailbox count
+  -- the original setup_infrastructure call used (neither is otherwise durable —
+  -- both are per-call inputs). Written INSERT-only (recordDomainIntent's INSERT
+  -- OR IGNORE), so a retry keeps the first call's spec and a reconcile converges
+  -- on the SAME deterministic mailbox addresses the agent's own retry would.
+  -- NULL on any row that predates this column (e.g. the incident's rebound legacy
+  -- intents): the reconcile SKIPS such a row rather than guessing a spec, so a
+  -- pre-column stranding is completed by an agent retry, never by a guess.
+  persona_slug TEXT,
+  inboxes_each INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );

@@ -17,7 +17,7 @@ import { customerSafeVendorDetail, customerSafeVendorFailure, logVendorFailure }
 import { buildMailboxBilling, syncMailboxQuantity, type MailboxBilling } from "./billing.js";
 import { assertNotLifecycleFrozen } from "./billing-state.js";
 import { assertBrandOwnership } from "./brand-guard.js";
-import { setDnsWithRetry } from "./domain-dns.js";
+import { DomainPropagationPendingError, setDnsWithRetry } from "./domain-dns.js";
 import { managedMailboxAddress, provisionMailboxesForDomain } from "./mailbox-provisioning.js";
 import { domainIntentKey, markDomainIntent, readDomainIntent, recordDomainIntent, type DomainIntentRow } from "./provision-intents.js";
 import { assertWithinProvisioningCap } from "./quota.js";
@@ -219,7 +219,17 @@ export async function provisionDomainWithMailboxes(
   // candidate name, keyed stably so a retry lands on the same row, and never
   // deleted: a 'dangling' row is the only durable evidence that we may already
   // own a domain the buy leg failed to report.
-  const intent = recordDomainIntent(ctx, opts.intentKey, opts.domain);
+  //
+  // C3 part d — the desired provisioning spec (persona + mailbox count) rides
+  // along, INSERT-only, so the out-of-band reconcile sweep can finish this
+  // ordinal with the SAME persona/count this call used. Both setup and the
+  // REPLACE_DOMAIN burn path reach here with their own opts, so both stamp their
+  // spec; the reconcile keys off the ordinal derivation and never touches a
+  // `replace:` row.
+  const intent = recordDomainIntent(ctx, opts.intentKey, opts.domain, {
+    personaSlug: opts.personaSlug,
+    inboxesEach: opts.inboxesEach,
+  });
 
   // This ORDINAL is already done. The intent key is the tenant + ordinal
   // (provision-intents.ts's domainIntentKey), so ANY repeat of a setup call —
@@ -386,7 +396,10 @@ export async function runSetupInfrastructure(
   // here solely so a retry_setup message can tell the agent which key to resend.
   // It deliberately has NO say in what gets bought — see domainIntentKey.
   setupKey?: string,
-): Promise<{ jobId: string; billing: MailboxBilling } | { quoteOnly: true; billing: MailboxBilling }> {
+): Promise<
+  | { jobId: string; billing: MailboxBilling; provisioning?: "pending"; pendingDomain?: string }
+  | { quoteOnly: true; billing: MailboxBilling }
+> {
   // Lifecycle freeze — BEFORE any spend. A suspended/disputed/canceled tenant
   // must not provision fresh infra (real registrar/mailbox spend at activation
   // on an account we deliberately froze — adversarial panel-03 finding #5).
@@ -559,6 +572,13 @@ export async function runSetupInfrastructure(
   // it in the retry_setup message without needing the error itself to carry
   // structured detail.
   let inFlightDomain: string | undefined;
+  // C3 part b — which ordinal the loop is on, so the catch can tell a benign
+  // propagation wait on the LAST domain (nothing else left to do -> success-
+  // pending) from one on an earlier ordinal (later domains still unbought ->
+  // the agent must retry). The sequential loop guarantees every ordinal before
+  // the current one fully provisioned, so "current is the last" is exactly "the
+  // propagation wait is the only thing still incomplete".
+  let inFlightOrdinal = -1;
   try {
     const personaSlug = slugify(input.persona);
 
@@ -569,6 +589,7 @@ export async function runSetupInfrastructure(
       // satisfied — a silent partial provision under a 202.
       const domain = plan.satisfied.get(domainIndex)?.domain ?? fresh.shift() ?? noCandidates();
       inFlightDomain = domain;
+      inFlightOrdinal = domainIndex;
       await provisionDomainWithMailboxes(ctx, {
         domain,
         domainIndex,
@@ -606,6 +627,39 @@ export async function runSetupInfrastructure(
     }
     if (err instanceof RegistrarUnarmedError) {
       await alertRegistrarUnarmed(ctx, input.primaryDomain, err, mailer);
+    }
+    // C3 part b — SUCCESS-PENDING, not an error. The ONLY thing this call still
+    // owes is a freshly-bought purchased domain finishing its ~32s async DNS
+    // registration (DomainPropagationPendingError, engine/domain-dns.ts), AND it
+    // is the terminal ordinal — so every earlier domain fully provisioned and
+    // nothing but propagation remains. The domain is bought, recorded, and heals
+    // on its own; a retry (informational, below) or the provisioning-reconcile
+    // sweep completes the mailboxes. Returning the job (202, async-in-progress)
+    // rather than throwing is the async-request-reply contract: "in progress"
+    // must never read to the agent as a failure. A pending wait on a NON-terminal
+    // ordinal has un-bought domains after it, so it falls through to the retryable
+    // path below (the agent genuinely has to retry to buy the rest).
+    if (err instanceof DomainPropagationPendingError && inFlightOrdinal === input.domains - 1) {
+      await syncMailboxQuantity(ctx);
+      const { step } = customerSafeVendorFailure(err);
+      // The SAME retry_setup channel, but INFORMATIONAL: nothing is required of
+      // the agent (the wait completes automatically), so the message is a status
+      // note, not an action item. Its body still names a same-key retry as the
+      // manual way to finish, for an agent that would rather not wait — but the
+      // severity says it need not.
+      emitTenantMessage(ctx, {
+        kind: "retry_setup",
+        severity: "info",
+        body: retrySetupMessageBody(inFlightDomain, step),
+        actionHint: { tool: "setup_infrastructure", idempotencyKey: setupKey ?? null },
+        dedupKey: inFlightDomain ?? `tenant:${ctx.tenantId}`,
+      });
+      return {
+        jobId: newId("job"),
+        billing: buildMailboxBilling(ctx, liveProvisioned()),
+        provisioning: "pending",
+        pendingDomain: inFlightDomain ?? "",
+      };
     }
     // Wire point A — a RETRYABLE VendorError here is H2's exact shape
     // (setDnsWithRetry / awaitMailboxReady exhausted its in-call backoff):

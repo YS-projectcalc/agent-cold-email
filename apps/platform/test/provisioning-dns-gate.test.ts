@@ -14,6 +14,7 @@ import {
 import { toErrorResponse } from "../src/error-response.js";
 import { domainIntentKey } from "../src/engine/provision-intents.js";
 import { runSetupInfrastructure } from "../src/engine/provisioning.js";
+import { listSurfacedTenantMessages } from "../src/engine/tenant-messages.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
 import { activatePaidPlan, mintTenant, tenantStub, withTenantContext } from "./helpers.js";
 
@@ -40,6 +41,9 @@ interface PortLog {
 function domainPort(opts: {
   /** What setDns reports: 'ready' | 'not-propagated', or an error to throw. */
   dns: "ready" | "not-propagated" | { throw: VendorError };
+  /** The connection type buy() reports (default 'purchased'). Only 'purchased' is
+   * eligible for the C3-part-b propagation-wait reclassification. */
+  connectionType?: DomainConnectionType;
 }): { port: DomainPort; log: PortLog } {
   const log: PortLog = { buys: [], setDns: [] };
   const port: DomainPort = {
@@ -52,7 +56,7 @@ function domainPort(opts: {
     },
     async buy(domain: string): Promise<PurchasedDomain> {
       log.buys.push(domain);
-      return { domain, purchasedAt: Date.now(), registrar: "test", connectionType: "purchased" };
+      return { domain, purchasedAt: Date.now(), registrar: "test", connectionType: opts.connectionType ?? "purchased" };
     },
     async setDns(domain: string, _key: string, connectionType: DomainConnectionType): Promise<DnsRecordSet> {
       log.setDns.push({ domain, connectionType });
@@ -117,18 +121,22 @@ function readActions(tenantId: string): Promise<{ action: string; detail_json: s
 }
 
 describe("L1 — the mailbox buy is gated on REAL propagation, not on setDns not throwing", () => {
-  it("a domain whose DNS has NOT propagated provisions ZERO mailboxes and stays 'pending'", async () => {
+  it("a domain whose DNS has NOT propagated provisions ZERO mailboxes and stays 'pending' (now SUCCESS-PENDING, not a throw)", async () => {
     const { tenantId } = await mintTenant("Dns Gate Co", "managed");
     await activatePaidPlan(tenantId, "managed");
     const { port, log } = domainPort({ dns: "not-propagated" });
 
-    const err = await runSetup(tenantId, port, "notpropagated.com", "gate-1");
+    const result = await runSetup(tenantId, port, "notpropagated.com", "gate-1");
 
-    // Pre-fix: setDns returned WITHOUT throwing, so dns_status flipped to
-    // 'ready', the call returned 202, and two mailboxes were bought (and billed
-    // monthly) on a domain whose nameservers were pointed nowhere.
-    expect(err).toBeInstanceOf(VendorError);
-    expect((err as VendorError).retryable).toBe(true);
+    // The L1 gate itself is UNCHANGED: setDns returning all-false must still buy
+    // ZERO mailboxes and leave the domain 'pending' — nothing billed onto
+    // nameservers pointed nowhere. What C3 part b changed is only the AGENT-FACING
+    // contract: a freshly-bought PURCHASED domain still propagating is
+    // "provisioning in progress", so the call RETURNS a success-pending job
+    // instead of throwing a retryable VendorError.
+    expect(result).not.toBeInstanceOf(Error);
+    expect(result).toMatchObject({ provisioning: "pending", pendingDomain: "notpropagated0.com" });
+    expect((result as { jobId: string }).jobId).toBeTruthy();
     expect(await readMailboxCount(tenantId)).toBe(0);
     const domains = await readDomains(tenantId);
     expect(domains).toHaveLength(1); // the domain we paid for is still recorded
@@ -311,6 +319,55 @@ describe("retryable laundering — a permanent DNS failure must not read as 'ret
     expect(detail.step).toBe("domain DNS setup");
     expect(detail.retryable).toBe(false);
     expect(JSON.stringify(detail)).not.toMatch(/inboxkit/i);
+  });
+});
+
+describe("C3 part b — the benign propagation wait is SUCCESS-PENDING; genuine failures still error", () => {
+  it("emits an INFORMATIONAL retry_setup message (not action_required) for the benign wait", async () => {
+    const { tenantId } = await mintTenant("Info Msg Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
+    const { port } = domainPort({ dns: "not-propagated" });
+
+    const result = await runSetup(tenantId, port, "infomsg.com", "info-1");
+    expect(result).toMatchObject({ provisioning: "pending" });
+
+    // The retry_setup channel still fires — an agent that would rather not wait
+    // can retry with the same key — but at severity 'info', because nothing is
+    // REQUIRED (the wait completes on its own / the reconcile sweep finishes it).
+    const messages = await withTenantContext(tenantId, (ctx) => listSurfacedTenantMessages(ctx));
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ kind: "retry_setup", severity: "info" });
+    expect(messages[0]!.body).toContain("infomsg0.com");
+  });
+
+  it("a CONNECTED domain whose DNS has not propagated STILL ERRORS — only 'purchased' is reclassified", async () => {
+    // The connection-type gate: a connected domain's propagation depends on the
+    // customer's OWN registrar acting and can genuinely stall forever, so it is
+    // never the benign async-registration wait. It must stay a thrown retryable
+    // error, exactly as before.
+    const { tenantId } = await mintTenant("Connected Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
+    const { port } = domainPort({ dns: "not-propagated", connectionType: "connected" });
+
+    const err = await runSetup(tenantId, port, "connectedstall.com", "conn-1");
+
+    expect(err).toBeInstanceOf(VendorError);
+    expect((err as VendorError).retryable).toBe(true);
+    // And no success-pending leaked: the domain is recorded 'pending', zero mailboxes.
+    expect(await readMailboxCount(tenantId)).toBe(0);
+    expect((await readDomains(tenantId))[0]!.dns_status).toBe("pending");
+  });
+
+  it("a fully-propagated domain is a normal success, never success-pending", async () => {
+    const { tenantId } = await mintTenant("Ready Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
+    const { port } = domainPort({ dns: "ready" });
+
+    const result = await runSetup(tenantId, port, "allready.com", "ready-1");
+
+    expect(result).not.toBeInstanceOf(Error);
+    expect(result).not.toHaveProperty("provisioning"); // a completed provision carries no pending marker
+    expect(await readMailboxCount(tenantId)).toBe(2);
   });
 });
 

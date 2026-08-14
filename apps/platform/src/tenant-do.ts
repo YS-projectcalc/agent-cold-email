@@ -46,6 +46,7 @@ import { runDemo, type DemoRunSummary } from "./engine/demo.js";
 import { cancelTenant, terminateTenant, type CancelResult, type TerminateResult } from "./engine/lifecycle.js";
 import { getInfrastructureStatus } from "./engine/infrastructure-status.js";
 import { runSetupInfrastructure } from "./engine/provisioning.js";
+import { runProvisioningReconcile } from "./engine/provisioning-reconcile.js";
 import { launchCampaign, listCampaigns, pauseAllCampaigns, pauseCampaign, type CampaignListItem } from "./engine/campaigns.js";
 import { runTick } from "./engine/tick.js";
 import { runWarmupCancellationSweep } from "./engine/warmup-cancel.js";
@@ -419,6 +420,12 @@ export class TenantDO extends DurableObject<Env> {
     this.addColumnIfMissing("tenant_profile", "checkout_discount_pct", "INTEGER NOT NULL DEFAULT 0");
     // G5 gate (a) follow-up — InboxKit-as-registrar per-tenant opt-in (see schema.ts).
     this.addColumnIfMissing("tenant_profile", "register_domains", "INTEGER NOT NULL DEFAULT 0");
+    // C3 part d — the desired provisioning spec persisted per domain ordinal, so
+    // the out-of-band reconcile sweep can re-drive completion with the ORIGINAL
+    // persona + mailbox count (see schema.ts). NULL for every pre-existing intent
+    // row; the reconcile skips a NULL-spec row rather than guessing.
+    this.addColumnIfMissing("domain_intents", "persona_slug", "TEXT");
+    this.addColumnIfMissing("domain_intents", "inboxes_each", "INTEGER");
     // Registrar-arming follow-up (2026-07-28) — the tenant's structured
     // registrant-of-record, persisted as JSON (see schema.ts).
     this.addColumnIfMissing("tenant_profile", "registrant_json", "TEXT");
@@ -1188,6 +1195,24 @@ export class TenantDO extends DurableObject<Env> {
    */
   async warmupCancelSweep() {
     return runWarmupCancellationSweep(this.requireContext());
+  }
+
+  /**
+   * C3 part d — cron-triggerable out-of-band provisioning reconcile
+   * (engine/provisioning-reconcile.ts). Re-drives this tenant's dns_status
+   * 'pending' setup domains to completion so a benign propagation wait finishes
+   * without an agent retry. Its own lane, exactly like `warmupCancelSweep` /
+   * `deliverabilitySweep`: it carries no send scheduling.
+   *
+   * The arming gate (PROVISIONING_RECONCILE_ENABLED) is checked ONCE in
+   * admin/ops-sweep.ts BEFORE this RPC is ever dispatched, so this method never
+   * runs while the flag is dark. Reaching it at all also means this DO was just
+   * constructed, which fires the P0 legacy-intent-key rebind first (constructor);
+   * a rebound legacy intent has no persisted spec, so the reconcile below skips
+   * it (an agent retry completes those) rather than guessing a mailbox count.
+   */
+  async provisioningReconcileSweep() {
+    return runProvisioningReconcile(this.requireContext());
   }
 
   /** Cron-triggerable: runs just the monitor->decide->act loop (no send scheduling — that's tick()/B2). */

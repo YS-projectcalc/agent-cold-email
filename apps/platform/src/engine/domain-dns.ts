@@ -27,6 +27,33 @@ import { logAction } from "./deliverability-actions.js";
 /** The abstract step label every failure in this module reports (vendor-failure.ts's closed vocabulary). */
 const DNS_STEP = VENDOR_STEP.domainDns;
 
+/**
+ * The benign "a freshly-registered domain's mail DNS has not finished
+ * propagating yet" signal — NOT a failure (C3 part b, 2026-08-13). Thrown by
+ * `setDnsWithRetry` INSTEAD of a plain retryable VendorError, but ONLY for the
+ * one case the vendor's async registration produces: a `connection_type`
+ * 'purchased', `status='active'` domain whose DNS the port answered as not yet
+ * in effect (`notPropagated`). Every GENUINE failure — permanent rejection, a
+ * named registrar/capacity class, a transient vendor-API error, a non-purchased
+ * or non-active domain — still throws an ordinary error and is untouched.
+ *
+ * It EXTENDS VendorError and keeps `name = "VendorError"` deliberately: it must
+ * still gate mailbox provisioning (the throw is the buy gate) and, if it ever
+ * escapes to a customer surface, map exactly like the retryable VendorError it
+ * replaced (error-response.ts's 502 retryable). What makes it special is only
+ * that `runSetupInfrastructure` recognises it by `instanceof` and, when it is
+ * the sole thing left incomplete, returns a SUCCESS-PENDING result rather than
+ * throwing — the async-request-reply contract, not an error.
+ */
+export class DomainPropagationPendingError extends VendorError {
+  constructor(message: string, step: string | undefined) {
+    super(message, true, { step });
+    // Intentionally NOT a distinct name — see the class doc. It is a VendorError
+    // to every consumer except the one that narrows on `instanceof`.
+    this.name = "VendorError";
+  }
+}
+
 // The in-call re-attempt budget. Deliberately SHORT (one quick re-check, ~2s)
 // rather than long enough to outlast a registrar's propagation: parking a
 // Durable Object to wait out a vendor's async pipeline burns wall-clock budget,
@@ -54,6 +81,14 @@ function readDomainConnectionType(ctx: TenantContext, domainId: string): DomainC
     .toArray()[0];
   const value = (row?.connection_type ?? "").trim().toLowerCase();
   return value === "purchased" || value === "connected" ? value : "unknown";
+}
+
+/** The domain row's lifecycle status ('active' | 'burning' | 'released' | …), or '' if the row is gone. */
+function readDomainStatus(ctx: TenantContext, domainId: string): string {
+  const row = ctx.sql
+    .exec<{ status: string }>(`SELECT status FROM domains WHERE id = ? AND tenant_id = ?`, domainId, ctx.tenantId)
+    .toArray()[0];
+  return (row?.status ?? "").trim().toLowerCase();
 }
 
 /**
@@ -207,6 +242,22 @@ export async function setDnsWithRetry(
   // has a precise, customer-actionable mapping of its own — surface it intact
   // rather than flattening it into "an upstream provider failed".
   if (failure.passthrough) throw failure.passthrough;
+
+  // C3 part b — the ONE benign case: a freshly-registered PURCHASED domain
+  // (row still 'active') whose port answered "not in effect yet". The vendor's
+  // registration is async (~32s) and this genuinely heals on its own, so it is
+  // reported as "provisioning in progress", not an error — but ONLY here, never
+  // for a permanent rejection (retryable false, handled by passthrough/below),
+  // a named class (passthrough above), a transient vendor-API error
+  // (notPropagated false — setDns threw, so we never observed a not-ready
+  // answer), or a connected/unknown domain (its propagation is the customer's
+  // registrar's job and can genuinely stall). `runSetupInfrastructure` turns
+  // this into a SUCCESS-PENDING result; every other caller treats it as the
+  // retryable VendorError it still is.
+  if (failure.notPropagated && connectionType === "purchased" && readDomainStatus(ctx, domainId) === "active") {
+    throw new DomainPropagationPendingError(dnsFailureMessage(domain, failure), failure.step);
+  }
+
   throw new VendorError(dnsFailureMessage(domain, failure), failure.retryable, { step: failure.step });
 }
 

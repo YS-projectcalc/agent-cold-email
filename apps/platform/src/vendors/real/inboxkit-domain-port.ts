@@ -247,8 +247,20 @@ export class RealInboxKitDomainPort implements DomainPort {
     const record = await this.findDomainRecord(domain);
     if (!record) {
       // Registration is ASYNC — a domain whose order was accepted seconds ago is
-      // genuinely not listed yet. Retryable: this one really does heal by waiting.
-      throw new VendorError(`inboxkit domains/list does not yet list ${domain}`, true);
+      // genuinely not listed yet. This is NOT an error: it is the same "not ready
+      // yet, heals by waiting" condition as a listed-but-not-active record, so it
+      // is reported as an all-false DnsRecordSet, NOT a thrown VendorError.
+      //
+      // WHY A RESULT, NOT A THROW (C3 part b, 2026-08-13). A genuine vendor API
+      // failure (`/domains/list` erroring) still THROWS from listDomainRecords
+      // above; only the domain-simply-not-listed-yet case returns here. That split
+      // is what lets setDnsWithRetry (engine/domain-dns.ts) grade a freshly-bought
+      // purchased domain's propagation wait as the benign, non-error "provisioning
+      // in progress" state (its notPropagated branch) while a real API error stays
+      // a surfaced failure — the two used to be one indistinguishable retryable
+      // throw. Attempt count and backoff are unchanged (the caller retries a
+      // not-ready result exactly as it retried this throw).
+      return dnsRecordSet(false);
     }
     return dnsRecordSet(polledDomainIsReady(record, connectionType));
   }

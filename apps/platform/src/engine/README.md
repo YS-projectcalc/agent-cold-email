@@ -86,13 +86,26 @@ into a god file:
     failed lookup authorizes nothing. Raises the founder's stuck / re-buy-outcome
     alerts through the watchtower state machine so they inherit its dedup and
     cooldown.
-  - `domain-dns.ts` — `setDnsWithRetry`, the only export. Runs the DNS operation
-    the domain's `connection_type` calls for (INCIDENT 2026-08-05: the
-    connect-an-existing-domain nameserver handshake was being run against
-    domains the vendor itself had registered — the wrong operation, permanently
-    failing), flips `dns_status` to 'ready' ONLY on real propagation flags, and
-    preserves the underlying transient/permanent grade instead of laundering
-    everything into "retryable".
+  - `domain-dns.ts` — `setDnsWithRetry` plus `DomainPropagationPendingError`
+    (C3 part b). Runs the DNS operation the domain's `connection_type` calls for
+    (INCIDENT 2026-08-05: the connect-an-existing-domain nameserver handshake was
+    being run against domains the vendor itself had registered — the wrong
+    operation, permanently failing), flips `dns_status` to 'ready' ONLY on real
+    propagation flags, and preserves the underlying transient/permanent grade
+    instead of laundering everything into "retryable". A freshly-bought
+    'purchased'/'active' domain still in its async registration window throws
+    `DomainPropagationPendingError` (a retryable `VendorError` subclass) so
+    `runSetupInfrastructure` can report it as SUCCESS-PENDING rather than a
+    failure; every other caller treats it as the retryable error it still is.
+  - `provisioning-reconcile.ts` — `runProvisioningReconcile` (C3 part d), the
+    out-of-band reconcile driven by the cron sweep (admin/ops-sweep.ts's
+    `runProvisioningReconcileAllTenants`, DARK unless
+    `PROVISIONING_RECONCILE_ENABLED` is armed). Re-drives every committed setup
+    ordinal still short of completion (dns 'pending', or mailboxes below the
+    persisted count) through the same idempotent `provisionDomainWithMailboxes`,
+    using the persona/count spec stored on the intent — so a SUCCESS-PENDING
+    domain finishes without an agent retry. NEVER touches a `replace:` burn
+    intent, and SKIPS (never guesses) an intent that lacks a durable spec.
   - `mailbox-provisioning.ts` — `provisionMailboxesForDomain`, the per-mailbox
     saga: buy → WAIT for the vendor to finish creating it → warmup → local row →
     metering → credential push. The wait is the L2 gate (a buy is ACCEPTED, not
