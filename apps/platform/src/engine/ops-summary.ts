@@ -368,8 +368,8 @@ function readSendPipelineSignals(ctx: TenantContext): SendPipelineSignals {
   // the same skew direction that makes `purchased_at` unusable as the BOUND's
   // own anchor (schema.ts) is harmless here.
   const agingPendingDomains = ctx.sql
-    .exec<{ domain: string; dns_first_checked_at: number | null; dns_gave_up_at: number | null }>(
-      `SELECT domain, dns_first_checked_at, dns_gave_up_at FROM domains
+    .exec<{ domain: string; dns_first_checked_at: number | null; dns_gave_up_at: number | null; purchased_at: number }>(
+      `SELECT domain, dns_first_checked_at, dns_gave_up_at, purchased_at FROM domains
         WHERE tenant_id = ? AND source = 'provisioned' AND status = 'active' AND dns_status != 'ready'
           AND (
             dns_gave_up_at IS NOT NULL
@@ -384,7 +384,12 @@ function readSendPipelineSignals(ctx: TenantContext): SendPipelineSignals {
     .toArray()
     .map((row) => ({
       domain: row.domain,
-      pendingForMs: row.dns_first_checked_at === null ? 0 : now - row.dns_first_checked_at,
+      // N1 (delta re-gate, non-blocking): the admission criteria (above) and
+      // this arithmetic are two separate pieces of code. A NULL anchor no
+      // longer means "just admitted, age unknown" — the third disjunct admits
+      // rows this deploy never observed, and for those `purchased_at` IS the
+      // age signal (same fallback the admission query itself uses).
+      pendingForMs: row.dns_first_checked_at === null ? now - row.purchased_at : now - row.dns_first_checked_at,
       gaveUp: row.dns_gave_up_at !== null,
     }));
 

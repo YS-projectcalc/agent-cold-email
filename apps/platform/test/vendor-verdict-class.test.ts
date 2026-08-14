@@ -567,6 +567,36 @@ describe("guard C — an aging pending domain becomes a founder signal", () => {
     const dnsCheck = checks.find((c) => c.name === "domain_dns_aging:predeploy0.com");
     expect(dnsCheck, `no domain_dns_aging check in ${JSON.stringify(checks.map((c) => c.name))}`).toBeDefined();
     expect(dnsCheck?.healthy).toBe(false);
+    // N1 (delta re-gate, single new non-blocking finding): the admission
+    // criteria and the age ARITHMETIC are two separate pieces of code — a row
+    // admitted via the NULL-anchor disjunct must render its TRUE age (~72h for
+    // a 3-day-old purchase), not "0h" (the pre-N1-fix fallback for a NULL
+    // dns_first_checked_at, which is meaningless for a row this method never
+    // observed).
+    expect(dnsCheck?.detail).toMatch(/for 72h\./);
+  });
+
+  it("N1 CONTROL — an ANCHORED row's rendered age is unchanged (the purchased_at fallback never overrides a present anchor)", async () => {
+    await seedBenignSdnList();
+    const { tenantId } = await mintTenant("Anchored Age Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
+
+    const now = Date.now();
+    await runInDurableObject(tenantStub(tenantId), (_i, s) => {
+      s.storage.sql.exec(
+        `INSERT INTO domains (id, tenant_id, domain, status, purchased_at, dns_status, connection_type, source, dns_check_count, dns_first_checked_at)
+         VALUES ('dom_anchored_age', ?, 'anchoredage0.com', 'active', ?, 'pending', 'purchased', 'provisioned', 3, ?)`,
+        tenantId,
+        now - 30 * ONE_DAY_MS, // purchased long ago — must NOT be what renders
+        now - (SIX_HOURS_MS + 60_000), // the anchor IS what should render (~6h)
+      );
+    });
+
+    const summary = await tenantStub(tenantId).opsSummary(now - ONE_DAY_MS);
+    const checks = sendPipelineChecks(tenantId, summary, new Set<string>());
+    const dnsCheck = checks.find((c) => c.name === "domain_dns_aging:anchoredage0.com");
+    expect(dnsCheck, `no domain_dns_aging check in ${JSON.stringify(checks.map((c) => c.name))}`).toBeDefined();
+    expect(dnsCheck?.detail).toMatch(/for 6h\./);
   });
 
   it("CONTROL — a healthy YOUNG row (recent purchased_at, NULL anchor) does not surface", async () => {
