@@ -128,10 +128,27 @@ describe("a PURCHASED domain clears on the vendor's contract, not on its propaga
     expect(result.mx).toBe(false);
   });
 
-  it("a domain the vendor has not listed yet is RETRYABLE (async registration, genuinely heals)", async () => {
-    // The poll still has to SEE the record — the contract clears the propagation
-    // verdicts, not the existence check.
+  it("a domain the vendor has not listed yet reads NOT-READY, not an error (async registration heals by waiting)", async () => {
+    // C3 part b — a freshly-registered domain the vendor has not listed yet is
+    // "not ready", reported as an all-false DnsRecordSet, NOT a thrown error:
+    // the poll answers "not in effect yet", exactly as a listed-but-not-active
+    // record does. That representation is what lets setDnsWithRetry grade this as
+    // the benign propagation wait rather than conflate it with a `/domains/list`
+    // API failure (which still throws — the very next test). The caller retries a
+    // not-ready result exactly as it retried the old throw, so nothing downstream
+    // waits any less.
     installFetch({ list: { error: false, domains: [], pages: 1 } });
+    const result = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "purchased");
+    expect(result).toEqual({ mx: false, spf: false, dkim: false, dmarc: false, rdns: false });
+  });
+
+  it("a /domains/list API failure still THROWS retryable — a real vendor error is not a propagation wait", async () => {
+    // The surgical boundary the change above depends on: ONLY domain-not-listed-
+    // yet becomes a not-ready result. The list endpoint itself erroring is a
+    // genuine vendor failure and must surface as a retryable throw, never be
+    // swallowed as "still propagating" — otherwise a vendor outage would read to
+    // the agent as successful async provisioning.
+    installFetch({ list: { error: true, message: "upstream busy" } });
     const err = await new RealInboxKitDomainPort(CONFIG).setDns(DOMAIN, "k1", "purchased").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(VendorError);
     expect((err as VendorError).retryable).toBe(true);

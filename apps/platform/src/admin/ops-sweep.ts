@@ -235,6 +235,77 @@ export async function runWarmupCancelSweepAllTenants(env: Env): Promise<WarmupCa
   return { tenantsSwept: tenantIds.length, cancelled, errors };
 }
 
+export interface ProvisioningReconcileSweepSummary {
+  /** True iff PROVISIONING_RECONCILE_ENABLED was dark and NOTHING ran. */
+  disabled: boolean;
+  tenantsSwept: number;
+  /** Domains re-driven across all tenants. */
+  reconciled: number;
+  /** Re-drives that finished cleanly. */
+  completed: number;
+  /** Committed intents skipped for want of a durable spec (legacy rows). */
+  skippedNoSpec: number;
+  /** Per-tenant reconcile failures (a deferred domain, or a wedged DO) — never aborts the sweep. */
+  errors: number;
+}
+
+/**
+ * Is the C3-part-d out-of-band provisioning reconcile ARMED? DARK (false) unless
+ * PROVISIONING_RECONCILE_ENABLED is set to a genuinely-affirmative value — empty,
+ * "0", "false", "off" (case-insensitive) all read as OFF, so a founder who sets a
+ * disabling word gets what they meant instead of the "any-non-empty-value"
+ * footgun. Shipped default (unset) is dark.
+ */
+function provisioningReconcileArmed(env: Env): boolean {
+  const raw = (env.PROVISIONING_RECONCILE_ENABLED ?? "").trim().toLowerCase();
+  return raw !== "" && raw !== "0" && raw !== "false" && raw !== "off";
+}
+
+/**
+ * C3 part d — the out-of-band provisioning-reconcile leg for EVERY tenant.
+ * DARK by default: the arming flag is checked ONCE here (mirroring
+ * AUTOSEND_DISABLED's single leg-level check in runSendPipelineAllTenants), so
+ * while the flag is unset this is a cheap no-op that constructs no tenant DO and
+ * spends nothing. Once armed, each tenant's own DO re-drives its pending setup
+ * domains to completion against its own storage; one tenant's failure never
+ * aborts the sweep for the rest.
+ */
+export async function runProvisioningReconcileAllTenants(env: Env): Promise<ProvisioningReconcileSweepSummary> {
+  const empty: ProvisioningReconcileSweepSummary = {
+    disabled: false,
+    tenantsSwept: 0,
+    reconciled: 0,
+    completed: 0,
+    skippedNoSpec: 0,
+    errors: 0,
+  };
+  if (!provisioningReconcileArmed(env)) {
+    // Shipped default — no deploy, no code change arms it; a `wrangler secret put`
+    // / `[vars]` entry does, and only then does auto-completion (which SPENDS on
+    // an armed tenant) begin. Logged loudly on the rare armed tick, silent here.
+    return { ...empty, disabled: true };
+  }
+
+  const tenantIds = await listAllTenantIds(env);
+  const summary: ProvisioningReconcileSweepSummary = { ...empty, tenantsSwept: tenantIds.length };
+  for (const tenantId of tenantIds) {
+    try {
+      const stub = env.TENANT.get(env.TENANT.idFromName(tenantId));
+      const result = await stub.provisioningReconcileSweep();
+      summary.reconciled += result.reconciled;
+      summary.completed += result.completed;
+      summary.skippedNoSpec += result.skippedNoSpec;
+      summary.errors += result.errors;
+    } catch (err) {
+      // One tenant's failure must never abort the sweep for every other tenant,
+      // nor (via runScheduledOpsSweep) every other cron leg.
+      summary.errors++;
+      console.error(`provisioning reconcile sweep failed for tenant ${tenantId}`, err);
+    }
+  }
+  return summary;
+}
+
 export interface WebhookDeliverySweepSummary {
   tenantsSwept: number;
   errors: number;

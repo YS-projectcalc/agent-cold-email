@@ -60,6 +60,11 @@ export interface DomainIntentRow {
   key: string;
   candidate_domain: string;
   status: string;
+  // C3 part d — the desired provisioning spec (see schema.ts). NULL on any intent
+  // written before the columns existed; the reconcile treats a NULL spec as
+  // "not safely completable out of band" and leaves it to an agent retry.
+  persona_slug: string | null;
+  inboxes_each: number | null;
   [column: string]: SqlStorageValue;
 }
 
@@ -78,20 +83,32 @@ export interface MailboxIntentRow {
  * on the same domain instead of generating a fresh one. Tenant-scoped on read
  * (CLAUDE.md rule h) even though the key already embeds the tenant.
  */
-export function recordDomainIntent(ctx: TenantContext, key: string, candidateDomain: string): DomainIntentRow {
+export function recordDomainIntent(
+  ctx: TenantContext,
+  key: string,
+  candidateDomain: string,
+  // C3 part d — the DESIRED provisioning spec (persona + mailbox count) for this
+  // ordinal, persisted INSERT-ONLY so a retry keeps the FIRST call's spec and the
+  // out-of-band reconcile re-drives the same deterministic mailbox addresses an
+  // agent retry would. Optional so pre-part-d call sites and tests still compile;
+  // an intent written without one has a NULL spec and the reconcile skips it.
+  spec?: { personaSlug: string; inboxesEach: number },
+): DomainIntentRow {
   const now = ctx.clock.now();
   ctx.sql.exec(
-    `INSERT OR IGNORE INTO domain_intents (key, tenant_id, candidate_domain, status, created_at, updated_at)
-     VALUES (?, ?, ?, 'intent', ?, ?)`,
+    `INSERT OR IGNORE INTO domain_intents (key, tenant_id, candidate_domain, status, persona_slug, inboxes_each, created_at, updated_at)
+     VALUES (?, ?, ?, 'intent', ?, ?, ?, ?)`,
     key,
     ctx.tenantId,
     candidateDomain,
+    spec?.personaSlug ?? null,
+    spec?.inboxesEach ?? null,
     now,
     now,
   );
   return ctx.sql
     .exec<DomainIntentRow>(
-      `SELECT key, candidate_domain, status FROM domain_intents WHERE key = ? AND tenant_id = ?`,
+      `SELECT key, candidate_domain, status, persona_slug, inboxes_each FROM domain_intents WHERE key = ? AND tenant_id = ?`,
       key,
       ctx.tenantId,
     )
@@ -170,7 +187,7 @@ export function replacementDomainIntentKeyPrefix(tenantId: string): string {
 export function readDomainIntent(ctx: TenantContext, key: string): DomainIntentRow | undefined {
   return ctx.sql
     .exec<DomainIntentRow>(
-      `SELECT key, candidate_domain, status FROM domain_intents WHERE key = ? AND tenant_id = ?`,
+      `SELECT key, candidate_domain, status, persona_slug, inboxes_each FROM domain_intents WHERE key = ? AND tenant_id = ?`,
       key,
       ctx.tenantId,
     )

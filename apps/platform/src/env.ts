@@ -214,6 +214,25 @@ declare global {
       // it; treating a kill switch as an arming signal would be backwards.
       // Categorized in KNOWN_NON_SPEND_ARMING (spend-armed-env-coverage.test.ts).
       AUTOSEND_DISABLED?: string;
+      // C3 part d (2026-08-13) — the out-of-band provisioning-reconcile cron
+      // leg's ARMING switch. UNSET (or empty/"false"/"0"/"off") = DARK: the cron
+      // leg is a no-op and NOTHING is auto-completed, which is the shipped
+      // default. Set to any other value (`wrangler secret put` / a `[vars]`
+      // entry) to ARM it, at which point the leg re-drives every tenant's
+      // dns_status='pending' setup domain to completion out of band. Arming is a
+      // DELIBERATE, separate step because that auto-completion PROVISIONS MAILBOXES
+      // — real vendor spend on an armed tenant — without an agent request; see
+      // admin/ops-sweep.ts's runProvisioningReconcileAllTenants and
+      // engine/provisioning-reconcile.ts.
+      //
+      // NOT `// spend-arming` (categorized in spend-armed-env-coverage.test.ts's
+      // KNOWN_NON_SPEND_ARMING): it is a LEG on/off switch, exactly like
+      // AUTOSEND_DISABLED, not a vendor credential. It arms no vendor by itself —
+      // the mailbox/domain spend it drives is gated by INBOXKIT_*/isRealSpendArmed
+      // precisely as the on-demand setup_infrastructure path is; this flag only
+      // decides whether that already-armed path also runs from the cron. A tenant
+      // on the sandbox bundle spends $0 whether this is set or not.
+      PROVISIONING_RECONCILE_ENABLED?: string;
     }
   }
 }

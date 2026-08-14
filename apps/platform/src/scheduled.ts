@@ -24,7 +24,7 @@
 // degrades gracefully — an unsendable alert can never take down the sweep.
 import { RealClock } from "./clock.js";
 import type { Env } from "./env.js";
-import { buildOpsDigest, runDeliverabilitySweepAllTenants, runDunningSweep, runSendPipelineAllTenants, runWarmupCancelSweepAllTenants, runWebhookDeliveriesAllTenants } from "./admin/ops-sweep.js";
+import { buildOpsDigest, runDeliverabilitySweepAllTenants, runDunningSweep, runProvisioningReconcileAllTenants, runSendPipelineAllTenants, runWarmupCancelSweepAllTenants, runWebhookDeliveriesAllTenants } from "./admin/ops-sweep.js";
 import { runWatchtower } from "./admin/watchtower.js";
 import { reportSweepSignals } from "./admin/sweep-signals.js";
 import { recordSweepHeartbeat } from "./admin/watchtower-infra.js";
@@ -98,6 +98,15 @@ export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer 
   // screening time, now that a refresh above may have just loaded one. Cheap
   // no-op whenever no list is available or nothing is stuck.
   const sdnRecovery = await runLeg("sdnRecovery", null, () => rescreenListUnavailableReviews(env));
+  // C3 part d — the out-of-band provisioning reconcile: finish every tenant's
+  // dns_status 'pending' setup domain so a benign propagation wait completes
+  // without an agent retry. DARK unless PROVISIONING_RECONCILE_ENABLED is armed
+  // (checked once inside), so a cheap no-op in the shipped default. Its own leg,
+  // BELOW the health/alerting lanes per this file's ordering rule (once armed it
+  // makes vendor calls / mailbox spend, so a stall here must never delay the
+  // founder learning the platform is unhealthy) and ABOVE the send pipeline
+  // (that one carries the wall-clock budget and must run last).
+  const provisioningReconcile = await runLeg("provisioningReconcile", null, () => runProvisioningReconcileAllTenants(env));
   // WAVE 2 — the auto-send driver: poll then tick, for every tenant whose DO
   // says it may (admin/ops-sweep.ts). LAST on purpose. It is the only leg that
   // sends customer mail and the only one carrying a wall-clock budget, so a
@@ -106,7 +115,7 @@ export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer 
   // time this one starts.
   const sendPipeline = await runLeg("sendPipeline", null, () => runSendPipelineAllTenants(env, now));
 
-  const legs = { deliverability, dunning, digest, watchtower, warmupCancel, webhooks, spendReservations, sdnRefresh, sdnRecovery, sendPipeline };
+  const legs = { deliverability, dunning, digest, watchtower, warmupCancel, webhooks, spendReservations, sdnRefresh, sdnRecovery, provisioningReconcile, sendPipeline };
 
   // Audit 2026-08-06 (NB-2/NB-3, table row 4) — every leg above already counts
   // its own failures and `runLeg` already catches a leg-level throw; until now
