@@ -284,9 +284,19 @@ export class RealInboxKitDomainPort implements DomainPort {
    * `propagated` maps onto ALL FIVE flags rather than being left granular.
    */
   private async setDnsForConnectedDomain(domain: string): Promise<DomainDnsResult> {
-    await this.client.request("setDns:nameservers", "POST", "/domains/nameservers", {
+    const nsBody = await this.client.request<SetNameserversResponse>("setDns:nameservers", "POST", "/domains/nameservers", {
       body: { domains: [domain], mask_forwarding: false },
     });
+    if (nsBody.error) {
+      // Rider (gate delta, docs/adversarial/vendor-verdict-gate-2026-08-14.md
+      // NOTE 2). This response used to be DISCARDED: a 200 {error:true} means
+      // nameservers were never actually set, so the domain would sit
+      // not-propagated forever — a silent stall, surfacing later only as a
+      // "needs to be replaced" verdict at the age bound instead of a visible,
+      // immediate, retryable failure. Follows the sibling check
+      // (`listDomainRecords` above) exactly.
+      throw new VendorError(`inboxkit domains/nameservers failed for ${domain}: ${nsBody.message ?? "no message"}`, true);
+    }
 
     const body = await this.client.request<CheckPropagationResponse>("setDns:check-propagation", "POST", "/domains/nameservers/check-propagation", {
       body: { domains: [domain] },
@@ -325,6 +335,11 @@ interface RegisterDomainsResponse {
   message?: string;
   url?: string;
   payment_type?: string;
+}
+
+interface SetNameserversResponse {
+  error: boolean;
+  message?: string;
 }
 
 interface CheckPropagationResponse {

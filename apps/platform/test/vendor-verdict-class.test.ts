@@ -35,7 +35,7 @@ import type {
   ReleaseResult,
   VendorReadiness,
 } from "@coldstart/shared";
-import { DNS_PENDING_MAX_MS } from "../src/engine/domain-dns.js";
+import { DNS_PENDING_MAX_MS, setDnsWithRetry } from "../src/engine/domain-dns.js";
 import { runProvisioningReconcile } from "../src/engine/provisioning-reconcile.js";
 import { runSetupInfrastructure } from "../src/engine/provisioning.js";
 import { runDeliverabilitySweep } from "../src/engine/deliverability-actions.js";
@@ -96,7 +96,11 @@ function mailboxPort(): RealMailboxPort {
 describe("guard A — the real domain port reports a TERMINAL vendor state as terminal", () => {
   // ATTACK C-1, flipped. Pre-fix these five all returned an all-false
   // DnsRecordSet — byte-identical to a registration accepted two seconds ago.
-  for (const status of ["expired", "suspended", "pending_deletion", "failed", "cancelled", "deleted"]) {
+  // 'scheduled_for_deletion' (rider, gate delta 2026-08-14, UNVERIFIABLE #1):
+  // observed LIVE 2026-08-14 on the real InboxKit workspace (`/domains/list`
+  // returned a domain with this exact status) — a live observation, not a
+  // plausible synonym, so vendor-lifecycle.ts's own extension rule is met.
+  for (const status of ["expired", "suspended", "pending_deletion", "failed", "cancelled", "deleted", "scheduled_for_deletion"]) {
     it(`vendor lists the purchased domain with status='${status}' -> verdict TERMINAL`, async () => {
       stubJson({
         error: false,
@@ -272,6 +276,42 @@ function readMailboxCount(tenantId: string): Promise<number> {
     (_i, s) => s.storage.sql.exec<{ n: number }>(`SELECT COUNT(*) as n FROM mailboxes WHERE released_at IS NULL`).one().n,
   );
 }
+
+describe("rider — scheduled_for_deletion drives the REAL port's verdict into the engine's bound", () => {
+  it("a REAL port poll of scheduled_for_deletion is non-retryable on the FIRST call (not bounded-benign)", async () => {
+    const { tenantId } = await mintTenant("Sched Deletion Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
+    stubJson({
+      error: false,
+      pages: 1,
+      domains: [{ uid: "u1", name: "scheddel0.com", status: "scheduled_for_deletion", connection_type: "purchased", assigned_mailboxes: 0 }],
+    });
+
+    // setDnsWithRetry's own contract is to drive DNS for an ALREADY-PERSISTED
+    // row (it never buys) — persisting directly is the surgical way to reach
+    // it without also exercising the unrelated buy()/registrant-completeness
+    // path this file's other end-to-end tests use a synthetic port to skip.
+    await runInDurableObject(tenantStub(tenantId), (_i, s) => {
+      s.storage.sql.exec(
+        `INSERT INTO domains (id, tenant_id, domain, status, purchased_at, dns_status, connection_type, source)
+         VALUES ('dom_sched', ?, 'scheddel0.com', 'active', ?, 'pending', 'purchased', 'provisioned')`,
+        tenantId,
+        Date.now(),
+      );
+    });
+
+    const err = await withTenantContext(tenantId, (ctx) =>
+      setDnsWithRetry({ ...ctx, adapters: { ...ctx.adapters, domain: domainPort() } }, "scheddel0.com", "sched-key-1", "dom_sched").catch(
+        (e: unknown) => e,
+      ),
+    );
+
+    expect(err).toBeInstanceOf(Error);
+    expect((err as { retryable?: boolean }).retryable).toBe(false);
+    const row = await readOneDomainRow(tenantId);
+    expect(row.dns_gave_up_at).not.toBeNull(); // gave up immediately, not left "still propagating"
+  });
+});
 
 describe("the confirmed defect — a TERMINAL registration is never reported as success-pending", () => {
   it("setup_infrastructure REJECTS non-retryably instead of returning 202 provisioning:pending", async () => {
@@ -495,6 +535,76 @@ describe("guard C — an aging pending domain becomes a founder signal", () => {
     const dnsCheck = checks.find((c) => c.name === "domain_dns_aging:freshdead0.com");
     expect(dnsCheck?.healthy).toBe(false);
     expect(dnsCheck?.detail).toMatch(/GIVEN UP/);
+  });
+
+  // Gate delta, Finding 2 (docs/adversarial/vendor-verdict-gate-2026-08-14.md):
+  // both existing disjuncts require a column only THIS wave's code ever writes
+  // (dns_first_checked_at / dns_gave_up_at), so a domain stalled BEFORE this
+  // deploy — both columns NULL — matched neither and stayed invisible forever.
+  // Option 1 (adopted): a third disjunct keyed on the NULL anchor + an aged
+  // purchased_at, WITHOUT touching the bound or backfilling any column (a
+  // stuck-but-recoverable legacy row must keep its fresh 6h grace on its next
+  // retry, not insta-trip).
+  it("FINDING 2 fix — a PRE-DEPLOY stalled row (purchased_at old, both new columns NULL) surfaces", async () => {
+    await seedBenignSdnList();
+    const { tenantId } = await mintTenant("Predeploy Stalled Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
+
+    const now = Date.now();
+    await runInDurableObject(tenantStub(tenantId), (_i, s) => {
+      s.storage.sql.exec(
+        `INSERT INTO domains (id, tenant_id, domain, status, purchased_at, dns_status, connection_type, source)
+         VALUES ('dom_predeploy', ?, 'predeploy0.com', 'active', ?, 'pending', 'purchased', 'provisioned')`,
+        tenantId,
+        now - 3 * ONE_DAY_MS,
+      );
+    });
+
+    const summary = await tenantStub(tenantId).opsSummary(now - ONE_DAY_MS);
+    expect(summary.sendPipeline.agingPendingDomains.map((d) => d.domain)).toEqual(["predeploy0.com"]);
+
+    const checks = sendPipelineChecks(tenantId, summary, new Set<string>());
+    const dnsCheck = checks.find((c) => c.name === "domain_dns_aging:predeploy0.com");
+    expect(dnsCheck, `no domain_dns_aging check in ${JSON.stringify(checks.map((c) => c.name))}`).toBeDefined();
+    expect(dnsCheck?.healthy).toBe(false);
+  });
+
+  it("CONTROL — a healthy YOUNG row (recent purchased_at, NULL anchor) does not surface", async () => {
+    await seedBenignSdnList();
+    const { tenantId } = await mintTenant("Healthy Young Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
+
+    const now = Date.now();
+    await runInDurableObject(tenantStub(tenantId), (_i, s) => {
+      s.storage.sql.exec(
+        `INSERT INTO domains (id, tenant_id, domain, status, purchased_at, dns_status, connection_type, source)
+         VALUES ('dom_young', ?, 'young0.com', 'active', ?, 'pending', 'purchased', 'provisioned')`,
+        tenantId,
+        now - 60_000,
+      );
+    });
+
+    const summary = await tenantStub(tenantId).opsSummary(now - ONE_DAY_MS);
+    expect(summary.sendPipeline.agingPendingDomains).toEqual([]);
+  });
+
+  it("a FUTURE-skewed purchased_at does not surface — the clock-skew direction fails safe on an is-it-old test", async () => {
+    await seedBenignSdnList();
+    const { tenantId } = await mintTenant("Future Skew Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
+
+    const now = Date.now();
+    await runInDurableObject(tenantStub(tenantId), (_i, s) => {
+      s.storage.sql.exec(
+        `INSERT INTO domains (id, tenant_id, domain, status, purchased_at, dns_status, connection_type, source)
+         VALUES ('dom_future', ?, 'future0.com', 'active', ?, 'pending', 'purchased', 'provisioned')`,
+        tenantId,
+        now + ONE_DAY_MS,
+      );
+    });
+
+    const summary = await tenantStub(tenantId).opsSummary(now - ONE_DAY_MS);
+    expect(summary.sendPipeline.agingPendingDomains).toEqual([]);
   });
 });
 

@@ -247,13 +247,18 @@ export function sendPipelineChecks(
   const { activated, agingPendingDomains, agingPendingPushes, dueNonDemoPendingSends, eligibleMailboxes, provisionedDomainNames } =
     summary.sendPipeline;
 
-  // Vendor-verdict class fix, guard C — `DOMAIN_DNS_PENDING` finally has a
-  // reader. A provisioned domain that has been un-ready past DNS_PENDING_MAX_MS
-  // is a PAID resource that will never carry a mailbox, and before this nothing
-  // anywhere bounded, escalated or even counted it: no timer, no ceiling, no
-  // check keyed on domains at all. Scoped to activated tenants for the same
-  // reason the credential-push check is — an unactivated tenant's domains are
-  // sandbox ones, and alerting on them trains the founder to ignore the channel.
+  // Vendor-verdict class fix, guard C — the escalation edge un-ready domains
+  // owed. CORRECTED (gate delta NOTE 4, docs/adversarial/
+  // vendor-verdict-gate-2026-08-14.md): this is NOT a reader of the
+  // `DOMAIN_DNS_PENDING` action row — nothing reads that row, before or after
+  // this guard. It is an independent query over `domains` (engine/
+  // ops-summary.ts's `agingPendingDomains`). A provisioned domain that has been
+  // un-ready past DNS_PENDING_MAX_MS is a PAID resource that will never carry a
+  // mailbox, and before this nothing anywhere bounded, escalated or even
+  // counted it: no timer, no ceiling, no check keyed on domains at all. Scoped
+  // to activated tenants for the same reason the credential-push check is — an
+  // unactivated tenant's domains are sandbox ones, and alerting on them trains
+  // the founder to ignore the channel.
   const stalledDomains = activated ? agingPendingDomains : [];
   for (const stalled of stalledDomains) {
     const hours = Math.round(stalled.pendingForMs / 3_600_000);

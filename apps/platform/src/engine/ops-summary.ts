@@ -79,9 +79,13 @@ export interface SendPipelineSignals {
    * readers, no timer, no ceiling, so an indefinitely-stalled paid domain paged
    * nobody). Named, so the founder alert says WHICH domain.
    *
-   * Keyed on the ANCHOR's age, not on `dns_gave_up_at`: the give-up is only
-   * stamped when something CALLS setDnsWithRetry, and the whole hazard is a
-   * tenant whose agent has stopped retrying. This fires either way.
+   * Keyed on THREE disjuncts, not on `dns_gave_up_at` alone: the give-up is
+   * only stamped when something CALLS setDnsWithRetry, and the whole hazard is
+   * a tenant whose agent has stopped retrying. The anchor (`dns_first_checked_at`)
+   * ages a row that HAS been observed at least once; a NULL anchor is not
+   * covered by that disjunct at all (identical dependency on setDnsWithRetry
+   * having run) — it is the pre-deploy population, aged instead off
+   * `purchased_at` (see the query's own comment, engine/ops-summary.ts).
    */
   agingPendingDomains: { domain: string; pendingForMs: number; gaveUp: boolean }[];
   /**
@@ -348,18 +352,33 @@ function readSendPipelineSignals(ctx: TenantContext): SendPipelineSignals {
   // 'active' to match the reconcile's own scope — a burned/released domain is
   // already being handled by the deliverability loop and is not a stall.
   //
-  // TWO ways in, and the second is not redundant: a domain whose ANCHOR is older
-  // than the bound (the slow stall — fires even if nobody ever calls
-  // setDnsWithRetry again, which is the whole hazard), OR one already marked
-  // given-up (the sharp failure — a terminal vendor verdict on the first poll is
-  // given up on immediately and would otherwise be too young for the age test).
+  // THREE ways in (gate delta, Finding 2, docs/adversarial/
+  // vendor-verdict-gate-2026-08-14.md): a domain whose ANCHOR is older than the
+  // bound (the slow stall — fires even if nobody ever calls setDnsWithRetry
+  // again, which is the whole hazard), one already marked given-up (the sharp
+  // failure — a terminal vendor verdict on the first poll is given up on
+  // immediately and would otherwise be too young for the age test), OR — the
+  // disjunct this wave owed — a row whose anchor is NULL because it predates
+  // this wave's columns entirely, aged instead off `purchased_at`: the ONLY
+  // population the escalation exists for (a tenant whose agent has stopped
+  // retrying) includes rows this deploy has never observed at all, and neither
+  // of the first two disjuncts can ever match a NULL anchor. `purchased_at`
+  // clock skew fails SAFE for this is-it-old test: a future `purchased_at`
+  // simply never satisfies `<= now - DNS_PENDING_MAX_MS`, so it never fires —
+  // the same skew direction that makes `purchased_at` unusable as the BOUND's
+  // own anchor (schema.ts) is harmless here.
   const agingPendingDomains = ctx.sql
     .exec<{ domain: string; dns_first_checked_at: number | null; dns_gave_up_at: number | null }>(
       `SELECT domain, dns_first_checked_at, dns_gave_up_at FROM domains
         WHERE tenant_id = ? AND source = 'provisioned' AND status = 'active' AND dns_status != 'ready'
-          AND (dns_gave_up_at IS NOT NULL OR (dns_first_checked_at IS NOT NULL AND dns_first_checked_at <= ?))
+          AND (
+            dns_gave_up_at IS NOT NULL
+            OR (dns_first_checked_at IS NOT NULL AND dns_first_checked_at <= ?)
+            OR (dns_first_checked_at IS NULL AND purchased_at <= ?)
+          )
         ORDER BY dns_first_checked_at ASC`,
       ctx.tenantId,
+      now - DNS_PENDING_MAX_MS,
       now - DNS_PENDING_MAX_MS,
     )
     .toArray()

@@ -105,6 +105,12 @@ const SET_DNS_BACKOFF_MS = [2_000];
  * needs in order to stop retrying and escalate. The watchtower's aging check
  * (engine/ops-summary.ts) reads the SAME constant, so the founder is alerted at
  * the moment the platform gives up rather than on a second, drifting threshold.
+ *
+ * PURCHASED ONLY (gate delta, docs/adversarial/vendor-verdict-gate-2026-08-14.md
+ * Finding 1). The ~32s-vendor-registration justification above does not
+ * transfer to a CONNECTED domain: propagating NS delegation to a customer's own
+ * registrar is that registrar's job, and routinely takes 24-48h, so the bound
+ * applies only where its own timing argument holds.
  */
 export const DNS_PENDING_MAX_MS = 6 * 60 * 60 * 1000;
 
@@ -231,8 +237,16 @@ interface DnsAttemptFailure {
   notPropagated: boolean;
   /**
    * Set when the port answered `{kind:"terminal"}` — the vendor's own statement
-   * that this registration is dead. Carries the raw vendor token for the
-   * operator-facing action row; never reaches a customer surface.
+   * that this registration is dead. Carries the raw vendor token, normalized
+   * (vendor-lifecycle.ts's `normalizeLifecycleToken`), for the action row.
+   *
+   * CORRECTED (gate delta NOTE 1, docs/adversarial/vendor-verdict-gate-2026-08-14.md):
+   * this IS deliberately surfaced on a customer surface — `customerSafeDetail`
+   * carries it into `deliverability_actions.detail_json`, which
+   * `reporting.ts`'s `recentActions` reads and the `account` MCP tool returns.
+   * That is intentional and useful (an actionable signal), not a leak: the
+   * payload is the normalized lifecycle token only ("expired"/"suspended"/…),
+   * never a provider name or endpoint.
    */
   terminalVendorState?: string;
   /**
@@ -389,7 +403,11 @@ export async function setDnsWithRetry(
   // was therefore never listed at all, which the port can only report as
   // "not listed yet, forever".
   const pendingForMs = bound.firstCheckedAt === null ? 0 : ctx.clock.now() - bound.firstCheckedAt;
-  if (failure.notPropagated && (bound.gaveUpAt !== null || pendingForMs >= DNS_PENDING_MAX_MS)) {
+  if (
+    failure.notPropagated &&
+    connectionType === "purchased" &&
+    (bound.gaveUpAt !== null || pendingForMs >= DNS_PENDING_MAX_MS)
+  ) {
     return failTerminal(ctx, domain, domainId, { ...failure, retryable: false }, {
       action: "DOMAIN_DNS_GAVE_UP",
       reason: "domain DNS setup has been pending far longer than it should take — it is treated as failed rather than still in progress",

@@ -72,8 +72,12 @@ export interface DnsRecordSet {
  *  - 'ready'        — usable now.
  *  - 'not_yet'      — a real, benign in-progress state that heals by waiting.
  *  - 'terminal'     — the vendor says this resource is DEAD. It never heals, so
- *                     retrying is a spin, not a retry. `vendorState` carries the
- *                     raw token for operator logs (never a customer surface).
+ *                     retrying is a spin, not a retry. `vendorState` carries a
+ *                     normalized lifecycle token — CORRECTED (gate delta NOTE 1,
+ *                     docs/adversarial/vendor-verdict-gate-2026-08-14.md): it IS
+ *                     deliberately surfaced on a customer surface (deliverability
+ *                     action rows -> `account`'s recentActions), an actionable
+ *                     signal, never a provider name or endpoint.
  *  - 'inconclusive' — we could not classify the answer (an unrecognized status
  *                     token, an errored lookup body). Proves NOTHING, so it is
  *                     graded exactly like 'not_yet' at every decision point and

@@ -44,6 +44,12 @@
  *  - 'pending_deletion' — scheduled for removal. "Pending" here qualifies the
  *    DELETION, not the provisioning; nothing about it heals.
  *  - 'deleted'          — gone.
+ *  - 'scheduled_for_deletion' — the same fact as 'pending_deletion', a
+ *    different vendor spelling. LIVE OBSERVATION (not a plausible synonym, per
+ *    this module's own extension rule): captured 2026-08-14 on the real
+ *    InboxKit workspace, `/domains/list` returned a domain with
+ *    `status:"scheduled_for_deletion"` (docs/adversarial/
+ *    vendor-verdict-gate-2026-08-14.md, UNVERIFIABLE #1).
  */
 const TERMINAL_TOKENS = new Set([
   "expired",
@@ -53,6 +59,7 @@ const TERMINAL_TOKENS = new Set([
   "failed",
   "pending_deletion",
   "deleted",
+  "scheduled_for_deletion",
 ]);
 
 /**

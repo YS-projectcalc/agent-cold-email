@@ -96,13 +96,17 @@ function pauseDomainMailboxes(ctx: TenantContext, domainId: string): void {
  * a TERMINAL vendor verdict on it (vendor-verdict class fix) — money moved, the
  * domain exists, and it will never work.
  *
- * ⚠ WHY THE SECOND ONE HAS TO COUNT. A terminal DNS failure used to be caught as
- * a generic "provider issue" and logged as `REPLACE_DOMAIN_FAILED`, which this
- * count ignored. The next sweep therefore re-entered the replacement with a
- * HIGHER `domainIndex` — a different `replacementDomainIntentKey`, so a fresh
- * intent and a fresh BUY — and did it again, and again, with the cap that exists
- * precisely to stop a runaway replacement chain never advancing. The cap is a
- * SPEND guard, so it has to count purchases, not successes.
+ * WHY THE SECOND ONE HAS TO COUNT (corrected, gate delta NOTE 3,
+ * docs/adversarial/vendor-verdict-gate-2026-08-14.md — the accounting is
+ * conservative spend-cap consumption, NOT a loop-breaker: `applyReplaceDomain`
+ * flips the burning domain to 'burning' unconditionally BEFORE the attempt, and
+ * `evaluate()` (engine/deliverability.ts) skips any non-'active' domain, so
+ * nothing ever re-enters a REPLACE_DOMAIN for the SAME burn — an infinite
+ * re-buy loop on one domain cannot occur either way). What DOES happen without
+ * counting it: a terminal replacement burned real money (one domain bought)
+ * that a per-window SPEND cap meant to catch would silently miss, since the cap
+ * only ever saw `REPLACE_DOMAIN_FAILED` as free. Counting it is what makes the
+ * cap describe actual spend rather than only successful spend.
  *
  * Deliberately narrow: an ordinary transient failure, and a
  * RegistrarUnarmedError (which never reaches a purchase at all), stay

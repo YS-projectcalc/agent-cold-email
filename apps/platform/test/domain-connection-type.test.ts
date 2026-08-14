@@ -96,6 +96,35 @@ describe("setDns branches on connection type — the wrong-operation root cause"
   });
 });
 
+// Rider (gate delta, docs/adversarial/vendor-verdict-gate-2026-08-14.md NOTE 2):
+// the nameservers call's own response was DISCARDED — a 200 {error:true} means
+// nameservers were never set, so the domain would sit not-propagated forever
+// (a silent stall, then a "needs to be replaced" verdict at the 6h bound
+// instead of a visible, immediate, retryable failure).
+describe("setDns:nameservers must not discard its own response", () => {
+  it("a 200 {error:true} from /domains/nameservers throws a visible RETRYABLE VendorError immediately", async () => {
+    const calls = installFetch({ nameservers: { error: true, message: "workspace suspended" } });
+
+    const err = await new RealInboxKitDomainPort(CONFIG).setDns("connected-broken.com", "k1", "connected").catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(VendorError);
+    expect((err as VendorError).retryable).toBe(true);
+    expect((err as Error).message).toMatch(/nameservers/i);
+    expect(nameserverCalls(calls)).toHaveLength(1);
+    // Thrown BEFORE the propagation check — not graded as a benign not-yet.
+    expect(calls.some((c) => c.url.includes("check-propagation"))).toBe(false);
+  });
+
+  it("CONTROL — a clean nameservers response behaves exactly as before", async () => {
+    const calls = installFetch({ nameservers: IK_NAMESERVERS_RESULT, propagation: IK_PROPAGATION_CONFIRMED });
+    const result = await new RealInboxKitDomainPort(CONFIG).setDns("connected-clean.com", "k1", "connected");
+
+    expect(nameserverCalls(calls)).toHaveLength(1);
+    expect(result.verdict).toEqual({ kind: "ready" });
+    expect(result.records.mx).toBe(true);
+  });
+});
+
 describe("a PURCHASED domain clears on the vendor's contract, not on its propagation fields", () => {
   // VENDOR CONTRACT (InboxKit support, 2026-08-10, verbatim): "The domain
   // goauthorpitchdesk.com is now active, and the DNS will be configured during
