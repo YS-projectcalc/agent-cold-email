@@ -7,7 +7,7 @@ import {
   sendPipelineChecks,
   sendStarvedCheckName,
 } from "../src/admin/watchtower.js";
-import { WATCHTOWER_COOLDOWN_MS } from "../src/admin/watchtower-alerts.js";
+import { WATCHTOWER_COOLDOWN_MS } from "../src/admin/watchtower-policy.js";
 import { AGING_CRED_PUSH_MS, type TenantOpsSummary } from "../src/engine/ops-summary.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
 import { activatePaidPlan, api, mintTenant, seedBenignSdnList, tenantStub } from "./helpers.js";
@@ -61,39 +61,52 @@ describe("§1c alert — aging credential push", () => {
   const email = "waiting@alert-co.test";
   const check = credPushAgingCheckName(email);
 
-  it("fires ONCE, suppresses inside the cooldown, re-alerts after it, and clears on recovery", async () => {
+  it("fires ONCE on the confirming sweep, suppresses inside the cooldown, re-alerts after it, and clears on recovery", async () => {
     const mailer = new SandboxOpsMailer();
     const aging = summaryWith({ agingPendingPushes: [{ email, pendingForMs: 45 * 60 * 1000 }] }, [email]);
 
-    // 1. First sweep: alert, naming the mailbox and what a human must do.
+    // 1. First sweep: the condition is recorded, nothing is sent yet (founder
+    //    ruling 2026-08-16 — one observation is a flap until a second agrees).
     let outcomes = await reconcileAlerts(env, mailer, sendPipelineChecks("ten_x", aging, await readReportedCheckNames(env)), T0);
+    expect(outcomes).toEqual([{ name: check, action: "pending", emailSent: false }]);
+    expect(mailer.sent).toEqual([]);
+
+    // 2. Second consecutive sweep: alert, naming the mailbox and what a human
+    //    must do.
+    const confirmedAt = T0 + 300_000;
+    outcomes = await reconcileAlerts(env, mailer, sendPipelineChecks("ten_x", aging, await readReportedCheckNames(env)), confirmedAt);
     expect(outcomes).toEqual([{ name: check, action: "alerted", emailSent: true }]);
     expect(mailer.sent[0]!.subject).toBe(`[coldrig] Mailbox credentials ${email}: UNHEALTHY`);
     expect(mailer.sent[0]!.text).toContain("45 min");
     expect(mailer.sent[0]!.text).toContain("GMAIL_OAUTH_GRANTS");
 
-    // 2. Still aging, one cron cycle later: SUPPRESSED (the anti-storm rule —
+    // 3. Still aging, one cron cycle later: SUPPRESSED (the anti-storm rule —
     //    5-minute cadence must not become a 5-minute mail loop).
-    outcomes = await reconcileAlerts(env, mailer, sendPipelineChecks("ten_x", aging, await readReportedCheckNames(env)), T0 + 300_000);
-    expect(outcomes).toEqual([{ name: check, action: "suppressed", emailSent: false }]);
-    expect(mailer.sent).toHaveLength(1);
-
-    // 3. Past the cooldown: re-alert.
     outcomes = await reconcileAlerts(
       env,
       mailer,
       sendPipelineChecks("ten_x", aging, await readReportedCheckNames(env)),
-      T0 + WATCHTOWER_COOLDOWN_MS + 1,
+      confirmedAt + 300_000,
+    );
+    expect(outcomes).toEqual([{ name: check, action: "suppressed", emailSent: false }]);
+    expect(mailer.sent).toHaveLength(1);
+
+    // 4. Past the cooldown: re-alert.
+    outcomes = await reconcileAlerts(
+      env,
+      mailer,
+      sendPipelineChecks("ten_x", aging, await readReportedCheckNames(env)),
+      confirmedAt + WATCHTOWER_COOLDOWN_MS + 1,
     );
     expect(outcomes).toEqual([{ name: check, action: "realerted", emailSent: true }]);
 
-    // 4. The grant lands — the push clears, and the founder is told it recovered.
+    // 5. The grant lands — the push clears, and the founder is told it recovered.
     const cleared = summaryWith({ agingPendingPushes: [] }, [email]);
     outcomes = await reconcileAlerts(
       env,
       mailer,
       sendPipelineChecks("ten_x", cleared, await readReportedCheckNames(env)),
-      T0 + WATCHTOWER_COOLDOWN_MS + 2,
+      confirmedAt + WATCHTOWER_COOLDOWN_MS + 2,
     );
     expect(outcomes).toEqual([{ name: check, action: "recovered", emailSent: true }]);
     expect(mailer.sent.at(-1)!.subject).toContain("RECOVERED");
@@ -128,6 +141,14 @@ describe("§1c alert — send-starved tenant", () => {
     const starved = summaryWith({ dueNonDemoPendingSends: 7, eligibleMailboxes: 0 });
 
     let outcomes = await reconcileAlerts(env, mailer, sendPipelineChecks("ten_starved", starved, await readReportedCheckNames(env)), T0);
+    expect(outcomes).toEqual([{ name: check, action: "pending", emailSent: false }]);
+
+    outcomes = await reconcileAlerts(
+      env,
+      mailer,
+      sendPipelineChecks("ten_starved", starved, await readReportedCheckNames(env)),
+      T0 + 300_000,
+    );
     expect(outcomes).toEqual([{ name: check, action: "alerted", emailSent: true }]);
     expect(mailer.sent[0]!.text).toContain("7 send(s) due and ZERO eligible mailboxes");
     expect(mailer.sent[0]!.text).toContain("mailboxProvenance");
@@ -136,7 +157,7 @@ describe("§1c alert — send-starved tenant", () => {
       env,
       mailer,
       sendPipelineChecks("ten_starved", starved, await readReportedCheckNames(env)),
-      T0 + 300_000,
+      T0 + 600_000,
     );
     expect(outcomes).toEqual([{ name: check, action: "suppressed", emailSent: false }]);
 
@@ -145,7 +166,7 @@ describe("§1c alert — send-starved tenant", () => {
       env,
       mailer,
       sendPipelineChecks("ten_starved", recovered, await readReportedCheckNames(env)),
-      T0 + 600_000,
+      T0 + 900_000,
     );
     expect(outcomes).toEqual([{ name: check, action: "recovered", emailSent: true }]);
   });

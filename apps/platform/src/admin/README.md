@@ -61,13 +61,23 @@ closed (401 on every call) rather than falling open. Set it via
   BOTH DO classes, engine `/health` when configured, a cross-tenant
   failure-signal scan, a per-tenant "this DO is not answering" check) + the
   D1-backed founder-alert state machine (`reconcileAlerts`) — alerts on a
-  health CHANGE, re-alerts on persistence after a 6h cooldown, recovers on
-  heal, never storms. Dedupe state in D1 (`migrations/0008_watchtower.sql`).
-  Runs on the ops-sweep cron.
-- `watchtower-alerts.ts` — the alert VOCABULARY: what a `CheckResult` is, how
-  its email renders, and `decideAlert`, the PURE transition rule. Extracted
-  because two stores now back the same machine and the anti-storm rules must be
-  identical in both.
+  CONFIRMED health change, re-alerts on persistence after a backoff, recovers
+  on heal, never storms. Dedupe state in D1 (`migrations/0008_watchtower.sql`
+  + `0018_watchtower_debounce.sql`). Runs on the ops-sweep cron.
+- `watchtower-alerts.ts` — the alert VOCABULARY: what a `CheckResult` is, which
+  policy each named check gets (`policyFor`), and how its email renders.
+- `watchtower-policy.ts` — the PURE transition rule (`decideAlert`) and the
+  policy dials, extracted because two stores back the same machine and the
+  anti-storm rules must be identical in both. Founder ruling 2026-08-16: a
+  check must be observed unhealthy on **2 consecutive** observations before its
+  first email (a single-sweep flap sends nothing, recovery included), then
+  re-alerts at +6h and every 24h after that. `policyFor` is the ONE place that
+  turns the debounce off, and it does so for exactly three reasons — the
+  `cron_sweep` dead-man (hard exemption: it already embodies `SWEEP_STALE_MS`
+  and is the check of last resort), `cron_legs` (already damped over 3
+  consecutive ticks upstream, so a debounce would push it past the 10-15 min
+  paging ceiling), and the one-shot event reports raised by `reportCheck`
+  (nothing re-observes them, so a debounce would silence them permanently).
 - `watchtower-grading.ts` — PURE observation damping between "what one probe
   saw this tick" and "what the state machine is told" (trailing window +
   threshold for event counts; N-up/M-down streak for per-tick booleans). A

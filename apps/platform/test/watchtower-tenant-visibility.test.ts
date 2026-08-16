@@ -51,7 +51,12 @@ describe("BLOCKING-3 — a wedged tenant DO surfaces by name", () => {
     const tenantId = await wedgedTenant("Wedged Co");
 
     const mailer = new SandboxOpsMailer();
+    // Two consecutive sweeps: a tenant DO that is wedged (rather than one
+    // Cloudflare transient) is still wedged 5 minutes later, which is exactly
+    // the distinction the 2026-08-16 debounce draws — see
+    // watchtower-debounce.test.ts for the flap side of it.
     await runWatchtower(env, mailer, T0);
+    await runWatchtower(env, mailer, T0 + 300_000);
 
     const named = mailer.sent.filter((m) => m.subject.includes(tenantId));
     expect(named.map((m) => m.subject)).toEqual([`[coldrig] Tenant state unreachable ${tenantId}: UNHEALTHY`]);

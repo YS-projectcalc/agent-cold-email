@@ -1,12 +1,13 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   alertEmailFor,
-  decideAlert,
+  policyFor,
   trySend,
-  type AlertState,
-  type AlertTransition,
+  CRON_SWEEP_CHECK,
+  D1_CHECK,
   type CheckResult,
 } from "./admin/watchtower-alerts.js";
+import { decideAlert, type AlertTransition, type PersistedAlertState } from "./admin/watchtower-policy.js";
 import { DEAD_MAN_INTERVAL_MS, EMPTY_STREAK, gradeStreak, SWEEP_STALE_MS, type Grade, type StreakState } from "./admin/watchtower-grading.js";
 import type { Env } from "./env.js";
 import { createOpsMailer, type OpsMailer } from "./ops-mail/ops-mailer.js";
@@ -72,7 +73,7 @@ export class WatchtowerDO extends DurableObject<Env> {
    * from here as "cannot alert", never as "healthy".
    */
   async reconcileD1Alert(healthy: boolean, nowMs: number): Promise<RemoteAlertDecision> {
-    return this.applyAlert(D1_ALERT_KEY, healthy, nowMs);
+    return this.applyAlert(D1_ALERT_KEY, D1_CHECK, healthy, nowMs);
   }
 
   /**
@@ -132,7 +133,7 @@ export class WatchtowerDO extends DurableObject<Env> {
     const ageMs = nowMs - heartbeat;
     const stale = ageMs >= SWEEP_STALE_MS;
     const result: CheckResult = {
-      name: "cron_sweep",
+      name: CRON_SWEEP_CHECK,
       healthy: !stale,
       detail: stale
         ? `No ops sweep has completed for ~${Math.round(ageMs / 60000)} min (last: ${new Date(heartbeat).toISOString()}). ` +
@@ -141,15 +142,27 @@ export class WatchtowerDO extends DurableObject<Env> {
         : `Ops sweep completed ~${Math.round(ageMs / 60000)} min ago (last: ${new Date(heartbeat).toISOString()}).`,
     };
 
-    const decision = await this.applyAlert(DEAD_MAN_ALERT_KEY, result.healthy, nowMs);
+    const decision = await this.applyAlert(DEAD_MAN_ALERT_KEY, result.name, result.healthy, nowMs);
     const email = alertEmailFor(this.env, result, decision.transition, decision.prevSinceTs, nowMs);
     if (email) await trySend(this.mailer, email);
   }
 
-  /** The shared read -> decide -> persist step for both DO-backed checks. */
-  private async applyAlert(key: string, healthy: boolean, nowMs: number): Promise<RemoteAlertDecision> {
-    const prev = (await this.ctx.storage.get<AlertState>(key)) ?? null;
-    const transition = decideAlert(prev, healthy, nowMs);
+  /**
+   * The shared read -> decide -> persist step for both DO-backed checks.
+   *
+   * Takes the CHECK NAME as well as the storage key so the policy comes from
+   * the same `policyFor` table the D1-backed store uses (founder ruling
+   * 2026-08-16): this is the call site where the debounced `d1` check and the
+   * exempt `cron_sweep` dead-man meet, and hard-coding either rule here is how
+   * the two stores would drift apart.
+   *
+   * `prev` is read as `PersistedAlertState` because a value written by the
+   * PREVIOUS deploy has no debounce counters and DO storage has no migration
+   * step — `decideAlert` normalizes it.
+   */
+  private async applyAlert(key: string, checkName: string, healthy: boolean, nowMs: number): Promise<RemoteAlertDecision> {
+    const prev = (await this.ctx.storage.get<PersistedAlertState>(key)) ?? null;
+    const transition = decideAlert(prev, healthy, nowMs, policyFor(checkName));
     await this.ctx.storage.put(key, transition.next);
     return { transition, prevSinceTs: prev?.sinceTs ?? null };
   }
