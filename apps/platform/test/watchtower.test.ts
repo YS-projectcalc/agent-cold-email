@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 import { reconcileAlerts, runWatchtower } from "../src/admin/watchtower.js";
-import { WATCHTOWER_COOLDOWN_MS, type CheckResult } from "../src/admin/watchtower-alerts.js";
+import type { CheckResult } from "../src/admin/watchtower-alerts.js";
+import { WATCHTOWER_COOLDOWN_MS } from "../src/admin/watchtower-policy.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
 import type { OpsMailer, OpsEmailMessage } from "../src/ops-mail/ops-mailer.js";
 import { signup } from "./helpers.js";
@@ -11,8 +12,15 @@ import { signup } from "./helpers.js";
 // controlled `now`, so the machine is tested with zero dependence on a live
 // probe. State persists in D1 (watchtower_state); each `it` starts clean
 // (isolated per-test storage) and drives the whole timeline itself.
+//
+// Since the founder's 2026-08-16 ruling these checks are DEBOUNCED: the first
+// email of an episode waits for a second consecutive unhealthy observation, so
+// every timeline below opens the episode with two sweeps. The debounce itself
+// (and what it must not delay) is watchtower-debounce.test.ts /
+// watchtower-policy.test.ts; these cases hold the rest of the machine.
 
 const T0 = 1_800_000_000_000; // fixed base ms
+const SWEEP = 300_000; // the live cron cadence
 
 function unhealthy(name: string, detail = "down"): CheckResult {
   return { name, healthy: false, detail };
@@ -38,9 +46,12 @@ async function stateOf(checkName: string) {
 }
 
 describe("watchtower alert state machine (reconcileAlerts)", () => {
-  it("alerts once on healthy->unhealthy, with the [coldrig] <check>: UNHEALTHY subject + specifics", async () => {
+  it("alerts once on a CONFIRMED healthy->unhealthy, with the [coldrig] <check>: UNHEALTHY subject + specifics", async () => {
     const mailer = new SandboxOpsMailer();
-    const outcomes = await reconcileAlerts(env, mailer, [unhealthy("d1", "D1 unreachable: boom")], T0);
+    const pending = await reconcileAlerts(env, mailer, [unhealthy("d1", "D1 unreachable: boom")], T0);
+    expect(pending).toEqual([{ name: "d1", action: "pending", emailSent: false }]);
+
+    const outcomes = await reconcileAlerts(env, mailer, [unhealthy("d1", "D1 unreachable: boom")], T0 + SWEEP);
 
     expect(outcomes).toEqual([{ name: "d1", action: "alerted", emailSent: true }]);
     expect(mailer.sent).toHaveLength(1);
@@ -53,33 +64,38 @@ describe("watchtower alert state machine (reconcileAlerts)", () => {
 
     const row = await stateOf("d1");
     expect(row?.status).toBe("unhealthy");
+    // since_ts is when the check first went bad, NOT when the debounce
+    // confirmed it — the founder is told how long it has really been down.
     expect(row?.since_ts).toBe(T0);
-    expect(row?.last_alert_ts).toBe(T0);
+    expect(row?.last_alert_ts).toBe(T0 + SWEEP);
   });
 
   it("SUPPRESSES a persisting unhealthy within the cooldown — never storms", async () => {
     const mailer = new SandboxOpsMailer();
-    await reconcileAlerts(env, mailer, [unhealthy("d1")], T0); // 1 alert
+    await reconcileAlerts(env, mailer, [unhealthy("d1")], T0);
+    await reconcileAlerts(env, mailer, [unhealthy("d1")], T0 + SWEEP); // 1 alert
     // Ten more sweeps well within the 6h cooldown -> zero further emails.
-    for (let i = 1; i <= 10; i++) {
-      const out = await reconcileAlerts(env, mailer, [unhealthy("d1")], T0 + i * 5 * 60_000);
+    for (let i = 2; i <= 11; i++) {
+      const out = await reconcileAlerts(env, mailer, [unhealthy("d1")], T0 + i * SWEEP);
       expect(out[0]!.action).toBe("suppressed");
       expect(out[0]!.emailSent).toBe(false);
     }
     expect(mailer.sent).toHaveLength(1);
   });
 
-  it("re-alerts exactly once AT the cooldown boundary", async () => {
+  it("re-alerts exactly once AT the cooldown boundary, measured from the confirming alert", async () => {
     const mailer = new SandboxOpsMailer();
     await reconcileAlerts(env, mailer, [unhealthy("d1")], T0);
+    await reconcileAlerts(env, mailer, [unhealthy("d1")], T0 + SWEEP);
+    const confirmedAt = T0 + SWEEP;
 
     // Just before the boundary: suppressed.
-    const before = await reconcileAlerts(env, mailer, [unhealthy("d1")], T0 + WATCHTOWER_COOLDOWN_MS - 1);
+    const before = await reconcileAlerts(env, mailer, [unhealthy("d1")], confirmedAt + WATCHTOWER_COOLDOWN_MS - 1);
     expect(before[0]!.action).toBe("suppressed");
     expect(mailer.sent).toHaveLength(1);
 
     // At the boundary: one re-alert.
-    const at = await reconcileAlerts(env, mailer, [unhealthy("d1")], T0 + WATCHTOWER_COOLDOWN_MS);
+    const at = await reconcileAlerts(env, mailer, [unhealthy("d1")], confirmedAt + WATCHTOWER_COOLDOWN_MS);
     expect(at[0]!.action).toBe("realerted");
     expect(mailer.sent).toHaveLength(2);
     expect(mailer.sent[1]!.subject).toBe("[coldrig] D1 database: UNHEALTHY");
@@ -88,13 +104,14 @@ describe("watchtower alert state machine (reconcileAlerts)", () => {
     // since_ts is preserved across the re-alert; last_alert_ts advances.
     const row = await stateOf("d1");
     expect(row?.since_ts).toBe(T0);
-    expect(row?.last_alert_ts).toBe(T0 + WATCHTOWER_COOLDOWN_MS);
+    expect(row?.last_alert_ts).toBe(confirmedAt + WATCHTOWER_COOLDOWN_MS);
   });
 
-  it("sends a RECOVERED email on unhealthy->healthy, then re-arms for a fresh flap", async () => {
+  it("sends a RECOVERED email on unhealthy->healthy, then re-arms (debounce included)", async () => {
     const mailer = new SandboxOpsMailer();
-    await reconcileAlerts(env, mailer, [unhealthy("d1")], T0); // alert
-    const rec = await reconcileAlerts(env, mailer, [healthy("d1", "D1 SELECT 1 ok")], T0 + 60_000);
+    await reconcileAlerts(env, mailer, [unhealthy("d1")], T0);
+    await reconcileAlerts(env, mailer, [unhealthy("d1")], T0 + SWEEP); // alert
+    const rec = await reconcileAlerts(env, mailer, [healthy("d1", "D1 SELECT 1 ok")], T0 + SWEEP + 60_000);
     expect(rec[0]!.action).toBe("recovered");
     expect(mailer.sent).toHaveLength(2);
     expect(mailer.sent[1]!.subject).toBe("[coldrig] D1 database: RECOVERED");
@@ -102,15 +119,29 @@ describe("watchtower alert state machine (reconcileAlerts)", () => {
     expect((await stateOf("d1"))?.status).toBe("healthy");
     expect((await stateOf("d1"))?.last_alert_ts).toBeNull();
 
-    // A brand-new unhealthy after recovery is a genuine transition -> alerts.
-    const again = await reconcileAlerts(env, mailer, [unhealthy("d1")], T0 + 120_000);
-    expect(again[0]!.action).toBe("alerted");
+    // A brand-new episode after recovery starts its OWN debounce: the recovery
+    // must not leave the check armed to alert on a single observation.
+    const again = await reconcileAlerts(env, mailer, [unhealthy("d1")], T0 + SWEEP + 120_000);
+    expect(again[0]!.action).toBe("pending");
+    expect(mailer.sent).toHaveLength(2);
+    const confirmed = await reconcileAlerts(env, mailer, [unhealthy("d1")], T0 + 2 * SWEEP + 120_000);
+    expect(confirmed[0]!.action).toBe("alerted");
     expect(mailer.sent).toHaveLength(3);
   });
 
   it("handles multiple simultaneous checks independently (one recovers while others persist)", async () => {
     const mailer = new SandboxOpsMailer();
-    // All three go unhealthy at once -> three alerts.
+    // All three go unhealthy at once. Each debounces on its OWN counter, so the
+    // second consecutive sweep confirms all three.
+    const pending = await reconcileAlerts(
+      env,
+      mailer,
+      [unhealthy("d1"), unhealthy("do_storage"), unhealthy("engine")],
+      T0 - SWEEP,
+    );
+    expect(pending.map((o) => o.action)).toEqual(["pending", "pending", "pending"]);
+    expect(mailer.sent).toHaveLength(0);
+
     const first = await reconcileAlerts(
       env,
       mailer,
@@ -159,13 +190,14 @@ describe("watchtower alert state machine (reconcileAlerts)", () => {
       },
     };
     // Must not reject.
-    const out = await reconcileAlerts(env, throwing, [unhealthy("d1")], T0);
+    await reconcileAlerts(env, throwing, [unhealthy("d1")], T0);
+    const out = await reconcileAlerts(env, throwing, [unhealthy("d1")], T0 + SWEEP);
     expect(out[0]!.action).toBe("alerted");
     expect(out[0]!.emailSent).toBe(false);
     // State advanced despite the send failure -> next sweep suppresses (no
     // retry-storm) instead of re-attempting every tick.
     expect((await stateOf("d1"))?.status).toBe("unhealthy");
-    const next = await reconcileAlerts(env, throwing, [unhealthy("d1")], T0 + 60_000);
+    const next = await reconcileAlerts(env, throwing, [unhealthy("d1")], T0 + SWEEP + 60_000);
     expect(next[0]!.action).toBe("suppressed");
   });
 });

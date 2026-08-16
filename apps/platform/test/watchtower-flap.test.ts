@@ -116,14 +116,21 @@ describe("NB-1 — failure_signals no longer flaps", () => {
     const mailer = new SandboxOpsMailer();
 
     await recordEvent(tenantId, "complaint", T0 - JUST_BEFORE);
+    // The complaint threshold is 1, so the check is unhealthy on this sweep —
+    // the founder's 2026-08-16 debounce holds the EMAIL for one more sweep (the
+    // complaint stays inside the trailing window, so the second observation
+    // agrees), it does not change the threshold.
     await runWatchtower(env, mailer, T0);
+    expect(failureSubjects(mailer)).toEqual([]);
+
+    await runWatchtower(env, mailer, T0 + SWEEP);
     expect(failureSubjects(mailer)).toEqual(["[coldrig] Failure signals: UNHEALTHY"]);
     expect(mailer.sent[0]!.text).toContain("1 complaint(s)");
 
     // ...and the next sweep must NOT declare it recovered: on the old per-sweep
     // window the complaint fell out of scope 5 minutes later and produced an
     // immediate RECOVERED, which is the flap.
-    await runWatchtower(env, mailer, T0 + SWEEP);
+    await runWatchtower(env, mailer, T0 + 2 * SWEEP);
     expect(failureSubjects(mailer)).toEqual(["[coldrig] Failure signals: UNHEALTHY"]);
   });
 

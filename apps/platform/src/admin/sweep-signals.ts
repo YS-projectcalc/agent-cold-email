@@ -24,7 +24,7 @@ import type { Env } from "../env.js";
 import type { OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { OpsDigest } from "./ops-sweep.js";
 import { reconcileAlerts } from "./watchtower.js";
-import type { AlertOutcome, CheckResult } from "./watchtower-alerts.js";
+import { CRON_LEGS_CHECK, type AlertOutcome, type CheckResult } from "./watchtower-alerts.js";
 import { watchtowerStub } from "./watchtower-infra.js";
 
 /** The three counters every leg summary may carry (absent = the leg has none). */
@@ -93,10 +93,10 @@ export async function reportSweepSignals(
   // NB-2 + row 4 — the legs' own error accounting, damped over consecutive ticks.
   const signals = collectLegSignals(input.legs);
   const observedUnhealthy = signals.legsThrew.length > 0 || signals.counted > 0;
-  const grade = await watchtowerStub(env).gradeSweepStreak("cron_legs", observedUnhealthy);
+  const grade = await watchtowerStub(env).gradeSweepStreak(CRON_LEGS_CHECK, observedUnhealthy);
   if (grade === false) {
     results.push({
-      name: "cron_legs",
+      name: CRON_LEGS_CHECK,
       healthy: false,
       detail:
         `The ops sweep has been reporting failures on consecutive ticks — ${signals.detail}. ` +
@@ -104,7 +104,11 @@ export async function reportSweepSignals(
         `A leg that throws every tick, or a tenant abandoned at its budget every cycle, looks exactly like this.`,
     });
   } else if (grade === true) {
-    results.push({ name: "cron_legs", healthy: true, detail: "Every ops-sweep leg completed with zero errors on consecutive ticks." });
+    results.push({
+      name: CRON_LEGS_CHECK,
+      healthy: true,
+      detail: "Every ops-sweep leg completed with zero errors on consecutive ticks.",
+    });
   }
 
   // NB-3 — the one digest watchdog with no other alert path and a money cost.

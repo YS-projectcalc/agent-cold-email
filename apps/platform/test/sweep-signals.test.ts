@@ -157,7 +157,12 @@ describe("NB-2 — cron-leg failures reach the founder, damped", () => {
 describe("NB-3 — a warmup cancellation the platform gave up on reaches the founder", () => {
   it("alerts, naming the money that may still be billing", async () => {
     const mailer = new SandboxOpsMailer();
+    // Two ticks: this check is derived from the 24h digest window and reported
+    // on every sweep, so the founder's 2026-08-16 debounce costs it one cron
+    // period and nothing else (the leak is already up to a day old).
     await reportSweepSignals(env, mailer, { legs: {}, digest: digestWith({ gaveUpWarmupCancels: 2 }) }, T0);
+    expect(mailer.sent).toEqual([]);
+    await reportSweepSignals(env, mailer, { legs: {}, digest: digestWith({ gaveUpWarmupCancels: 2 }) }, T0 + 300_000);
 
     expect(mailer.sent.map((m) => m.subject)).toEqual(["[coldrig] Warmup cancellations gave up: UNHEALTHY"]);
     expect(mailer.sent[0]!.text).toContain("may STILL BE BILLING");
@@ -181,12 +186,13 @@ describe("NB-3 — a warmup cancellation the platform gave up on reaches the fou
   it("reports NOTHING when the digest leg threw — unknown must not read as recovered", async () => {
     const mailer = new SandboxOpsMailer();
     await reportSweepSignals(env, mailer, { legs: {}, digest: digestWith({ gaveUpWarmupCancels: 2 }) }, T0);
+    await reportSweepSignals(env, mailer, { legs: {}, digest: digestWith({ gaveUpWarmupCancels: 2 }) }, T0 + 300_000);
     expect(mailer.sent).toHaveLength(1);
 
     // The digest leg throws on the next tick: its counters are unknown. A
     // false RECOVERED here would clear an incident nobody fixed AND re-arm the
     // alert, which is how a dedup silently disarms itself.
-    await reportSweepSignals(env, mailer, { legs: { digest: null }, digest: null }, T0 + 300_000);
+    await reportSweepSignals(env, mailer, { legs: { digest: null }, digest: null }, T0 + 600_000);
     expect(mailer.sent).toHaveLength(1);
     const row = await env.DB.prepare(`SELECT status FROM watchtower_state WHERE check_name = 'warmup_cancel_gave_up'`).first<{ status: string }>();
     expect(row?.status).toBe("unhealthy");

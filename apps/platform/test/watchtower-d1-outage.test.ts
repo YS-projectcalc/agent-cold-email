@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
 import { runWatchtower } from "../src/admin/watchtower.js";
 import { watchtowerStub } from "../src/admin/watchtower-infra.js";
-import { WATCHTOWER_COOLDOWN_MS } from "../src/admin/watchtower-alerts.js";
+import { WATCHTOWER_COOLDOWN_MS } from "../src/admin/watchtower-policy.js";
 import { runScheduledOpsSweep } from "../src/scheduled.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
 import { envWithDeadDb } from "./helpers.js";
@@ -20,6 +20,12 @@ import { envWithDeadDb } from "./helpers.js";
 // once, and the anti-storm guarantee still holds with no D1 to store it in.
 
 const T0 = 1_800_000_000_000;
+// The `d1` check is debounced like every other cron-sampled check (founder
+// ruling 2026-08-16): the sweep keeps running during a D1 outage — every leg is
+// wrapped by runLeg and the d1 leg is reconciled through the DO first — so the
+// second consecutive observation lands one cron period later, and the founder
+// is paged ~10 min after onset.
+const SWEEP = 300_000;
 
 // The WatchtowerDO's storage is the whole point of this fix, and it is NOT
 // rolled back between tests — clear it so each test drives its own timeline.
@@ -35,7 +41,12 @@ beforeEach(async () => {
 describe("BLOCKING-1 — a D1 outage reaches the founder", () => {
   it("emails the founder that D1 is down, without reading D1 to decide it", async () => {
     const mailer = new SandboxOpsMailer();
-    const outcomes = await runWatchtower(envWithDeadDb(), mailer, T0);
+    const broken = envWithDeadDb();
+    // The debounce state for this check also lives outside D1 — the first
+    // observation has to be counted somewhere the outage cannot reach.
+    expect((await runWatchtower(broken, mailer, T0))[0]).toEqual({ name: "d1", action: "pending", emailSent: false });
+
+    const outcomes = await runWatchtower(broken, mailer, T0 + SWEEP);
 
     expect(mailer.sent.map((m) => m.subject)).toEqual(["[coldrig] D1 database: UNHEALTHY"]);
     expect(mailer.sent[0]!.to).toBe(env.OPS_ALERT_EMAIL);
@@ -55,7 +66,9 @@ describe("BLOCKING-1 — a D1 outage reaches the founder", () => {
     const mailer = new SandboxOpsMailer();
     const broken = envWithDeadDb();
     await runWatchtower(broken, mailer, T0);
-    await runWatchtower(broken, mailer, T0 + WATCHTOWER_COOLDOWN_MS);
+    await runWatchtower(broken, mailer, T0 + SWEEP); // confirmed -> first email
+    const confirmedAt = T0 + SWEEP;
+    await runWatchtower(broken, mailer, confirmedAt + WATCHTOWER_COOLDOWN_MS);
     expect(mailer.sent.map((m) => m.subject)).toEqual([
       "[coldrig] D1 database: UNHEALTHY",
       "[coldrig] D1 database: UNHEALTHY",
@@ -63,7 +76,7 @@ describe("BLOCKING-1 — a D1 outage reaches the founder", () => {
     expect(mailer.sent[1]!.text).toContain("Still unhealthy since");
 
     // D1 comes back — the real binding, so the rest of the sweep runs too.
-    await runWatchtower(env, mailer, T0 + WATCHTOWER_COOLDOWN_MS + 300_000);
+    await runWatchtower(env, mailer, confirmedAt + WATCHTOWER_COOLDOWN_MS + SWEEP);
     expect(mailer.sent.map((m) => m.subject)).toContain("[coldrig] D1 database: RECOVERED");
   });
 
@@ -73,6 +86,13 @@ describe("BLOCKING-1 — a D1 outage reaches the founder", () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
+    // TWO real cron ticks. This is also what makes the debounce SAFE for the
+    // one check that alarms on its own store being down: every D1-dependent leg
+    // throws into runLeg and the sweep still reaches the DO-backed d1
+    // reconcile, so the outage really is re-observed each tick rather than
+    // stalling the count at one.
+    await runScheduledOpsSweep(envWithDeadDb(), { mailer });
+    expect(mailer.sent).toEqual([]);
     await runScheduledOpsSweep(envWithDeadDb(), { mailer });
 
     errSpy.mockRestore();

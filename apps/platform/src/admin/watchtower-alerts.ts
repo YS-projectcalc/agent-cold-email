@@ -1,5 +1,5 @@
-// The watchtower's ALERT VOCABULARY — what a check result is, how its email
-// renders, and the pure state transition that decides whether to send one.
+// The watchtower's ALERT VOCABULARY — what a check result is, which alert
+// policy each named check gets, and how its email renders.
 //
 // Extracted from watchtower.ts because there are now TWO stores backing the
 // same state machine, and the rules must be identical in both (CLAUDE.md rule
@@ -8,16 +8,21 @@
 //    ordinary platform/tenant check;
 //  - the WatchtowerDO's own storage (watchtower-do.ts) — the D1-outage check
 //    and the cron dead-man, which by definition cannot read D1.
-// `decideAlert` is PURE (no store, no clock, no mailer), so the anti-storm
-// guarantee is one tested function rather than a rule copied per substrate.
+// The transition RULE itself lives in `watchtower-policy.ts` (pure: no store,
+// no clock, no mailer), so the anti-storm guarantee is one tested function
+// rather than a rule copied per substrate.
 
 import type { Env } from "../env.js";
 import { escapeHtml } from "../html-escape.js";
 import type { OpsMailer } from "../ops-mail/ops-mailer.js";
-
-// Re-alert cooldown while a check stays unhealthy — a persistent outage emails
-// at most once per 6h regardless of the (5-min) probe cadence.
-export const WATCHTOWER_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+import {
+  DEAD_MAN_ALERT_POLICY,
+  DEBOUNCED_ALERT_POLICY,
+  IMMEDIATE_ALERT_POLICY,
+  type AlertAction,
+  type AlertPolicy,
+  type AlertTransition,
+} from "./watchtower-policy.js";
 
 /** One health observation. `detail` is the human specifics that ride into the
  * alert body (never just the check name). */
@@ -27,65 +32,10 @@ export interface CheckResult {
   detail: string;
 }
 
-/** What the state machine did for one check this sweep — returned for tests +
- * the sweep's structured log line. `unreportable` is NOT a decision: it is the
- * D1-independent leg saying its own store was unreachable too, so the check was
- * neither alerted nor cleared. It must never read as "suppressed" (which claims
- * a deliberate, throttled silence). */
-export type AlertAction = "alerted" | "realerted" | "recovered" | "suppressed" | "healthy" | "unreportable";
 export interface AlertOutcome {
   name: string;
   action: AlertAction;
   emailSent: boolean;
-}
-
-/** The persisted per-check state, store-agnostic (D1 row or DO storage value). */
-export interface AlertState {
-  status: "healthy" | "unhealthy";
-  sinceTs: number;
-  lastAlertTs: number | null;
-}
-
-export interface AlertTransition {
-  action: AlertAction;
-  next: AlertState;
-}
-
-/**
- * The ONE alert rule set, as a pure function of (previous state, observation):
- *  - healthy -> unhealthy (or first-ever-unhealthy): ALERT now.
- *  - unhealthy -> unhealthy: re-alert ONLY after `cooldownMs` since the last
- *    alert; otherwise SUPPRESS (this is the anti-storm guarantee).
- *  - unhealthy -> healthy: RECOVERY email.
- *  - healthy -> healthy (or first-ever-healthy): nothing.
- * `next` is what the caller must persist; `action` says which email (if any)
- * `alertEmailFor` will render.
- */
-export function decideAlert(
-  prev: AlertState | null,
-  healthy: boolean,
-  nowMs: number,
-  cooldownMs: number = WATCHTOWER_COOLDOWN_MS,
-): AlertTransition {
-  if (healthy) {
-    if (prev && prev.status === "unhealthy") {
-      return { action: "recovered", next: { status: "healthy", sinceTs: nowMs, lastAlertTs: null } };
-    }
-    // Stay/enter healthy — keep the original since_ts if already healthy.
-    const sinceTs = prev && prev.status === "healthy" ? prev.sinceTs : nowMs;
-    return { action: "healthy", next: { status: "healthy", sinceTs, lastAlertTs: null } };
-  }
-
-  if (!prev || prev.status === "healthy") {
-    return { action: "alerted", next: { status: "unhealthy", sinceTs: nowMs, lastAlertTs: nowMs } };
-  }
-
-  const lastAlert = prev.lastAlertTs ?? prev.sinceTs;
-  if (nowMs - lastAlert >= cooldownMs) {
-    return { action: "realerted", next: { status: "unhealthy", sinceTs: prev.sinceTs, lastAlertTs: nowMs } };
-  }
-  // Still unhealthy, within cooldown — record the latest detail, send NOTHING.
-  return { action: "suppressed", next: { status: "unhealthy", sinceTs: prev.sinceTs, lastAlertTs: prev.lastAlertTs } };
 }
 
 // --- Check naming + human labels ------------------------------------------
@@ -134,6 +84,18 @@ export const TENANT_DO_WEDGED_CHECK = "tenant_do_wedged:";
 // dedup against, or be deduped by, any mailbox-scoped check.
 export const DOMAIN_DNS_AGING_CHECK = "domain_dns_aging:";
 
+/**
+ * The three checks whose names cross a module boundary, as constants rather
+ * than literals. `cron_sweep` and `cron_legs` are the two the alert policy
+ * EXEMPTS by name (`policyFor`) — a rename that silently moved either onto the
+ * default policy would delete an exemption without a single test noticing — and
+ * `d1` is decided inside the WatchtowerDO but named by the Worker's probe, so
+ * the two halves must agree on the spelling to get the same policy.
+ */
+export const CRON_SWEEP_CHECK = "cron_sweep";
+export const CRON_LEGS_CHECK = "cron_legs";
+export const D1_CHECK = "d1";
+
 export function labelFor(name: string): string {
   if (name.startsWith(MAILBOX_PROVISIONING_CHECK)) {
     return `Mailbox provisioning ${name.slice(MAILBOX_PROVISIONING_CHECK.length)}`;
@@ -154,6 +116,44 @@ export function labelFor(name: string): string {
     return `Domain DNS stalled ${name.slice(DOMAIN_DNS_AGING_CHECK.length)}`;
   }
   return CHECK_LABELS[name] ?? name;
+}
+
+/**
+ * Which alert policy a named check gets — the ONE place the founder's
+ * 2026-08-16 debounce is turned off, so every exemption is visible in one
+ * screen and each one carries its own reason (an exemption inherits none of
+ * the reasoning behind the guard it opts out of).
+ *
+ * The DEFAULT is debounced, deliberately: a new check is far more likely to be
+ * another 5-minute cron probe than one of the three shapes below, and the
+ * failure direction of a wrong default is one extra sweep of delay rather than
+ * an alert that never arrives. `watchtower-policy.test.ts` enumerates every
+ * check name this file knows about and fails if a new one is added without a
+ * stated classification.
+ */
+export function policyFor(checkName: string): AlertPolicy {
+  // C — the dead-man, HARD EXEMPTION (founder ruling 2026-08-16). It already
+  // embodies a time threshold (SWEEP_STALE_MS) and it is the check of last
+  // resort: when it fires, every other alert is silent, so double-delaying it
+  // (or thinning it to daily) weakens the only signal that says so.
+  if (checkName === CRON_SWEEP_CHECK) return DEAD_MAN_ALERT_POLICY;
+
+  // Already damped upstream: `sweep-signals.ts` only reports this check after
+  // LEG_ALERT_AFTER_SWEEPS consecutive bad ticks (15 min at the live cadence),
+  // so a debounce here would make a genuinely broken sweep page at 20 min and
+  // breach the founder's 10-15 min ceiling. The requirement the ruling asks for
+  // is already satisfied — twice over — before the result reaches the machine.
+  if (checkName === CRON_LEGS_CHECK) return IMMEDIATE_ALERT_POLICY;
+
+  // ONE-SHOT event reports (`reportCheck`, from engine/mailbox-acquisition.ts).
+  // Nothing re-observes these: they are raised once by whatever hit the
+  // condition, around real vendor spend. "2 consecutive observations" is not a
+  // delay for them, it is permanent silence.
+  if (checkName.startsWith(MAILBOX_PROVISIONING_CHECK) || checkName.startsWith(MAILBOX_REBUY_CHECK)) {
+    return IMMEDIATE_ALERT_POLICY;
+  }
+
+  return DEBOUNCED_ALERT_POLICY;
 }
 
 // --- Email bodies ---------------------------------------------------------

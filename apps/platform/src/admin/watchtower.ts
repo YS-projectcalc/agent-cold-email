@@ -23,18 +23,19 @@ import type { TenantOpsSummary } from "../engine/ops-summary.js";
 import type { OpsMailer } from "../ops-mail/ops-mailer.js";
 import {
   alertEmailFor,
-  decideAlert,
+  policyFor,
   trySend,
   CRED_PUSH_AGING_CHECK,
+  D1_CHECK,
   DOMAIN_DNS_AGING_CHECK,
   MAILBOX_PROVISIONING_CHECK,
   MAILBOX_REBUY_CHECK,
   SEND_STARVED_CHECK,
   TENANT_DO_WEDGED_CHECK,
   type AlertOutcome,
-  type AlertState,
   type CheckResult,
 } from "./watchtower-alerts.js";
+import { decideAlert, type AlertState } from "./watchtower-policy.js";
 import { FAILURE_SIGNAL_WINDOW_MS, gradeFailureSignals } from "./watchtower-grading.js";
 import { reconcileD1Alert, recordWatchtowerCompleted } from "./watchtower-infra.js";
 
@@ -96,10 +97,10 @@ export async function evaluateHealthChecks(env: Env, nowMs: number): Promise<Che
   let d1Healthy = true;
   try {
     await env.DB.prepare("SELECT 1").first();
-    results.push({ name: "d1", healthy: true, detail: "D1 SELECT 1 ok" });
+    results.push({ name: D1_CHECK, healthy: true, detail: "D1 SELECT 1 ok" });
   } catch (err) {
     d1Healthy = false;
-    results.push({ name: "d1", healthy: false, detail: `D1 unreachable: ${errMsg(err)}` });
+    results.push({ name: D1_CHECK, healthy: false, detail: `D1 unreachable: ${errMsg(err)}` });
   }
 
   results.push(await probeDurableObjectStorage(env));
@@ -329,12 +330,17 @@ export function sendPipelineChecks(
 /**
  * Reconcile probe results against the persisted per-check state (D1) and email
  * the founder accordingly. The rules themselves live in `decideAlert`
- * (watchtower-alerts.ts) so the DO-backed store applies exactly the same ones;
+ * (watchtower-policy.ts) so the DO-backed store applies exactly the same ones;
  * this function is the D1 read/apply half.
  *
  * Every send is wrapped: an OpsMailNotConfiguredError / dark-domain send
  * failure is logged and the state is STILL advanced (so a dark channel does
  * not retry-storm and does not take down the sweep).
+ *
+ * The per-check policy comes from `policyFor` — one table, so the checks that
+ * must NOT be debounced (`reportCheck`'s one-shot event reports below, and
+ * `cron_legs`, which is damped over consecutive ticks before it ever gets
+ * here) cannot be silently swept into the default by this loop.
  */
 export async function reconcileAlerts(
   env: Env,
@@ -347,7 +353,7 @@ export async function reconcileAlerts(
 
   for (const result of results) {
     const prev = stateByName.get(result.name) ?? null;
-    const transition = decideAlert(prev, result.healthy, nowMs);
+    const transition = decideAlert(prev, result.healthy, nowMs, policyFor(result.name));
     const email = alertEmailFor(env, result, transition, prev?.sinceTs ?? null, nowMs);
     const emailSent = email ? await trySend(mailer, email) : false;
     await upsertWatchtowerState(env, { name: result.name, state: transition.next, detail: result.detail, nowMs });
@@ -366,12 +372,12 @@ export async function reconcileAlerts(
  * down, and attempting it would only trade one email for ten stack traces. */
 export async function runWatchtower(env: Env, mailer: OpsMailer, nowMs: number): Promise<AlertOutcome[]> {
   const results = await evaluateHealthChecks(env, nowMs);
-  const d1 = results.find((r) => r.name === "d1") as CheckResult;
+  const d1 = results.find((r) => r.name === D1_CHECK) as CheckResult;
 
   const outcomes: AlertOutcome[] = [await reconcileD1Alert(env, mailer, d1, nowMs)];
   if (!d1.healthy) return outcomes;
 
-  outcomes.push(...(await reconcileAlerts(env, mailer, results.filter((r) => r.name !== "d1"), nowMs)));
+  outcomes.push(...(await reconcileAlerts(env, mailer, results.filter((r) => r.name !== D1_CHECK), nowMs)));
   await recordWatchtowerCompleted(env, nowMs);
   return outcomes;
 }
@@ -399,8 +405,10 @@ export async function readCheckStatus(env: Env, checkName: string): Promise<"hea
  * Unlike `evaluateHealthChecks`'s probes, these checks are raised by whatever
  * observed the condition (engine/mailbox-provisioning.ts) — the cron never
  * produces them, so they stay at whatever state their last report left them.
- * They are also ONE-SHOT, which is why they are never streak-damped: a repeat
- * requirement on an event that happens once would silence it forever.
+ * They are also ONE-SHOT, which is why they are never streak-damped and why
+ * `policyFor` exempts their check names from the 2026-08-16 transition
+ * debounce: a repeat-observation requirement on an event that happens once
+ * would not delay the alert, it would silence it forever.
  *
  * NEVER THROWS. The caller is mid-saga around real vendor spend; a D1 hiccup in
  * the notifier must not decide whether a purchase happens or a customer's setup
@@ -476,15 +484,25 @@ export async function readAllCheckRows(env: Env): Promise<WatchtowerCheckRow[]> 
 }
 
 async function readWatchtowerState(env: Env): Promise<Map<string, AlertState>> {
-  const result = await env.DB.prepare(`SELECT check_name, status, since_ts, last_alert_ts FROM watchtower_state`).all<{
+  const result = await env.DB.prepare(
+    `SELECT check_name, status, since_ts, last_alert_ts, unhealthy_obs, alert_count FROM watchtower_state`,
+  ).all<{
     check_name: string;
     status: "healthy" | "unhealthy";
     since_ts: number;
     last_alert_ts: number | null;
+    unhealthy_obs: number;
+    alert_count: number;
   }>();
   const map = new Map<string, AlertState>();
   for (const row of result.results) {
-    map.set(row.check_name, { status: row.status, sinceTs: row.since_ts, lastAlertTs: row.last_alert_ts });
+    map.set(row.check_name, {
+      status: row.status,
+      sinceTs: row.since_ts,
+      lastAlertTs: row.last_alert_ts,
+      unhealthyObs: row.unhealthy_obs,
+      alertCount: row.alert_count,
+    });
   }
   return map;
 }
@@ -494,16 +512,27 @@ async function upsertWatchtowerState(
   params: { name: string; state: AlertState; detail: string; nowMs: number },
 ): Promise<void> {
   await env.DB.prepare(
-    `INSERT INTO watchtower_state (check_name, status, since_ts, last_alert_ts, last_detail, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?)
+    `INSERT INTO watchtower_state (check_name, status, since_ts, last_alert_ts, last_detail, updated_at, unhealthy_obs, alert_count)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(check_name) DO UPDATE SET
        status = excluded.status,
        since_ts = excluded.since_ts,
        last_alert_ts = excluded.last_alert_ts,
        last_detail = excluded.last_detail,
-       updated_at = excluded.updated_at`,
+       updated_at = excluded.updated_at,
+       unhealthy_obs = excluded.unhealthy_obs,
+       alert_count = excluded.alert_count`,
   )
-    .bind(params.name, params.state.status, params.state.sinceTs, params.state.lastAlertTs, params.detail, params.nowMs)
+    .bind(
+      params.name,
+      params.state.status,
+      params.state.sinceTs,
+      params.state.lastAlertTs,
+      params.detail,
+      params.nowMs,
+      params.state.unhealthyObs,
+      params.state.alertCount,
+    )
     .run();
 }
 

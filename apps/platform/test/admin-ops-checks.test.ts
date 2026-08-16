@@ -57,6 +57,15 @@ describe("GET /admin/ops/checks — admin read surface for watchtower per-check 
       [unhealthy("domain_dns_aging:example.com", "Domain example.com has had un-ready mail DNS for 50h.")],
       T0 + 2_000,
     );
+    // A second consecutive observation is what CONFIRMS the check and stamps
+    // last_alert_ts (founder ruling 2026-08-16); the row itself was already
+    // unhealthy from the first one, which is what this endpoint serves.
+    await reconcileAlerts(
+      env,
+      mailer,
+      [unhealthy("domain_dns_aging:example.com", "Domain example.com has had un-ready mail DNS for 50h.")],
+      T0 + 3_000,
+    );
 
     const res = await adminApi<ChecksResponse>("/admin/ops/checks");
     expect(res.status).toBe(200);
@@ -74,7 +83,14 @@ describe("GET /admin/ops/checks — admin read surface for watchtower per-check 
     const domainCheck = res.body.checks.find((c) => c.name === "domain_dns_aging:example.com")!;
     expect(domainCheck.detail).toBe("Domain example.com has had un-ready mail DNS for 50h.");
     expect(domainCheck.sinceTs).toBe(T0 + 2_000);
-    expect(domainCheck.lastAlertTs).toBe(T0 + 2_000);
+    expect(domainCheck.lastAlertTs).toBe(T0 + 3_000);
+
+    // `engine` was observed unhealthy ONCE and is still inside the debounce:
+    // the operator's watch sees it immediately (that is the point of polling
+    // this endpoint rather than the inbox) with no alert stamped yet.
+    const engineCheck = res.body.checks.find((c) => c.name === "engine")!;
+    expect(engineCheck.healthy).toBe(false);
+    expect(engineCheck.lastAlertTs).toBeNull();
 
     const d1Check = res.body.checks.find((c) => c.name === "d1")!;
     expect(d1Check.healthy).toBe(true);
