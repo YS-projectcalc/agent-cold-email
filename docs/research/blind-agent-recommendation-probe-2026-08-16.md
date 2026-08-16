@@ -37,3 +37,9 @@ D. **Lead with the two universal gaps:** agentic signup/billing story (Stripe ag
 E. **Trust floor:** G2/Trustpilot/independent-review presence — load-bearing in Sonnet's pick.
 
 Full raw reports (both agents' complete query lists + encountered-service lists) preserved in the session transcript of 2026-08-16; this doc is the frozen synthesis.
+
+## CORRECTION (same day, founder challenge: "didn't we do all this already")
+
+He was right — options A/B above were ALREADY BUILT before the probe: coldrig.dev serves `llms.txt` (200), `/for-agents`, `/agent-evaluation.md`, `AGENTS.md`, guide pages targeting the exact probe queries (`guide-mcp-cold-email`, `guide-cold-email-with-ai-agent`, `guide-cold-email-operation-{claude-code,cursor,codex}`), and comparison pages against the precise probe winners (`compare-vs-salesforge`, `compare-vs-smartlead-instantly`, `compare-vs-agentmail`, `compare-vs-skyp`, `compare-vs-foxreach`, `compare-vs-maildoso`, `compare-vs-diy`) — with clean crawlability (robots.txt allows, no noindex meta/header, Googlebot/GPTBot/ClaudeBot UAs all answered 200; verified live).
+
+**The real failure is one level below content: coldrig.dev has ZERO pages in the search index.** Verified live 2026-08-16: the branded query "coldrig cold email" returns only competitors (Salesforge/Instantly/Smartlead/Saleshandy blogs), and a domain-restricted search on coldrig.dev returns "No links found." A no-backlink domain doesn't get indexed, and unindexed content cannot appear for ANY of the 51 queries regardless of quality. The on-site layer is necessary but was never sufficient; every surface that decided the probes is third-party. The follow-up space is therefore OFF-SITE only — see the corrected ROADMAP [ASK] entry (index-triggering citations incl. public GitHub + MCP registries, guide/listicle placement, Reddit, review-site trust floor, Stripe agent-billing moonshot).
