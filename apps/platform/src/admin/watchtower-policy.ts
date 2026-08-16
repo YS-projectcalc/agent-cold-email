@@ -196,29 +196,37 @@ export function decideAlert(
     return { action: "healthy", next: healthyState(state ? state.sinceTs : nowMs) };
   }
 
-  const sinceTs = episode ? episode.sinceTs : nowMs;
-  const unhealthyObs = (episode ? episode.unhealthyObs : 0) + 1;
-  const alertCount = episode ? episode.alertCount : 0;
-
-  if (alertCount === 0) {
-    if (unhealthyObs < policy.confirmAfterObservations) {
-      // Seen once, not confirmed. The state IS recorded (GET /admin/ops/checks
-      // and the next observation both need it) — only the email waits.
-      return { action: "pending", next: { status: "unhealthy", sinceTs, lastAlertTs: null, unhealthyObs, alertCount: 0 } };
+  // PHASE 2 — an episode the founder has already been told about: the backoff
+  // ladder. `alertCount` is what says which rung, so a re-alert never restarts
+  // the debounce and the 24h step cannot be reached by anything but a second
+  // announcement.
+  if (episode !== null && episode.alertCount > 0) {
+    const { sinceTs, alertCount } = episode;
+    const unhealthyObs = episode.unhealthyObs + 1;
+    const gapMs = alertCount >= 2 ? policy.steadyRealertMs : policy.firstRealertMs;
+    if (nowMs - (episode.lastAlertTs ?? sinceTs) >= gapMs) {
+      return {
+        action: "realerted",
+        next: { status: "unhealthy", sinceTs, lastAlertTs: nowMs, unhealthyObs, alertCount: alertCount + 1 },
+      };
     }
-    return { action: "alerted", next: { status: "unhealthy", sinceTs, lastAlertTs: nowMs, unhealthyObs, alertCount: 1 } };
-  }
-
-  const lastAlertTs = episode ? episode.lastAlertTs : null;
-  const gapMs = alertCount >= 2 ? policy.steadyRealertMs : policy.firstRealertMs;
-  if (nowMs - (lastAlertTs ?? sinceTs) >= gapMs) {
+    // Still unhealthy, inside the backoff — record the latest detail, send NOTHING.
     return {
-      action: "realerted",
-      next: { status: "unhealthy", sinceTs, lastAlertTs: nowMs, unhealthyObs, alertCount: alertCount + 1 },
+      action: "suppressed",
+      next: { status: "unhealthy", sinceTs, lastAlertTs: episode.lastAlertTs, unhealthyObs, alertCount },
     };
   }
-  // Still unhealthy, inside the backoff — record the latest detail, send NOTHING.
-  return { action: "suppressed", next: { status: "unhealthy", sinceTs, lastAlertTs, unhealthyObs, alertCount } };
+
+  // PHASE 1 — nothing announced yet: count consecutive observations until the
+  // policy is satisfied.
+  const sinceTs = episode ? episode.sinceTs : nowMs;
+  const unhealthyObs = (episode ? episode.unhealthyObs : 0) + 1;
+  if (unhealthyObs < policy.confirmAfterObservations) {
+    // Seen, not confirmed. The state IS recorded (GET /admin/ops/checks and the
+    // next observation both need it) — only the email waits.
+    return { action: "pending", next: { status: "unhealthy", sinceTs, lastAlertTs: null, unhealthyObs, alertCount: 0 } };
+  }
+  return { action: "alerted", next: { status: "unhealthy", sinceTs, lastAlertTs: nowMs, unhealthyObs, alertCount: 1 } };
 }
 
 function healthyState(sinceTs: number): AlertState {
