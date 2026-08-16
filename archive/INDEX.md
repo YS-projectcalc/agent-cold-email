@@ -16,3 +16,5 @@
 - 2026-08-05-full-boundary-audit-msgchannel/prior-HANDOFF.md — HANDOFF.md as of the incident-hotfix handoff, before this session's `## Resume` rewrite (full boundary audit round-1 + msgchannel Inc1 gate).
 - 2026-08-05-provisioning-fixwave-plan/prior-HANDOFF.md — HANDOFF.md as of the full-boundary-audit/msgchannel handoff, before this pass's `## Resume` rewrite (provisioning fix-wave 2-wave restructure).
 - 2026-08-05-provisioning-fixwave-plan/superseded-roadmap-provisioning-class-wave.md — the pre-restructure `ROADMAP.md ## Open` "PROVISIONING CLASS WAVE" bullet, kept verbatim for provenance; the two-wave split (`PROVISIONING FIX WAVE 1`/`2`) supersedes it, with unretriaged sub-items carried forward into a new "deferred" bullet rather than dropped.
+- 2026-08-16: ROADMAP done-drain — all checked ledger lines moved to ROADMAP-done.md (handoff, self-draining contract)
+- 2026-08-16: prior-HANDOFF.md — pre-handoff snapshot (visibility + alert-policy session)
