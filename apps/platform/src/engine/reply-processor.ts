@@ -1,5 +1,6 @@
 import type { PolledEvent } from "@coldstart/shared";
 import type { TenantContext } from "../tenant-context.js";
+import { logAction } from "./deliverability-actions.js";
 import { recordEventIfNew } from "./events.js";
 import { cancelPendingSteps, suppress, unsubscribeEmail } from "./suppression.js";
 import { lookupThreadRef, type ThreadRef } from "./threads.js";
@@ -272,7 +273,20 @@ export async function runPollInbox(
       // high-water, process, then advance it. The engine holds no cursor, so a
       // lost poll response leaves poll_cursor un-advanced and the next poll
       // redelivers the same events (deduped below on message_id).
-      const { events, cursor } = await ctx.adapters.email.poll(mailbox.email, mailbox.poll_cursor);
+      const { events, cursor, unreadable } = await ctx.adapters.email.poll(mailbox.email, mailbox.poll_cursor);
+      // IN-7 — the engine permanently skipped a message it could not parse, so
+      // the cursor below can move past it and this mailbox keeps working. That
+      // is a reply/bounce we will never see, so it is recorded where an operator
+      // reads it rather than only in the engine's container log. Bounded by
+      // construction: the cursor advances past the poison message, so it is
+      // reported once, not every cycle.
+      if (unreadable) {
+        logAction(ctx, "INBOUND_MESSAGE_UNREADABLE", mailbox.email, {
+          count: unreadable,
+          reason: "the mail engine could not parse these messages and skipped them so this mailbox keeps processing — they are not recoverable",
+          throughCursor: cursor,
+        });
+      }
       for (const ev of events) {
         const ref = lookupThreadRef(ctx, ev.threadId);
         if (!ref) continue; // defensive: unknown thread, nothing to attribute it to
