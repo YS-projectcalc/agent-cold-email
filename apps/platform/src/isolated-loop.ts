@@ -102,3 +102,56 @@ export async function forEachIsolated<TItem, TResult>(
 
   return { results, failures };
 }
+
+/** What `withItemBudget` returns instead of a value when the budget elapsed first. */
+export const BUDGET_EXPIRED = Symbol("item-budget-expired");
+
+/**
+ * Runs `fn` under a wall-clock budget — the STALL half of this class.
+ *
+ * A per-item try/catch only isolates a THROW. An item that never resolves, or
+ * that resolves just slowly enough to consume the caller's whole shared budget,
+ * starves everything behind it exactly as a throw does and has no `catch` to
+ * grep for. That is the shape the sweep found both across tenants
+ * (`runSendPipelineAllTenants`, already fixed) and inside one tenant's own
+ * inbox poll (IN-9).
+ *
+ * The abandoned promise KEEPS RUNNING — a DO RPC is not cancellable. That is
+ * safe at every call site here because each effect it can still land is
+ * protected by an idempotency claim or a consumer-owned cursor, and its
+ * rejection is swallowed so an abandoned call can never surface as an unhandled
+ * rejection that takes down the whole loop.
+ */
+export async function withItemBudget<T>(budgetMs: number, fn: () => Promise<T>): Promise<T | typeof BUDGET_EXPIRED> {
+  const work = fn();
+  work.catch(() => {});
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expiry = new Promise<typeof BUDGET_EXPIRED>((resolve) => {
+    timer = setTimeout(() => resolve(BUDGET_EXPIRED), budgetMs);
+  });
+  try {
+    return await Promise.race([work, expiry]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Where a rotating sweep should START in a stably-ordered list this cycle.
+ *
+ * A budget ALONE only converts "the items behind a stalled one never run" into
+ * "the items behind a stalled one never run THIS cycle" — which, against a list
+ * the next invocation re-derives in the same order, is still permanent
+ * starvation. Rotation is what makes it "some items this cycle, all items
+ * across cycles", and it is the half a reader is most likely to leave out.
+ *
+ * Cycle-derived and stateless, so it needs no storage and two concurrent
+ * workers cannot disagree. It STUTTERS (cron fire times drift around the period
+ * boundary, so consecutive cycles can repeat or skip an offset) — harmless, and
+ * the fairness property to test for is eventual coverage across cycles, not
+ * strict +1 stepping (adversary round-2, R6). Zero-guarded: `% 0` is NaN.
+ */
+export function rotationOffset(nowMs: number, periodMs: number, length: number): number {
+  if (length <= 0) return 0;
+  return Math.floor(nowMs / periodMs) % length;
+}
