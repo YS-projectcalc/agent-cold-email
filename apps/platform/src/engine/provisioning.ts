@@ -18,6 +18,7 @@ import { buildMailboxBilling, syncMailboxQuantity, type MailboxBilling } from ".
 import { assertNotLifecycleFrozen } from "./billing-state.js";
 import { assertBrandOwnership } from "./brand-guard.js";
 import { DomainPropagationPendingError, setDnsWithRetry } from "./domain-dns.js";
+import { forEachIsolated } from "./isolated-loop.js";
 import { managedMailboxAddress, provisionMailboxesForDomain } from "./mailbox-provisioning.js";
 import { domainIntentKey, markDomainIntent, readDomainIntent, recordDomainIntent, type DomainIntentRow } from "./provision-intents.js";
 import { assertWithinProvisioningCap } from "./quota.js";
@@ -567,29 +568,44 @@ export async function runSetupInfrastructure(
   };
   if (fresh.length < plan.newDomains) noCandidates();
 
-  // Wire point A (system->agent message channel, increment 1) — tracks which
-  // domain the loop below was working on when it threw, so the catch can name
-  // it in the retry_setup message without needing the error itself to carry
-  // structured detail.
-  let inFlightDomain: string | undefined;
-  // C3 part b — which ordinal the loop is on, so the catch can tell a benign
-  // propagation wait on the LAST domain (nothing else left to do -> success-
-  // pending) from one on an earlier ordinal (later domains still unbought ->
-  // the agent must retry). The sequential loop guarantees every ordinal before
-  // the current one fully provisioned, so "current is the last" is exactly "the
-  // propagation wait is the only thing still incomplete".
-  let inFlightOrdinal = -1;
-  try {
-    const personaSlug = slugify(input.persona);
+  const personaSlug = slugify(input.persona);
 
-    for (let domainIndex = 0; domainIndex < input.domains; domainIndex++) {
-      // A satisfied ordinal names the domain it already resolved to; every other
-      // one consumes the next fresh candidate. Indexing `usable` by the ordinal
-      // instead would skip a buy whenever an earlier ordinal was already
-      // satisfied — a silent partial provision under a 202.
-      const domain = plan.satisfied.get(domainIndex)?.domain ?? fresh.shift() ?? noCandidates();
-      inFlightDomain = domain;
-      inFlightOrdinal = domainIndex;
+  // Each ordinal's target domain, resolved BEFORE the loop. A satisfied ordinal
+  // names the domain it already resolved to; every other one consumes the next
+  // fresh candidate. Indexing `usable` by the ordinal instead would skip a buy
+  // whenever an earlier ordinal was already satisfied — a silent partial
+  // provision under a 202.
+  //
+  // Resolved out here, not inside the isolated body below, because running out
+  // of candidates is a condition of the CALL (nothing left to hand any ordinal),
+  // not a failure of one ordinal — so it propagates exactly as it always did.
+  const ordinals: { domainIndex: number; domain: string }[] = [];
+  for (let domainIndex = 0; domainIndex < input.domains; domainIndex++) {
+    ordinals.push({ domainIndex, domain: plan.satisfied.get(domainIndex)?.domain ?? fresh.shift() ?? noCandidates() });
+  }
+
+  // Wire point A (system->agent message channel, increment 1) + N2 (gate
+  // 2026-08-05, F1) — the domain each ordinal ACTUALLY operated on, so a failure
+  // report names the real resource. A fresh candidate is only a correct guess
+  // for an ordinal nothing has committed yet: on a resume,
+  // provisionDomainWithMailboxes works on the intent-resolved domain, which can
+  // differ from whatever name was passed in, and `onDomainResolved` corrects
+  // this map the instant the real one is known.
+  const inFlightByOrdinal = new Map<number, string>();
+
+  // HEAD-OF-LINE BLOCKING (class sweep 2026-08-17, IN-1 — the confirmed
+  // instance). This loop had no per-item isolation, and its item list is
+  // re-derived identically on every call (domainIntentKey is tenant + ordinal),
+  // so ONE permanently-dead ordinal did not merely fail itself: it denied
+  // service to every ordinal behind it on every retry, forever, while the tenant
+  // paid the platform fee and the minimum-5 mailbox floor for zero working
+  // mailboxes. The ordinals are INDEPENDENTLY COMPLETABLE — separate domains,
+  // separate intents, separate spend — so nothing but the loop shape ever tied
+  // them together.
+  const outcome = await forEachIsolated(
+    ordinals,
+    async ({ domainIndex, domain }) => {
+      inFlightByOrdinal.set(domainIndex, domain);
       await provisionDomainWithMailboxes(ctx, {
         domain,
         domainIndex,
@@ -600,47 +616,86 @@ export async function runSetupInfrastructure(
         // if candidate generation changes, which is the whole point of recording
         // the resolved name rather than deriving it. See domainIntentKey.
         intentKey: domainIntentKey(ctx.tenantId, domainIndex),
-        // N2 (gate 2026-08-05, F1) — a fresh candidate is only a correct guess
-        // for an ordinal nothing has committed yet. On a resume,
-        // provisionDomainWithMailboxes operates on the intent-resolved domain,
-        // which can differ from whatever name was passed in. This callback
-        // corrects `inFlightDomain` to the real one the instant it's known,
-        // before the catch below ever names it in a customer message.
-        onDomainResolved: (domain) => {
-          inFlightDomain = domain;
-        },
+        onDomainResolved: (resolved) => inFlightByOrdinal.set(domainIndex, resolved),
       });
-    }
-  } catch (err) {
+    },
+    {
+      onItemError: ({ item, error }) => {
+        // The raw failure goes to the Worker log (operators only); the activity
+        // row a customer can read back carries the ABSTRACT step instead. This
+        // row is what makes the isolation itself legible: without it a reader
+        // sees one ordinal's failure and another's success and cannot tell
+        // whether the call gave up at the first or carried on past it.
+        logVendorFailure(`setup ordinal ${item.domainIndex}`, error);
+        logAction(
+          ctx,
+          "DOMAIN_ORDINAL_FAILED",
+          inFlightByOrdinal.get(item.domainIndex) ?? item.domain,
+          customerSafeVendorDetail(error, "this domain could not be completed — the remaining domains were still attempted", {
+            ordinal: item.domainIndex,
+          }),
+        );
+      },
+      // TENANT-GLOBAL conditions, not this ordinal's fault: the spend ceiling
+      // and an unarmed registrar reject every remaining ordinal identically, so
+      // continuing would only burn reservations and re-fire one-shot alerts.
+      abortOn: (err) => err instanceof CapacityPendingError || err instanceof RegistrarUnarmedError,
+    },
+  );
+
+  // The meter reflects what ACTUALLY landed, on every path — a partially-failed
+  // batch bills only what came up (design §7 N1). Before isolation this only
+  // mattered for the CapacityPending branch, because a throw meant nothing after
+  // the failing ordinal existed; now a failed call can leave real mailboxes
+  // behind, so the sync has to happen before we report the failure. Its own
+  // failure must never REPLACE the vendor error the caller needs to see.
+  try {
+    await syncMailboxQuantity(ctx);
+  } catch (syncErr) {
+    console.error(`setup_infrastructure: mailbox quantity sync failed for tenant ${ctx.tenantId}`, syncErr);
+  }
+
+  const firstFailure = outcome.failures[0];
+  if (firstFailure) {
+    // The FIRST failure in ordinal order is what the call reports — deterministic,
+    // and it is the head item the class is named for. A later ordinal's failure
+    // surfaces on the retry that clears this one.
+    const err = firstFailure.error;
+    const inFlightDomain = inFlightByOrdinal.get(firstFailure.item.domainIndex);
     if (err instanceof CapacityPendingError) {
       // G2/G4 graceful back-pressure — NOT a failure. withSpendCeiling already
       // set the tenant's capacity_pending marker, released the reservation, and
       // fired the one-shot founder alert. Return the job normally (never a 500):
       // the account surfaces capacity_pending via G3, and a later provision
       // retries once the founder raises the ceiling / upgrades the plan. Any
-      // domains/mailboxes provisioned before the gate stay provisioned.
-      // Sync the meter to the rows that actually landed (design §7 N1 — a
-      // partially-failed batch bills only what came up, floored at 5). The
-      // billing projection reflects REALITY (what landed), not the ask.
-      await syncMailboxQuantity(ctx);
+      // domains/mailboxes provisioned before the gate stay provisioned. The
+      // meter was already synced to the rows that actually landed above (design
+      // §7 N1), so the billing projection reflects REALITY, not the ask.
       return { jobId: newId("job"), billing: buildMailboxBilling(ctx, liveProvisioned()) };
     }
     if (err instanceof RegistrarUnarmedError) {
       await alertRegistrarUnarmed(ctx, input.primaryDomain, err, mailer);
     }
     // C3 part b — SUCCESS-PENDING, not an error. The ONLY thing this call still
-    // owes is a freshly-bought purchased domain finishing its ~32s async DNS
-    // registration (DomainPropagationPendingError, engine/domain-dns.ts), AND it
-    // is the terminal ordinal — so every earlier domain fully provisioned and
-    // nothing but propagation remains. The domain is bought, recorded, and heals
-    // on its own; a retry (informational, below) or the provisioning-reconcile
-    // sweep completes the mailboxes. Returning the job (202, async-in-progress)
-    // rather than throwing is the async-request-reply contract: "in progress"
-    // must never read to the agent as a failure. A pending wait on a NON-terminal
-    // ordinal has un-bought domains after it, so it falls through to the retryable
-    // path below (the agent genuinely has to retry to buy the rest).
-    if (err instanceof DomainPropagationPendingError && inFlightOrdinal === input.domains - 1) {
-      await syncMailboxQuantity(ctx);
+    // owes is freshly-bought purchased domains finishing their ~32s async DNS
+    // registration (DomainPropagationPendingError, engine/domain-dns.ts) — so
+    // every other ordinal fully provisioned and nothing but propagation remains.
+    // Those domains are bought, recorded, and heal on their own; a retry
+    // (informational, below) or the provisioning-reconcile sweep completes the
+    // mailboxes. Returning the job (202, async-in-progress) rather than throwing
+    // is the async-request-reply contract: "in progress" must never read to the
+    // agent as a failure.
+    //
+    // THE DISCRIMINATOR CHANGED WITH ISOLATION, and had to. It used to be "the
+    // failing ordinal is the LAST one", which was a proxy for "nothing else is
+    // outstanding" that only held because the loop aborted at the first failure
+    // (every ordinal before it had necessarily succeeded, and the ones after it
+    // did not exist yet). Now that later ordinals are genuinely attempted, that
+    // proxy is false in both directions, so the condition says what it always
+    // meant: EVERY outstanding item is a benign propagation wait. A pending wait
+    // alongside any other kind of failure still falls through to the retryable
+    // path below — the agent genuinely has to retry.
+    if (outcome.failures.every((f) => f.error instanceof DomainPropagationPendingError)) {
       const { step } = customerSafeVendorFailure(err);
       // The SAME retry_setup channel, but INFORMATIONAL: nothing is required of
       // the agent (the wait completes automatically), so the message is a status
@@ -688,11 +743,9 @@ export async function runSetupInfrastructure(
     throw err;
   }
 
-  // Mirror the Stripe mailbox quantity to the now-higher provisioned count
-  // (design §2/§9 — a provision raises the count, increases prorate). No-op
-  // unless active with a real Stripe subscription (syncMailboxQuantity guards).
-  await syncMailboxQuantity(ctx);
   // SPEC §18 — return the new count + projected monthly on the add (no silent
-  // capacity addition); computed from the REAL post-provision count.
+  // capacity addition); computed from the REAL post-provision count. The Stripe
+  // mailbox quantity was already mirrored to it above (design §2/§9 — a provision
+  // raises the count, increases prorate).
   return { jobId: newId("job"), billing: buildMailboxBilling(ctx, liveProvisioned()) };
 }
