@@ -114,6 +114,63 @@ function readDomains(tenantId: string): Promise<{ domain: string; dns_status: st
   );
 }
 
+/** Wraps the mailbox port so ONE deterministic address permanently refuses to buy. */
+function mailboxPortWithDeadAddress(inner: MailboxPort, deadLocalPart: string): { port: MailboxPort; provisioned: string[] } {
+  const provisioned: string[] = [];
+  const port = new Proxy(inner, {
+    get(target, prop, receiver) {
+      if (prop !== "provision") return Reflect.get(target, prop, receiver);
+      return async (domain: string, localPart: string, key: string) => {
+        if (localPart === deadLocalPart) {
+          throw new VendorError("inboxkit mailboxes/buy -> HTTP 422: local part rejected", false);
+        }
+        provisioned.push(`${localPart}@${domain}`);
+        return target.provision(domain, localPart, key);
+      };
+    },
+  });
+  return { port, provisioned };
+}
+
+function readActions(tenantId: string): Promise<{ action: string; target: string }[]> {
+  return runInDurableObject(tenantStub(tenantId), (_i, s) =>
+    s.storage.sql.exec<{ action: string; target: string }>(`SELECT action, target FROM deliverability_actions`).toArray(),
+  );
+}
+
+describe("T2/IN-5 — one dead mailbox address must not starve the addresses behind it", () => {
+  it("provisions slots 2 and 3 even though slot 1's address is permanently rejected", async () => {
+    const { tenantId } = await mintTenant("Slotco", "managed");
+    await activatePaidPlan(tenantId, "managed");
+    const { port: domain } = domainPortWithDeadDomain("no-such-domain.example");
+
+    let provisioned: string[] = [];
+    const result = await withTenantContext(tenantId, (base) => {
+      // sender11@ is ordinal 0's FIRST slot — the head item.
+      const mailbox = mailboxPortWithDeadAddress(base.adapters.mailbox, "sender11");
+      provisioned = mailbox.provisioned;
+      return runSetupInfrastructure(
+        { ...base, adapters: { ...base.adapters, domain, mailbox: mailbox.port } },
+        { ...INPUT, brand: "slotco", primaryDomain: "slotco.com", senderIdentity: "S <s@slotco.com>", domains: 1, inboxesEach: 3 },
+        new SandboxOpsMailer(),
+        "slot-1",
+      ).catch((e: unknown) => e);
+    });
+
+    // Pre-fix this was []: slot 1's permanent rejection ended the loop, so the
+    // two healthy addresses behind it were never bought — on this call or any
+    // retry, since the addresses are deterministic and fail identically.
+    expect(provisioned).toEqual(["sender12@slotco0.com", "sender13@slotco0.com"]);
+    expect(await readMailboxEmails(tenantId)).toEqual(["sender12@slotco0.com", "sender13@slotco0.com"]);
+
+    // The dead slot is still REPORTED — a short domain must never read as a
+    // completed one — and it is recorded ops-visibly rather than silently.
+    expect(result).toBeInstanceOf(VendorError);
+    expect((result as VendorError).retryable).toBe(false);
+    expect(await readActions(tenantId)).toContainEqual({ action: "MAILBOX_SLOT_FAILED", target: "sender11@slotco0.com" });
+  }, 30_000);
+});
+
 describe("T1 — one dead ordinal must not starve the ordinals behind it", () => {
   it("provisions D1 even though D0's DNS is permanently dead, across a retry", async () => {
     const { tenantId } = await mintTenant("Holco", "managed");
