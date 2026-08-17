@@ -443,7 +443,7 @@ async function awaitMailboxReady(ctx: TenantContext, email: string, backoffMs: n
         });
         throw new VendorError(
           `mailbox ${email} was purchased, but the provider now reports it as no longer usable. It was NOT billed or enrolled in ` +
-            `warmup, and no second purchase was made. Retrying will not help — this address needs a hand; contact support.`,
+            `warmup, and no second purchase was made. Retrying will not help — this address needs a hand; call contact_operator to reach a human.`,
           false,
           { step: MAILBOX_STEP },
         );

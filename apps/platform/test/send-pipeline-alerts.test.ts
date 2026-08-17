@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
 import {
   credPushAgingCheckName,
+  domainDnsAgingCheckName,
   reconcileAlerts,
   readReportedCheckNames,
   sendPipelineChecks,
@@ -37,7 +38,7 @@ function summaryWith(overrides: Partial<TenantOpsSummary["sendPipeline"]>, mailb
       eligibleMailboxes: 1,
       agingPendingPushes: [],
       agingPendingDomains: [],
-      provisionedDomainNames: [],
+      provisionedDomains: [],
       ...overrides,
     },
     mailboxProvenance: mailboxEmails.map((email) => ({
@@ -258,5 +259,68 @@ describe("§1c — the signals come from the tenant's REAL state, not a fixture"
     const aging = (await tenantStub(tenantId).opsSummary(0)).sendPipeline.agingPendingPushes;
     expect(aging.map((p) => p.email)).toEqual(["old@aging-push-co.test"]);
     expect(aging[0]!.pendingForMs).toBeGreaterThan(AGING_CRED_PUSH_MS);
+  });
+});
+
+// F10 (docs/adversarial/agent-channel-product-audit-2026-08-17.md) — an
+// aging-domain alert clears whenever the domain leaves `agingPendingDomains`,
+// and that set requires `status='active' AND dns_status != 'ready'`. So a
+// domain we gave up on and released leaves it WITHOUT its DNS ever coming up,
+// and the clear used to announce the opposite. A false all-clear on the one
+// signal that says a paid resource is dead is worse than no signal.
+describe("§1c alert — aging domain clear must not claim DNS came up", () => {
+  const domain = "dead.example.com";
+  const check = domainDnsAgingCheckName(domain);
+
+  async function reportStalled(): Promise<void> {
+    const checks = sendPipelineChecks(
+      "ten_x",
+      summaryWith({
+        agingPendingDomains: [{ domain, pendingForMs: 504 * 3_600_000, gaveUp: true }],
+        provisionedDomains: [{ domain, dnsStatus: "pending", status: "active" }],
+      }),
+      await readReportedCheckNames(env),
+    );
+    await reconcileAlerts(env, new SandboxOpsMailer(), checks, T0);
+  }
+
+  it("says 'now has working mail DNS' only when the domain is active AND ready", async () => {
+    await reportStalled();
+    const checks = sendPipelineChecks(
+      "ten_x",
+      summaryWith({ provisionedDomains: [{ domain, dnsStatus: "ready", status: "active" }] }),
+      await readReportedCheckNames(env),
+    );
+    expect(checks).toEqual([{ name: check, healthy: true, detail: expect.stringContaining("now has working mail DNS") }]);
+  });
+
+  it("a RELEASED domain clears its alert without claiming its mail DNS came up", async () => {
+    await reportStalled();
+    const checks = sendPipelineChecks(
+      "ten_x",
+      summaryWith({ provisionedDomains: [{ domain, dnsStatus: "pending", status: "released" }] }),
+      await readReportedCheckNames(env),
+    );
+    expect(checks.length).toBe(1);
+    expect(checks[0]!.healthy).toBe(true);
+    expect(checks[0]!.detail).not.toContain("now has working mail DNS");
+    expect(checks[0]!.detail).toContain("does NOT");
+    expect(checks[0]!.detail).toContain("status=released");
+  });
+
+  it("a domain whose row went 'burning' with ready DNS still does not claim the alert's condition resolved", async () => {
+    await reportStalled();
+    const checks = sendPipelineChecks(
+      "ten_x",
+      summaryWith({ provisionedDomains: [{ domain, dnsStatus: "ready", status: "burning" }] }),
+      await readReportedCheckNames(env),
+    );
+    expect(checks[0]!.detail).not.toContain("now has working mail DNS");
+  });
+
+  it("still never clears another tenant's domain", async () => {
+    await reportStalled();
+    const checks = sendPipelineChecks("ten_x", summaryWith({ provisionedDomains: [] }), await readReportedCheckNames(env));
+    expect(checks).toEqual([]);
   });
 });

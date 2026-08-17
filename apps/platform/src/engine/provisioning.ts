@@ -23,7 +23,7 @@ import { domainIntentKey, markDomainIntent, readDomainIntent, recordDomainIntent
 import { assertWithinProvisioningCap } from "./quota.js";
 import { screenTenant } from "../ofac/screening.js";
 import { alertRegistrarUnarmed } from "./registrar-alert.js";
-import { retrySetupMessageBody } from "./retry-setup-message.js";
+import { retrySetupMessageBody, setupFailedMessageBody } from "./retry-setup-message.js";
 import { withSpendCeiling } from "./spend-ceiling.js";
 import { emitTenantMessage } from "./tenant-messages.js";
 import { RealInboxKitDomainPort } from "../vendors/real/inboxkit-domain-port.js";
@@ -375,6 +375,27 @@ export async function provisionDomainWithMailboxes(
   return { domainId, domain: purchased.domain, mailboxEmails };
 }
 
+export type SetupInfrastructureRunResult =
+  | { jobId: string; billing: MailboxBilling; provisioning?: "pending"; pendingDomain?: string }
+  | { quoteOnly: true; billing: MailboxBilling };
+
+/**
+ * Does a RECORDED `runSetupInfrastructure` outcome still owe work?
+ *
+ * Handed to `withRequestIdempotency` by the one production call site
+ * (tenant-do.ts's setupInfrastructure) so a 202 SUCCESS-PENDING result stops
+ * replaying once a double-submit window has passed — see that wrapper's
+ * "INCOMPLETE-outcome reclaim" doc for why replaying it forever was F1.
+ *
+ * It lives HERE, next to the branch that produces the shape, on purpose: a
+ * predicate parked at the call site would silently go stale the day this saga
+ * grows a second "accepted, not finished" return. Total by construction — it is
+ * handed a `JSON.parse` of a row that may predate the current result type.
+ */
+export function isSetupProvisioningIncomplete(result: SetupInfrastructureRunResult): boolean {
+  return typeof result === "object" && result !== null && "provisioning" in result && result.provisioning === "pending";
+}
+
 /**
  * setup_infrastructure — SPEC.md §6 / brief signature. Buys N lookalike
  * domains, DNS them, provisions `inboxesEach` mailboxes per domain, starts
@@ -396,10 +417,7 @@ export async function runSetupInfrastructure(
   // here solely so a retry_setup message can tell the agent which key to resend.
   // It deliberately has NO say in what gets bought — see domainIntentKey.
   setupKey?: string,
-): Promise<
-  | { jobId: string; billing: MailboxBilling; provisioning?: "pending"; pendingDomain?: string }
-  | { quoteOnly: true; billing: MailboxBilling }
-> {
+): Promise<SetupInfrastructureRunResult> {
   // Lifecycle freeze — BEFORE any spend. A suspended/disputed/canceled tenant
   // must not provision fresh infra (real registrar/mailbox spend at activation
   // on an account we deliberately froze — adversarial panel-03 finding #5).
@@ -682,6 +700,31 @@ export async function runSetupInfrastructure(
         severity: "action_required",
         body: retrySetupMessageBody(inFlightDomain, step),
         actionHint: { tool: "setup_infrastructure", idempotencyKey: setupKey ?? null },
+        dedupKey: inFlightDomain ?? `tenant:${ctx.tenantId}`,
+      });
+    } else if (err instanceof VendorError) {
+      // F3 (docs/adversarial/agent-channel-product-audit-2026-08-17.md) — the
+      // give-up was the ONE outcome with no durable signal. The retryable
+      // branch above emitted, the 202 branch above emitted, and the single
+      // outcome that actually REQUIRES a human reached the agent only as the
+      // HTTP body of the one call that produced it: an agent that had already
+      // stopped polling, or whose session ended, never learned its paid domain
+      // was dead. Non-retryable is exactly the case that must survive the
+      // response.
+      //
+      // Scoped to VendorError (not every throw) deliberately: a ValidationError
+      // is the caller's own input and is answered by the 400 it gets, while a
+      // non-retryable VendorError means WE stopped — a dead registration
+      // (domain-dns.ts's failTerminal), a permanently rejected DNS setup, an
+      // unarmed registrar. All of them share one recovery, and it is not a
+      // retry. Composed prose only, never `err.message` (GUARDRAIL B): these
+      // errors carry registrar/env detail no customer surface may repeat.
+      const { step } = customerSafeVendorFailure(err);
+      emitTenantMessage(ctx, {
+        kind: "setup_failed",
+        severity: "action_required",
+        body: setupFailedMessageBody(inFlightDomain, step),
+        actionHint: { tool: "contact_operator" },
         dedupKey: inFlightDomain ?? `tenant:${ctx.tenantId}`,
       });
     }

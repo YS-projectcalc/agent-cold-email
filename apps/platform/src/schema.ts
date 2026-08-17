@@ -1012,7 +1012,11 @@ CREATE INDEX IF NOT EXISTS idx_mailbox_cred_pushes_pending
 -- + CLAUDE.md rule h — tenant-scoped, one tenant per DO, never cross-tenant).
 -- 'kind' + 'source' are free-form/enum-by-convention exactly like
 -- deliverability_actions.action/events.type above (no DB-level enum
--- shorthand in this codebase; the emit helper is the one writer). 'source' is
+-- shorthand in this codebase; the emit helper is the one writer). 'severity' is
+-- 'info' | 'action_required' — a real union on the TypeScript side
+-- (engine/tenant-messages.ts's TenantMessageSeverity), not DB-enforced: a CHECK
+-- would need a table rebuild inside every live DO, and every write funnels
+-- through that module's two emit helpers. 'source' is
 -- 'system' (every row this increment writes) | 'operator' (increment 2, not
 -- built here). 'action_hint' is JSON (a structured hint the agent can act on,
 -- e.g. { tool, idempotencyKey }), NULL when there is none. 'dedup_key' backs

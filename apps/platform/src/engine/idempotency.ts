@@ -25,6 +25,44 @@ const REQUEST_IDEMPOTENCY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 // waiting anywhere near the 30-day full-eviction horizon.
 const REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS = 10 * 60 * 1000;
 
+// How long an INCOMPLETE recorded outcome (see `isIncomplete` below) keeps
+// replaying before a retry of the same key is allowed to re-run fn(). This is
+// NOT the pending-claim TTL above: that one bounds a claim believed to be
+// RUNNING, this one bounds a claim that has already FINISHED but finished
+// owing work. Sized purely against a double-submit (a dropped response, an
+// at-least-once queue re-delivery), which lands within seconds of the
+// original, plus the ~32s async registrar registration a 202 provisioning-
+// pending outcome is typically waiting on — so an immediate re-fire cannot do
+// pointless vendor work. Past that, the retry the system's OWN message
+// instructs must actually run, because re-running fn() is the only thing that
+// can finish the work.
+//
+// Measured from `created_at`, which is stamped when the call CLAIMED the key,
+// not when it finished — so a long fn() spends part of this window running, and
+// a slow saga's recorded outcome can be replayable for less than a minute (or
+// not at all). That is deliberate rather than papered over with a bigger
+// number: erring short costs one redundant re-run, which is safe by
+// construction here (setup_infrastructure's purchases are gated by the
+// ordinal-derived domain intents, never by this key — see tenant-do.ts), while
+// erring long re-opens the exact dead window F1 is about.
+const REQUEST_IDEMPOTENCY_INCOMPLETE_REPLAY_MS = 60 * 1000;
+
+/** Per-call-site options — see `isIncomplete`. */
+export interface RequestIdempotencyOptions<T> {
+  /**
+   * Classifies a SUCCESSFUL result as still-unfinished work. SYNCHRONOUS by
+   * contract (it runs inside the claim-then-execute prefix, before any await —
+   * see the class doc) and TOTAL (it is handed a `JSON.parse` of whatever was
+   * recorded, which may predate the current result shape).
+   *
+   * Opt-in, and deliberately owned by the caller rather than sniffed here: the
+   * wrapper is generic and must not learn any intent's result semantics. An
+   * intent whose fn() can return "accepted, not finished" MUST pass this or it
+   * re-opens F1 below.
+   */
+  isIncomplete?: (result: T) => boolean;
+}
+
 /**
  * Request-level idempotency (B2, CLASS B). When a client presents an
  * idempotency `key` for a mutating intent, the FIRST call runs `fn` and records
@@ -60,11 +98,29 @@ const REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS = 10 * 60 * 1000;
  * instead of conflicting — see the reclaim branch below for how this stays
  * atomic under a concurrent retry race. A 'pending' claim within the window
  * still rejects with the retryable conflict, unchanged.
+ *
+ * INCOMPLETE-outcome reclaim (F1, docs/adversarial/
+ * agent-channel-product-audit-2026-08-17.md). THE INVARIANT: a recorded outcome
+ * may be replayed forever only if it is TERMINAL. "fn() returned" is not the
+ * same as "the work is finished" — setup_infrastructure's 202 SUCCESS-PENDING
+ * branch RETURNS while the setup still owes a domain's DNS and its mailboxes.
+ * Recording that as an ordinary replayable result made the system's own retry
+ * instruction ("retry with the same idempotency key to finish it") a guaranteed
+ * no-op: every later same-key call replayed a stale 202 with zero vendor calls
+ * and an empty messages[], indefinitely — the exact eternal-"pending" shape
+ * engine/domain-dns.ts's class fix closed INSIDE the saga and left open in
+ * front of it. So an outcome the caller classifies as incomplete replays for
+ * REQUEST_IDEMPOTENCY_INCOMPLETE_REPLAY_MS only; the next same-key call after
+ * that re-claims the row and re-runs fn(). The classification is applied to the
+ * RECORDED RESPONSE rather than to a status column, so rows written before this
+ * fix are covered too — which is the whole point, since the population that
+ * needs it is the one already wedged in production.
  */
 export async function withRequestIdempotency<T>(
   ctx: TenantContext,
   key: string | undefined,
   fn: () => T | Promise<T>,
+  opts?: RequestIdempotencyOptions<T>,
 ): Promise<T> {
   if (!key) return fn();
 
@@ -77,24 +133,42 @@ export async function withRequestIdempotency<T>(
     .toArray()[0];
   if (existing) {
     if (existing.status === "done" && existing.response_json !== null) {
-      return JSON.parse(existing.response_json) as T;
-    }
-    // 'pending': another turn claimed this key. Within the trust window it's
-    // presumed genuinely still running fn() — running it again would double
-    // the side effect, so reject with a retryable conflict.
-    if (now - existing.created_at < REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS) {
+      const recorded = JSON.parse(existing.response_json) as T;
+      // THE REPLAY DECISION (see "INCOMPLETE-outcome reclaim" above). A
+      // terminal outcome replays for the row's whole life, exactly as before.
+      // An outcome the caller classifies as unfinished replays only long
+      // enough to absorb a double-submit; after that the retry has to do the
+      // work, because nothing else will.
+      const incomplete = opts?.isIncomplete?.(recorded) ?? false;
+      if (!incomplete || now - existing.created_at < REQUEST_IDEMPOTENCY_INCOMPLETE_REPLAY_MS) {
+        return recorded;
+      }
+      // Re-claim IN PLACE, synchronously, before any await below — the same
+      // "one input-gate turn" guarantee the fresh-claim INSERT and the
+      // stale-claim reclaim rely on. A concurrent same-key call can only
+      // observe this row AFTER the flip lands (its own SELECT cannot run until
+      // this synchronous prefix yields at fn()'s first await), so it reads
+      // 'pending' with a freshly-set created_at and takes the conflict branch
+      // below — exactly one caller ever proceeds to run fn(). The stale
+      // response is cleared with it: a 'pending' row's body is never read, and
+      // if fn() throws, the catch DELETEs the row rather than resurrecting a
+      // 202 the retry has just disproved.
+      ctx.sql.exec(
+        `UPDATE request_idempotency SET status = 'pending', response_json = NULL, created_at = ? WHERE key = ? AND status = 'done'`,
+        now,
+        key,
+      );
+    } else if (now - existing.created_at < REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS) {
+      // 'pending': another turn claimed this key. Within the trust window it's
+      // presumed genuinely still running fn() — running it again would double
+      // the side effect, so reject with a retryable conflict.
       throw new RequestInProgressError();
+    } else {
+      // Past the window: presumed dead (the claiming DO crashed mid-fn — see
+      // the class doc above). Same in-place, pre-await reclaim as the branch
+      // above, and atomic under a concurrent retry for the same reason.
+      ctx.sql.exec(`UPDATE request_idempotency SET created_at = ? WHERE key = ? AND status = 'pending'`, now, key);
     }
-    // Past the window: presumed dead (the claiming DO crashed mid-fn — see
-    // the class doc above). Reclaim IN PLACE, synchronously, before any
-    // await below — the same "one input-gate turn" guarantee the fresh-claim
-    // INSERT relies on. A concurrent retry of this SAME stale key can only
-    // observe this row AFTER the re-stamp lands (its own SELECT can't run
-    // until this synchronous prefix yields at fn()'s first await), so it
-    // reads 'pending' with a freshly-set created_at and falls into the
-    // conflict branch above instead of reclaiming a second time — exactly
-    // one retry ever proceeds to run fn().
-    ctx.sql.exec(`UPDATE request_idempotency SET created_at = ? WHERE key = ? AND status = 'pending'`, now, key);
   } else {
     // Claim BEFORE the first await (see the class doc): synchronous SELECT + INSERT
     // land in one input-gate turn, so the claim is durable before fn() can yield.

@@ -15,9 +15,23 @@ import { NotFoundError } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
 
-/** Convention so far (not DB-enforced — see the schema.ts table comment):
- * 'info' | 'action_required'. Both real emit points use 'action_required'. */
-export type TenantMessageSeverity = string;
+/**
+ * What an agent may branch on (F11, docs/adversarial/
+ * agent-channel-product-audit-2026-08-17.md). A bare `string` was
+ * undefined-by-convention: the type promised nothing, the comment that stood
+ * here claimed "both real emit points use 'action_required'" while
+ * provisioning.ts's SUCCESS-PENDING emit already used 'info', and four public
+ * tool descriptions tell agents to read this field. The union is now the
+ * contract, and it matches admin/schemas.ts's `z.enum(["info",
+ * "action_required"])` on the operator route.
+ *
+ * 'action_required' means the account will not progress until someone acts;
+ * 'info' means the condition resolves on its own. NOT DB-enforced — the
+ * `tenant_messages` CHECK would have to be added by table rebuild inside every
+ * live DO, and the writes all funnel through this module's two emit helpers,
+ * so the type is the enforcement point.
+ */
+export type TenantMessageSeverity = "info" | "action_required";
 
 export interface TenantMessage {
   id: string;
@@ -159,6 +173,8 @@ export function emitOperatorMessage(ctx: TenantContext, input: EmitOperatorMessa
 interface TenantMessageRow {
   id: string;
   kind: string;
+  /** Widened deliberately: this is what SQLite hands back, not what we accept.
+   * A row written before the union was the contract must still read out. */
   severity: string;
   body: string;
   action_hint: string | null;
@@ -168,11 +184,22 @@ interface TenantMessageRow {
   [column: string]: SqlStorageValue;
 }
 
+/**
+ * Reads a stored severity back into the union. Anything unrecognised resolves
+ * to 'action_required' rather than 'info': the emit helpers can only ever write
+ * the two union members, so this is reachable only by a hand-written row, and
+ * an over-reported action item costs an agent one look while an under-reported
+ * one is precisely the silent-stall class this channel exists to prevent.
+ */
+function toSeverity(raw: string): TenantMessageSeverity {
+  return raw === "info" ? "info" : "action_required";
+}
+
 function toTenantMessage(row: TenantMessageRow): TenantMessage {
   return {
     id: row.id,
     kind: row.kind,
-    severity: row.severity,
+    severity: toSeverity(row.severity),
     body: row.body,
     actionHint: row.action_hint ? (JSON.parse(row.action_hint) as Record<string, unknown>) : null,
     source: row.source,
@@ -187,9 +214,20 @@ function toTenantMessage(row: TenantMessageRow): TenantMessage {
  * ONLY writer of `read_at` in this codebase). UNACKED ONLY (gate fix,
  * msgchannel-inc23-gate-2026-08-06 F1 — increment 3 shipped the ack writer
  * without this filter, so an acked message kept resurfacing here, and four
- * public tool/API descriptions claimed the opposite as fact). Newest first,
- * expired rows filtered out, capped at MAX_SURFACED_MESSAGES. list_messages
- * (below) is the surface for acked history — this preview never shows it.
+ * public tool/API descriptions claimed the opposite as fact). Expired rows
+ * filtered out, capped at MAX_SURFACED_MESSAGES.
+ *
+ * OPERATOR FIRST, then newest first (F9, docs/adversarial/
+ * agent-channel-product-audit-2026-08-17.md). A plain newest-first cap of 5 is
+ * displaceable by our own system churn: `emitTenantMessage`'s dedup branch
+ * RE-STAMPS `created_at` on every re-trigger, so a tenant with five or more
+ * domains each refreshing a per-domain `retry_setup` pushes a human operator's
+ * reply out of the preview entirely — while infrastructure_status's tool
+ * description tells the agent to "poll this alongside the mailbox fields so you
+ * never miss one". A system message is machine-regenerated on the next call; an
+ * operator's reply is written once by a human and is the only thing here that
+ * cannot be reconstructed, so it outranks. list_messages (below) is the surface
+ * for acked history — this preview never shows it.
  */
 export function listSurfacedTenantMessages(ctx: TenantContext): TenantMessage[] {
   const now = ctx.clock.now();
@@ -198,7 +236,7 @@ export function listSurfacedTenantMessages(ctx: TenantContext): TenantMessage[] 
       `SELECT id, kind, severity, body, action_hint, source, created_at, read_at
        FROM tenant_messages
        WHERE tenant_id = ? AND read_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
-       ORDER BY created_at DESC, rowid DESC
+       ORDER BY (source = 'operator') DESC, created_at DESC, rowid DESC
        LIMIT ?`,
       ctx.tenantId,
       now,

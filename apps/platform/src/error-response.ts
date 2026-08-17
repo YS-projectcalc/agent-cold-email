@@ -147,7 +147,7 @@ export function toErrorResponse(err: unknown): ErrorResponse {
       body: {
         error: retryable
           ? "An upstream provider failed while handling this request. Nothing was charged for the failed step. Retry shortly."
-          : "An upstream provider rejected this request. Nothing was charged for the failed step. Retrying as-is will not help — check your inputs or contact support.",
+          : "An upstream provider rejected this request. Nothing was charged for the failed step. Retrying as-is will not help — check your inputs, or call contact_operator to reach a human.",
         code: "vendor_error",
         ...(step ? { step } : {}),
         retryable,

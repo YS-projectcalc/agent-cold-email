@@ -245,7 +245,7 @@ export function sendPipelineChecks(
   reported: ReadonlySet<string>,
 ): CheckResult[] {
   const results: CheckResult[] = [];
-  const { activated, agingPendingDomains, agingPendingPushes, dueNonDemoPendingSends, eligibleMailboxes, provisionedDomainNames } =
+  const { activated, agingPendingDomains, agingPendingPushes, dueNonDemoPendingSends, eligibleMailboxes, provisionedDomains } =
     summary.sendPipeline;
 
   // Vendor-verdict class fix, guard C — the escalation edge un-ready domains
@@ -274,15 +274,35 @@ export function sendPipelineChecks(
         `It was paid for and no mailbox will come up on it until it is replaced.`,
     });
   }
-  // Clear an aging-domain alert once the domain is ready/released — and only for
-  // domains THIS tenant holds, so one tenant's sweep never clears another's.
+  // Clear an aging-domain alert once the domain leaves the stalled set — and
+  // only for domains THIS tenant holds, so one tenant's sweep never clears
+  // another's.
+  //
+  // A domain can leave that set two ways, and they are not the same news (F10,
+  // docs/adversarial/agent-channel-product-audit-2026-08-17.md): its DNS came
+  // up, OR it stopped being an active provisioned domain (released, burning,
+  // retired) with its DNS still dead. The clear used to assert the first
+  // unconditionally, so a domain we gave up on and released could file "now has
+  // working mail DNS" about itself — a false all-clear on the one signal that
+  // exists to say a paid resource is dead. Re-read the columns instead of
+  // inferring from absence.
   const stalledNow = new Set(stalledDomains.map((d) => d.domain));
   for (const name of reported) {
     if (!name.startsWith(DOMAIN_DNS_AGING_CHECK)) continue;
     const domain = name.slice(DOMAIN_DNS_AGING_CHECK.length);
     if (stalledNow.has(domain)) continue;
-    if (!provisionedDomainNames.includes(domain)) continue; // another tenant's domain
-    results.push({ name, healthy: true, detail: `Domain ${domain} (tenant ${tenantId}) now has working mail DNS.` });
+    const owned = provisionedDomains.find((d) => d.domain === domain);
+    if (!owned) continue; // another tenant's domain
+    const dnsWorks = owned.dnsStatus === "ready" && owned.status === "active";
+    results.push({
+      name,
+      healthy: true,
+      detail: dnsWorks
+        ? `Domain ${domain} (tenant ${tenantId}) now has working mail DNS.`
+        : `Domain ${domain} (tenant ${tenantId}) is no longer an active provisioned domain awaiting DNS ` +
+          `(status=${owned.status}, dns=${owned.dnsStatus}), so this alert no longer applies. Clearing it does NOT ` +
+          `mean its mail DNS came up.`,
+    });
   }
 
   const aging = activated ? agingPendingPushes : [];

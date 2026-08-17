@@ -45,7 +45,7 @@ import {
 import { runDemo, type DemoRunSummary } from "./engine/demo.js";
 import { cancelTenant, terminateTenant, type CancelResult, type TerminateResult } from "./engine/lifecycle.js";
 import { getInfrastructureStatus } from "./engine/infrastructure-status.js";
-import { runSetupInfrastructure } from "./engine/provisioning.js";
+import { isSetupProvisioningIncomplete, runSetupInfrastructure } from "./engine/provisioning.js";
 import { runProvisioningReconcile } from "./engine/provisioning-reconcile.js";
 import { launchCampaign, listCampaigns, pauseAllCampaigns, pauseCampaign, type CampaignListItem } from "./engine/campaigns.js";
 import { runTick } from "./engine/tick.js";
@@ -737,6 +737,13 @@ export class TenantDO extends DurableObject<Env> {
       // orphaned, not un-consulted (ticket sup_3ca260e4; the rebind is
       // engine/legacy-domain-intent-keys.ts).
       () => runSetupInfrastructure(ctx, input, undefined, idempotencyKey),
+      // F1 (docs/adversarial/agent-channel-product-audit-2026-08-17.md) — this
+      // saga can RETURN while still owing work (the 202 SUCCESS-PENDING
+      // branch). Without this, that outcome recorded as an ordinary replayable
+      // result and every later same-key call — including the one this
+      // platform's own retry_setup message instructs — replayed a stale 202
+      // and performed nothing, forever.
+      { isIncomplete: isSetupProvisioningIncomplete },
     );
   }
 
