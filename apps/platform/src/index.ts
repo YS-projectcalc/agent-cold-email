@@ -22,6 +22,7 @@ import { adminOpsRoute } from "./routes/admin-ops.js";
 import { adminScreeningRoute } from "./routes/admin-screening.js";
 import { adminSdnIngestRoute } from "./routes/admin-sdn-ingest.js";
 import { adminMessagesRoute } from "./routes/admin-messages.js";
+import { adminProvisioningStateRoute } from "./routes/admin-provisioning-state.js";
 import { statusRoute } from "./routes/status.js";
 import { dashboardSessionRoute } from "./routes/dashboard-session.js";
 import { loginRoute } from "./routes/login.js";
@@ -86,6 +87,7 @@ admin.route("/", adminOpsRoute);
 admin.route("/", adminScreeningRoute);
 admin.route("/", adminSdnIngestRoute);
 admin.route("/", adminMessagesRoute);
+admin.route("/", adminProvisioningStateRoute);
 app.route("/", admin);
 
 // Every literal top-level path this API exposes behind requireAuth (bearer OR
