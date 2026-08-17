@@ -14,16 +14,42 @@ import { parseJsonBody } from "../validate.js";
 // msgchannel-inc23-gate-2026-08-06 F2) — see emitOperatorMessage's doc for
 // why: a human operator reaching a suspended/canceling/canceled tenant is
 // this channel's canonical use case, not a case to block.
-export const adminMessagesRoute = new Hono<{ Bindings: Env }>().post("/admin/tenants/:id/messages", async (c) => {
-  const tenantId = c.req.param("id");
-  const tenant = await getTenantIndexById(c.env, tenantId);
-  if (!tenant) return c.json({ error: `tenant ${tenantId} not found` }, 404);
+export const adminMessagesRoute = new Hono<{ Bindings: Env }>()
+  .post("/admin/tenants/:id/messages", async (c) => {
+    const tenantId = c.req.param("id");
+    const tenant = await getTenantIndexById(c.env, tenantId);
+    if (!tenant) return c.json({ error: `tenant ${tenantId} not found` }, 404);
 
-  const parsed = await parseJsonBody(c, AdminOperatorMessageInput);
-  if (!parsed.ok) return parsed.response;
+    const parsed = await parseJsonBody(c, AdminOperatorMessageInput);
+    if (!parsed.ok) return parsed.response;
 
-  const stub = c.env.TENANT.get(c.env.TENANT.idFromName(tenantId));
-  await stub.emitOperatorMessage(parsed.data);
+    const stub = c.env.TENANT.get(c.env.TENANT.idFromName(tenantId));
+    await stub.emitOperatorMessage(parsed.data);
 
-  return c.json({ tenantId, emitted: true }, 201);
-});
+    return c.json({ tenantId, emitted: true }, 201);
+  })
+  // The read twin of the POST above — lets the operator see a tenant's
+  // WHOLE message store (engine/tenant-messages.ts's listMessagesForOperator),
+  // above all each message's `readAt`, to answer "did the customer's agent
+  // ever read the operator's reply." Same auth (admin.use("/admin/*",
+  // requireAdminAuth) in index.ts covers this path automatically — no
+  // per-route auth call needed, matching the POST above) and same
+  // getTenantIndexById 404 check. `?unreadOnly=1` mirrors the boolean
+  // query-flag convention admin-ops.ts's GET /admin/ops/checks already uses
+  // (`?unhealthy=1`). DELIVERS REGARDLESS OF LIFECYCLE STATE — same
+  // rationale as the POST (admin-messages.ts:13-16): a pure read has nothing
+  // to gate.
+  .get("/admin/tenants/:id/messages", async (c) => {
+    const tenantId = c.req.param("id");
+    const tenant = await getTenantIndexById(c.env, tenantId);
+    if (!tenant) return c.json({ error: `tenant ${tenantId} not found` }, 404);
+
+    const rawLimit = c.req.query("limit");
+    const limit = rawLimit !== undefined ? Number(rawLimit) : undefined;
+    const unreadOnly = c.req.query("unreadOnly") === "1";
+
+    const stub = c.env.TENANT.get(c.env.TENANT.idFromName(tenantId));
+    const result = await stub.listMessagesForOperator({ limit, unreadOnly });
+
+    return c.json({ tenantId, messages: result.messages, total: result.total });
+  });
