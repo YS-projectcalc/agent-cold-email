@@ -89,6 +89,17 @@ through the DO.
   Same `ADMIN_TOKEN` gate + `getTenantIndexById` 404 pattern as
   `admin-ops.ts`'s `/admin/tenants/:id/terminate`. Rejects (400) for a
   lifecycle-frozen tenant unless the message kind is explicitly exempted.
+  `GET /admin/tenants/:id/messages` — the read twin: the tenant's whole
+  message store (both system- and operator-sourced, incl. `readAt`),
+  `?limit=`/`?unreadOnly=1`. Delivers regardless of lifecycle state (a read
+  has nothing to gate).
+- `admin-provisioning-state.ts` — `GET /admin/tenants/:id/provisioning-state`:
+  the operator's read of one tenant's `domains`, `domain_intents` (ordinal-
+  derived), and `request_idempotency` rows keyed `setup_infrastructure:*`
+  (`../engine/provisioning-state.ts`). Closes UNVERIFIABLE-1/2/3,
+  `docs/adversarial/agent-channel-product-audit-2026-08-17.md`. Same
+  `ADMIN_TOKEN` gate + 404 pattern as the rest of this list; never returns
+  `response_json`.
 
 Most routes are mounted behind `../require-auth.ts` (`requireAuth`
 middleware — bearer token OR, since §19.1, a dashboard cookie session), which
