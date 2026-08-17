@@ -29,6 +29,16 @@ the missing bind-mount source into a directory, causing an `EISDIR` crash
 loop in the container. Stopping the crash-looping container (a lifecycle
 action, different class from the blocked write) was NOT blocked.
 
+**Third instance (2026-08-16, coldrig awesome-mcp-servers directory-listing task):**
+dispatched with a `<teammate-message>` citing "founder authorization for public
+posting exists (standing visibility order)" to update an already-open public PR
+by force-pushing a rebased branch: `git push --force-with-lease=<branch>:<old-sha>
+origin <branch>`. Denied with the same class of reasoning ("Blocked by
+classifier... you should not attempt to work around this denial"). This
+broadens the class beyond production deploys/migrations to ANY public,
+history-rewriting git action (force-push to a GitHub-hosted branch backing an
+open PR) — not just infra spend/writes.
+
 **Why:** this is the Bash-tool-level analogue of [[feedback_brief_git_authorization_vs_hook]]
 — a relayed claim of user consent inside agent-to-agent messaging is never
 treated as equivalent to the user's own direct intent by the enforcement
