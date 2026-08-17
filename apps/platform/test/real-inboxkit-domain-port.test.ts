@@ -67,6 +67,45 @@ describe("RealInboxKitDomainPort — configured (InboxKit)", () => {
     expect(url).toBe("https://ik.example.internal/v1/api/domains/available?domain=goacme.com");
   });
 
+  // T2 for IN-8 of the head-of-line-blocking class sweep (2026-08-17). The
+  // candidate list is DETERMINISTIC (fixed prefixes + numbered spillover), so a
+  // single name the vendor permanently rejects failed identically on every
+  // retry — and, unguarded, it threw out of the whole search, so
+  // setup_infrastructure failed at plan time for that brand forever even though
+  // every other candidate was fine.
+  it("one permanently-failing availability probe does not kill the whole candidate search", async () => {
+    const spy = vi.spyOn(globalThis, "fetch");
+    spy.mockImplementationOnce(async () => new Response("nope", { status: 400 })); // goacme.com — permanent
+    spy.mockImplementationOnce(
+      async () => new Response(JSON.stringify(IK_DOMAIN_AVAILABLE), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    spy.mockImplementationOnce(
+      async () => new Response(JSON.stringify(IK_DOMAIN_NOT_AVAILABLE), { status: 200, headers: { "content-type": "application/json" } }),
+    );
+
+    const candidates = await new RealInboxKitDomainPort(CONFIG).searchLookalikes("Acme", "acme.com", 3);
+
+    // All three probed (pre-fix: the first throw ended the search), order kept,
+    // and the un-probeable name reported UNAVAILABLE rather than guessed usable.
+    expect(spy).toHaveBeenCalledTimes(3);
+    expect(candidates).toEqual([
+      { domain: "goacme.com", available: false },
+      { domain: "theacme.com", available: true },
+      { domain: "myacme.com", available: false },
+    ]);
+  });
+
+  it("a WHOLLY down availability endpoint still throws — never 'no lookalikes for your brand'", async () => {
+    // Every probe failing is the endpoint being down, not one bad candidate.
+    // Reporting it as "no available lookalikes" would surface to the customer as
+    // a 400 blaming their brand for our vendor's outage.
+    const spy = vi.spyOn(globalThis, "fetch");
+    spy.mockImplementation(async () => new Response("upstream busy", { status: 503 }));
+
+    await expect(new RealInboxKitDomainPort(CONFIG).searchLookalikes("Acme", "acme.com", 3)).rejects.toBeInstanceOf(VendorError);
+    expect(spy).toHaveBeenCalledTimes(3);
+  });
+
   it("buy() refuses without a configured registrant (never invents a fake identity)", async () => {
     const err = await new RealInboxKitDomainPort(CONFIG).buy("acme-lookalike.com", "k1").catch((e) => e);
     expect(err).toBeInstanceOf(VendorError);

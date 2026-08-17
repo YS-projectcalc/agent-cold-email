@@ -18,7 +18,7 @@ import { buildMailboxBilling, syncMailboxQuantity, type MailboxBilling } from ".
 import { assertNotLifecycleFrozen } from "./billing-state.js";
 import { assertBrandOwnership } from "./brand-guard.js";
 import { DomainPropagationPendingError, setDnsWithRetry } from "./domain-dns.js";
-import { forEachIsolated } from "./isolated-loop.js";
+import { forEachIsolated } from "../isolated-loop.js";
 import { managedMailboxAddress, provisionMailboxesForDomain } from "./mailbox-provisioning.js";
 import { domainIntentKey, markDomainIntent, readDomainIntent, recordDomainIntent, type DomainIntentRow } from "./provision-intents.js";
 import { assertWithinProvisioningCap } from "./quota.js";

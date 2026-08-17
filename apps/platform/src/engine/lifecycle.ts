@@ -14,7 +14,7 @@ import { alertUnresolvedDomainConnectionType } from "./byo-teardown-alert.js";
 import { pauseAllCampaigns } from "./campaigns.js";
 import { logAction } from "./deliverability-actions.js";
 import { EngineMailboxClient } from "./engine-mailbox-client.js";
-import { forEachIsolated } from "./isolated-loop.js";
+import { forEachIsolated } from "../isolated-loop.js";
 import { engineConfigFromEnv, revokePushedMailboxCredentials } from "./mailbox-credential-push.js";
 import { suspendTenant } from "./ops-summary.js";
 import { markMailboxIntentsReleased } from "./provision-intents.js";

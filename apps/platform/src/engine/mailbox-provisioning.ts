@@ -30,7 +30,7 @@ import type { TenantContext } from "../tenant-context.js";
 import { customerSafeVendorDetail, logVendorFailure, VENDOR_STEP } from "../vendor-failure.js";
 import { logAction } from "./deliverability-actions.js";
 import { withRequestIdempotency } from "./idempotency.js";
-import { forEachIsolated } from "./isolated-loop.js";
+import { forEachIsolated } from "../isolated-loop.js";
 import {
   abandonedPurchaseError,
   alertMailboxRebuyFailed,

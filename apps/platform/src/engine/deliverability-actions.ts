@@ -22,7 +22,7 @@ import {
   type DeliverabilityAction,
   type DeliverabilityThresholds,
 } from "./deliverability.js";
-import { forEachIsolated } from "./isolated-loop.js";
+import { forEachIsolated } from "../isolated-loop.js";
 import { replacementDomainIntentKey } from "./provision-intents.js";
 import { provisionDomainWithMailboxes, slugify } from "./provisioning.js";
 import { ONE_DAY_MS } from "./warmup.js";
