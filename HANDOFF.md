@@ -9,10 +9,10 @@ Agent-operated cold-email platform (28 MCP tools). **LIVE, FIRST PAYING CUSTOMER
 2. **`ADMIN_TOKEN` rotated into Keychain `coldrig/admin-token` (standing access) and the operator reply SENT to Mordy's agent** (201, `regarding sup_3ca260e4`: retry same key `apd-setup-a-2mbx`, spend-safe). **His agent has been SILENT since (>48h)** — recommend the founder nudges Mordy the human; the watch pages on any reaction.
 3. **`GET /admin/ops/checks` SHIPPED + DEPLOYED** (gate SHIP-WITH-NOTES; two-store caveat: `d1`/`cron_sweep` dead-man live in WatchtowerDO — pair with `GET /status`). **Current live Worker version: `a507f12a`** (latest deploy; `/status` 200 throughout the session).
 4. **Alert-policy wave SHIPPED + DEPLOYED 2026-08-16** (founder AskUserQuestion ruling: "Debounce + daily re-alerts"). Fresh-context adversary gate: SHIP, 0 blocking, 6 non-blocking notes (`docs/adversarial/alert-policy-gate-2026-08-16.md`; both builder spec-conflict resolutions — the one-shot `mailbox_*` exemption and the pre-damped `cron_legs` exemption — UPHELD; mutation battery 7/8 killed, 60k-timeline fuzz zero violations, dead-man exemption mutation-proven). Merged `--no-ff` `a981163`, deployed Worker `a507f12a`, migration 0018 applied to prod D1 (backfill verified live: the 2 stuck Mordy `domain_dns_aging` rows carry `unhealthy_obs=2, alert_count=2`; pre-deploy `last_alert_ts` only 1.05h old so no deploy-day duplicate email, next re-alert ~23h out then daily). Founder alert-email volume drops from ~8/day to ~2 on day one, then 2/day (one per stuck domain, daily ladder) until Mordy's agent retries; cron_sweep dead-man ≤15-min page guarantee untouched.
-5. **Discoverability: blind-probe verdict = coldrig appeared in 0/51 agent queries; on-site layer already built; real gap = ~zero backlinks/index authority.** Frozen `docs/research/blind-agent-recommendation-probe-2026-08-16.md` (+ same-day correction). Off-site execution started this session — see the 2026-08-16 `[ORDER]` in `ROADMAP.md ## Open` for done/remaining.
+5. **Discoverability: blind-probe verdict = coldrig appeared in 0/51 agent queries; on-site layer already built; real gap = ~zero backlinks/index authority.** Frozen `docs/research/blind-agent-recommendation-probe-2026-08-16.md` (+ same-day correction). Off-site execution started this session — see the 2026-08-16 `[ORDER]` in `ROADMAP.md ## Open` for done/remaining. MCP-registry publish DONE 2026-08-17T00:12Z (v0.2.3, isLatest verified).
 
 ## In flight / next
-- **MCP-registry re-publish [blocked:founder-click]** and **Gmail MCP authorization [gated:founder]** — exact steps in their `ROADMAP.md ## Open` 2026-08-16 entries.
+- **MCP-registry re-publish: DONE** — v0.2.3 published 2026-08-17T00:12Z, `isLatest` verified via registry API (details in `ROADMAP.md ## Open` 2026-08-16 visibility entry). **Gmail MCP authorization [gated:founder]** — exact steps in the `ROADMAP.md ## Open` 2026-08-16 Gmail entry.
 - Still running: the 2-hourly coldrig watch, cron job `be956d32` (**SESSION-scoped — dies with the session; re-create on resume**, spec below).
 - Open decisions (founder-gated, unchanged): C3 (d) arm-gate fix (3 blockers — grep `PROVISIONING_RECONCILE_ENABLED` in ROADMAP; ⛔ never arm before they're fixed) · direction-1 (staged) · mailbox W7 tail (`~/dev/agent-mailbox/HANDOFF.md`).
 
@@ -29,11 +29,11 @@ Agent-operated cold-email platform (28 MCP tools). **LIVE, FIRST PAYING CUSTOMER
 - `docs/adversarial/vendor-verdict-gate-2026-08-14.md` — 3-round gate + ship record of the class fix.
 - `docs/research/blind-agent-recommendation-probe-2026-08-16.md` — probe verdict + corrected diagnosis + option space.
 - `ROADMAP.md ## Open` — the two 2026-08-16 entries (visibility [ORDER], Gmail [ASK]) + alert-policy [ORDER] + arm-gate blockers.
-- `server.json` — v0.2.3 registry manifest, committed, awaiting publish.
+- `server.json` — v0.2.3 registry manifest — PUBLISHED to the official MCP registry 2026-08-17 (isLatest).
 - `apps/platform/src/admin/watchtower-policy.ts` — the shipped alert policy table (debounce, ladders, exemptions); gate record at `docs/adversarial/alert-policy-gate-2026-08-16.md`.
 
 ## Resume — no in-flight build; next actions are visibility remainder + founder clicks
 1. **Alert wave: DONE end-to-end 2026-08-16** (gate SHIP → merged `a981163` → Worker `a507f12a` → backfill verified live → ledgered). Nothing to resume; branch `feat/alert-debounce-backoff-2026-08-16` preserved for history, worktree reaped. Follow-ups = the non-blocking `[IDEA]` line in `ROADMAP.md ## Open`.
-2. **Founder clicks (KIND B — present, don't do):** (a) MCP-registry Authorize click (exact commands in the ROADMAP visibility [ORDER]; mint the device code only when the founder is at the keyboard — codes die in ~15 min); (b) Gmail `/mcp` authorization; (c) GitHub 2FA before 2026-08-28; (d) nudge Mordy the human (his agent >48h silent on a spend-safe retry).
-3. **Visibility [ORDER] remainder (KIND A):** after the registry publish lands — mcp.so + PulseMCP submissions, guide/listicle outreach (see the ROADMAP entry for done/remaining).
+2. **Founder clicks (KIND B — present, don't do):** (b) Gmail `/mcp` authorization; (c) GitHub 2FA before 2026-08-28; (d) nudge Mordy the human (his agent >48h silent on a spend-safe retry).
+3. **Visibility [ORDER] remainder (KIND A):** mcp.so + PulseMCP submissions, guide/listicle outreach (see the ROADMAP entry for done/remaining).
 4. **Re-create the watch cron** (spec in Landmines) if not already running.
