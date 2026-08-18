@@ -177,6 +177,12 @@ export const ALLOWED_UNISOLATED_LOOPS: { file: string; header: string; reason: s
     header: "for (let i = 0; i < params.entries.length; i += INSERT_BATCH_SIZE)",
     reason: "builds one batch of prepared statements for a single atomic swap-in — chunking, not independent per-entry items",
   },
+  {
+    file: "apps/platform/src/engine/remove-intents.ts",
+    header: "for (let i = 0; i < targets.length; i += RELEASE_INTENT_CHUNK_SIZE)",
+    reason:
+      "R3-1 (gate finding): same chunked-bulk-op shape as admin/db.ts — one logical recordRemoveIntent write split under the 100-bound-param ceiling, not independent per-target items; also synchronous ctx.sql.exec only (no await) inside a DO's input-gate turn, same as the 'synchronous, no await' group below",
+  },
   // --- Synchronous, no await, no throw-prone call — a DO commits the turn atomically (doc §3 OUT group 6) ---
   {
     file: "apps/platform/src/engine/campaigns.ts",

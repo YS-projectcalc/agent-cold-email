@@ -1036,10 +1036,14 @@ CREATE TABLE IF NOT EXISTS mailbox_buy_dispatches (
 --
 -- INSERT-ONLY, like the buy intents, and for the same reason: a row that can be
 -- rewritten is a target set that can move, which is the property being removed.
--- Rows are never deleted — the members are addresses whose release was ASKED
--- for, so the table's size is bounded by the mailboxes a tenant has ever
--- downgraded away, not by request volume (a call that resolves no live mailbox
--- writes nothing).
+-- Rows are never deleted. Table size scales with the number of DISTINCT KEYS a
+-- tenant has ever used for a downgrade, NOT with mailboxes ever released
+-- (PRIMARY KEY is (key, mailbox_id), not mailbox_id alone): a same-key retry
+-- writes nothing further (recordRemoveIntent returns the already-recorded
+-- set), but a mailbox the vendor permanently refuses is re-resolved and
+-- re-INSERTed under every NEW key that ever targets it, so one permanently
+-- stuck mailbox can appear in as many rows as keys have targeted it (a call
+-- that resolves no live mailbox writes nothing, so idle tenants add none).
 CREATE TABLE IF NOT EXISTS mailbox_release_intents (
   -- The namespaced request-idempotency key ('remove_mailboxes:<customer key>'),
   -- so the intent and the replay claim it belongs to are the same anchor.

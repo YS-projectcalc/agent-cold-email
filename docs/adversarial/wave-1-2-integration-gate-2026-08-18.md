@@ -628,3 +628,190 @@ but it is the safe pattern, correctly applied, and it buys a real honesty gain
 3. Round-1 NB-1, NB-4, NB-6, NB-7, NB-10 and the three §6 NEW items are
    untouched by this fix and still stand.
 
+---
+---
+
+# RE-ATTACK — round 3, 2026-08-18 (scope: N1)
+
+**Ref:** same worktree, **HEAD `dd3a33a`** ("N1: keyed remove_mailboxes retry is
+ABSOLUTE via durable per-key remove-intent"), one commit past `36bec2d`.
+`git status --porcelain` empty at start and end. Read-only git. Two probe files
+written, executed, deleted.
+
+## R3 VERDICT
+
+# SHIP-AFTER-FIXES — N1 is genuinely CLOSED; ONE new blocking defect in the fix
+
+**N1 is dead.** The round-2 destructive loop, re-driven verbatim, now destroys
+**exactly what the customer asked for** instead of 12-and-climbing, and every
+attack angle on the intent mechanism held. The battery matches the builder's
+claim exactly.
+
+**But the fix reintroduces a class this repo has documented in five separate
+files:** `recordRemoveIntent` binds **five parameters per target** in one
+un-chunked multi-row INSERT, against a DO SqlStorage ceiling of **100 bound
+parameters**. It throws at **21 targets**. `RemoveMailboxesInput.count` is
+`.max(60)` and `MAX_SELF_SERVE_MAILBOXES` is 60 — so **two-thirds of the input
+range the schema explicitly permits is a hard 500.** It fails CLOSED (throws
+before any vendor call, nothing released, nothing destroyed) and the fix is
+three lines with an in-repo precedent, which is why this is
+SHIP-AFTER-FIXES rather than NO-SHIP.
+
+### Battery spot-check at `dd3a33a` — real exit codes, nothing piped
+
+| Leg | Exit | Result |
+|---|---|---|
+| `npm run typecheck` (5 workspaces) | **0** | 0 × `error TS` |
+| `npx vitest run` (apps/platform) | **0** | **186/186 files; 1764 passed / 1 skipped** |
+
+Builder's claim (186f/1764p/1skip, all-zero exits) **confirmed exactly**.
+
+---
+
+## R3-1 · lens 2 (RUN it) + lens 5 (fixture realism) · BLOCKING
+**The new intent write binds 5 params per target with no chunking, against the 100-bound-param ceiling this repo documents in five places. A keyed downgrade of 21+ mailboxes is a hard 500.**
+
+```ts
+// apps/platform/src/engine/remove-intents.ts:93-97
+ctx.sql.exec(
+  `INSERT OR IGNORE INTO mailbox_release_intents (key, tenant_id, mailbox_id, email, created_at)
+   VALUES ${targets.map(() => "(?, ?, ?, ?, ?)").join(", ")}`,
+  ...targets.flatMap((target) => [key, ctx.tenantId, target.mailboxId, target.email, now]),
+);
+```
+
+`targets.length ≤ min(count, live mailboxes)`, `count` is
+`z.number().int().min(1).max(60)` (`packages/shared/src/intents.ts:199`), and
+`MAX_SELF_SERVE_MAILBOXES = 60` (`packages/shared/src/pricing.ts:20`). So the
+statement binds up to **300** parameters and crosses 100 at 21 targets.
+
+**The repo already knew this, in five files, and solved it in one of them.**
+`ofac/sdn-list.ts:13-19`: *"Cloudflare D1's REAL per-statement limit is 100 bound
+parameters — empirically confirmed (101 params throws `too many SQL variables`)"*,
+and `:26` sets `INSERT_BATCH_SIZE = 16` to chunk **the identical multi-row-INSERT
+shape** (`:125` builds `(?, ?, ?, ?, ?, ?)` — six params, chunked at 16 = 96).
+`admin/db.ts:102`, `contact-operator-guard.ts:213`, `demo.ts:79` and
+`contact-operator-reconcile.ts:52` all carry the same note and all chunk. The new
+site is the one that does not.
+
+**Verification — EXECUTED, 4 probes:**
+
+```
+control (establish the ceiling on THIS runtime):
+  100 params -> OK      101 params -> "too many SQL variables at offset ...: SQLITE_ERROR"   ✓ PASSES
+
+recordRemoveIntent(count: 20)  -> OK          (5 × 20 = 100)
+recordRemoveIntent(count: 21)  -> "too many SQL variables at offset 447: SQLITE_ERROR"   (5 × 21 = 105)
+
+the REAL keyed path, 40 live mailboxes:
+  removeMailboxes({count: 21}, key) -> {"ok":false,"message":"too many SQL variables at offset 447: SQLITE_ERROR"}
+  removeMailboxes({count: 60}, key) -> {"ok":false,"message":"too many SQL variables at offset 447: SQLITE_ERROR"}
+```
+
+**Failure scenario:** a tenant with 21+ live mailboxes calls `remove_mailboxes`
+with `count: 21` (or anything up to the schema's own max of 60) **and an
+idempotency key**. `recordRemoveIntent` throws before `releaseMailboxes` is
+reached, so the claim is deleted, the error propagates as a 500, and every retry
+fails identically. The downgrade is permanently impossible through the keyed
+path.
+
+**The sharpest part: the platform's own advice is what breaks it.** The UNKEYED
+path calls `resolveRemoveTargets` (a plain `SELECT ... LIMIT ?`, 2 params) and
+works at any count. Only the keyed path writes the intent. AGENTS.md and the MCP
+description both say **"always send an idempotency key"** — so the safe,
+documented, instructed path is the broken one, and the unsafe one still works.
+
+**Why no test caught it** — the committed regression tests (which are good, and
+are my round-2 probes promoted to HTTP-driven tests) use fleets of 15 and 7 with
+`count` 3 and 4. This is my standing lesson from the inc5 gate verbatim: the
+blocker needs a scale the suite never reaches, and the array's bound lives in a
+*different file* (`intents.ts`'s `.max(60)`) from the `map(() => "?")`.
+
+**Fix:** chunk at ≤20 rows, matching `sdn-list.ts`'s `INSERT_BATCH_SIZE`
+precedent. Note the source comment's stated reason for one statement — *"a
+half-written intent is a smaller target set"* — is **preserved by chunking**: the
+atomicity that matters here comes from the DO input-gate turn (every synchronous
+write in the turn commits together), not from statement count. `recordRemoveIntent`
+is synchronous and runs entirely inside one turn, so a chunked loop is exactly as
+atomic. Add a bound assertion or reuse the shared constant so the sixth
+occurrence of this class is caught by the guard rather than by a reviewer.
+
+---
+
+## N1 — CLOSED ✅
+
+The mechanism is right, and it is the right mechanism: the destructive mirror of
+`provision-intents.ts`, anchored on the same namespaced key as the replay claim,
+resolved once and recorded before any vendor call, with the relative `{limit}`
+scope **deleted** from the shared executor rather than left as a second way in.
+
+**The round-2 loop, re-driven verbatim** (20 live, one permanently stuck, ask 3,
+six same-key retries):
+
+```
+a1: rel=2 fail=1 unreleased=["stuck@r3.com"] live=18
+a2: rel=2 fail=1 unreleased=["stuck@r3.com"] live=18
+a3..a6: identical — live stays 18
+TOTAL DESTROYED = 2      (round 2: 12 and climbing)
+```
+
+Exactly the 3 asked for, minus the 1 the vendor permanently refuses. `unreleased`
+names it on every pass. **The non-terminating destructive loop is gone.**
+
+### Attack angles — all held
+
+| Angle | Attack | Outcome |
+|---|---|---|
+| **Intent-write atomicity vs the input gate** | Can a crash leave a half-written intent, letting the retry pick a different set? | **HELD.** Traced the call chain: `withRequestIdempotency`'s claim INSERT, then `fn()`'s synchronous prefix — `assertNotLifecycleFrozen`, `recordRemoveIntent`, `stillLiveTargets` — all run **before the first `await`**, i.e. in one input-gate turn, so the claim and the intent commit together. `await fn()` invokes `fn` (running its sync prefix) *before* awaiting. And the write is a single statement, so there is no intra-statement partial. |
+| **`INSERT OR IGNORE` with a DIFFERENT resolved set on a racing first call** | Two concurrent first calls resolving different sets could UNION under `PRIMARY KEY (key, mailbox_id)`. | **HELD, three-deep.** The `releaseInFlight` in-memory single-flight rejects the second call before it reaches the engine; `withRequestIdempotency`'s claim is durable pre-await so a concurrent same-key call takes the 409 branch; and `readRemoveIntent`'s early return means a second resolution never even runs. Any one of the three closes it. |
+| **Same-key, DIFFERENT body — can a bigger `count` widen the set?** | First call `count: 2`, retry same key `count: 16`, 16 live. | **HELD.** `{"r":1,"f":1,"u":["stuck@r3.com"]}` — destroyed exactly **1**, ever. The recorded set wins; the changed count is ignored and the response describes the recorded intent, so the mismatch is visible rather than silent. Choosing this over a 409 is right: a 409 would punish the exact behaviour the round-2 docs asked for (`count` reduced to `failedCount`) and strand the stragglers. |
+| **`stillLiveTargets` vs mailboxes released by OTHER paths** (teardown / REPLACE_DOMAIN) between retries | Release the straggler out-of-band, then retry the key. | **HELD.** `{"r":3,"f":0,"u":[]}` with **0 extra vendor calls**. Reading `released_at` rather than a per-call tally means a member finished by any path is finished, full stop — and the cumulative report is then honest (3 of 3). |
+| **The 30-day `request_idempotency` ageout with a permanent intent** | Evict the claim, resend the key. | **HELD in the safe direction.** 0 vendor calls, live count unchanged (5 → 5). Nothing can be destroyed by a reused key because the intent bounds it. See NB-R3-1 for the reporting nuance. |
+| **`releaseMailboxes({ ids: [] })`** | An empty explicit set falling through to the unfiltered "all live mailboxes" query — i.e. a downgrade becoming a teardown. | **HELD, and it is explicitly guarded** at `lifecycle.ts:219` with a documented early return. Worth noting how close this was: `{}` (teardown) and `{ids: []}` (nothing owed) are one falsy check apart, and the guard is what keeps them apart. |
+| **The relative `{limit}` scope surviving somewhere** | A second caller still passing a relative selection into the executor. | **HELD.** The scope is deleted from the signature; `opts` is now `{ domainId?, ids? }`. Typecheck across 5 workspaces is clean, so no caller still passes `limit`. |
+| **Unbounded growth of `mailbox_release_intents`** | INSERT-only with no prune, unlike `request_idempotency`'s 30-day TTL. | **HELD as a practical matter.** Rows are written only on a key's FIRST execution and only when it resolves ≥1 live mailbox, so growth tracks downgrades, not request volume — a retry storm writes nothing. See NB-R3-2 for the one place the schema comment overstates it. |
+
+### N3 re-check (the claim surfaces changed again)
+All accurate, and the round-2 gaps are closed: the MCP description now names
+`unreleased`, says **"resend the identical request with the same key until
+failedCount is 0"** (the safe instruction, which is now the *correct* one because
+the retry is absolute), states that the recorded set wins over a changed count,
+and says a genuine second downgrade needs a NEW key. `quote` → `billing` is
+fixed. AGENTS.md and the openapi `Idempotency-Key` description carry the same
+statement. I checked each claim against the code; each is true — **for
+`count ≤ 20`.** Every one of them is silent on R3-1, which is the ordinary
+consequence of a defect nobody knew about.
+
+---
+
+## R3 non-blocking
+
+- **NB-R3-1 — a reused key after the 30-day ageout reports a success that did not
+  happen.** Measured: `{"r":3,"f":0,"u":[]}`, 0 vendor calls, nothing released.
+  The response is a true statement about the *recorded intent* ("3 of this
+  downgrade's members are released") and the docs do say a second downgrade needs
+  a new key — so this is coherent and safe-direction. But an agent that reused a
+  key cannot distinguish it from a fresh success, and will believe it downgraded
+  while continuing to pay. The clean fix is the one this codebase already named
+  and then left with zero consumers: **`Collapsed<T>`'s `deduplicated` flag**
+  (`packages/shared/src/provenance.ts:62`, round-1 NB-4). This is its first real
+  consumer — wiring it here both closes this and retires that finding.
+- **NB-R3-2 — the `mailbox_release_intents` schema comment slightly overstates its
+  bound.** It says size is bounded by "the mailboxes a tenant has ever downgraded
+  away, not by request volume". A *permanently stuck* mailbox is never released,
+  so it is re-resolved under every subsequent NEW key and accumulates one row per
+  key. Bounded by distinct keys, not by mailboxes. Small, but the comment is a
+  claim.
+- Round-2 residuals 1–3 and the round-1 non-blockers not addressed here still
+  stand. Round-2 residual 1 (`commitD1Alert` losing `unhealthyObs`) was accepted
+  in-code at `watchtower-infra.ts:75-79` — correctly documented as an accepted
+  residual rather than silently dropped.
+
+## R3 convergence note
+
+The next round is scoped to **R3-1 only**. N1 is closed and must not be re-scored.
+Re-verification needs exactly one thing beyond the battery: drive
+`removeMailboxes` with a key at `count` = 21 **and** at the schema max of 60 and
+show both return normally — the committed tests' fleets of 15 and 7 cannot see
+this, so a green suite is not evidence for it.
+

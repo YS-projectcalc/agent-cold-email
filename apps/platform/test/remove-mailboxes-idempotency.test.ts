@@ -1,7 +1,7 @@
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { VendorError } from "@coldstart/shared";
-import { api, signup, tenantStub } from "./helpers.js";
+import { api, mintTenant, signup, tenantStub } from "./helpers.js";
 
 // BLOCKING-2, docs/adversarial/audit-dashboard-idempotency-2026-08-06.md.
 //
@@ -343,5 +343,81 @@ describe("B2 — only one release may be in flight per tenant", () => {
 
     expect([a.status, b.status].sort()).toEqual([200, 409]);
     expect(await liveMailboxes(tenantId)).toBe(3);
+  });
+});
+
+/** Rows `recordRemoveIntent` wrote under `key` — proves the whole target set landed. */
+function intentRowCount(tenantId: string, key: string): Promise<number> {
+  return runInDurableObject(tenantStub(tenantId), (_i, state) =>
+    state.storage.sql
+      .exec<{ n: number }>(
+        `SELECT COUNT(*) as n FROM mailbox_release_intents WHERE key = ? AND tenant_id = ?`,
+        key,
+        tenantId,
+      )
+      .one().n,
+  );
+}
+
+// R3-1 (gate finding, wave-1-2-integration-gate). recordRemoveIntent wrote
+// the whole resolved target set as ONE multi-row INSERT — 5 bound params per
+// row — and DO SqlStorage enforces the same 100-bound-parameter ceiling D1
+// does (ofac/sdn-list.ts's INSERT_BATCH_SIZE precedent), so any keyed
+// removeMailboxes call resolving >=21 targets threw "too many SQL variables"
+// before a single row was recorded. RemoveMailboxesInput.count allows up to
+// 60 (packages/shared/src/intents.ts), so two-thirds of the schema-permitted
+// range failed on the documented path. `mintTenant(..., "managed")` bypasses
+// /signup's demo-only cap (SANDBOX_PROVISIONING_CAP.mailboxes = 15,
+// engine/quota.ts) to reach the managed plan's flat 60-mailbox self-serve
+// ceiling these counts need.
+describe("R3-1 — a keyed removeMailboxes at self-serve fleet sizes records the whole target set", () => {
+  it("count 21 crosses the old 20-row multi-row-INSERT ceiling and still records exactly 21 rows", async () => {
+    const { tenantId, token } = await mintTenant("Large Fleet 21 Co", "managed");
+    await api("/setup-infrastructure", {
+      method: "POST",
+      token,
+      body: setupBody("Large Fleet 21 Co", "largefleet21.com", 7, 3), // 7 x 3 = 21
+    });
+    expect(await liveMailboxes(tenantId)).toBe(21);
+    const attempts: string[] = [];
+    await failReleaseFor(tenantId, new Set<string>(), attempts);
+
+    const first = await removeN(token, 21, "downgrade-21");
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({ releasedCount: 21, failedCount: 0 });
+    expect(attempts).toHaveLength(21);
+    expect(await intentRowCount(tenantId, "remove_mailboxes:downgrade-21")).toBe(21);
+    expect(await liveMailboxes(tenantId)).toBe(0);
+
+    // Retry-replay semantics survive chunking: the recorded intent still wins
+    // over any re-resolution, so the replay makes zero further vendor calls.
+    const replay = await removeN(token, 21, "downgrade-21");
+    expect(replay.status).toBe(200);
+    expect(replay.body).toEqual(first.body);
+    expect(attempts).toHaveLength(21);
+  });
+
+  it("count 60 (the top of RemoveMailboxesInput's range) records exactly 60 rows across multiple chunks", async () => {
+    const { tenantId, token } = await mintTenant("Large Fleet 60 Co", "managed");
+    await api("/setup-infrastructure", {
+      method: "POST",
+      token,
+      body: setupBody("Large Fleet 60 Co", "largefleet60.com", 20, 3), // 20 x 3 = 60
+    });
+    expect(await liveMailboxes(tenantId)).toBe(60);
+    const attempts: string[] = [];
+    await failReleaseFor(tenantId, new Set<string>(), attempts);
+
+    const first = await removeN(token, 60, "downgrade-60");
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({ releasedCount: 60, failedCount: 0 });
+    expect(attempts).toHaveLength(60);
+    expect(await intentRowCount(tenantId, "remove_mailboxes:downgrade-60")).toBe(60);
+    expect(await liveMailboxes(tenantId)).toBe(0);
+
+    const replay = await removeN(token, 60, "downgrade-60");
+    expect(replay.status).toBe(200);
+    expect(replay.body).toEqual(first.body);
+    expect(attempts).toHaveLength(60);
   });
 });

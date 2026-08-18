@@ -28,6 +28,17 @@
 
 import type { TenantContext } from "../tenant-context.js";
 
+// Rows per INSERT statement in recordRemoveIntent's multi-row write. R3-1
+// (gate finding, wave-1-2-integration-gate): DO SqlStorage enforces the same
+// 100-bound-parameter ceiling D1 does (ofac/sdn-list.ts's INSERT_BATCH_SIZE
+// precedent, empirically confirmed: 100 params OK, 101 throws "too many SQL
+// variables"). This INSERT binds 5 params/row with no fixed params ahead of
+// them, so floor(100 / 5) = 20 is the exact ceiling, not an approximation —
+// unlike sdn-list.ts's 16 (6 cols) there is no remainder to round away.
+// RemoveMailboxesInput.count allows up to 60 (packages/shared/src/intents.ts),
+// so an unchunked write threw at 21+ targets on the documented self-serve path.
+const RELEASE_INTENT_CHUNK_SIZE = 20;
+
 /** One address a keyed downgrade resolved — the unit the retry re-drives. */
 export interface RemoveIntentMember {
   mailboxId: string;
@@ -87,14 +98,23 @@ export function recordRemoveIntent(ctx: TenantContext, key: string, count: numbe
   const targets = resolveRemoveTargets(ctx, count);
   if (targets.length === 0) return [];
   const now = ctx.clock.now();
-  // ONE statement for the whole set, not a row-at-a-time loop: a half-written
-  // intent is a smaller target set, and the point of recording it is that what
-  // the retry drives cannot differ from what the first call resolved.
-  ctx.sql.exec(
-    `INSERT OR IGNORE INTO mailbox_release_intents (key, tenant_id, mailbox_id, email, created_at)
-     VALUES ${targets.map(() => "(?, ?, ?, ?, ?)").join(", ")}`,
-    ...targets.flatMap((target) => [key, ctx.tenantId, target.mailboxId, target.email, now]),
-  );
+  // Chunked at RELEASE_INTENT_CHUNK_SIZE rows/statement (see the constant's
+  // comment) rather than one statement for the whole set. That does NOT
+  // reopen the half-written-intent risk the single-statement design was
+  // guarding against: the guarantee was never "one SQL statement", it's the
+  // Durable Object's INPUT GATE. This whole function is synchronous — no
+  // `await` between chunks, or anywhere in it — so it runs as ONE
+  // uninterruptible turn no matter how many INSERTs it issues; there is no
+  // point between chunks for a crash to land on, so every chunk lands or
+  // none do, exactly as before chunking.
+  for (let i = 0; i < targets.length; i += RELEASE_INTENT_CHUNK_SIZE) {
+    const chunk = targets.slice(i, i + RELEASE_INTENT_CHUNK_SIZE);
+    ctx.sql.exec(
+      `INSERT OR IGNORE INTO mailbox_release_intents (key, tenant_id, mailbox_id, email, created_at)
+       VALUES ${chunk.map(() => "(?, ?, ?, ?, ?)").join(", ")}`,
+      ...chunk.flatMap((target) => [key, ctx.tenantId, target.mailboxId, target.email, now]),
+    );
+  }
   return readRemoveIntent(ctx, key);
 }
 
