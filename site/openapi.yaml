@@ -1512,18 +1512,33 @@ components:
         materially different from a bug in this service. `step` names the
         vendor operation that failed when derivable; `retryable` is the
         adapter's own grade, so a caller can back off instead of guessing.
+
+
+        THE GRADE IS TWO INDEPENDENT QUESTIONS. `retryable` says whether an
+        immediate re-attempt can succeed on its own. `operatorActionable` says
+        whether an OPERATOR can clear the refusal — funding a provider account,
+        rotating a credential, un-suspending a workspace — after which your
+        SAME request, with the same idempotency key, completes. When it is true
+        the `code` is `vendor_operator_blocked`: do not change your inputs and
+        do not give up, because nothing about the request is wrong. When both
+        are false the refusal is yours to fix or to escalate.
       content:
         application/json:
           schema:
             type: object
             properties:
               error: { type: string }
-              code: { type: string, enum: [vendor_error] }
+              code: { type: string, enum: [vendor_error, vendor_operator_blocked] }
               step:
                 type: string
                 nullable: true
                 description: The vendor operation that failed, when derivable from the underlying error message.
               retryable: { type: boolean }
+              operatorActionable:
+                type: boolean
+                description: >
+                  Present and true only on `vendor_operator_blocked`: an operator can clear this,
+                  and the identical retry then completes. Absent means false.
             required: [error, code, retryable]
     NotActivated:
       description: >
@@ -2181,12 +2196,17 @@ components:
         kind: { type: string }
         severity:
           type: string
-          enum: [info, action_required, terminal]
+          enum: [info, action_required, operator_pending, terminal]
           description: >
             info = resolves on its own, nothing is required. action_required =
-            nothing progresses until you act, and acting works. terminal = the
-            platform has stopped; retrying will never help and only a human can
-            move it (the message's actionHint names contact_operator).
+            nothing progresses until you act, and acting works. operator_pending
+            = the platform has stopped and nothing YOU change will restart it,
+            but an operator can clear the blocker (e.g. funding a provider
+            account), after which retrying the SAME request with the SAME
+            idempotency key completes it — do not alter your inputs and do not
+            give up. terminal = the platform has stopped; retrying will never
+            help and only a human can move it (the message's actionHint names
+            contact_operator).
         body: { type: string }
         actionHint: { type: object, nullable: true }
         source: { type: string, enum: [system, operator] }

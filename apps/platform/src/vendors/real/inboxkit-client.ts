@@ -1,4 +1,5 @@
 import { NotActivatedError, VendorError } from "@coldstart/shared";
+import type { ZodType } from "zod";
 import { mapInboxKitError } from "./inboxkit-errors.js";
 
 /**
@@ -30,9 +31,29 @@ export const INBOXKIT_VENDOR = "inboxkit";
 // budget is exhausted.
 const REQUEST_TIMEOUT_MS = 30_000;
 
-export interface InboxKitRequestOptions {
+export interface InboxKitRequestOptions<T = unknown> {
   query?: Record<string, string | undefined>;
   body?: unknown;
+  /**
+   * The RESPONSE contract, enforced (class F, docs/adversarial/
+   * class-sweep-vendor-truth-2026-08-18.md). Without it `request<T>` ends in
+   * `return body as T` — a compile-time model of the vendor's payload that
+   * nothing checks at runtime, at every call site. That is not a theoretical
+   * hole: `getHealth` destructured `bounce_rate`/`health_status`, which the live
+   * response does not carry, and shipped `NaN` into a 0-1 rate and a fabricated
+   * reputation score into a customer-facing field, with a green test pinning the
+   * fiction.
+   *
+   * Supply one for every READ whose fields we act on. A parse failure is a
+   * LOUD, graded `VendorError` naming the op, the path and the offending fields
+   * — never a silent `undefined` propagating into arithmetic.
+   *
+   * WRITE the schema the way the adapter READS: require only the fields this
+   * codebase both consumes AND has live-confirmed, leave everything else
+   * optional. An over-strict schema turns a working vendor into an outage,
+   * which is a worse failure than the one it is guarding against.
+   */
+  schema?: ZodType<T>;
 }
 
 /**
@@ -50,7 +71,7 @@ export class InboxKitClient {
     return Boolean(this.config?.apiKey && this.config?.workspaceId);
   }
 
-  async request<T>(op: string, method: "GET" | "POST", path: string, opts: InboxKitRequestOptions = {}): Promise<T> {
+  async request<T>(op: string, method: "GET" | "POST", path: string, opts: InboxKitRequestOptions<T> = {}): Promise<T> {
     if (!this.config?.apiKey || !this.config?.workspaceId) {
       throw new NotActivatedError(INBOXKIT_VENDOR, op);
     }
@@ -84,6 +105,52 @@ export class InboxKitClient {
     if (!res.ok) {
       throw mapInboxKitError(res.status, body, `${method} ${path}`);
     }
-    return body as T;
+    // A 200 whose body is empty, truncated or non-JSON — a CDN/proxy
+    // interstitial — leaves `body` undefined, and every call site then evaluates
+    // `body.error` / `body.subscriptions` on it. That threw a **TypeError**,
+    // which is not a VendorError: error-response.ts fell through to a bare 500,
+    // setup-terminality never saw it and vendor-failure.ts could not derive the
+    // step. Graded here, once, for all fifteen call sites (canon finding 8).
+    if (body === undefined) {
+      throw shapeDriftError(op, method, path, "the response carried no parseable JSON body");
+    }
+    if (!opts.schema) return body as T;
+    const parsed = opts.schema.safeParse(body);
+    if (!parsed.success) {
+      throw shapeDriftError(op, method, path, describeIssues(parsed.error));
+    }
+    return parsed.data;
   }
 }
+
+/**
+ * The vendor's response no longer matches the contract this adapter is coded
+ * against.
+ *
+ * NOT retryable — the next call returns the same shape — and
+ * OPERATOR-ACTIONABLE: a drifted vendor contract is cleared by someone updating
+ * the adapter, after which the caller's same retry completes. Telling a
+ * customer's agent to "check your inputs" for it would be false, and telling it
+ * "retrying will never help" would be false the moment the adapter ships.
+ *
+ * The message names the op, the path and the offending fields because it is
+ * read by an operator in the Worker log; the customer surface shows the
+ * abstract step only (error-response.ts).
+ */
+function shapeDriftError(op: string, method: string, path: string, detail: string): VendorError {
+  return new VendorError(`inboxkit ${op} (${method} ${path}) returned an unexpected response shape: ${detail}`, false, {
+    operatorActionable: true,
+  });
+}
+
+/** Zod issues as one operator-readable `path: message` list, bounded so a wildly-off payload can't flood the log. */
+function describeIssues(error: { issues: ReadonlyArray<{ path: PropertyKey[]; message: string }> }): string {
+  const described = error.issues
+    .slice(0, MAX_REPORTED_ISSUES)
+    .map((issue) => `${issue.path.map(String).join(".") || "(root)"}: ${issue.message}`)
+    .join("; ");
+  const dropped = error.issues.length - MAX_REPORTED_ISSUES;
+  return dropped > 0 ? `${described}; +${dropped} more` : described;
+}
+
+const MAX_REPORTED_ISSUES = 5;

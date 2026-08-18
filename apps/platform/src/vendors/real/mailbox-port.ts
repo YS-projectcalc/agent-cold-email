@@ -6,8 +6,11 @@ import type {
   MailboxReadiness,
   ProvisionedMailbox,
   ReleaseResult,
+  WarmupSubscriptionState,
 } from "@coldstart/shared";
+import { z } from "zod";
 import { InboxKitClient, type InboxKitClientConfig } from "./inboxkit-client.js";
+import { inboxKitAppError } from "./inboxkit-errors.js";
 import { classifyVendorLifecycle, normalizeLifecycleToken } from "./vendor-lifecycle.js";
 
 /**
@@ -41,10 +44,10 @@ import { classifyVendorLifecycle, normalizeLifecycleToken } from "./vendor-lifec
  * `/already exists/i` message-substring detection (a vendor wording change
  * would have silently broken it); provision() no longer inspects error text.
  *
- * KNOWN APPROXIMATION: `getHealth`'s `MailboxHealth` has fields InboxKit's
- * per-mailbox health endpoint does not expose directly (`complaintRate`,
- * `placementRate` — InboxKit only returns `bounce_rate`/`reply_rate`/send-
- * volume counters). See the method for the exact derivation and its caveats.
+ * VENDOR HEALTH IS MOSTLY UNREPORTED, and this adapter now says so. It used to
+ * fill `MailboxHealth`'s four numbers from fields the live endpoint does not
+ * send — a NaN bounce rate and two invented constants — under `vendor*` names a
+ * customer's agent reads. Three of the four are `null` (see `getHealth`).
  */
 export class RealMailboxPort implements MailboxPort {
   private readonly client: InboxKitClient;
@@ -66,7 +69,11 @@ export class RealMailboxPort implements MailboxPort {
       },
     });
     if (body.error || !Array.isArray(body.mailboxes) || body.mailboxes.length === 0) {
-      throw new VendorError(`inboxkit mailboxes/buy did not return a mailbox for ${email}: ${body.message ?? "no message"}`, false);
+      // GRADED, not hard-coded permanent (class A). A funds refusal can arrive
+      // in this 200-`{error:true}` envelope as easily as in a 402 — the wire
+      // shape is still UNVERIFIED (canon Part 6 #1) — and "top up the wallet" is
+      // not "check your inputs".
+      throw inboxKitAppError(`inboxkit mailboxes/buy did not return a mailbox for ${email}: ${body.message ?? "no message"}`, body);
     }
     return { email, provider: "google", provisionedAt: Date.now() };
   }
@@ -115,28 +122,43 @@ export class RealMailboxPort implements MailboxPort {
     }
   }
 
+  /**
+   * ⚠ THIS METHOD WAS CODED AGAINST A PAYLOAD THE VENDOR DOES NOT SEND (class F
+   * member F1, docs/adversarial/class-sweep-vendor-truth-2026-08-18.md). It
+   * destructured `bounce_rate` and `health_status`; the live response carries
+   * neither, so `bounce_rate / 100` was `NaN`, `clamp01(NaN)` was `NaN`, and a
+   * customer's agent read `vendorPlacementRate: NaN` alongside a
+   * `vendorReputationScore` of 50 invented from an absent enum. The green test
+   * that pinned all of it was written against a fixture invented in the same
+   * commit as the code — the fixture restated the code's premise instead of the
+   * vendor's behaviour, so no test could ever have caught it.
+   *
+   * What the live endpoint actually returns is now the schema below, and every
+   * field this port cannot answer from it is `null` — see `MailboxHealth`.
+   * There is no `reputationScore` on the wire, no complaint/FBL signal and no
+   * inbox-placement signal, so this adapter reports exactly one number.
+   */
   async getHealth(email: string): Promise<MailboxHealth> {
     const uid = await this.resolveMailboxUid(email);
-    const body = await this.client.request<MailboxHealthResponse>("getHealth", "GET", `/email-insights/mailbox/${uid}/health`);
-    if (!body.success || !body.data) {
-      throw new VendorError(`inboxkit mailbox health for ${email} returned no data`, false);
+    const body = await this.client.request("getHealth", "GET", `/email-insights/mailbox/${uid}/health`, {
+      schema: MailboxHealthResponseSchema,
+    });
+    if (body.error === true || body.success === false || !body.data) {
+      throw inboxKitAppError(`inboxkit mailbox health for ${email} returned no data: ${body.message ?? "no message"}`, body);
     }
-    const { bounce_rate, health_status } = body.data;
     return {
       email,
-      // InboxKit's `bounce_rate` is a percentage (docs examples show 1.8,
-      // 22.3) — this port's contract is a 0-1 fraction.
-      bounceRate: clamp01(bounce_rate / 100),
-      // APPROXIMATION: InboxKit's health endpoint has no 0-100 reputation
-      // score; derived from its coarse `health_status` enum instead.
-      reputationScore: reputationScoreFromHealthStatus(health_status),
-      // NOT EXPOSED by InboxKit's per-mailbox health payload (no complaint/
-      // FBL signal in this endpoint) — see class doc comment.
-      complaintRate: 0,
-      // APPROXIMATION: no inbox-placement signal in this endpoint either;
-      // proxied as the bounce-rate complement, pending a real placement-test
-      // integration (InboxKit's separate `inbox-placement` product).
-      placementRate: clamp01(1 - bounce_rate / 100),
+      // A percentage on the wire (docs examples show 1.8, 22.3); this port's
+      // contract is a 0-1 fraction. ABSENT -> null, never 0 and never NaN: a
+      // bounce rate of "we were not told" is not a bounce rate of zero.
+      bounceRate: fractionFromPercent(body.data.bounce_rate_30d),
+      // NOT ON THE WIRE. All three were fabricated here before — a score from a
+      // `health_status` enum the endpoint does not return, a literal 0 complaint
+      // rate, and a placement rate proxied off the bounce rate that was itself
+      // NaN. `null` is the true answer and the type can now carry it.
+      reputationScore: null,
+      complaintRate: null,
+      placementRate: null,
     };
   }
 
@@ -147,7 +169,14 @@ export class RealMailboxPort implements MailboxPort {
     });
     const subscription = body.subscriptions?.[0];
     if (body.error || !subscription) {
-      throw new VendorError(`inboxkit warmup/add did not create a subscription for ${email}: ${body.message ?? "no message"}`, false);
+      // THE INCIDENT SITE (Mordy, 2026-08-18). The vendor credit wallet was
+      // empty, `/warmup/add` refused for want of 3 credits, and this throw's
+      // hard-coded permanent grade became "Retrying as-is will not help — check
+      // your inputs" to a customer's agent, which then correctly disabled its
+      // retry loop for a condition a top-up cleared. GRADED now: a funding
+      // refusal reaches the agent as held-pending-an-operator, and the same
+      // retry finishes once the wallet is funded.
+      throw inboxKitAppError(`inboxkit warmup/add did not create a subscription for ${email}: ${body.message ?? "no message"}`, body);
     }
     const startedAt = subscription.started_at ?? subscription.createdAt;
     // FAIL LOUD ON A NON-FINITE PARSE (adversary N2). `Date.parse` returns NaN
@@ -213,7 +242,7 @@ export class RealMailboxPort implements MailboxPort {
       return { cancelled: true, cancelledAt: Date.now() };
     }
 
-    const state = await this.warmupSubscriptionState(uid, email);
+    const state = await this.findWarmupSubscription(uid, email);
     if (state === "absent") return { cancelled: true, cancelledAt: Date.now() };
     throw new VendorError(
       `inboxkit warmup/cancel did not cancel ${email} (uid ${uid}), and its subscription is still ${state}: ${body.message ?? "no message"}`,
@@ -222,27 +251,49 @@ export class RealMailboxPort implements MailboxPort {
   }
 
   /**
-   * Whether this mailbox still has an ACTIVE warmup subscription — the
-   * disambiguator for `cancelWarmup` above. POST /v1/api/warmup/list, contract
-   * captured from docs.inboxkit.com/list-warmup-subscriptions-28170226e0
-   * (2026-08-02): body `{page, limit, status, include_cancelled}`, response
-   * `{error, message, subscriptions[], total, pages, current_page, limit}`,
-   * each subscription carrying `mailbox_email` and a nested `mailbox.uid`.
+   * Whether this mailbox already has an ACTIVE warmup subscription.
+   *
+   * TWO CALLERS, one question. It began as `cancelWarmup`'s private
+   * disambiguator ("did a previous attempt already cancel this?"); the class
+   * sweep found the engine needed the SAME answer one step earlier, before
+   * paying for an enrolment it may already have (E1 — `/warmup/add` is a billed
+   * recurring subscription and the only guard was a marker written after the
+   * call). Promoting it to the port is what makes the pre-check possible at all;
+   * a private method is where a missing pre-check hides.
+   *
+   * Takes the EMAIL alone, unlike the internal form: a caller deciding whether
+   * to enrol does not necessarily have a uid, and resolving one first would add
+   * a `/mailboxes/list` round trip whose own failure would then have to be
+   * graded. `/warmup/list` rows carry `mailbox_email`, so it can answer without.
+   */
+  async warmupSubscriptionState(email: string): Promise<WarmupSubscriptionState> {
+    return this.findWarmupSubscription(undefined, email);
+  }
+
+  /**
+   * The paged `/warmup/list` walk behind both callers. POST /v1/api/warmup/list,
+   * contract captured from docs.inboxkit.com/list-warmup-subscriptions-28170226e0
+   * (2026-08-02) and live-re-confirmed 2026-08-18 (canon Part 5, F9 HELD): body
+   * `{page, limit, status, include_cancelled}`, response `{error, message,
+   * subscriptions[], total, pages, current_page, limit}`, each subscription
+   * carrying `mailbox_email` and a nested `mailbox.uid`.
    *
    * The documented body params expose no per-mailbox filter, so this pages
-   * through the workspace's ACTIVE subscriptions and matches on either
-   * identifier. `"inconclusive"` (a vendor error, or more pages than
-   * MAX_SUBSCRIPTION_PAGES) is deliberately NOT folded into `"absent"`: an
-   * unfinished search proves nothing, and reporting a cancel that never
-   * happened would silently leak a recurring charge — the one outcome worth
-   * failing loudly for. Caller retries on anything but a definite `"absent"`.
+   * through the workspace's ACTIVE subscriptions and matches on whichever
+   * identifier the caller supplied. `"inconclusive"` (a vendor error, or more
+   * pages than MAX_SUBSCRIPTION_PAGES) is deliberately NOT folded into
+   * `"absent"`: an unfinished search proves nothing. Which way that matters
+   * depends on the caller, and both are bad — a false 'absent' reports a cancel
+   * that never happened (leaking a recurring charge) to one, and authorizes a
+   * SECOND paid enrolment for the other.
    */
-  private async warmupSubscriptionState(uid: string, email: string): Promise<"active" | "absent" | "inconclusive"> {
+  private async findWarmupSubscription(uid: string | undefined, email: string): Promise<WarmupSubscriptionState> {
     for (let page = 1; page <= MAX_SUBSCRIPTION_PAGES; page++) {
       let body: ListWarmupSubscriptionsResponse;
       try {
-        body = await this.client.request<ListWarmupSubscriptionsResponse>("warmupSubscriptionState", "POST", "/warmup/list", {
+        body = await this.client.request("warmupSubscriptionState", "POST", "/warmup/list", {
           body: { page, limit: SUBSCRIPTION_PAGE_SIZE, status: "active", include_cancelled: false },
+          schema: ListWarmupSubscriptionsResponseSchema,
         });
       } catch {
         return "inconclusive"; // the lookup itself failed — prove nothing
@@ -251,7 +302,7 @@ export class RealMailboxPort implements MailboxPort {
 
       const subscriptions = body.subscriptions ?? [];
       const match = subscriptions.some(
-        (s) => s.mailbox?.uid === uid || (s.mailbox_email ?? "").toLowerCase() === email.toLowerCase(),
+        (s) => (uid !== undefined && s.mailbox?.uid === uid) || (s.mailbox_email ?? "").toLowerCase() === email.toLowerCase(),
       );
       if (match) return "active";
       // Last page reached (or the vendor returned a short/empty page): the
@@ -261,13 +312,44 @@ export class RealMailboxPort implements MailboxPort {
     return "inconclusive"; // more pages than we are willing to walk
   }
 
+  /**
+   * Releases the mailbox at the vendor — IDEMPOTENTLY (canon finding 2).
+   *
+   * The vendor not holding the address is this operation's GOAL STATE. The
+   * previous shape went through `resolveMailboxUid`, whose 'absent' arm throws
+   * a PERMANENT "inboxkit has no mailbox matching …", so the second call for an
+   * already-released mailbox failed forever: `engine/lifecycle.ts` logs
+   * `MAILBOX_RELEASE_FAILED` and moves on WITHOUT writing `released_at`, and
+   * `released_at IS NULL` is what `syncMailboxQuantity` bills the customer on.
+   * One crash between the vendor release and that write billed a customer
+   * monthly, indefinitely, for a mailbox that no longer existed anywhere.
+   *
+   * Absence is read as success ONLY under the port contract's precondition —
+   * the caller releases addresses ITS OWN records say it holds. The two
+   * outcomes that are NOT absence keep their old grades: an inconclusive lookup
+   * is retryable (a failed list call is not proof of anything), and a non-exact
+   * keyword hit still throws from `findExactMailbox` rather than cancelling a
+   * DIFFERENT paid mailbox.
+   *
+   * A TERMINAL vendor state counts the same as absence: 'cancelled' /
+   * 'scheduled_for_deletion' / 'deleted' is the vendor telling us the release
+   * already happened, and re-issuing `/mailboxes/cancel` for one is at best a
+   * no-op and at worst the same permanent refusal one layer along.
+   */
   async release(email: string, _idempotencyKey: string): Promise<ReleaseResult> {
-    const uid = await this.resolveMailboxUid(email);
+    const found = await this.findExactMailbox(email);
+    if (found.kind === "absent") return { released: true, releasedAt: Date.now() };
+    if (found.kind === "inconclusive") {
+      throw new VendorError(`inboxkit mailboxes/list could not resolve ${email}: ${found.reason}`, true);
+    }
+    if (classifyVendorLifecycle(found.mailbox.status) === "terminal") {
+      return { released: true, releasedAt: Date.now() };
+    }
     const body = await this.client.request<CancelMailboxesResponse>("release", "POST", "/mailboxes/cancel", {
-      body: { uids: [uid] },
+      body: { uids: [found.mailbox.uid] },
     });
     if (body.error) {
-      throw new VendorError(`inboxkit mailboxes/cancel failed for ${email}: ${body.message ?? "no message"}`, false);
+      throw inboxKitAppError(`inboxkit mailboxes/cancel failed for ${email}: ${body.message ?? "no message"}`, body);
     }
     return { released: true, releasedAt: Date.now() };
   }
@@ -279,16 +361,29 @@ export class RealMailboxPort implements MailboxPort {
    * read replies; the gmail_api SEND transport's OAuth grant comes separately
    * from the OAuth-mint seam (oauth-mint.ts), not from here.
    *
-   * ⚠️ UNVERIFIED (no live calls in this build): the endpoint path + response
-   * field names are a DOCUMENTED-SHAPE GUESS to confirm at the first live
-   * mailbox. Dark until the InboxKitClient is configured (NotActivatedError).
+   * ⚠️ THE ENDPOINT DOES NOT EXIST (live probe 2026-08-18): the path is a
+   * documented-shape GUESS and the vendor answers it with the gateway's
+   * `404 {"code":404,"message":"Not found"}`. That is graded
+   * OPERATOR-ACTIONABLE, not permanent — a route we call and the vendor does not
+   * serve is cleared by shipping the right one, after which the caller's same
+   * retry works; "check your inputs" is simply false for it. The response
+   * mapping below is retained UNVERIFIED, to confirm at the first live mailbox,
+   * and is deliberately no longer pinned by a fixture invented alongside it.
+   * Dark until the InboxKitClient is configured (NotActivatedError).
    */
   async showMailboxCredentials(email: string): Promise<InboxKitMailboxCredentials> {
     const uid = await this.resolveMailboxUid(email);
     const body = await this.client.request<ShowCredentialsResponse>("showMailboxCredentials", "GET", `/mailboxes/${uid}/credentials`);
     const imap = body.imap ?? body.data?.imap;
     if (!imap || !imap.host || !imap.port || !imap.username || !imap.password) {
-      throw new VendorError(`inboxkit show-mailbox-credentials for ${email} returned no usable IMAP credentials (UNVERIFIED response shape): ${body.message ?? "no message"}`, false);
+      // Operator-actionable for the same reason the 404 is: an unusable
+      // credential payload from an endpoint whose shape was never confirmed is
+      // ours to fix, not the caller's.
+      throw new VendorError(
+        `inboxkit show-mailbox-credentials for ${email} returned no usable IMAP credentials (UNVERIFIED response shape): ${body.message ?? "no message"}`,
+        false,
+        { operatorActionable: true },
+      );
     }
     const smtp = body.smtp ?? body.data?.smtp;
     return {
@@ -351,8 +446,9 @@ export class RealMailboxPort implements MailboxPort {
    * `body.error` — this is the sibling that did not.)
    */
   private async findExactMailbox(email: string): Promise<FoundMailbox> {
-    const body = await this.client.request<ListMailboxesResponse>("resolveMailboxUid", "POST", "/mailboxes/list", {
+    const body = await this.client.request("resolveMailboxUid", "POST", "/mailboxes/list", {
       body: { keyword: email, limit: 1 },
+      schema: ListMailboxesResponseSchema,
     });
     if (body.error) {
       return { kind: "inconclusive", reason: `provider mailbox lookup failed: ${body.message ?? "no message"}` };
@@ -418,23 +514,67 @@ interface BuyMailboxesResponse {
   mailboxes?: Array<{ uid: string; domain_name: string; username: string; status: string }>;
 }
 
-interface ListMailboxesResponse {
-  error: boolean;
-  message?: string;
-  mailboxes?: Array<{ uid: string; domain_name: string; username: string; status: string }>;
-}
+/**
+ * SCHEMAS, not interfaces, for the READS whose fields drive a decision (class F).
+ * An interface is a compile-time wish; `request<T>` used to end in `body as T`,
+ * so nothing ever checked whether the vendor agreed. These run at the seam and
+ * throw a graded, operator-actionable `VendorError` naming the missing fields.
+ *
+ * REQUIRE ONLY WHAT WE READ AND HAVE LIVE-CONFIRMED. Everything else is
+ * optional, and unknown keys are simply dropped: a schema stricter than the
+ * adapter's actual appetite converts a working vendor into an outage, which is
+ * a worse failure than the one being guarded against.
+ *
+ * The types below are INFERRED from the schemas so the two can never drift —
+ * a hand-written interface beside a schema is the same duplication that let the
+ * health payload lie for a month.
+ */
 
-interface MailboxHealthResponse {
-  success: boolean;
-  data?: {
-    health_status: string;
-    bounce_rate: number;
-    reply_rate: number;
-    sent_7d: number;
-    received_7d: number;
-    last_event_at: string;
-  };
-}
+/** POST /mailboxes/list — envelope + row fields live-confirmed 2026-08-18 (canon Part 5, F7 HELD). */
+const ListMailboxesResponseSchema = z.object({
+  error: z.boolean(),
+  message: z.string().optional(),
+  mailboxes: z
+    .array(
+      z.object({
+        uid: z.string(),
+        domain_name: z.string(),
+        username: z.string(),
+        status: z.string().optional(),
+      }),
+    )
+    .optional(),
+});
+
+/**
+ * GET /email-insights/mailbox/{uid}/health — the LIVE payload, replacing a
+ * shape this codebase invented (`health_status`, `bounce_rate`, `reply_rate`,
+ * `sent_7d`, `received_7d`, none of which the vendor sends).
+ *
+ * ⚠ `data.status` is ACTIVITY, not lifecycle (canon Part 3 #8): live it reads
+ * `"inactive"` with `total_7d: 0` for a mailbox whose `/mailboxes/list` status
+ * is `"active"`. Feeding it to `classifyVendorLifecycle` would read idleness as
+ * a dead mailbox. It is captured here so the field is documented, and read by
+ * nothing.
+ *
+ * Every `data` field is OPTIONAL because the capture is partial — only the
+ * envelope is required. That is the honest strictness: absent fields become
+ * `null` in `MailboxHealth` rather than a parse failure OR a fabricated number.
+ */
+const MailboxHealthResponseSchema = z.object({
+  success: z.boolean().optional(),
+  error: z.boolean().optional(),
+  message: z.string().optional(),
+  data: z
+    .object({
+      status: z.string().optional(),
+      bounce_rate_30d: z.number().optional(),
+      total_7d: z.number().optional(),
+      total_30d: z.number().optional(),
+      last_event_at: z.string().optional(),
+    })
+    .optional(),
+});
 
 interface AddWarmupResponse {
   error: boolean;
@@ -458,17 +598,34 @@ interface CancelWarmupResponse {
   results?: { success?: Array<{ mailbox_uid: string; subscription_uid: string; action: string }> };
 }
 
-// POST /warmup/list (contract captured from docs.inboxkit.com 2026-08-02) —
-// the already-cancelled disambiguator for cancelWarmup. Paginated; each entry
-// carries the subscription's own `uid` plus the owning mailbox's email and uid.
-interface ListWarmupSubscriptionsResponse {
-  error: boolean;
-  message?: string;
-  subscriptions?: Array<{ uid: string; status: string; mailbox_email?: string; mailbox?: { uid?: string } }>;
-  total?: number;
-  pages?: number;
-  current_page?: number;
-}
+/**
+ * POST /warmup/list (captured from docs.inboxkit.com 2026-08-02, live
+ * re-confirmed 2026-08-18 — canon Part 5, F9 HELD) — the already-enrolled
+ * pre-check for `startWarmup` and the already-cancelled disambiguator for
+ * `cancelWarmup`. Paginated; each entry carries the subscription's own `uid`
+ * plus the owning mailbox's email and uid.
+ *
+ * `pages` drives the walk's termination, so a missing one reads as "last page"
+ * — hence optional, matching the code that already tolerates it.
+ */
+const ListWarmupSubscriptionsResponseSchema = z.object({
+  error: z.boolean(),
+  message: z.string().optional(),
+  subscriptions: z
+    .array(
+      z.object({
+        uid: z.string().optional(),
+        status: z.string().optional(),
+        mailbox_email: z.string().optional(),
+        mailbox: z.object({ uid: z.string().optional() }).optional(),
+      }),
+    )
+    .optional(),
+  total: z.number().optional(),
+  pages: z.number().optional(),
+  current_page: z.number().optional(),
+});
+type ListWarmupSubscriptionsResponse = z.infer<typeof ListWarmupSubscriptionsResponseSchema>;
 
 // Page size + walk ceiling for warmupSubscriptionState. The ceiling exists so a
 // very large workspace can never turn one cancel into an unbounded crawl; at
@@ -492,19 +649,16 @@ function nameFromLocalPart(localPart: string): { firstName: string; lastName: st
   return { firstName, lastName };
 }
 
-function reputationScoreFromHealthStatus(status: string): number {
-  switch (status) {
-    case "healthy":
-      return 90;
-    case "warning":
-      return 60;
-    case "critical":
-      return 30;
-    default:
-      return 50;
-  }
-}
-
-function clamp01(n: number): number {
-  return Math.min(1, Math.max(0, n));
+/**
+ * A vendor percentage as a 0-1 fraction, or `null` when the vendor did not
+ * report one.
+ *
+ * The non-finite rejection is the fix, not decoration: the old code divided an
+ * ABSENT field by 100 and clamped the result, and `Math.min(1, Math.max(0,
+ * NaN))` is `NaN` — so the clamp that looked like a guard passed the poison
+ * straight through into a customer-facing rate.
+ */
+function fractionFromPercent(percent: number | undefined): number | null {
+  if (percent === undefined || !Number.isFinite(percent)) return null;
+  return Math.min(1, Math.max(0, percent / 100));
 }

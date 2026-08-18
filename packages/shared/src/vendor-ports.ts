@@ -203,12 +203,25 @@ export interface ProvisionedMailbox {
   provisionedAt: number;
 }
 
+/**
+ * A mailbox's VENDOR-REPORTED health. Every field is nullable, and that is the
+ * contract, not a convenience (class F, docs/adversarial/
+ * class-sweep-vendor-truth-2026-08-18.md).
+ *
+ * `null` means THE VENDOR DOES NOT REPORT THIS, which a `number` cannot say —
+ * so the real adapter said it with a number anyway: an absent `bounce_rate`
+ * became `NaN` (destructured from a field the live payload has never carried),
+ * an absent reputation signal became a hard-coded 90 derived from an enum that
+ * does not exist, and `complaintRate` was literally `0`. Those numbers reach a
+ * customer's agent under `vendor*` names. A shape that cannot express "unknown"
+ * forces every implementation to invent a value.
+ */
 export interface MailboxHealth {
   email: string;
-  reputationScore: number; // 0-100
-  bounceRate: number; // fraction, 0-1
-  complaintRate: number; // fraction, 0-1
-  placementRate: number; // fraction landing in inbox vs spam
+  reputationScore: number | null; // 0-100, null = not reported by this vendor
+  bounceRate: number | null; // fraction, 0-1, null = not reported
+  complaintRate: number | null; // fraction, 0-1, null = not reported
+  placementRate: number | null; // fraction landing in inbox vs spam, null = not reported
 }
 
 export interface MailboxPort {
@@ -237,6 +250,24 @@ export interface MailboxPort {
   getHealth(email: string): Promise<MailboxHealth>;
   startWarmup(email: string, idempotencyKey: string): Promise<{ started: boolean; startedAt: number }>;
   /**
+   * Whether this mailbox ALREADY has a warmup subscription at the vendor — the
+   * pre-check `startWarmup` needs and did not have (class E member E1,
+   * docs/adversarial/class-sweep-vendor-truth-2026-08-18.md).
+   *
+   * `/warmup/add` creates a BILLED recurring subscription with no idempotency
+   * key, and the only guard against a second one was a local marker written
+   * AFTER the call returned. A crash in that window (or a lost status write)
+   * left a paid subscription with no marker, and the next attempt enrolled —
+   * and paid — again. A durable marker cannot close a window it is written
+   * after; only asking the vendor can.
+   *
+   * THREE VALUES, and 'inconclusive' is load-bearing exactly as it is on
+   * `MailboxReadiness`: a lookup that did not finish proves nothing, and folding
+   * it into 'absent' would authorize the second charge this method exists to
+   * prevent. A caller may enrol ONLY on 'absent'.
+   */
+  warmupSubscriptionState(email: string): Promise<WarmupSubscriptionState>;
+  /**
    * Cancels the vendor-side warmup-pool subscription started by `startWarmup`
    * — founder ruling 2026-08-02 (ROADMAP.md:25, option b): the pool runs during
    * the ~28-day ramp and the platform cancels it at ramp completion, so the
@@ -256,9 +287,36 @@ export interface MailboxPort {
    * Releases a mailbox back to the vendor on tenant teardown/reclaim (D5).
    * Idempotency-keyed. Real adapter calls Inboxkit's delete-mailbox endpoint at
    * activation; sandbox executes it in-memory now.
+   *
+   * MUST BE IDEMPOTENT, and the vendor no longer holding the address is the
+   * GOAL STATE, not a failure (canon finding 2). The real adapter used to throw
+   * PERMANENTLY on the second call — `resolveMailboxUid` -> absent -> "inboxkit
+   * has no mailbox matching …" — so a retry after a crash between the vendor
+   * release and the `released_at` write could never mark the row released. The
+   * row then kept `released_at IS NULL`, which is what `syncMailboxQuantity`
+   * counts, so the customer was billed monthly, forever, for a mailbox nobody
+   * held. Same disambiguation `cancelWarmup` already makes for itself.
+   *
+   * PRECONDITION the absence reading depends on: the caller only invokes this
+   * for an address its OWN records say it holds and is releasing
+   * (engine/lifecycle.ts selects `mailboxes WHERE released_at IS NULL`). Absence
+   * is success-shaped under that precondition and only under it — an
+   * implementation must NOT report success for an address nothing ever owned,
+   * and an INCONCLUSIVE lookup is not absence (it throws, retryably).
    */
   release(email: string, idempotencyKey: string): Promise<ReleaseResult>;
 }
+
+/**
+ * `MailboxPort.warmupSubscriptionState`'s verdict.
+ *
+ * 'absent' is the ONLY value that authorizes a paid `/warmup/add`, the same way
+ * `MailboxReadiness`'s 'absent' is the only one that can authorize a second
+ * mailbox purchase — and for the same reason. 'inconclusive' is a lookup that
+ * did not finish (a vendor error, an unwalkable page count); it is deliberately
+ * NOT folded into 'absent'.
+ */
+export type WarmupSubscriptionState = "active" | "absent" | "inconclusive";
 
 export interface SendEmailInput {
   fromEmail: string;

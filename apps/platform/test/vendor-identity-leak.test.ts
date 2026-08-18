@@ -108,6 +108,7 @@ describe("a caught vendor error never reaches a customer read-surface intact", (
       provisioningState: (e) => base.provisioningState(e),
       startWarmup: (e, k) => base.startWarmup(e, k),
       cancelWarmup: (e, k) => base.cancelWarmup(e, k),
+      warmupSubscriptionState: (e) => base.warmupSubscriptionState(e),
       release: (e, k) => base.release(e, k),
       getHealth: (): Promise<MailboxHealth> => {
         throw new VendorError("inboxkit GET /email-insights/mailbox/mbx-1/health -> HTTP 500: upstream", true);

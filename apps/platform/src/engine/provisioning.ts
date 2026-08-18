@@ -24,7 +24,7 @@ import { domainIntentKey, markDomainIntent, readDomainIntent, recordDomainIntent
 import { assertWithinProvisioningCap } from "./quota.js";
 import { screenTenant } from "../ofac/screening.js";
 import { alertRegistrarUnarmed } from "./registrar-alert.js";
-import { retrySetupMessageBody, setupFailedMessageBody } from "./retry-setup-message.js";
+import { retrySetupMessageBody, setupFailedMessageBody, setupHeldMessageBody } from "./retry-setup-message.js";
 import { withSpendCeiling } from "./spend-ceiling.js";
 import { emitTenantMessage } from "./tenant-messages.js";
 import { RealInboxKitDomainPort } from "../vendors/real/inboxkit-domain-port.js";
@@ -128,12 +128,24 @@ function planProvisioning(ctx: TenantContext, input: SetupInfrastructureInput): 
  * account owns it, it is ACTIVE, it has NO mailboxes attached, and no live
  * `domains` row already claims it for this tenant.
  *
- * A listing failure is swallowed to `null` (fall through to the ordinary buy):
- * the adopt path is a RECOVERY, and a vendor hiccup while asking must not turn
- * a first-time provision into a hard failure. The cost of that fallthrough is
- * bounded — a repeat buy the vendor itself rejects, which is exactly the state
- * we were already in — whereas failing closed would block every provision
- * whenever /domains/list is unhealthy.
+ * A LISTING FAILURE THROWS. It used to be swallowed to `null`, on the argument
+ * that a vendor hiccup while asking must not fail a first-time provision and
+ * that the cost was "a repeat buy the vendor itself rejects". Both halves are
+ * wrong (class E member E4, docs/adversarial/
+ * class-sweep-vendor-truth-2026-08-18.md): `null` means "nothing to adopt", and
+ * the caller reads that as authorization to proceed to `domain.buy` — a
+ * registrar purchase. A pre-check that COULD NOT COMPLETE was authorizing the
+ * billed effect it exists to prevent. And the vendor's response to a duplicate
+ * registration is not known to be a rejection; if it is, the cost is a permanent
+ * failure at a worse moment, and if it is not, it is a second $12.50 domain.
+ *
+ * Two sibling paths already refuse exactly this fold and say so: the mailbox
+ * warmup lookup ("`inconclusive` is deliberately NOT folded into `absent`") and
+ * `confirmVendorOwnership` ("it cannot be asked -> retry later, spend nothing").
+ * This is the third. The error keeps the ADAPTER's own grade rather than being
+ * re-graded here — `/domains/list`'s body-level failure is already retryable and
+ * its page-ceiling failure already permanent — the same discipline
+ * `searchLookalikes` follows when it re-throws its first failure.
  */
 export async function findAdoptableDomain(ctx: TenantContext, candidate: string): Promise<OwnedDomain | null> {
   const alreadyRecorded = ctx.sql
@@ -157,9 +169,9 @@ export async function findAdoptableDomain(ctx: TenantContext, candidate: string)
       ctx,
       "DOMAIN_ADOPT_LOOKUP_FAILED",
       candidate,
-      customerSafeVendorDetail(err, "could not check existing domains — continuing with a new domain purchase"),
+      customerSafeVendorDetail(err, "could not check which domains this account already holds — NO purchase was attempted"),
     );
-    return null;
+    throw err;
   }
 
   const match = owned.find((d) => d.domain.toLowerCase() === candidate.toLowerCase());
@@ -576,19 +588,34 @@ export async function runSetupInfrastructure(
   // recoverable BY NAME — no seeded intent row required, which matters because
   // domain_intents did not exist when the stranding call ran.
   const adoptable = new Map<string, OwnedDomain>();
+  // Candidates whose adopt check could not COMPLETE (E4). Kept apart from both
+  // answers on purpose: "we could not learn whether we already own this name" is
+  // neither "adoptable" nor "safe to buy", and collapsing it into the latter is
+  // the defect — the filter below would pass it straight to `domain.buy`.
+  const unclassified = new Map<string, unknown>();
   for (const candidate of candidates) {
     if (owned.has(candidate.domain.toLowerCase())) continue; // already ours locally
-    const match = await findAdoptableDomain(ctx, candidate.domain);
-    if (match) adoptable.set(candidate.domain.toLowerCase(), match);
+    try {
+      const match = await findAdoptableDomain(ctx, candidate.domain);
+      if (match) adoptable.set(candidate.domain.toLowerCase(), match);
+    } catch (err) {
+      // Per-candidate, NOT per-call. Failing the whole plan here would stop a
+      // call that needs to buy NOTHING — a tenant whose domains are already
+      // provisioned and only needs its DNS leg finished — every time
+      // /domains/list has a bad minute. The name is dropped from the usable set
+      // instead, so it can never be bought unchecked, and the error is re-raised
+      // below only if the plan actually comes up short without it.
+      unclassified.set(candidate.domain.toLowerCase(), err);
+    }
   }
 
-  // Usable = adoptable (recover it, zero spend) OR genuinely buyable (available
-  // and not already ours). Adoptable names are rescued from the filter that
-  // would otherwise drop them for being unavailable.
+  // Usable = adoptable (recover it, zero spend) OR genuinely buyable (available,
+  // not already ours, AND classifiable). Adoptable names are rescued from the
+  // filter that would otherwise drop them for being unavailable.
   const usable = candidates.filter(
     (c) =>
       adoptable.has(c.domain.toLowerCase()) ||
-      (c.available !== false && !owned.has(c.domain.toLowerCase())),
+      (c.available !== false && !owned.has(c.domain.toLowerCase()) && !unclassified.has(c.domain.toLowerCase())),
   );
   // Only the SHORTFALL needs a fresh name. Requiring `input.domains` of them
   // made a retry depend on the vendor still having lookalikes to sell for
@@ -596,6 +623,13 @@ export async function runSetupInfrastructure(
   // nothing could still 400 (BLOCKING-1's second half).
   const fresh = usable.map((c) => c.domain);
   const noCandidates = (): never => {
+    // The shortfall is unmet BECAUSE we could not ask the vendor, not because
+    // the names were unsuitable (E4). Re-throw the lookup failure so it keeps
+    // its own grade and its own truth — a retryable "we could not check" instead
+    // of a ValidationError blaming the customer's brand for our vendor's outage.
+    // Same discipline as searchLookalikes' every-probe-failed re-throw.
+    const firstUnclassified = unclassified.values().next();
+    if (!firstUnclassified.done) throw firstUnclassified.value;
     // Deliberately a hard, structured stop rather than the old positional
     // `candidates[i % candidates.length]` wraparound, which silently bought the
     // SAME domain repeatedly within one call at domains >= 6.
@@ -823,15 +857,36 @@ export async function runSetupInfrastructure(
       // retry. Composed prose only, never `err.message` (GUARDRAIL B): these
       // errors carry registrar/env detail no customer surface may repeat.
       const { step } = customerSafeVendorFailure(err);
+      // OPERATOR-CLEARABLE vs GENUINELY DEAD (class A, docs/adversarial/
+      // class-sweep-vendor-truth-2026-08-18.md). Both stop the saga, and until
+      // now both wrote the same 'terminal' row — so an empty provider wallet,
+      // which a top-up clears in a minute, was recorded and reported exactly
+      // like a dead paid domain that no retry will ever revive. The agent that
+      // read it did the right thing with the wrong fact and stopped for good.
+      //
+      // Same `kind` and same `dedupKey` on both branches, deliberately: they
+      // are two states of ONE condition (this domain's setup stopped), so the
+      // emit helper REFRESHES the single row in place when the outcome changes
+      // — a held setup that later dies replaces its own message rather than
+      // leaving an agent holding two contradictory ones.
+      const operatorActionable = err.operatorActionable === true;
       emitTenantMessage(ctx, {
         kind: "setup_failed",
         // 'terminal', not 'action_required' (signal-inversion guard A2). The
         // emit alone was not the fix: with only two rungs, the one message
         // that means "we have stopped, retrying will never work" was
         // byte-indistinguishable to a branching agent from "retry and it will".
-        severity: "terminal",
-        body: setupFailedMessageBody(inFlightDomain, step),
-        actionHint: { tool: "contact_operator" },
+        severity: operatorActionable ? "operator_pending" : "terminal",
+        body: operatorActionable ? setupHeldMessageBody(inFlightDomain, step) : setupFailedMessageBody(inFlightDomain, step),
+        // The held branch names contact_operator FIRST (that is the channel
+        // that reaches the human who can clear it) and carries the retry the
+        // agent should make afterwards — with the SAME key, which is safe
+        // because a throw records no outcome (idempotency.ts's Settled
+        // contract). No claim is made that anyone HAS been notified: nothing on
+        // this path notifies (signal-inversion guard A1).
+        actionHint: operatorActionable
+          ? { tool: "contact_operator", retryTool: "setup_infrastructure", idempotencyKey: setupKey ?? null }
+          : { tool: "contact_operator" },
         dedupKey: `failed:${inFlightDomain ?? `tenant:${ctx.tenantId}`}`,
       });
     }

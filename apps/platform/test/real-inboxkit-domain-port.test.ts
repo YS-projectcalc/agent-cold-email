@@ -141,11 +141,20 @@ describe("RealInboxKitDomainPort — configured (InboxKit)", () => {
     });
   });
 
-  it("buy() fails permanently when the wallet balance is insufficient (vendor returns a Stripe checkout session instead)", async () => {
+  // THIS TEST USED TO PIN THE DEFECT (class A, docs/adversarial/
+  // class-sweep-vendor-truth-2026-08-18.md). It asserted `retryable === false`
+  // and stopped there, while the throw site's own comment three lines up said
+  // the condition was "operator-fixable (top up the InboxKit wallet)". The
+  // codebase KNEW; the grade could not carry it, so the customer's agent was
+  // told to check its inputs over an empty wallet. `retryable` stays false —
+  // this call cannot succeed as-is — and the third value now says who can fix
+  // it.
+  it("buy() reports an insufficient wallet balance as OPERATOR-ACTIONABLE, not 'check your inputs'", async () => {
     stubFetchSequence([{ status: 200, body: IK_DOMAIN_REGISTER_STRIPE_SESSION }]);
     const err = await new RealInboxKitDomainPort(CONFIG, REGISTRANT).buy("acme-lookalike.com", "k1").catch((e) => e);
     expect(err).toBeInstanceOf(VendorError);
     expect((err as VendorError).retryable).toBe(false);
+    expect((err as VendorError).operatorActionable).toBe(true);
     expect((err as VendorError).message).toContain("Stripe checkout");
   });
 

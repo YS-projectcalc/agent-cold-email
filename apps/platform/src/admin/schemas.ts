@@ -42,7 +42,18 @@ export type AdminScreeningDecisionInput = z.infer<typeof AdminScreeningDecisionI
 // claim only the code path that stopped is in a position to make. A human
 // writing prose about a stuck account is making a different statement, and
 // letting the operator route mint 'terminal' would put the one rung an agent
-// is told never to retry behind a free-text surface. `body` is bounded well past the longest real
+// is told never to retry behind a free-text surface.
+//
+// STAYS TWO RUNGS after 'operator_pending' joined the union (ratified,
+// 2026-08-18 vendor-truth wave), for the same reason and one more. Same reason:
+// it asserts a machine fact — "the saga stopped at a step an operator clears" —
+// that only the stopping code path observed. One more: it is the rung that
+// tells an agent to KEEP its idempotency key and retry later, so a human
+// minting it by hand would be promising that a specific replay completes, on
+// behalf of a state machine they cannot see. An operator with something to say
+// about a held account says it as 'action_required' prose; the system's own
+// emit sites (engine/provisioning.ts) are what mint 'operator_pending'.
+// `body` is bounded well past the longest real
 // message body in this codebase today, generous headroom for an operator's
 // own prose, still far short of unbounded. Delivers regardless of the
 // tenant's lifecycle state (gate fix, msgchannel-inc23-gate-2026-08-06 F2) —

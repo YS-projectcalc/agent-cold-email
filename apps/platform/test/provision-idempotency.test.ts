@@ -7,6 +7,7 @@ import type {
   MailboxReadiness,
   ProvisionedMailbox,
   ReleaseResult,
+  WarmupSubscriptionState,
 } from "@coldstart/shared";
 import { VirtualClock } from "../src/clock.js";
 import { readActivationState } from "../src/engine/activation.js";
@@ -35,6 +36,9 @@ function countingMailbox(): { port: MailboxPort; provisionCalls: () => number } 
     },
     async startWarmup(): Promise<{ started: boolean; startedAt: number }> {
       return { started: true, startedAt: Date.now() };
+    },
+    async warmupSubscriptionState(): Promise<WarmupSubscriptionState> {
+      return "absent";
     },
     async cancelWarmup(): Promise<CancelWarmupResult> {
       return { cancelled: true, cancelledAt: Date.now() };

@@ -230,11 +230,14 @@ export const ALLOWED_UNISOLATED_LOOPS: { file: string; header: string; reason: s
     header: "for (const row of pending)",
     reason: "pushRecordedMailbox catches internally and returns { pushed: false } — the loop cannot observe a throw",
   },
-  {
-    file: "apps/platform/src/engine/provisioning.ts",
-    header: "for (const candidate of candidates)",
-    reason: "findAdoptableDomain catches its own vendor error and returns null — the loop cannot observe a throw",
-  },
+  // ENTRY REMOVED 2026-08-18 (class E member E4). It read "findAdoptableDomain
+  // catches its own vendor error and returns null — the loop cannot observe a
+  // throw", and that swallow WAS the defect: `null` meant "nothing to adopt",
+  // which authorized the domain purchase the check exists to prevent.
+  // findAdoptableDomain now throws, and this loop carries its own try/catch that
+  // drops the unclassifiable candidate from the usable set — so the scan no
+  // longer sees it as an offender at all. Isolation and the class fix agree
+  // here: the candidate is EXCLUDED, never fallen through.
   {
     file: "apps/platform/src/engine/webhook-delivery.ts",
     header: "for (const { id: deliveryId } of due)",

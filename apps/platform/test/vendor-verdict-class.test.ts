@@ -34,6 +34,7 @@ import type {
   PurchasedDomain,
   ReleaseResult,
   VendorReadiness,
+  WarmupSubscriptionState,
 } from "@coldstart/shared";
 import { DNS_PENDING_MAX_MS, setDnsWithRetry } from "../src/engine/domain-dns.js";
 import { runProvisioningReconcile } from "../src/engine/provisioning-reconcile.js";
@@ -444,6 +445,9 @@ function verdictMailboxPort(verdict: MailboxReadiness): { p: MailboxPort; buys: 
     },
     async cancelWarmup(): Promise<{ cancelled: boolean; cancelledAt: number }> {
       return { cancelled: true, cancelledAt: Date.now() };
+    },
+    async warmupSubscriptionState(): Promise<WarmupSubscriptionState> {
+      return "absent";
     },
     async release(): Promise<ReleaseResult> {
       return { released: true, releasedAt: Date.now() };

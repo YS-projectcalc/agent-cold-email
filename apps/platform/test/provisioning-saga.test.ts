@@ -233,6 +233,7 @@ describe("provisioning saga — a bought domain is never stranded (INCIDENT 2026
               provisioningState: (email: string) => base.adapters.mailbox.provisioningState(email),
               getHealth: (email: string) => base.adapters.mailbox.getHealth(email),
               cancelWarmup: (email: string, key: string) => base.adapters.mailbox.cancelWarmup(email, key),
+              warmupSubscriptionState: (email: string) => base.adapters.mailbox.warmupSubscriptionState(email),
               release: (email: string, key: string) => base.adapters.mailbox.release(email, key),
             },
           },

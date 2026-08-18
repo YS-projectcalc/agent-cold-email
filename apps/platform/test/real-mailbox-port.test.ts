@@ -6,7 +6,8 @@ import {
   IK_MAILBOX_ALREADY_EXISTS,
   IK_MAILBOX_BUY_SUCCESS,
   IK_MAILBOX_CANCEL_SUCCESS,
-  IK_MAILBOX_CREDENTIALS_SUCCESS,
+  IK_MAILBOX_CREDENTIALS_NOT_FOUND,
+  IK_MAILBOX_HEALTH_NO_METRICS,
   IK_MAILBOX_HEALTH_SUCCESS,
   IK_MAILBOX_LIST_EMPTY,
   IK_MAILBOX_LIST_SUCCESS,
@@ -46,24 +47,31 @@ describe("RealMailboxPort — dark until configured", () => {
   });
 });
 
+// The success-path test that stood here is DELETED, not updated. It stubbed an
+// invented credentials payload and asserted our mapper could read it — the
+// endpoint does not exist (live 2026-08-18: the gateway 404s it), so the test
+// proved only that a fixture written alongside the code agrees with the code.
+// See test/fixtures/inboxkit.ts's IK_MAILBOX_CREDENTIALS_NOT_FOUND.
 describe("RealMailboxPort — showMailboxCredentials (I3 credential push)", () => {
-  it("resolves the uid then GETs /mailboxes/{uid}/credentials and maps IMAP+SMTP into the engine endpoint shape", async () => {
-    const spy = stubFetchSequence([{ status: 200, body: IK_MAILBOX_LIST_SUCCESS }, { status: 200, body: IK_MAILBOX_CREDENTIALS_SUCCESS }]);
-    const creds = await new RealMailboxPort(CONFIG).showMailboxCredentials("john.doe@example-lookalike.com");
-
-    expect(creds.imap).toEqual({ host: "imap.gmail.com", port: 993, secure: true, user: "john.doe@example-lookalike.com", pass: "imap-app-pass" });
-    expect(creds.smtp).toEqual({ host: "smtp.gmail.com", port: 465, secure: true, user: "john.doe@example-lookalike.com", pass: "smtp-app-pass" });
-    const [credUrl, init] = spy.mock.calls[1]!;
-    expect(credUrl).toBe("https://ik.example.internal/v1/api/mailboxes/mbx-11111111-2222-3333-4444-555555555555/credentials");
-    expect((init as RequestInit).method).toBe("GET");
+  it("grades the endpoint's 404 as OPERATOR-ACTIONABLE, not 'check your inputs'", async () => {
+    stubFetchSequence([
+      { status: 200, body: IK_MAILBOX_LIST_SUCCESS },
+      { status: 404, body: IK_MAILBOX_CREDENTIALS_NOT_FOUND },
+    ]);
+    const err = await new RealMailboxPort(CONFIG).showMailboxCredentials("john.doe@example-lookalike.com").catch((e) => e);
+    expect(err).toBeInstanceOf(VendorError);
+    // A route the vendor does not serve is not the caller's fault and is not
+    // forever: someone ships the right path and the same call works.
+    expect((err as VendorError).retryable).toBe(false);
+    expect((err as VendorError).operatorActionable).toBe(true);
   });
 
-  it("fails LOUD (permanent) when the response carries no usable IMAP credentials (UNVERIFIED shape mismatch)", async () => {
-    const spy = stubFetchSequence([{ status: 200, body: IK_MAILBOX_LIST_SUCCESS }, { status: 200, body: { data: {} } }]);
+  it("fails LOUD (permanent, operator-actionable) when the response carries no usable IMAP credentials", async () => {
+    stubFetchSequence([{ status: 200, body: IK_MAILBOX_LIST_SUCCESS }, { status: 200, body: { data: {} } }]);
     const err = await new RealMailboxPort(CONFIG).showMailboxCredentials("john.doe@example-lookalike.com").catch((e) => e);
     expect(err).toBeInstanceOf(VendorError);
     expect((err as VendorError).retryable).toBe(false);
-    void spy;
+    expect((err as VendorError).operatorActionable).toBe(true);
   });
 });
 
@@ -101,20 +109,60 @@ describe("RealMailboxPort — configured (InboxKit)", () => {
     expect((err as VendorError).message).toContain("Insufficient wallet balance");
   });
 
-  it("getHealth() resolves the mailbox uid via /mailboxes/list then reads /email-insights/mailbox/{uid}/health", async () => {
+  it("getHealth() reads the LIVE health fields and reports the three the vendor does not send as null", async () => {
     const spy = stubFetchSequence([{ status: 200, body: IK_MAILBOX_LIST_SUCCESS }, { status: 200, body: IK_MAILBOX_HEALTH_SUCCESS }]);
     const health = await new RealMailboxPort(CONFIG).getHealth("john.doe@example-lookalike.com");
 
     expect(health.email).toBe("john.doe@example-lookalike.com");
-    expect(health.bounceRate).toBeCloseTo(0.018, 5); // 1.8% -> fraction
-    expect(health.reputationScore).toBe(90); // healthy -> 90 (approximation, documented in the adapter)
-    expect(health.complaintRate).toBe(0); // not exposed by InboxKit's health endpoint
-    expect(health.placementRate).toBeCloseTo(0.982, 5);
+    expect(health.bounceRate).toBeCloseTo(0.018, 5); // bounce_rate_30d 1.8% -> fraction
+    // NOT ON THE WIRE. These were 90 (from a `health_status` enum the endpoint
+    // does not return), 0 and 0.982 (the complement of a bounce rate that was
+    // itself NaN). The vendor reports no reputation, no complaint and no
+    // placement signal, and null is how this port says so.
+    expect(health.reputationScore).toBeNull();
+    expect(health.complaintRate).toBeNull();
+    expect(health.placementRate).toBeNull();
 
     const [listUrl] = spy.mock.calls[0]!;
     expect(listUrl).toBe("https://ik.example.internal/v1/api/mailboxes/list");
     const [healthUrl] = spy.mock.calls[1]!;
     expect(healthUrl).toBe("https://ik.example.internal/v1/api/email-insights/mailbox/mbx-11111111-2222-3333-4444-555555555555/health");
+  });
+
+  // THE DEFECT, PINNED (class F member F1). On the pre-fix adapter this exact
+  // response produced `bounceRate: NaN` and `placementRate: NaN` — it
+  // destructured `bounce_rate` from a payload that has never carried it, and
+  // `Math.min(1, Math.max(0, NaN))` is NaN, so the clamp that looked like a
+  // guard passed it through into a customer-facing rate.
+  it("getHealth() reports NO bounce rate — never NaN, never 0 — when the vendor omits the metric", async () => {
+    stubFetchSequence([{ status: 200, body: IK_MAILBOX_LIST_SUCCESS }, { status: 200, body: IK_MAILBOX_HEALTH_NO_METRICS }]);
+    const health = await new RealMailboxPort(CONFIG).getHealth("john.doe@example-lookalike.com");
+
+    expect(health.bounceRate).toBeNull();
+    expect(Number.isNaN(health.bounceRate as unknown as number)).toBe(false);
+  });
+
+  // The seam itself (class F member F3): `request<T>` used to end in `return
+  // body as T`, so a response that agreed with NO part of the model sailed
+  // through and failed later, somewhere else, as a TypeError.
+  it("getHealth() throws a graded VendorError — not a TypeError — when the response shape drifts", async () => {
+    stubFetchSequence([{ status: 200, body: IK_MAILBOX_LIST_SUCCESS }, { status: 200, body: { data: { bounce_rate_30d: "not-a-number" } } }]);
+    const err = await new RealMailboxPort(CONFIG).getHealth("john.doe@example-lookalike.com").catch((e) => e);
+
+    expect(err).toBeInstanceOf(VendorError);
+    expect((err as VendorError).retryable).toBe(false);
+    expect((err as VendorError).operatorActionable).toBe(true);
+    expect((err as VendorError).message).toContain("bounce_rate_30d");
+  });
+
+  it("getHealth() throws a graded VendorError when a 200 carries no parseable JSON body at all", async () => {
+    const spy = vi.spyOn(globalThis, "fetch");
+    spy.mockImplementationOnce(async () => new Response(JSON.stringify(IK_MAILBOX_LIST_SUCCESS), { status: 200, headers: { "content-type": "application/json" } }));
+    spy.mockImplementationOnce(async () => new Response("<html>gateway</html>", { status: 200, headers: { "content-type": "text/html" } }));
+    const err = await new RealMailboxPort(CONFIG).getHealth("john.doe@example-lookalike.com").catch((e) => e);
+
+    expect(err).toBeInstanceOf(VendorError);
+    expect((err as VendorError).message).toContain("no parseable JSON body");
   });
 
   it("getHealth() fails permanently when the mailbox can't be resolved to a uid", async () => {
@@ -194,6 +242,41 @@ describe("RealMailboxPort — configured (InboxKit)", () => {
     const result = await new RealMailboxPort(CONFIG).release("john.doe@example-lookalike.com", "k1");
     expect(result.released).toBe(true);
     expect(spy.mock.calls).toHaveLength(2); // list + cancel
+  });
+
+  // IDEMPOTENCY (canon finding 2). The port contract calls a retry-after-crash
+  // the normal case, and for a RELEASE the vendor holding nothing IS the goal
+  // state. This used to throw a PERMANENT "inboxkit has no mailbox matching …"
+  // via resolveMailboxUid, so `released_at` could never be written and the row
+  // stayed billable forever.
+  it("release() reports SUCCESS when the vendor already holds nothing for the address", async () => {
+    const spy = stubFetchSequence([{ status: 200, body: IK_MAILBOX_LIST_EMPTY }]);
+    const result = await new RealMailboxPort(CONFIG).release("john.doe@example-lookalike.com", "k1");
+
+    expect(result).toEqual({ released: true, releasedAt: expect.any(Number) });
+    // No cancel call: there is nothing left to cancel, and a second
+    // /mailboxes/cancel for an unknown uid is not what "idempotent" means.
+    expect(spy.mock.calls).toHaveLength(1);
+  });
+
+  it("release() treats a TERMINAL vendor state as already released", async () => {
+    const cancelled = {
+      ...IK_MAILBOX_LIST_SUCCESS,
+      mailboxes: [{ ...IK_MAILBOX_LIST_SUCCESS.mailboxes[0], status: "scheduled_for_deletion" }],
+    };
+    const spy = stubFetchSequence([{ status: 200, body: cancelled }]);
+    const result = await new RealMailboxPort(CONFIG).release("john.doe@example-lookalike.com", "k1");
+
+    expect(result.released).toBe(true);
+    expect(spy.mock.calls).toHaveLength(1);
+  });
+
+  it("release() does NOT read an inconclusive lookup as absence — that would strand a live paid mailbox", async () => {
+    stubFetchSequence([{ status: 200, body: { error: true, message: "workspace lookup failed" } }]);
+    const err = await new RealMailboxPort(CONFIG).release("john.doe@example-lookalike.com", "k1").catch((e) => e);
+
+    expect(err).toBeInstanceOf(VendorError);
+    expect((err as VendorError).retryable).toBe(true);
   });
 });
 

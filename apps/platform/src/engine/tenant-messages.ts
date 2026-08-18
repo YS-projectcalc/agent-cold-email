@@ -23,23 +23,39 @@ import type { TenantContext } from "../tenant-context.js";
  * provisioning.ts's SUCCESS-PENDING emit already used 'info', and four public
  * tool descriptions tell agents to read this field.
  *
- * THREE RUNGS, and the third one is load-bearing (docs/adversarial/
- * class-sweep-signal-inversion-2026-08-17.md guard A2):
+ * FOUR RUNGS, and each of the last two is load-bearing (docs/adversarial/
+ * class-sweep-signal-inversion-2026-08-17.md guard A2, then
+ * class-sweep-vendor-truth-2026-08-18.md class A):
  *
  * - 'info' — the condition resolves on its own; nothing is required.
  * - 'action_required' — the account will not progress until someone acts, and
- *   acting works.
+ *   acting works. The actor is YOU, the agent reading this.
+ * - 'operator_pending' — the platform has stopped AND the agent cannot restart
+ *   it, but this is not the end of the road: an OPERATOR clears the blocker
+ *   (funds a provider account, rotates a credential, ships a fix) and then the
+ *   agent's SAME retry completes, unchanged. Without this rung that outcome had
+ *   to borrow one of its neighbours, and both lied — 'action_required' tells an
+ *   agent to act when no action of its own can work, and 'terminal' tells it to
+ *   stop forever over something a top-up clears in a minute. The latter is what
+ *   actually happened: an empty provider wallet was reported as permanent, and
+ *   the customer's agent correctly obeyed and gave up.
  * - 'terminal' — the platform has STOPPED. Retrying will never help; the only
  *   way forward is a human. Emitting the terminal give-up (F3) without this
  *   rung re-opened the same defect one layer up: the message existed, and an
  *   agent branching on `severity` read a dead paid domain identically to a
  *   transient vendor hiccup, so it retried forever exactly as before.
  *
+ * The 'operator_pending' / 'terminal' distinction is exactly "will the SAME
+ * retry work later" — the question `VendorError.operatorActionable` answers,
+ * and these two rungs are its message-channel projection.
+ *
  * NOT DB-enforced — the `tenant_messages` CHECK would have to be added by table
  * rebuild inside every live DO, and the writes all funnel through this module's
- * two emit helpers, so the type is the enforcement point.
+ * two emit helpers, so the type is the enforcement point. Adding this rung
+ * therefore needed NO migration (verified against schema.ts: `severity` is a
+ * bare `TEXT NOT NULL`).
  */
-export type TenantMessageSeverity = "info" | "action_required" | "terminal";
+export type TenantMessageSeverity = "info" | "action_required" | "operator_pending" | "terminal";
 
 export interface TenantMessage {
   id: string;
@@ -202,11 +218,13 @@ interface TenantMessageRow {
  *
  * Note the unknown case does NOT resolve to 'terminal' either: claiming the
  * platform has permanently stopped, on the strength of a value we do not
- * recognise, would be its own false terminal.
+ * recognise, would be its own false terminal. Nor to 'operator_pending', which
+ * makes the equal-and-opposite claim that a human elsewhere is the blocker.
  */
 function toSeverity(raw: string): TenantMessageSeverity {
   if (raw === "info") return "info";
   if (raw === "terminal") return "terminal";
+  if (raw === "operator_pending") return "operator_pending";
   return "action_required";
 }
 
