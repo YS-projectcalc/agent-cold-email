@@ -155,6 +155,13 @@ describe("failing-by-construction — a new check cannot inherit an unchosen pol
     "send_starved:": 2,
     "tenant_do_wedged:": 2,
     "domain_dns_aging:": 2,
+    // Item 1/2 (docs/adversarial/class-sweep-vendor-truth-2026-08-18.md) — the
+    // watchtower re-samples all four every cron tick, exactly like
+    // domain_dns_aging above; NOT one-shot event reports.
+    vendor_wallet: 2,
+    warmup_duplicates: 2,
+    "mailbox_orphan:": 2,
+    "domain_orphan:": 2,
   };
 
   function declaredCheckNames(source: string): string[] {

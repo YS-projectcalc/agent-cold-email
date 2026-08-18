@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import { buildOpsDigest } from "../src/admin/ops-sweep.js";
+import { DEFAULT_PROVISIONING_ORPHAN_GRACE_MS } from "../src/engine/ops-summary.js";
 import { TenantDO } from "../src/tenant-do.js";
-import { activatePaidPlan, adminApi, failPayment, mintTenant } from "./helpers.js";
+import { activatePaidPlan, adminApi, failPayment, mintTenant, tenantStub } from "./helpers.js";
 
 interface OpsDigestResponse {
   tenants: { total: number; activeByPlan: Record<string, number> };
@@ -52,7 +53,11 @@ describe("GET /admin/ops/digest — D6 owner business-health rollup", () => {
 
     // No infra ever provisioned for any of these tenants -> no usage accrued.
     expect(digest.body.totalUsageCents).toBe(0);
-    // B2 sagas aren't built — honestly 0, not fabricated (src/admin/README.md).
+    // Item 3d (docs/adversarial/class-sweep-vendor-truth-2026-08-18.md, D8) —
+    // wired to the REAL cross-tenant orphan count (mailboxOrphans +
+    // domainOrphans, engine/ops-summary.ts); genuinely 0 here because none of
+    // these 4 tenants has an orphaned mailbox/domain intent, not because the
+    // field is a hardcoded literal.
     expect(digest.body.provisioningFailureCount).toBe(0);
   });
 
@@ -60,6 +65,42 @@ describe("GET /admin/ops/digest — D6 owner business-health rollup", () => {
     const res = await adminApi<{ windowHours: number }>("/admin/ops/digest?hours=1");
     expect(res.status).toBe(200);
     expect(res.body.windowHours).toBe(1);
+  });
+
+  // Item 3d — D8's hardcoded `provisioningFailureCount: 0` served on
+  // production alongside `GET /admin/ops/checks` reporting a REAL unhealthy
+  // domain (canon Finding 11, live-confirmed). Wired to the real cross-tenant
+  // orphan count so a genuine incident is no longer masked as zero.
+  it("provisioningFailureCount reflects REAL orphaned mailbox/domain intents across tenants — no longer a hardcoded 0", async () => {
+    const orphaned = await mintTenant("Digest Orphan Co", "managed");
+    await activatePaidPlan(orphaned.tenantId, "managed");
+    const past = Date.now() - DEFAULT_PROVISIONING_ORPHAN_GRACE_MS - 60_000;
+    await runInDurableObject(tenantStub(orphaned.tenantId), async (_i, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO mailbox_intents (key, tenant_id, email, status, created_at, updated_at) VALUES (?, ?, ?, 'bought', ?, ?)`,
+        "mbx:digest-orphan",
+        orphaned.tenantId,
+        "orphan@digest-orphan-co.test",
+        past,
+        past,
+      );
+      state.storage.sql.exec(
+        `INSERT INTO domain_intents (key, tenant_id, candidate_domain, status, created_at, updated_at) VALUES (?, ?, ?, 'committed', ?, ?)`,
+        "dom:digest-orphan",
+        orphaned.tenantId,
+        "digest-orphan-domain.test",
+        past,
+        past,
+      );
+    });
+
+    const clean = await mintTenant("Digest Clean Co", "managed");
+    await activatePaidPlan(clean.tenantId, "managed");
+
+    const digest = await adminApi<OpsDigestResponse>("/admin/ops/digest");
+    expect(digest.status).toBe(200);
+    // 1 mailbox orphan + 1 domain orphan, from the ONE tenant that has them.
+    expect(digest.body.provisioningFailureCount).toBe(2);
   });
 });
 

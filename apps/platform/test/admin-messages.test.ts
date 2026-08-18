@@ -253,7 +253,13 @@ interface OperatorMessageForOperatorDTO {
   actionHint: Record<string, unknown> | null;
   source: "system" | "operator";
   createdAt: number;
-  readAt: number | null;
+  // Item 6 (founder-ordered, class-sweep-vendor-truth-2026-08-18 addendum) —
+  // renamed from `readAt`: `tenant_messages.read_at`'s ONLY writer is the
+  // tenant agent's explicit ackMessage tool, so a null does NOT mean "never
+  // seen", only "never acked" — this endpoint lists messages the agent may
+  // have already read without acking. `readAt` misled the operator for a
+  // full day during a live incident.
+  ackedAt: number | null;
   expiresAt: number | null;
 }
 
@@ -313,7 +319,7 @@ describe("GET /admin/tenants/:id/messages — the read twin of the operator rout
       severity: "info",
       body: "operator says hi",
       source: "operator",
-      readAt: null,
+      ackedAt: null,
       expiresAt: null,
     });
     expect(typeof newest!.id).toBe("string");
@@ -323,26 +329,41 @@ describe("GET /admin/tenants/:id/messages — the read twin of the operator rout
       severity: "action_required",
       body: "system says hi",
       source: "system",
-      readAt: null,
+      ackedAt: null,
       expiresAt: null,
     });
   });
 
-  it("an acked message shows a non-null readAt in the GET (ack via the existing agent-facing ack path)", async () => {
+  // Item 6 — proves the RENAME, not just the field's presence: the raw wire
+  // shape must carry `ackedAt` and must NOT carry the old, misleading
+  // `readAt` name (a `.toMatchObject` alone would pass even if both were
+  // present, which is exactly the ambiguity this fix exists to remove).
+  it("the wire shape carries ackedAt and does NOT carry readAt", async () => {
+    const { tenantId } = await mintTenant("Msg Read Rename Co", "managed");
+    await withTenantContext(tenantId, (ctx) => emitTenantMessage(ctx, { kind: "k", severity: "info", body: "rename me" }));
+
+    const res = await adminApi<OperatorMessageListResponse>(`/admin/tenants/${tenantId}/messages`);
+    expect(res.body.messages).toHaveLength(1);
+    expect(res.body.messages[0]).toHaveProperty("ackedAt");
+    expect(res.body.messages[0]).not.toHaveProperty("readAt");
+    expect(JSON.stringify(res.body.messages)).not.toContain("readAt");
+  });
+
+  it("an acked message shows a non-null ackedAt in the GET (ack via the existing agent-facing ack path)", async () => {
     const { tenantId, token } = await mintTenant("Msg Read Ack Co", "managed");
     await withTenantContext(tenantId, (ctx) => emitTenantMessage(ctx, { kind: "k", severity: "info", body: "ack me" }));
 
     const before = await adminApi<OperatorMessageListResponse>(`/admin/tenants/${tenantId}/messages`);
     const id = before.body.messages[0]!.id;
-    expect(before.body.messages[0]!.readAt).toBeNull();
+    expect(before.body.messages[0]!.ackedAt).toBeNull();
 
     const ack = await api(`/messages/${id}/ack`, { method: "POST", token });
     expect(ack.status).toBe(200);
 
     const after = await adminApi<OperatorMessageListResponse>(`/admin/tenants/${tenantId}/messages`);
     expect(after.body.messages[0]!.id).toBe(id);
-    expect(after.body.messages[0]!.readAt).not.toBeNull();
-    expect(typeof after.body.messages[0]!.readAt).toBe("number");
+    expect(after.body.messages[0]!.ackedAt).not.toBeNull();
+    expect(typeof after.body.messages[0]!.ackedAt).toBe("number");
   });
 
   it("?unreadOnly=1 excludes acked messages (both from the list and from total)", async () => {
@@ -390,6 +411,23 @@ describe("GET /admin/tenants/:id/messages — the read twin of the operator rout
     expect(res.body.messages).toHaveLength(2);
     expect(res.body.total).toBe(5);
     expect(res.body.messages[0]!.body).toBe("m-4"); // newest first
+  });
+
+  // D9 (docs/adversarial/class-sweep-vendor-truth-2026-08-18.md) — `?limit=`
+  // with an EMPTY value (a URL built as `...?limit=${maybeUndefined}`) is a
+  // present-but-empty query string, not an absent one: `Number("") === 0`,
+  // and the old code only guarded `rawLimit !== undefined`, so a request that
+  // meant "no limit" silently clamped to 1 result instead of the real default.
+  it("?limit= (empty value) behaves exactly like an ABSENT limit — the platform default, never clamped to 1", async () => {
+    const { tenantId } = await mintTenant("Msg Read Empty Limit Co", "managed");
+    for (let i = 0; i < 5; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      await withTenantContext(tenantId, (ctx) => emitTenantMessage(ctx, { kind: "k", severity: "info", body: `m-${i}` }));
+    }
+    const withEmptyLimit = await adminApi<OperatorMessageListResponse>(`/admin/tenants/${tenantId}/messages?limit=`);
+    const withNoLimit = await adminApi<OperatorMessageListResponse>(`/admin/tenants/${tenantId}/messages`);
+    expect(withEmptyLimit.body.messages).toHaveLength(5);
+    expect(withEmptyLimit.body.messages).toEqual(withNoLimit.body.messages);
   });
 
   // Mirrors the POST route's own gate-F2 tests above — this channel's

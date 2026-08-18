@@ -492,6 +492,12 @@ export interface OpsDigest {
   tenants: { total: number; activeByPlan: Record<string, number> };
   mrrCents: number;
   totalUsageCents: number;
+  /** Item 3d (docs/adversarial/class-sweep-vendor-truth-2026-08-18.md, D8) —
+   * cross-tenant sum of `sendPipeline.mailboxOrphans` + `domainOrphans`
+   * (engine/ops-summary.ts): mailbox/domain intents at a post-purchase
+   * status with no matching live row, past the grace bound. NOT a general
+   * "provisioning saga failed" counter (no such signal exists yet) — the name
+   * predates this wiring; kept for API stability. */
   provisioningFailureCount: number;
   deliverability: { pausedMailboxesTotal: number; burningDomainsTotal: number; actionsInWindow: number };
   /** Warmup-pool cancellations the platform GAVE UP on in the window (adversary
@@ -545,6 +551,9 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
   let canceledCount = 0;
   let disputedCount = 0;
   let annualDomainLiabilityCents = 0;
+  // Item 3d (docs/adversarial/class-sweep-vendor-truth-2026-08-18.md, D8) —
+  // the real cross-tenant count, replacing the hardcoded literal below.
+  let provisioningFailureCount = 0;
 
   for (const s of summaries) {
     if (s.status === "active") activeByPlan[s.plan] = (activeByPlan[s.plan] ?? 0) + 1;
@@ -561,6 +570,7 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
     deliverabilityActionsInWindow += s.actionsInWindow.paused + s.actionsInWindow.replaced;
     gaveUpWarmupCancels += s.actionsInWindow.gaveUpWarmupCancels;
     pendingCredentialPushes += s.pendingCredentialPushes;
+    provisioningFailureCount += s.sendPipeline.mailboxOrphans.length + s.sendPipeline.domainOrphans.length;
   }
 
   // Terminated tenants come from the D1 enforcement_actions audit log (an
@@ -570,11 +580,17 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
   const waitlistCount = await countWaitlistEmails(env);
 
   // Watchdog alerts — simple threshold-crossing prose, not a separate
-  // alerting system (YAGNI, CLAUDE.md rule i). "Stuck jobs" (provisioning
-  // sagas) has no signal to alert on yet: B2's resumable alarm-driven sagas
-  // aren't built (ROADMAP.md), so provisioningFailureCount is honestly 0
-  // rather than fabricated.
+  // alerting system (YAGNI, CLAUDE.md rule i). Item 3d (docs/adversarial/
+  // class-sweep-vendor-truth-2026-08-18.md, D8) — `provisioningFailureCount`
+  // (below) is no longer the hardcoded literal this comment used to describe;
+  // it is the real cross-tenant sum of engine/ops-summary.ts's
+  // mailboxOrphans + domainOrphans, computed in the loop above.
   const watchdogAlerts: string[] = [];
+  if (provisioningFailureCount > 0) {
+    watchdogAlerts.push(
+      `${provisioningFailureCount} mailbox/domain intent(s) may be orphaned (vendor holds a resource with no matching platform row) — see GET /admin/ops/checks for the named mailbox_orphan:/domain_orphan: entries`,
+    );
+  }
   if (pausedMailboxesTotal > 0) {
     watchdogAlerts.push(`${pausedMailboxesTotal} mailbox(es) paused by the deliverability loop across all tenants`);
   }
@@ -603,7 +619,7 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
     tenants: { total: tenantIds.length, activeByPlan },
     mrrCents,
     totalUsageCents,
-    provisioningFailureCount: 0,
+    provisioningFailureCount,
     deliverability: { pausedMailboxesTotal, burningDomainsTotal, actionsInWindow: deliverabilityActionsInWindow },
     gaveUpWarmupCancels,
     pendingCredentialPushes,

@@ -113,6 +113,20 @@ declare global {
       COST_DOMAIN_CENTS?: string;
       COST_PREWARM_MAILBOX_CENTS?: string;
       INBOXKIT_PLAN_SLOTS?: string;
+      // Item 1 (docs/adversarial/class-sweep-vendor-truth-2026-08-18.md, class B)
+      // — the watchtower's `vendor_wallet` check floor (admin/watchtower-vendor.ts).
+      // NOT `// spend-arming`: a floor is a BOUND on when to alarm, exactly like
+      // SPEND_CEILING_CENTS above — it arms no vendor spend by itself and reads
+      // nothing INBOXKIT_* doesn't already gate. Unset/blank/non-positive falls
+      // back to the built-in default (10 credits).
+      WALLET_FLOOR_CREDITS?: string;
+      // Item 2 (same canon doc, class C stage 1) — the grace bound before a
+      // post-purchase mailbox/domain intent with no matching live row becomes an
+      // unhealthy `mailbox_orphan:`/`domain_orphan:` watchtower check
+      // (engine/ops-summary.ts). Same non-arming reasoning as WALLET_FLOOR_CREDITS
+      // — a detection-timing bound, not a vendor credential. Unset/blank/
+      // non-positive falls back to the built-in default (30 minutes).
+      PROVISIONING_ORPHAN_GRACE_MS?: string;
       // Self-serve I3 — operator-supplied gmail_api OAuth grants for the MANUAL
       // mint path (the proven 2026-07-19 pilot path), a JSON secret
       // {email:{clientId,clientSecret,refreshToken}}. NOT spend-arming: holding

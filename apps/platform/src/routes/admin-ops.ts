@@ -4,10 +4,19 @@ import { getTenantIndexById } from "../admin/db.js";
 import { buildOpsDigest, runDunningSweep } from "../admin/ops-sweep.js";
 import { terminateTenantForAbuse } from "../admin/terminate.js";
 import { readAllCheckRows } from "../admin/watchtower.js";
+import { CRON_SWEEP_CHECK, D1_CHECK } from "../admin/watchtower-alerts.js";
 import { RealClock } from "../clock.js";
 import { listWaitlistEmails } from "../db.js";
 import type { Env } from "../env.js";
 import { parseJsonBody } from "../validate.js";
+
+// Item 3e (docs/adversarial/class-sweep-vendor-truth-2026-08-18.md, D7) — the
+// checks GET /admin/ops/checks structurally cannot report (they live in
+// WatchtowerDO storage, never watchtower_state — see the route's own doc
+// comment below). Exposed on the wire so `unhealthyCount: 0` can never be
+// read as "the whole platform is healthy" during exactly the outage this
+// table is blind to.
+const DO_STORE_ONLY_CHECKS = [D1_CHECK, CRON_SWEEP_CHECK];
 
 const DEFAULT_DIGEST_WINDOW_HOURS = 24;
 
@@ -72,7 +81,7 @@ export const adminOpsRoute = new Hono<{ Bindings: Env }>()
       // Stable sort (V8/ES2019+): unhealthy first, healthy after, each group
       // keeping the D1 read's own order.
       .sort((a, b) => Number(a.healthy) - Number(b.healthy));
-    return c.json({ checks, unhealthyCount });
+    return c.json({ checks, unhealthyCount, excludesDoStoreChecks: DO_STORE_ONLY_CHECKS });
   })
   // C6 — the owner's durable waitlist export (adversarial panel-03 finding #9:
   // the funnel had no owner-retrieval path). Ordered newest-first.

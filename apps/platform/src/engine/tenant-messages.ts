@@ -371,7 +371,21 @@ export function ackMessage(ctx: TenantContext, id: string): AckMessageResult {
 // MessageListPage/TenantMessage (the first, working occurrence). A generic
 // index-signature type reachable from a SECOND RPC method is the trigger,
 // not this field's data shape.
-export type OperatorTenantMessage = Omit<TenantMessage, "actionHint"> & { actionHint: object | null; expiresAt: number | null };
+// Item 6 (founder-ordered, docs/adversarial/class-sweep-vendor-truth-2026-08-18.md
+// addendum) — `readAt` (TenantMessage's own field, shared with the two
+// AGENT-facing surfaces above and NEVER renamed there) is replaced here with
+// `ackedAt`, ONLY on this operator-facing type. `tenant_messages.read_at`'s
+// ONLY writer is the tenant agent's explicit `ackMessage` tool
+// (ackMessage below) — a null does NOT mean the agent never saw the message,
+// only that it has not acked it; this endpoint lists every message
+// REGARDLESS of ack state. The old `readAt` name told the operator "the
+// agent read this" when the true claim was narrower and misled the operator
+// for a full day during a live incident.
+export type OperatorTenantMessage = Omit<TenantMessage, "actionHint" | "readAt"> & {
+  actionHint: object | null;
+  expiresAt: number | null;
+  ackedAt: number | null;
+};
 
 export type OperatorMessageListResult = {
   messages: OperatorTenantMessage[];
@@ -396,9 +410,14 @@ function clampOperatorMessageLimit(limit: number | undefined): number {
  * an AUDIT view, unlike the two agent-facing surfaces above:
  * listSurfacedTenantMessages caps at 5 and hides read/expired rows;
  * listMessagesPage partitions unread-first for an agent's inbox triage.
- * Here the operator is asking "did the customer's agent ever read this?", so
- * every row is in scope regardless of read/expired state, newest-first only
- * (no unread partition), and `expiresAt` is returned (the agent-facing
+ * Here the operator is asking "has the customer's agent ACKED this?" — NOT
+ * "has it been seen" (Item 6, docs/adversarial/class-sweep-vendor-truth-
+ * 2026-08-18.md addendum): this call itself LISTS every message regardless of
+ * ack state, so a message can be read by this very response without ever
+ * being acked. `ackedAt` (OperatorTenantMessage, above) is set ONLY by the
+ * tenant's explicit `ackMessage` call; null means "not acked", never "not
+ * seen". Every row is in scope regardless of ack/expired state, newest-first
+ * only (no unread partition), and `expiresAt` is returned (the agent-facing
  * shapes omit it — an agent never needs its own expiry). `total` counts the
  * SAME filter the returned page used (tenant_id, plus read_at IS NULL when
  * `unreadOnly`), so it always tells the caller whether `limit` truncated the
@@ -430,7 +449,14 @@ export function listMessagesForOperator(
   const total = ctx.sql.exec<{ n: number }>(`SELECT COUNT(*) as n FROM tenant_messages WHERE ${where}`, ...binds).one().n;
 
   return {
-    messages: rows.map((row) => ({ ...toTenantMessage(row), expiresAt: row.expires_at })),
+    // Item 6 — `readAt` -> `ackedAt`: same underlying column (`read_at`,
+    // ackMessage's ONLY writer), renamed on THIS surface only so the field
+    // name states its true semantics rather than implying "the agent saw
+    // this", which this endpoint cannot know.
+    messages: rows.map((row) => {
+      const { readAt, ...message } = toTenantMessage(row);
+      return { ...message, expiresAt: row.expires_at, ackedAt: readAt };
+    }),
     total,
   };
 }

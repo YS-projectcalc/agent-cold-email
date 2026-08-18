@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { nonTerminal, terminal } from "@coldstart/shared";
-import { domainIntentKey } from "../src/engine/provision-intents.js";
+import { claimBuyDispatch, domainIntentKey, mailboxIntentKey, markMailboxIntent, recordMailboxIntent } from "../src/engine/provision-intents.js";
 import { withRequestIdempotency } from "../src/engine/idempotency.js";
 import { adminApi, api, mintTenant, withTenantContext } from "./helpers.js";
 
@@ -24,6 +24,7 @@ interface ProvisioningStateResponse {
     dnsGaveUpAt: number | null;
     purchasedAt: number;
   }[];
+  domainsTotal: number;
   domainIntents: {
     key: string;
     ordinal: number | null;
@@ -34,11 +35,32 @@ interface ProvisioningStateResponse {
     createdAt: number;
     updatedAt: number;
   }[];
+  domainIntentsTotal: number;
+  mailboxIntents: {
+    key: string;
+    email: string;
+    status: string;
+    provider: string | null;
+    createdAt: number;
+    updatedAt: number;
+  }[];
+  mailboxIntentsTotal: number;
+  buyDispatches: {
+    intentKey: string;
+    email: string;
+    attempts: number;
+    lastDispatchedAt: number;
+    reconstructed: boolean;
+    createdAt: number;
+    updatedAt: number;
+  }[];
+  buyDispatchesTotal: number;
   requestIdempotency: {
     key: string;
     status: string;
     createdAt: number;
   }[];
+  requestIdempotencyTotal: number;
 }
 
 async function seedDomain(
@@ -146,10 +168,16 @@ describe("GET /admin/tenants/:id/provisioning-state", () => {
         terminal({ jobId: "job-apd-setup-a", billing: { provisionedAfter: 2 } }),
       ),
     );
-    // A DIFFERENT intent's key must NOT appear (the prefix filter).
+    // A DIFFERENT intent's key — Item 3a (docs/adversarial/
+    // class-sweep-vendor-truth-2026-08-18.md): the DEFAULT scope is now every
+    // prefix (see the "Item 3a" describe block below), so proving "only the
+    // setup_infrastructure: key" now requires the EXPLICIT `idempotencyPrefix`
+    // param this test is actually about, rather than an implicit default.
     await withTenantContext(tenantId, (ctx) => withRequestIdempotency(ctx, "launch_campaign:unrelated-key", () => terminal({ ok: true })));
 
-    const res = await adminApi<ProvisioningStateResponse>(`/admin/tenants/${tenantId}/provisioning-state`);
+    const res = await adminApi<ProvisioningStateResponse>(
+      `/admin/tenants/${tenantId}/provisioning-state?idempotencyPrefix=${encodeURIComponent("setup_infrastructure:")}`,
+    );
     expect(res.status).toBe(200);
     expect(res.body.tenantId).toBe(tenantId);
 
@@ -199,6 +227,16 @@ describe("GET /admin/tenants/:id/provisioning-state", () => {
   // minted. An empty `requestIdempotency` therefore means "no finished key is
   // frozen here", never "this tenant never called setup_infrastructure"; the
   // in-flight/owing state is read from `domainIntents` + `domains` above.
+  //
+  // CONSCIOUSLY RE-STATED under Item 3a (docs/adversarial/
+  // class-sweep-vendor-truth-2026-08-18.md, D1): the `[]` pin's VALUE is
+  // unchanged by widening the default scope to ALL prefixes below — a
+  // non-terminal outcome writes NO row at all (idempotency.ts's `Settled`
+  // contract deletes the claim synchronously), so there is nothing for any
+  // prefix, wide or narrow, to find. What changed is what "no rows" now
+  // MEANS: before, it could also mean "the default LIKE filter hid a
+  // different-prefixed row"; now the default has no filter, so `[]` here is
+  // unambiguous — this tenant genuinely holds zero request_idempotency rows.
   it("a NON-TERMINAL setup outcome leaves no row — this lists FINISHED keys only", async () => {
     const { tenantId } = await mintTenant("Prov State NonTerminal Co", "managed");
 
@@ -236,5 +274,85 @@ describe("GET /admin/tenants/:id/provisioning-state", () => {
     expect(resB.body.domains).toEqual([]);
     expect(resB.body.domainIntents).toEqual([]);
     expect(resB.body.requestIdempotency).toEqual([]);
+  });
+
+  // Item 3a (docs/adversarial/class-sweep-vendor-truth-2026-08-18.md, D1) —
+  // the OLD default scoped requestIdempotency to `LIKE 'setup_infrastructure:%'`
+  // only, so a tenant that demonstrably provisioned mailboxes reported "no
+  // claims exist" for its per-mailbox `provision:mbx:` claims (live-confirmed
+  // on production, canon Finding 11). The LIKE narrowing is now the EXCEPTION
+  // (an explicit `?idempotencyPrefix=`), never the default.
+  describe("Item 3a — requestIdempotency scope defaults to ALL prefixes", () => {
+    it("with no ?idempotencyPrefix=, returns request_idempotency rows of EVERY prefix, not just setup_infrastructure:", async () => {
+      const { tenantId } = await mintTenant("Prov State AllPrefix Co", "managed");
+      await withTenantContext(tenantId, (ctx) =>
+        withRequestIdempotency(ctx, "provision:mbx:a@allprefix.co", () => terminal({ email: "a@allprefix.co" })),
+      );
+      await withTenantContext(tenantId, (ctx) =>
+        withRequestIdempotency(ctx, "setup_infrastructure:allprefix-key", () => terminal({ jobId: "job-allprefix" })),
+      );
+
+      const res = await adminApi<ProvisioningStateResponse>(`/admin/tenants/${tenantId}/provisioning-state`);
+      expect(res.status).toBe(200);
+      expect(res.body.requestIdempotency.map((r) => r.key).sort()).toEqual([
+        "provision:mbx:a@allprefix.co",
+        "setup_infrastructure:allprefix-key",
+      ]);
+      expect(res.body.requestIdempotencyTotal).toBe(2);
+    });
+
+    it("?idempotencyPrefix= narrows back to one prefix, same as the OLD hardcoded default", async () => {
+      const { tenantId } = await mintTenant("Prov State PrefixParam Co", "managed");
+      await withTenantContext(tenantId, (ctx) =>
+        withRequestIdempotency(ctx, "provision:mbx:a@prefixparam.co", () => terminal({ email: "a@prefixparam.co" })),
+      );
+      await withTenantContext(tenantId, (ctx) =>
+        withRequestIdempotency(ctx, "setup_infrastructure:prefixparam-key", () => terminal({ jobId: "job-prefixparam" })),
+      );
+
+      const res = await adminApi<ProvisioningStateResponse>(
+        `/admin/tenants/${tenantId}/provisioning-state?idempotencyPrefix=${encodeURIComponent("setup_infrastructure:")}`,
+      );
+      expect(res.body.requestIdempotency.map((r) => r.key)).toEqual(["setup_infrastructure:prefixparam-key"]);
+      expect(res.body.requestIdempotencyTotal).toBe(1);
+    });
+  });
+
+  // Item 3a(second half) — the response gains the two tables the incident
+  // needed: mailbox_intents and mailbox_buy_dispatches (provision-intents.ts),
+  // previously invisible to every admin read surface.
+  it("surfaces mailboxIntents + buyDispatches", async () => {
+    const { tenantId } = await mintTenant("Prov State MbxIntents Co", "managed");
+    const email = "a@mbxintents.co";
+    await withTenantContext(tenantId, (ctx) => {
+      const key = mailboxIntentKey(tenantId, email);
+      recordMailboxIntent(ctx, key, email);
+      markMailboxIntent(ctx, key, "bought", "inboxkit");
+      claimBuyDispatch(ctx, key, email);
+    });
+
+    const res = await adminApi<ProvisioningStateResponse>(`/admin/tenants/${tenantId}/provisioning-state`);
+    expect(res.status).toBe(200);
+    expect(res.body.mailboxIntents).toHaveLength(1);
+    expect(res.body.mailboxIntents[0]).toMatchObject({ email, status: "bought", provider: "inboxkit" });
+    expect(res.body.mailboxIntentsTotal).toBe(1);
+    expect(res.body.buyDispatches).toHaveLength(1);
+    expect(res.body.buyDispatches[0]).toMatchObject({ email, attempts: 1 });
+    expect(res.body.buyDispatchesTotal).toBe(1);
+  });
+
+  // Item 3b — every list gets `limit` AND `total`-over-the-same-predicate
+  // TOGETHER (the canon's own warning: limit without total is silent
+  // truncation, the same class one layer down from D1).
+  it("?limit= bounds EVERY list, but each list's *Total still reports the un-truncated count", async () => {
+    const { tenantId } = await mintTenant("Prov State LimitAll Co", "managed");
+    for (let i = 0; i < 3; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      await seedDomain(tenantId, `d${i}.limitall.co`, { purchasedAt: 1000 + i });
+    }
+
+    const res = await adminApi<ProvisioningStateResponse>(`/admin/tenants/${tenantId}/provisioning-state?limit=1`);
+    expect(res.body.domains).toHaveLength(1);
+    expect(res.body.domainsTotal).toBe(3);
   });
 });
