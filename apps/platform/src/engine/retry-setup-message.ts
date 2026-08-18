@@ -19,16 +19,16 @@
  * `err.message`, GUARDRAIL B).
  */
 export function retrySetupMessageBody(domain: string | undefined, step: string | undefined): string {
-  // TRUTHFULNESS (F1 mitigation, docs/adversarial/
+  // TRUTHFULNESS (F1, docs/adversarial/
   // agent-channel-product-audit-2026-08-17.md): the prior wording promised that
   // a same-key retry finishes the setup, which was false for as long as the
-  // recorded outcome replayed. It is true now (engine/idempotency.ts's
-  // incomplete-outcome reclaim) EXCEPT inside the short double-submit window,
-  // so the sentence names that window rather than leaving the agent to
-  // discover it as a silent no-op.
+  // recorded outcome replayed — this exact sentence is what turned the replay
+  // trap into a live customer incident. It is true without qualification now:
+  // an outcome that still owes work is not recorded at all (idempotency.ts's
+  // Settled contract), so the key is reclaimable the moment this message is
+  // written. Any caveat added back here has to be a caveat the CODE enforces.
   const sameKeyIsSafe =
-    "Nothing was lost; retry setup_infrastructure to finish it — reusing the same idempotency key is safe, " +
-    "though a retry within about a minute just returns this same in-progress answer.";
+    "Nothing was lost; retry setup_infrastructure to finish it — reusing the same idempotency key is safe and will re-run the setup.";
   if (!domain) {
     return `Your last setup_infrastructure call has not finished yet. ${sameKeyIsSafe}`;
   }

@@ -12,9 +12,10 @@
 // no clock, no mailer), so the anti-storm guarantee is one tested function
 // rather than a rule copied per substrate.
 
+import type { DeliveryReason, Notified, RecoveryBasis } from "@coldstart/shared";
 import type { Env } from "../env.js";
 import { escapeHtml } from "../html-escape.js";
-import type { OpsMailer } from "../ops-mail/ops-mailer.js";
+import { OpsMailNotConfiguredError, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import {
   DEAD_MAN_ALERT_POLICY,
   DEBOUNCED_ALERT_POLICY,
@@ -26,16 +27,36 @@ import {
 
 /** One health observation. `detail` is the human specifics that ride into the
  * alert body (never just the check name). */
-export interface CheckResult {
-  name: string;
-  healthy: boolean;
-  detail: string;
-}
+/**
+ * One health observation. `detail` is the human specifics that ride into the
+ * alert body (never just the check name).
+ *
+ * A HEALTHY result must state the GROUNDS for its claim (docs/adversarial/
+ * class-sweep-signal-inversion-2026-08-17.md, arm B). Three of these clears
+ * announced a positive fact — "now has working mail DNS", "now has its engine
+ * credentials pushed", "has eligible mailboxes again" — that nothing had
+ * checked: they fired whenever the entity left a FILTERED unhealthy query, and
+ * a domain that was released, a mailbox whose credentials were revoked on
+ * teardown, and a tenant that simply ran out of due sends all leave those
+ * queries exactly like a recovered one does.
+ *
+ * Making `basis` non-optional is the point: it does not compile until each
+ * producer states which it is, and that is precisely the decision the old code
+ * made implicitly. `no_longer_applicable` then makes `recoveryEmail` DISCARD
+ * the producer's prose, so a false cause cannot reach the founder even if
+ * someone writes one.
+ */
+export type CheckResult =
+  | { name: string; healthy: false; detail: string }
+  | { name: string; healthy: true; detail: string; basis: RecoveryBasis };
 
 export interface AlertOutcome {
   name: string;
   action: AlertAction;
   emailSent: boolean;
+  /** Why `emailSent` is what it is — see `Notified` (packages/shared). Lets an
+   * operator surface tell "we chose not to" from "we could not tell you". */
+  why: DeliveryReason;
 }
 
 // --- Check naming + human labels ------------------------------------------
@@ -184,7 +205,10 @@ export function alertEmailFor(
     case "realerted":
       return unhealthyEmail(env, result, transition.next.sinceTs, true);
     case "recovered":
-      return recoveryEmail(env, result, prevSinceTs ?? nowMs, nowMs);
+      // `recovered` is only ever produced from a healthy observation
+      // (watchtower-policy.ts's decideAlert), so the narrowing always holds;
+      // the guard keeps it a type fact rather than a comment.
+      return result.healthy ? recoveryEmail(env, result, prevSinceTs ?? nowMs, nowMs) : null;
     default:
       return null;
   }
@@ -202,29 +226,86 @@ function unhealthyEmail(env: Env, result: CheckResult, sinceTs: number, isReAler
   };
 }
 
-function recoveryEmail(env: Env, result: CheckResult, sinceTs: number, nowMs: number): OutgoingAlert {
+/**
+ * The RECOVERED email. On `no_longer_applicable` the producer's `detail` is
+ * DELIBERATELY DISCARDED and replaced with the only thing that is actually
+ * known: the entity left this check's scope. That is the enforcement half of
+ * arm B — a fixer can still write an over-confident sentence at a clear site,
+ * and it will never reach the founder, because the renderer refuses to repeat
+ * a claim the result did not earn.
+ */
+function recoveryEmail(
+  env: Env,
+  result: Extract<CheckResult, { healthy: true }>,
+  sinceTs: number,
+  nowMs: number,
+): OutgoingAlert {
   const label = labelFor(result.name);
   const durationLine = `Was unhealthy for ~${Math.round((nowMs - sinceTs) / 60000)} min.`;
-  const text = `Check "${label}" (${result.name}) has RECOVERED.\n\n${result.detail}\n${durationLine}\n\nThis is an automated coldrig watchtower alert.`;
+  const headline = result.basis === "reobserved" ? "has RECOVERED" : "is NO LONGER TRACKED";
+  const body =
+    result.basis === "reobserved"
+      ? result.detail
+      : `${result.name} left this check's scope — the entity is no longer in the population this check watches. ` +
+        `This is NOT evidence that the condition was fixed; nothing re-verified it.`;
+  const text = `Check "${label}" (${result.name}) ${headline}.\n\n${body}\n${durationLine}\n\nThis is an automated coldrig watchtower alert.`;
   return {
     to: env.OPS_ALERT_EMAIL,
-    subject: `[coldrig] ${label}: RECOVERED`,
+    subject: `[coldrig] ${label}: ${result.basis === "reobserved" ? "RECOVERED" : "NO LONGER TRACKED"}`,
     text,
-    html: `<p>Check <strong>${escapeHtml(label)}</strong> (<code>${escapeHtml(result.name)}</code>) has <strong>RECOVERED</strong>.</p><p>${escapeHtml(result.detail)}</p><p>${escapeHtml(durationLine)}</p><p>This is an automated coldrig watchtower alert.</p>`,
+    html: `<p>Check <strong>${escapeHtml(label)}</strong> (<code>${escapeHtml(result.name)}</code>) ${escapeHtml(headline)}.</p><p>${escapeHtml(body)}</p><p>${escapeHtml(durationLine)}</p><p>This is an automated coldrig watchtower alert.</p>`,
   };
 }
 
 /**
- * Send, never throw. A dark channel (OpsMailNotConfiguredError) or a send
- * failure is logged; the caller STILL advances its state, so the sweep does not
- * retry-storm and an unsendable alert can never take down the sweep.
+ * Send, never throw — and report WHICH of the three outcomes happened, because
+ * the caller's alert state is only allowed to advance on one of them
+ * (docs/adversarial/class-sweep-cached-terminal-2026-08-17.md member 5).
+ *
+ * The boolean this used to return was discarded at every call site, so a dark
+ * channel and a delivered email were recorded identically: `last_alert_ts` —
+ * documented in migrations/0008_watchtower.sql as "last time an alert was
+ * actually SENT" — was stamped either way, the backoff engaged, and on recovery
+ * the founder got a RECOVERED email for an incident nobody had ever announced.
+ * An unsendable alert still must not take down the sweep, so this still never
+ * throws; what changes is that the caller can tell.
  */
-export async function trySend(mailer: OpsMailer, alert: OutgoingAlert): Promise<boolean> {
+export async function trySend(mailer: OpsMailer, alert: OutgoingAlert): Promise<Notified> {
   try {
     await mailer.send(alert);
-    return true;
+    return { delivered: true, why: "sent" };
   } catch (err) {
     console.error(`watchtower: failed to send "${alert.subject}"`, err);
-    return false;
+    return {
+      delivered: false,
+      why: err instanceof OpsMailNotConfiguredError ? "dark_channel" : "send_failed",
+    };
   }
+}
+
+/**
+ * What an event-driven caller (`reportCheck`) may claim about its own alert.
+ *
+ * `reportCheck` returns `AlertOutcome | null` and every caller threw it away,
+ * so code paths that compose "the operator has been notified" for a CUSTOMER
+ * were asserting delivery they had no evidence of: the alert may have been
+ * withheld pending a confirming observation, suppressed inside the 6h cooldown,
+ * sent into a dark channel, or lost to a `reportCheck` that swallowed a throw
+ * (`null`). This is the one translation from that outcome to a claim.
+ */
+export function notifiedFromOutcome(outcome: AlertOutcome | null): Notified {
+  // null = reportCheck caught and logged; nothing reached the state machine.
+  if (!outcome) return { delivered: false, why: "send_failed" };
+  return { delivered: outcome.emailSent, why: outcome.why };
+}
+
+/**
+ * Why no email was owed for a transition that composed none. Kept beside
+ * `AlertAction` semantics rather than inlined so "we chose not to tell you"
+ * cannot quietly stand in for "there was nothing to tell".
+ */
+export function reasonForNoEmail(action: AlertAction): DeliveryReason {
+  if (action === "pending") return "pending_debounce";
+  if (action === "suppressed") return "suppressed_cooldown";
+  return "nothing_owed";
 }

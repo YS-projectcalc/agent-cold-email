@@ -17,6 +17,7 @@
 // before returning it, so the one check named for a D1 outage was structurally
 // incapable of reporting one.
 
+import type { Notified } from "@coldstart/shared";
 import { listAllTenantIds } from "./db.js";
 import type { Env } from "../env.js";
 import type { TenantOpsSummary } from "../engine/ops-summary.js";
@@ -24,6 +25,7 @@ import type { OpsMailer } from "../ops-mail/ops-mailer.js";
 import {
   alertEmailFor,
   policyFor,
+  reasonForNoEmail,
   trySend,
   CRED_PUSH_AGING_CHECK,
   D1_CHECK,
@@ -35,7 +37,7 @@ import {
   type AlertOutcome,
   type CheckResult,
 } from "./watchtower-alerts.js";
-import { decideAlert, type AlertState } from "./watchtower-policy.js";
+import { decideAlert, withheldAlertState, type AlertState } from "./watchtower-policy.js";
 import { FAILURE_SIGNAL_WINDOW_MS, gradeFailureSignals } from "./watchtower-grading.js";
 import { reconcileD1Alert, recordWatchtowerCompleted } from "./watchtower-infra.js";
 
@@ -97,7 +99,7 @@ export async function evaluateHealthChecks(env: Env, nowMs: number): Promise<Che
   let d1Healthy = true;
   try {
     await env.DB.prepare("SELECT 1").first();
-    results.push({ name: D1_CHECK, healthy: true, detail: "D1 SELECT 1 ok" });
+    results.push({ name: D1_CHECK, healthy: true, detail: "D1 SELECT 1 ok", basis: "reobserved" });
   } catch (err) {
     d1Healthy = false;
     results.push({ name: D1_CHECK, healthy: false, detail: `D1 unreachable: ${errMsg(err)}` });
@@ -114,7 +116,7 @@ export async function evaluateHealthChecks(env: Env, nowMs: number): Promise<Che
       });
       results.push(
         res.ok
-          ? { name: "engine", healthy: true, detail: `engine /health -> ${res.status}` }
+          ? { name: "engine", healthy: true, detail: `engine /health -> ${res.status}`, basis: "reobserved" }
           : { name: "engine", healthy: false, detail: `engine /health -> HTTP ${res.status}` },
       );
     } catch (err) {
@@ -154,7 +156,7 @@ async function probeDurableObjectStorage(env: Env): Promise<CheckResult> {
       detail: `TenantDO canary probe failed — the class holding every tenant's state does not construct or read: ${errMsg(err)}`,
     };
   }
-  return { name: "do_storage", healthy: true, detail: "DO storage probe ok (RateLimiterDO + TenantDO canary)" };
+  return { name: "do_storage", healthy: true, detail: "DO storage probe ok (RateLimiterDO + TenantDO canary)", basis: "reobserved" };
 }
 
 /**
@@ -196,7 +198,9 @@ async function scanTenants(env: Env, nowMs: number): Promise<CheckResult[]> {
       complaints += s.failureSignalsInWindow.complaints;
       results.push(...sendPipelineChecks(tenantId, s, reported));
       if (reported.has(wedgedName)) {
-        results.push({ name: wedgedName, healthy: true, detail: `Tenant ${tenantId} (${s.brand}) is answering again.` });
+        // reobserved: this line is inside the try where the opsSummary RPC
+        // actually returned, so the positive claim was just proven.
+        results.push({ name: wedgedName, healthy: true, detail: `Tenant ${tenantId} (${s.brand}) is answering again.`, basis: "reobserved" });
       }
     } catch (err) {
       results.push({
@@ -216,12 +220,15 @@ async function scanTenants(env: Env, nowMs: number): Promise<CheckResult[]> {
   const grade = gradeFailureSignals(failed, complaints);
   if (grade !== null) {
     const windowMin = Math.round(FAILURE_SIGNAL_WINDOW_MS / 60000);
+    const failureDetail = grade
+      ? `no failed sends or complaints in the last ${windowMin} min`
+      : `${failed} terminal-failed send(s) + ${complaints} complaint(s) in the last ${windowMin} min, across all tenants`;
     results.push({
       name: "failure_signals",
-      healthy: grade,
-      detail: grade
-        ? `no failed sends or complaints in the last ${windowMin} min`
-        : `${failed} terminal-failed send(s) + ${complaints} complaint(s) in the last ${windowMin} min, across all tenants`,
+      // reobserved: the healthy claim is a freshly counted window, not an
+      // entity dropping out of a filter.
+      ...(grade ? { healthy: true as const, basis: "reobserved" as const } : { healthy: false as const }),
+      detail: failureDetail,
     });
   }
 
@@ -245,7 +252,7 @@ export function sendPipelineChecks(
   reported: ReadonlySet<string>,
 ): CheckResult[] {
   const results: CheckResult[] = [];
-  const { activated, agingPendingDomains, agingPendingPushes, dueNonDemoPendingSends, eligibleMailboxes, provisionedDomains } =
+  const { activated, agingPendingDomains, agingPendingPushes, credentialPushes, dueNonDemoPendingSends, eligibleMailboxes, provisionedDomains } =
     summary.sendPipeline;
 
   // Vendor-verdict class fix, guard C — the escalation edge un-ready domains
@@ -278,14 +285,12 @@ export function sendPipelineChecks(
   // only for domains THIS tenant holds, so one tenant's sweep never clears
   // another's.
   //
-  // A domain can leave that set two ways, and they are not the same news (F10,
-  // docs/adversarial/agent-channel-product-audit-2026-08-17.md): its DNS came
-  // up, OR it stopped being an active provisioned domain (released, burning,
-  // retired) with its DNS still dead. The clear used to assert the first
-  // unconditionally, so a domain we gave up on and released could file "now has
-  // working mail DNS" about itself — a false all-clear on the one signal that
-  // exists to say a paid resource is dead. Re-read the columns instead of
-  // inferring from absence.
+  // A domain can leave that set two ways and they are not the same news
+  // (signal-inversion arm B; audit F10): its DNS came up, OR it stopped being
+  // an active provisioned domain — released, burning, retired — with its DNS
+  // still dead. Re-read the columns rather than inferring from absence, and
+  // state which one this is, so `recoveryEmail` renders a merely-departed
+  // entity as departed no matter what prose anyone writes here.
   const stalledNow = new Set(stalledDomains.map((d) => d.domain));
   for (const name of reported) {
     if (!name.startsWith(DOMAIN_DNS_AGING_CHECK)) continue;
@@ -294,15 +299,21 @@ export function sendPipelineChecks(
     const owned = provisionedDomains.find((d) => d.domain === domain);
     if (!owned) continue; // another tenant's domain
     const dnsWorks = owned.dnsStatus === "ready" && owned.status === "active";
-    results.push({
-      name,
-      healthy: true,
-      detail: dnsWorks
-        ? `Domain ${domain} (tenant ${tenantId}) now has working mail DNS.`
-        : `Domain ${domain} (tenant ${tenantId}) is no longer an active provisioned domain awaiting DNS ` +
-          `(status=${owned.status}, dns=${owned.dnsStatus}), so this alert no longer applies. Clearing it does NOT ` +
-          `mean its mail DNS came up.`,
-    });
+    results.push(
+      dnsWorks
+        ? {
+            name,
+            healthy: true,
+            basis: "reobserved",
+            detail: `Domain ${domain} (tenant ${tenantId}) now has working mail DNS.`,
+          }
+        : {
+            name,
+            healthy: true,
+            basis: "no_longer_applicable",
+            detail: `Domain ${domain} (tenant ${tenantId}) is status=${owned.status}, dns=${owned.dnsStatus}.`,
+          },
+    );
   }
 
   const aging = activated ? agingPendingPushes : [];
@@ -318,13 +329,36 @@ export function sendPipelineChecks(
   }
   // Clear any aging alert for a mailbox that is no longer aging — but only for
   // ones actually raised before, so this never files rows for healthy mailboxes.
+  //
+  // EXACT SIBLING of the domain clear above, and it was missed by the audit
+  // that found that one (signal-inversion arm B). `agingPendingPushes` requires
+  // status='pending', and lifecycle.ts writes 'revoked' on suspend/teardown —
+  // so tearing a tenant down while a push was aging used to send the founder
+  // "now has its engine credentials pushed" for a mailbox that never received
+  // any. The ownership guard is `mailboxProvenance`, which has no released_at
+  // filter, so a released mailbox passes it. Re-read the push row instead.
   const agingNow = new Set(aging.map((p) => p.email));
   for (const name of reported) {
     if (!name.startsWith(CRED_PUSH_AGING_CHECK)) continue;
     const email = name.slice(CRED_PUSH_AGING_CHECK.length);
     if (agingNow.has(email)) continue;
     if (!summary.mailboxProvenance.some((m) => m.email === email)) continue; // another tenant's mailbox
-    results.push({ name, healthy: true, detail: `Mailbox ${email} (tenant ${tenantId}) now has its engine credentials pushed.` });
+    const push = credentialPushes.find((p) => p.email === email);
+    results.push(
+      push?.status === "pushed"
+        ? {
+            name,
+            healthy: true,
+            basis: "reobserved",
+            detail: `Mailbox ${email} (tenant ${tenantId}) now has its engine credentials pushed.`,
+          }
+        : {
+            name,
+            healthy: true,
+            basis: "no_longer_applicable",
+            detail: `Mailbox ${email} (tenant ${tenantId}) credential push is status=${push?.status ?? "absent"}.`,
+          },
+    );
   }
 
   const starved = activated && dueNonDemoPendingSends > 0 && eligibleMailboxes === 0;
@@ -339,7 +373,25 @@ export function sendPipelineChecks(
         `deliverability loop, or waiting on a credential push. Read opsSummary.mailboxProvenance for which.`,
     });
   } else if (reported.has(starvedName)) {
-    results.push({ name: starvedName, healthy: true, detail: `Tenant ${tenantId} (${summary.brand}) has eligible mailboxes again.` });
+    // `starved` also goes false when the DUE side drops to zero — the tick
+    // marked the sends failed, the campaign paused, the leads ran out, the
+    // tenant de-activated — in every one of which the mailbox count is still
+    // zero. Only the mailbox half is evidence that capacity came back.
+    results.push(
+      eligibleMailboxes > 0
+        ? {
+            name: starvedName,
+            healthy: true,
+            basis: "reobserved",
+            detail: `Tenant ${tenantId} (${summary.brand}) has ${eligibleMailboxes} eligible mailbox(es) again.`,
+          }
+        : {
+            name: starvedName,
+            healthy: true,
+            basis: "no_longer_applicable",
+            detail: `Tenant ${tenantId} (${summary.brand}) still has ZERO eligible mailboxes; it simply has no due sends right now.`,
+          },
+    );
   }
 
   return results;
@@ -354,8 +406,17 @@ export function sendPipelineChecks(
  * this function is the D1 read/apply half.
  *
  * Every send is wrapped: an OpsMailNotConfiguredError / dark-domain send
- * failure is logged and the state is STILL advanced (so a dark channel does
- * not retry-storm and does not take down the sweep).
+ * failure is logged and never throws, so an unsendable alert cannot take down
+ * the sweep. What it does NOT do any more is advance the announcement counters
+ * regardless of the outcome — see `withheldAlertState`.
+ *
+ * PER-CHECK ISOLATION (docs/adversarial/class-sweep-hol-blocking-2026-08-17.md).
+ * The loop body touches D1 twice and either can throw; before this, the FIRST
+ * check whose upsert failed aborted alerting for every check after it in the
+ * array — head-of-line blocking on the one code path whose job is to tell a
+ * human that something is broken, and the checks are ordered, so the same
+ * unlucky check would shadow the same tail on every tick. One check's failure
+ * is now its own `unreportable` outcome and nothing more.
  *
  * The per-check policy comes from `policyFor` — one table, so the checks that
  * must NOT be debounced (`reportCheck`'s one-shot event reports below, and
@@ -372,12 +433,29 @@ export async function reconcileAlerts(
   const outcomes: AlertOutcome[] = [];
 
   for (const result of results) {
-    const prev = stateByName.get(result.name) ?? null;
-    const transition = decideAlert(prev, result.healthy, nowMs, policyFor(result.name));
-    const email = alertEmailFor(env, result, transition, prev?.sinceTs ?? null, nowMs);
-    const emailSent = email ? await trySend(mailer, email) : false;
-    await upsertWatchtowerState(env, { name: result.name, state: transition.next, detail: result.detail, nowMs });
-    outcomes.push({ name: result.name, action: transition.action, emailSent });
+    try {
+      const prev = stateByName.get(result.name) ?? null;
+      const transition = decideAlert(prev, result.healthy, nowMs, policyFor(result.name));
+      const email = alertEmailFor(env, result, transition, prev?.sinceTs ?? null, nowMs);
+      // `null` = no email was OWED (suppressed / pending / steady-healthy).
+      // That is not a delivery, and it is not a failure either — it must not
+      // withhold the transition, and it must not be recorded as "sent". The
+      // two used to be one boolean, which is the same conflation member 5 is
+      // about, one level down.
+      const notified: Notified | null = email ? await trySend(mailer, email) : null;
+      const withheld = notified !== null && !notified.delivered;
+      const state = withheld ? withheldAlertState(prev, transition) : transition.next;
+      await upsertWatchtowerState(env, { name: result.name, state, detail: result.detail, nowMs });
+      outcomes.push({
+        name: result.name,
+        action: transition.action,
+        emailSent: notified?.delivered ?? false,
+        why: notified?.why ?? reasonForNoEmail(transition.action),
+      });
+    } catch (err) {
+      console.error(`watchtower: check "${result.name}" could not be reconciled — it is UNREPORTED this tick`, err);
+      outcomes.push({ name: result.name, action: "unreportable", emailSent: false, why: "send_failed" });
+    }
   }
 
   return outcomes;

@@ -26,6 +26,7 @@ import type {
 // schema (`DemoRunInput.parse({})`), not just the inferred type.
 import { DemoRunInput } from "@coldstart/shared";
 import { isPaidPlan, RateLimitError, RequestInProgressError, TenantIsolationError, type Clock } from "@coldstart/shared";
+import { terminal } from "@coldstart/shared";
 import { DelegatingClock, RealClock, requireVirtualClock, VirtualClock } from "./clock.js";
 import { migrateTenantClockToReal } from "./engine/clock-migration.js";
 import { reconcileLegacyDomainIntentKeys } from "./engine/legacy-domain-intent-keys.js";
@@ -45,7 +46,8 @@ import {
 import { runDemo, type DemoRunSummary } from "./engine/demo.js";
 import { cancelTenant, terminateTenant, type CancelResult, type TerminateResult } from "./engine/lifecycle.js";
 import { getInfrastructureStatus } from "./engine/infrastructure-status.js";
-import { isSetupProvisioningIncomplete, runSetupInfrastructure } from "./engine/provisioning.js";
+import { runSetupInfrastructure } from "./engine/provisioning.js";
+import { settleSetupInfrastructure } from "./engine/setup-terminality.js";
 import { runProvisioningReconcile } from "./engine/provisioning-reconcile.js";
 import { launchCampaign, listCampaigns, pauseAllCampaigns, pauseCampaign, type CampaignListItem } from "./engine/campaigns.js";
 import { runTick } from "./engine/tick.js";
@@ -736,14 +738,16 @@ export class TenantDO extends DurableObject<Env> {
       // gating the resume path": intents written under the OLD key were
       // orphaned, not un-consulted (ticket sup_3ca260e4; the rebind is
       // engine/legacy-domain-intent-keys.ts).
-      () => runSetupInfrastructure(ctx, input, undefined, idempotencyKey),
-      // F1 (docs/adversarial/agent-channel-product-audit-2026-08-17.md) — this
-      // saga can RETURN while still owing work (the 202 SUCCESS-PENDING
-      // branch). Without this, that outcome recorded as an ordinary replayable
-      // result and every later same-key call — including the one this
-      // platform's own retry_setup message instructs — replayed a stale 202
-      // and performed nothing, forever.
-      { isIncomplete: isSetupProvisioningIncomplete },
+      // THE ONE CALL SITE WITH NON-TERMINAL RETURNS (docs/adversarial/
+      // class-sweep-cached-terminal-2026-08-17.md members 1-3). This saga can
+      // RETURN while still owing work, and until the wrapper made terminality a
+      // written value, each such outcome froze as the permanent answer to a key
+      // the platform's own retry_setup message tells the agent to reuse.
+      async () => settleSetupInfrastructure(await runSetupInfrastructure(ctx, input, undefined, idempotencyKey)),
+      // Pre-contract rows are 'done' regardless of what they recorded, so the
+      // replay path re-classifies the stored payload for the population already
+      // wedged in production.
+      { recordedIsNonTerminal: (recorded) => !settleSetupInfrastructure(recorded).terminal },
     );
   }
 
@@ -793,7 +797,10 @@ export class TenantDO extends DurableObject<Env> {
     return withRequestIdempotency(
       ctx,
       idempotencyKey ? `launch_campaign:${idempotencyKey}` : undefined,
-      () => launchCampaign(ctx, input),
+      // TERMINAL: launchCampaign is fully synchronous and returns only after the
+      // campaign, its leads and its scheduled_sends rows have landed; a duplicate
+      // submit THROWS with the existing id rather than returning a success shape.
+      async () => terminal(await launchCampaign(ctx, input)),
     );
   }
 
@@ -939,7 +946,9 @@ export class TenantDO extends DurableObject<Env> {
     return withRequestIdempotency(
       ctx,
       idempotencyKey ? `reply:${threadId}:${idempotencyKey}` : undefined,
-      () => replyToThread(ctx, threadId, body, idempotencyKey),
+      // TERMINAL: returns a messageId only after the send is confirmed; the
+      // sent_message_keys short-circuit can only replay a send that provably went out.
+      async () => terminal(await replyToThread(ctx, threadId, body, idempotencyKey)),
     );
   }
 
@@ -1006,7 +1015,9 @@ export class TenantDO extends DurableObject<Env> {
       return await withRequestIdempotency(
         ctx,
         idempotencyKey ? `remove_mailboxes:${idempotencyKey}` : undefined,
-        () => removeMailboxes(ctx, input),
+        // TERMINAL: releaseMailboxes THROWS on any vendor release failure, so a
+        // non-throwing return means every selected mailbox was actually released.
+        async () => terminal(await removeMailboxes(ctx, input)),
       );
     } finally {
       this.releaseInFlight = false;

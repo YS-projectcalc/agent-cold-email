@@ -23,7 +23,7 @@
  *    every counter about a new state.
  */
 
-import { isPaidPlan, NotActivatedError, VendorError, type MailboxReadiness } from "@coldstart/shared";
+import { isPaidPlan, NotActivatedError, NOT_NOTIFIED, terminal, VendorError, type MailboxReadiness } from "@coldstart/shared";
 import type { OpsMailer } from "../ops-mail/ops-mailer.js";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
@@ -148,8 +148,13 @@ export async function provisionMailboxesForDomain(
     // wait AND startWarmup — so a REPLAY re-runs none of it. What the claim
     // cannot do is survive a THROW (it is deleted, by design, so failures are
     // never cached); that half is the intent row's job.
-    const provisioned = await withRequestIdempotency(ctx, `provision:${intentKey}`, () =>
-      runMailboxProvisioningUnit(ctx, { email, localPart, domain: opts.domain, intentKey, mailer: opts.mailer }),
+    // TERMINAL: every uncertain branch of acquireMailbox THROWS, and this unit
+    // returns only past awaitMailboxReady — the vendor-verdict fix is what made
+    // control flow a sound terminality proxy here (the cached-terminal sweep's
+    // in-repo template). The claim is also invalidated on teardown
+    // (provision-intents.ts), so a re-provision cannot inherit a stale one.
+    const provisioned = await withRequestIdempotency(ctx, `provision:${intentKey}`, async () =>
+      terminal(await runMailboxProvisioningUnit(ctx, { email, localPart, domain: opts.domain, intentKey, mailer: opts.mailer })),
     );
     mailboxEmails.push(provisioned.email);
 
@@ -273,13 +278,16 @@ async function acquireMailbox(
   // re-buy (it is not absent — something exists and was paid for). A hard,
   // alerted stop, so the address gets replaced by a hand rather than spun on.
   if (verdict.kind === "terminal") {
-    await alertMailboxRebuyFailed(
+    // The customer error one line down CITES this result rather than assuming
+    // it: a cooldown-suppressed or dark alert means nobody was told, and the
+    // agent has to hear that instead of "the operator has been notified".
+    const notified = await alertMailboxRebuyFailed(
       ctx,
       opts.email,
       `the provider holds this address and reports it as no longer usable (${verdict.state}) — no re-buy authorized, this address needs a hand`,
       opts.mailer,
     );
-    throw terminalMailboxError(ctx, opts.email, verdict.state);
+    throw terminalMailboxError(ctx, opts.email, verdict.state, notified);
   }
 
   if (verdict.kind === "unconfirmed") {
@@ -296,13 +304,13 @@ async function acquireMailbox(
 
   // The provider confirms the recorded purchase(s) produced nothing.
   if (dispatch.attempts >= MAX_BUY_DISPATCHES) {
-    await alertMailboxRebuyFailed(
+    const notified = await alertMailboxRebuyFailed(
       ctx,
       opts.email,
       `${dispatch.attempts} purchases are on record and the provider confirms none of them exist — the one automatic re-buy is spent, so this address is abandoned and needs a hand`,
       opts.mailer,
     );
-    throw abandonedPurchaseError(ctx, opts.email);
+    throw abandonedPurchaseError(ctx, opts.email, notified);
   }
 
   await alertMailboxStuck(
@@ -350,7 +358,10 @@ async function dispatchBuy(
   if (attempt > MAX_BUY_DISPATCHES) {
     // Only two provisions racing the same address reach this: the claim, not the
     // budget check above it, is the arbiter, so the loser stops before spending.
-    throw abandonedPurchaseError(ctx, opts.email);
+    // NOT_NOTIFIED because THIS path told nobody — whether the winning caller
+    // alerted is not knowable from here, and guessing that it did is the exact
+    // false claim this argument exists to prevent.
+    throw abandonedPurchaseError(ctx, opts.email, NOT_NOTIFIED);
   }
 
   let bought;

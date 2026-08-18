@@ -36,8 +36,13 @@ export type AdminScreeningDecisionInput = z.infer<typeof AdminScreeningDecisionI
 // ENUM, not free text, so an operator call can never write a kind the
 // agent-facing surface (infrastructure_status/list_messages) doesn't already
 // understand; extend the enum when a second operator kind is actually
-// needed. `severity` mirrors tenant-messages.ts's documented convention
-// (info | action_required). `body` is bounded well past the longest real
+// needed. `severity` is DELIBERATELY the two rungs an operator can honestly
+// assert, not the full TenantMessageSeverity union: 'terminal' means the
+// PLATFORM's own state machine has stopped and no retry will ever move it, a
+// claim only the code path that stopped is in a position to make. A human
+// writing prose about a stuck account is making a different statement, and
+// letting the operator route mint 'terminal' would put the one rung an agent
+// is told never to retry behind a free-text surface. `body` is bounded well past the longest real
 // message body in this codebase today, generous headroom for an operator's
 // own prose, still far short of unbounded. Delivers regardless of the
 // tenant's lifecycle state (gate fix, msgchannel-inc23-gate-2026-08-06 F2) —

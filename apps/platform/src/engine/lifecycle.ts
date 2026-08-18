@@ -364,6 +364,25 @@ export async function teardownTenant(
     ts: now,
   };
 
+  // 4. INVALIDATE EVERY RECORDED RESPONSE. N4 established the rule for the
+  //    per-mailbox namespace (provision-intents.ts's markMailboxIntentsReleased:
+  //    "the claim is a statement about a resource; when the resource is
+  //    destroyed the statement has to go with it") and it was applied to
+  //    exactly one of the five key namespaces. The other four survived teardown
+  //    for the full 30-day TTL, so a cancel-then-resubscribe inside that window
+  //    replays pre-teardown answers: `setup_infrastructure:<key>` hands back the
+  //    old `{jobId, billing}` — a projection of infrastructure that no longer
+  //    exists — WITHOUT running the saga, so the returning customer is told
+  //    their setup succeeded and gets nothing. Agents reuse deterministic keys
+  //    ("apd-setup-a-2mbx"), which is what makes the collision ordinary rather
+  //    than exotic.
+  //
+  //    Table-wide because the DO is single-tenant: every row in it is a
+  //    statement about resources this teardown just destroyed. Nothing in
+  //    flight can be dropped here — teardown is not itself wrapped, so no
+  //    caller is holding a 'pending' claim it would then fail to record.
+  ctx.sql.exec(`DELETE FROM request_idempotency`);
+
   ctx.sql.exec(
     `INSERT INTO teardown_records
        (tenant_id, reason, effective, domains_released, mailboxes_released, campaigns_stopped, annual_domain_liability_cents, ts)

@@ -274,7 +274,12 @@ async function seedUnmigratedPaidTenant(
       `INSERT INTO request_idempotency (key, status, created_at) VALUES ('setup:wedged', 'pending', ?)`,
       frozenNow - 20 * 60 * 1000,
     );
-    sql.exec(`INSERT INTO request_idempotency (key, status, created_at) VALUES ('setup:done', 'done', ?)`, frozenNow - ONE_DAY_MS);
+    // A recorded outcome carries its response — the table's CHECK makes a 'done'
+    // row with no body unrepresentable (schema.ts, cached-terminal member 10).
+    sql.exec(
+      `INSERT INTO request_idempotency (key, status, response_json, created_at) VALUES ('setup:done', 'done', '{"jobId":"job_x"}', ?)`,
+      frozenNow - ONE_DAY_MS,
+    );
 
     return { tenantId, frozenNow };
   });

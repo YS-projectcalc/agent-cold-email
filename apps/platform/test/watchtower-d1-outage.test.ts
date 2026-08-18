@@ -44,14 +44,14 @@ describe("BLOCKING-1 — a D1 outage reaches the founder", () => {
     const broken = envWithDeadDb();
     // The debounce state for this check also lives outside D1 — the first
     // observation has to be counted somewhere the outage cannot reach.
-    expect((await runWatchtower(broken, mailer, T0))[0]).toEqual({ name: "d1", action: "pending", emailSent: false });
+    expect((await runWatchtower(broken, mailer, T0))[0]).toEqual({ name: "d1", action: "pending", emailSent: false, why: "pending_debounce" });
 
     const outcomes = await runWatchtower(broken, mailer, T0 + SWEEP);
 
     expect(mailer.sent.map((m) => m.subject)).toEqual(["[coldrig] D1 database: UNHEALTHY"]);
     expect(mailer.sent[0]!.to).toBe(env.OPS_ALERT_EMAIL);
     expect(mailer.sent[0]!.text).toContain("D1 unreachable: D1_ERROR: Network connection lost.");
-    expect(outcomes[0]).toEqual({ name: "d1", action: "alerted", emailSent: true });
+    expect(outcomes[0]).toEqual({ name: "d1", action: "alerted", emailSent: true, why: "sent" });
   });
 
   it("does NOT storm: 24 sweeps across 2h of sustained outage send exactly one email", async () => {

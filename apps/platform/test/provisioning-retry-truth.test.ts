@@ -15,7 +15,7 @@
 // came up (504h) with a NULL `dns_first_checked_at` (the column predates the
 // row), ordinal 1's DNS ready.
 
-import { runInDurableObject } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type {
   DomainConnectionType,
@@ -30,9 +30,11 @@ import type {
   PurchasedDomain,
   ReleaseResult,
 } from "@coldstart/shared";
-import { VendorError } from "@coldstart/shared";
+import { VendorError, type SetupInfrastructureInput } from "@coldstart/shared";
 import { withRequestIdempotency } from "../src/engine/idempotency.js";
-import { isSetupProvisioningIncomplete, runSetupInfrastructure } from "../src/engine/provisioning.js";
+import { runSetupInfrastructure } from "../src/engine/provisioning.js";
+import { periodKey } from "../src/engine/spend-ceiling.js";
+import { settleSetupInfrastructure } from "../src/engine/setup-terminality.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
 import { activatePaidPlan, mintTenant, tenantStub, withTenantContext } from "./helpers.js";
 
@@ -214,18 +216,36 @@ function readMessages(tenantId: string): Promise<MsgRow[]> {
   );
 }
 
-async function driveRetry(tenantId: string, log: Log, d0Verdict: "not_yet" | "ready"): Promise<unknown> {
+async function driveRetry(
+  tenantId: string,
+  log: Log,
+  d0Verdict: "not_yet" | "ready",
+  input: SetupInfrastructureInput = setupInput,
+  // 'real' engages engine/spend-ceiling.ts's money choke-point; a minted tenant
+  // is otherwise a sandbox bundle and never reserves anything.
+  bundleKind: "sandbox" | "real" = "sandbox",
+): Promise<unknown> {
   const p = ports(log, { d0Verdict });
   return withTenantContext(tenantId, (base) => {
-    const ctx = { ...base, adapters: { ...base.adapters, domain: p.domain, mailbox: p.mailbox } };
+    const ctx = { ...base, adapters: { ...base.adapters, kind: bundleKind, domain: p.domain, mailbox: p.mailbox } };
     // EXACT production composition — tenant-do.ts's setupInfrastructure.
     return withRequestIdempotency(
       ctx,
       `setup_infrastructure:${KEY}`,
-      () => runSetupInfrastructure(ctx, setupInput, new SandboxOpsMailer(), KEY),
-      { isIncomplete: isSetupProvisioningIncomplete },
+      async () => settleSetupInfrastructure(await runSetupInfrastructure(ctx, input, new SandboxOpsMailer(), KEY)),
+      { recordedIsNonTerminal: (recorded) => !settleSetupInfrastructure(recorded).terminal },
     ).catch((e: unknown) => e);
   });
+}
+
+/** Sets the account-wide monthly ceiling for the period this test runs in. */
+async function setCeilingCents(cents: number): Promise<void> {
+  await env.DB.prepare(
+    `INSERT OR REPLACE INTO vendor_spend_ledger (period_key, reserved_cents, committed_cents, ceiling_cents, updated_at)
+     VALUES (?, 0, 0, ?, ?)`,
+  )
+    .bind(periodKey(Date.now()), cents, Date.now())
+    .run();
 }
 
 describe("F1 — a recorded 202 SUCCESS-PENDING outcome must not replay forever", () => {
@@ -245,7 +265,7 @@ describe("F1 — a recorded 202 SUCCESS-PENDING outcome must not replay forever"
     expect(log.setDns.length + log.mailboxBuys.length).toBeGreaterThan(0);
   }, 60_000);
 
-  it("a same-key retry WITHIN the short replay window still replays the recorded 202 (double-submit protection)", async () => {
+  it("a same-key retry re-runs the saga even seconds after the recorded 202 — a non-terminal outcome has no replay window", async () => {
     const { tenantId } = await mintTenant("APD Replay", "managed");
     await activatePaidPlan(tenantId, "managed");
     await seedLiveState(tenantId, {
@@ -257,10 +277,40 @@ describe("F1 — a recorded 202 SUCCESS-PENDING outcome must not replay forever"
     const log = newLog();
     const outcome = await driveRetry(tenantId, log, "not_yet");
 
-    expect(outcome).toEqual(RECORDED_PENDING_RESPONSE);
+    expect(outcome).not.toEqual(RECORDED_PENDING_RESPONSE);
+    expect(log.setDns.length).toBeGreaterThan(0);
+  }, 60_000);
+
+  // cached-terminal member 2 — the most reachable member of the class, and it
+  // needs no vendor failure: mcp/tools.ts instructs the quote-then-commit flow
+  // and both calls carry the same Idempotency-Key header.
+  it("a quoteOnly preview does not consume the idempotency key", async () => {
+    const { tenantId } = await mintTenant("APD Quote", "managed");
+    await activatePaidPlan(tenantId, "managed");
+
+    const quote = await driveRetry(tenantId, newLog(), "ready", { ...setupInput, quoteOnly: true });
+    expect(quote).toMatchObject({ quoteOnly: true });
+
+    // The commit, with the SAME key. It must provision, not hand back the quote.
+    const log = newLog();
+    const commit = await driveRetry(tenantId, log, "ready");
+    expect(commit).not.toMatchObject({ quoteOnly: true });
+    expect(log.buys.length).toBeGreaterThan(0);
+    expect(log.mailboxBuys.length).toBeGreaterThan(0);
+  }, 60_000);
+
+  it("a terminal outcome still replays without re-running the saga", async () => {
+    const { tenantId } = await mintTenant("APD Terminal", "managed");
+    await activatePaidPlan(tenantId, "managed");
+
+    const first = await driveRetry(tenantId, newLog(), "ready");
+    const log = newLog();
+    const replay = await driveRetry(tenantId, log, "ready");
+
+    expect(replay).toEqual(first);
+    expect(log.buys).toEqual([]);
     expect(log.setDns).toEqual([]);
     expect(log.mailboxBuys).toEqual([]);
-    expect(log.buys).toEqual([]);
   }, 60_000);
 
   // The reason the wrapper exists: two racing same-key calls must not both run
@@ -293,6 +343,45 @@ describe("F1 — a recorded 202 SUCCESS-PENDING outcome must not replay forever"
     expect(rejected[0]!.reason).toMatchObject({ message: expect.stringMatching(/in progress/i) });
     // Exactly ONE saga ran: one domain, not two.
     expect((await readDomains(tenantId)).length).toBe(1);
+  }, 60_000);
+});
+
+// cached-terminal member 3. The graceful back-pressure return was the class's
+// worst payload: it handed back `{jobId, billing}` — the FULL-SUCCESS shape,
+// with no discriminator at all — so the recorded response was indistinguishable
+// from a completed provision. spend-ceiling.ts's own docblock asserted the
+// opposite ("a retry after the founder raises the ceiling re-runs cleanly"):
+// true of the inner per-mailbox wrapper it was written about, false of the
+// outer setup_infrastructure one, which caught the throw and returned.
+describe("cached-terminal member 3 — a capacity-gated setup must not freeze as a success", () => {
+  it("says so in the response, and a same-key retry after the ceiling is raised PROVISIONS", async () => {
+    const { tenantId } = await mintTenant("APD Capacity", "managed");
+    await activatePaidPlan(tenantId, "managed");
+    await env.DB.prepare("DELETE FROM vendor_spend_entries").run();
+    await env.DB.prepare("DELETE FROM vendor_spend_ledger").run();
+
+    // A ceiling of zero rejects the very first reservation of the saga.
+    await setCeilingCents(0);
+    const held = await driveRetry(tenantId, newLog(), "ready", { ...setupInput, domains: 1 }, "real");
+    // Legible to the agent: back-pressure no longer wears a completed
+    // provision's clothes.
+    expect(held).toMatchObject({ provisioning: "capacity_pending" });
+
+    // Nothing was recorded against the key, so the retry the 409/marker invites
+    // is not answered from the frozen artifact.
+    const rows = await runInDurableObject(tenantStub(tenantId), (_i, s) =>
+      s.storage.sql.exec<{ key: string }>(`SELECT key FROM request_idempotency WHERE key LIKE 'setup%'`).toArray(),
+    );
+    expect(rows).toEqual([]);
+
+    // The founder raises it. THE CLAIM UNDER TEST: the retry does the work.
+    await setCeilingCents(500_000);
+    const log = newLog();
+    const after = await driveRetry(tenantId, log, "ready", { ...setupInput, domains: 1 }, "real");
+
+    expect(after).not.toMatchObject({ provisioning: "capacity_pending" });
+    expect(log.buys.length).toBeGreaterThan(0);
+    expect(log.mailboxBuys.length).toBeGreaterThan(0);
   }, 60_000);
 });
 
@@ -331,7 +420,7 @@ describe("Q4 — the 6h bound must cover the NULL-anchor (pre-deploy) population
 });
 
 describe("F3 — the terminal give-up must reach the agent durably", () => {
-  it("ARM C: an anchor already 504h old throws non-retryably AND leaves an action_required message naming contact_operator", async () => {
+  it("ARM C: an anchor already 504h old throws non-retryably AND leaves a TERMINALLY-graded message naming contact_operator", async () => {
     const { tenantId } = await mintTenant("APD ArmC", "managed");
     await activatePaidPlan(tenantId, "managed");
     await seedLiveState(tenantId, {
@@ -347,7 +436,12 @@ describe("F3 — the terminal give-up must reach the agent durably", () => {
     const messages = await readMessages(tenantId);
     const failed = messages.find((m) => m.kind === "setup_failed");
     expect(failed, `no setup_failed message; got ${JSON.stringify(messages)}`).toBeDefined();
-    expect(failed!.severity).toBe("action_required");
+    // 'terminal', not 'action_required' (docs/adversarial/
+    // class-sweep-signal-inversion-2026-08-17.md guard A2). Emitting the
+    // message was only half the fix: with two rungs, the outcome that means
+    // "we have stopped, retrying will never work" graded identically to the
+    // retryable one, so an agent branching on severity kept retrying anyway.
+    expect(failed!.severity).toBe("terminal");
     expect(failed!.body).toContain("contact_operator");
     expect(JSON.parse(failed!.action_hint!)).toMatchObject({ tool: "contact_operator" });
     // GUARDRAIL B — the body is composed prose, never the vendor error string.

@@ -39,6 +39,7 @@ function summaryWith(overrides: Partial<TenantOpsSummary["sendPipeline"]>, mailb
       agingPendingPushes: [],
       agingPendingDomains: [],
       provisionedDomains: [],
+      credentialPushes: [],
       ...overrides,
     },
     mailboxProvenance: mailboxEmails.map((email) => ({
@@ -69,14 +70,14 @@ describe("§1c alert — aging credential push", () => {
     // 1. First sweep: the condition is recorded, nothing is sent yet (founder
     //    ruling 2026-08-16 — one observation is a flap until a second agrees).
     let outcomes = await reconcileAlerts(env, mailer, sendPipelineChecks("ten_x", aging, await readReportedCheckNames(env)), T0);
-    expect(outcomes).toEqual([{ name: check, action: "pending", emailSent: false }]);
+    expect(outcomes).toEqual([{ name: check, action: "pending", emailSent: false, why: "pending_debounce" }]);
     expect(mailer.sent).toEqual([]);
 
     // 2. Second consecutive sweep: alert, naming the mailbox and what a human
     //    must do.
     const confirmedAt = T0 + 300_000;
     outcomes = await reconcileAlerts(env, mailer, sendPipelineChecks("ten_x", aging, await readReportedCheckNames(env)), confirmedAt);
-    expect(outcomes).toEqual([{ name: check, action: "alerted", emailSent: true }]);
+    expect(outcomes).toEqual([{ name: check, action: "alerted", emailSent: true, why: "sent" }]);
     expect(mailer.sent[0]!.subject).toBe(`[coldrig] Mailbox credentials ${email}: UNHEALTHY`);
     expect(mailer.sent[0]!.text).toContain("45 min");
     expect(mailer.sent[0]!.text).toContain("GMAIL_OAUTH_GRANTS");
@@ -89,7 +90,7 @@ describe("§1c alert — aging credential push", () => {
       sendPipelineChecks("ten_x", aging, await readReportedCheckNames(env)),
       confirmedAt + 300_000,
     );
-    expect(outcomes).toEqual([{ name: check, action: "suppressed", emailSent: false }]);
+    expect(outcomes).toEqual([{ name: check, action: "suppressed", emailSent: false, why: "suppressed_cooldown" }]);
     expect(mailer.sent).toHaveLength(1);
 
     // 4. Past the cooldown: re-alert.
@@ -99,17 +100,18 @@ describe("§1c alert — aging credential push", () => {
       sendPipelineChecks("ten_x", aging, await readReportedCheckNames(env)),
       confirmedAt + WATCHTOWER_COOLDOWN_MS + 1,
     );
-    expect(outcomes).toEqual([{ name: check, action: "realerted", emailSent: true }]);
+    expect(outcomes).toEqual([{ name: check, action: "realerted", emailSent: true, why: "sent" }]);
 
-    // 5. The grant lands — the push clears, and the founder is told it recovered.
-    const cleared = summaryWith({ agingPendingPushes: [] }, [email]);
+    // 5. The grant lands — the push row itself now reads 'pushed', so the clear
+    //    is a RE-OBSERVATION and the founder is told it recovered.
+    const cleared = summaryWith({ agingPendingPushes: [], credentialPushes: [{ email, status: "pushed" }] }, [email]);
     outcomes = await reconcileAlerts(
       env,
       mailer,
       sendPipelineChecks("ten_x", cleared, await readReportedCheckNames(env)),
       confirmedAt + WATCHTOWER_COOLDOWN_MS + 2,
     );
-    expect(outcomes).toEqual([{ name: check, action: "recovered", emailSent: true }]);
+    expect(outcomes).toEqual([{ name: check, action: "recovered", emailSent: true, why: "sent" }]);
     expect(mailer.sent.at(-1)!.subject).toContain("RECOVERED");
     expect((await stateOf(check))?.status).toBe("healthy");
   });
@@ -142,7 +144,7 @@ describe("§1c alert — send-starved tenant", () => {
     const starved = summaryWith({ dueNonDemoPendingSends: 7, eligibleMailboxes: 0 });
 
     let outcomes = await reconcileAlerts(env, mailer, sendPipelineChecks("ten_starved", starved, await readReportedCheckNames(env)), T0);
-    expect(outcomes).toEqual([{ name: check, action: "pending", emailSent: false }]);
+    expect(outcomes).toEqual([{ name: check, action: "pending", emailSent: false, why: "pending_debounce" }]);
 
     outcomes = await reconcileAlerts(
       env,
@@ -150,7 +152,7 @@ describe("§1c alert — send-starved tenant", () => {
       sendPipelineChecks("ten_starved", starved, await readReportedCheckNames(env)),
       T0 + 300_000,
     );
-    expect(outcomes).toEqual([{ name: check, action: "alerted", emailSent: true }]);
+    expect(outcomes).toEqual([{ name: check, action: "alerted", emailSent: true, why: "sent" }]);
     expect(mailer.sent[0]!.text).toContain("7 send(s) due and ZERO eligible mailboxes");
     expect(mailer.sent[0]!.text).toContain("mailboxProvenance");
 
@@ -160,7 +162,7 @@ describe("§1c alert — send-starved tenant", () => {
       sendPipelineChecks("ten_starved", starved, await readReportedCheckNames(env)),
       T0 + 600_000,
     );
-    expect(outcomes).toEqual([{ name: check, action: "suppressed", emailSent: false }]);
+    expect(outcomes).toEqual([{ name: check, action: "suppressed", emailSent: false, why: "suppressed_cooldown" }]);
 
     const recovered = summaryWith({ dueNonDemoPendingSends: 7, eligibleMailboxes: 2 });
     outcomes = await reconcileAlerts(
@@ -169,7 +171,7 @@ describe("§1c alert — send-starved tenant", () => {
       sendPipelineChecks("ten_starved", recovered, await readReportedCheckNames(env)),
       T0 + 900_000,
     );
-    expect(outcomes).toEqual([{ name: check, action: "recovered", emailSent: true }]);
+    expect(outcomes).toEqual([{ name: check, action: "recovered", emailSent: true, why: "sent" }]);
   });
 
   it("does NOT fire when a tenant simply has nothing due", async () => {
@@ -272,16 +274,23 @@ describe("§1c alert — aging domain clear must not claim DNS came up", () => {
   const domain = "dead.example.com";
   const check = domainDnsAgingCheckName(domain);
 
+  /**
+   * Reports the stall on TWO consecutive sweeps, which is what the per-entity
+   * debounce requires before an alert is actually announced. One sweep leaves
+   * the episode 'pending' with alertCount 0, and a clear on top of that is a
+   * plain 'healthy' transition that sends no email at all — so a test that
+   * asserts on the RECOVERED/NO-LONGER-TRACKED email has to get past the
+   * debounce first or it is asserting on an empty outbox.
+   */
   async function reportStalled(): Promise<void> {
-    const checks = sendPipelineChecks(
-      "ten_x",
-      summaryWith({
-        agingPendingDomains: [{ domain, pendingForMs: 504 * 3_600_000, gaveUp: true }],
-        provisionedDomains: [{ domain, dnsStatus: "pending", status: "active" }],
-      }),
-      await readReportedCheckNames(env),
-    );
-    await reconcileAlerts(env, new SandboxOpsMailer(), checks, T0);
+    const stalled = summaryWith({
+      agingPendingDomains: [{ domain, pendingForMs: 504 * 3_600_000, gaveUp: true }],
+      provisionedDomains: [{ domain, dnsStatus: "pending", status: "active" }],
+    });
+    const mailer = new SandboxOpsMailer();
+    for (const at of [T0, T0 + 300_000]) {
+      await reconcileAlerts(env, mailer, sendPipelineChecks("ten_x", stalled, await readReportedCheckNames(env)), at);
+    }
   }
 
   it("says 'now has working mail DNS' only when the domain is active AND ready", async () => {
@@ -291,7 +300,9 @@ describe("§1c alert — aging domain clear must not claim DNS came up", () => {
       summaryWith({ provisionedDomains: [{ domain, dnsStatus: "ready", status: "active" }] }),
       await readReportedCheckNames(env),
     );
-    expect(checks).toEqual([{ name: check, healthy: true, detail: expect.stringContaining("now has working mail DNS") }]);
+    expect(checks).toEqual([
+      { name: check, healthy: true, basis: "reobserved", detail: expect.stringContaining("now has working mail DNS") },
+    ]);
   });
 
   it("a RELEASED domain clears its alert without claiming its mail DNS came up", async () => {
@@ -302,10 +313,16 @@ describe("§1c alert — aging domain clear must not claim DNS came up", () => {
       await readReportedCheckNames(env),
     );
     expect(checks.length).toBe(1);
-    expect(checks[0]!.healthy).toBe(true);
+    expect(checks[0]).toMatchObject({ healthy: true, basis: "no_longer_applicable" });
     expect(checks[0]!.detail).not.toContain("now has working mail DNS");
-    expect(checks[0]!.detail).toContain("does NOT");
     expect(checks[0]!.detail).toContain("status=released");
+    // The ENFORCEMENT is in the renderer: whatever a producer writes here, the
+    // founder's email must not read as "the condition was fixed".
+    const mailer = new SandboxOpsMailer();
+    await reconcileAlerts(env, mailer, checks, T0 + 600_000);
+    expect(mailer.sent.at(-1)!.subject).toContain("NO LONGER TRACKED");
+    expect(mailer.sent.at(-1)!.text).toContain("NOT evidence that the condition was fixed");
+    expect(mailer.sent.at(-1)!.text).not.toContain("RECOVERED");
   });
 
   it("a domain whose row went 'burning' with ready DNS still does not claim the alert's condition resolved", async () => {

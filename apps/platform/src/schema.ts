@@ -147,7 +147,24 @@ CREATE TABLE IF NOT EXISTS domains (
   -- re-driven). Previously setDns ran BEFORE the INSERT, so the vendor's ~32s
   -- async registration racing our immediate nameservers call threw and stranded
   -- a domain we had already paid for.
-  dns_status TEXT NOT NULL DEFAULT 'ready',
+  --
+  -- The DEFAULT is the UN-READY value (docs/adversarial/
+  -- class-sweep-cached-terminal-2026-08-17.md UNCERTAIN-1, settled). It used to
+  -- be 'ready': a completion claim, handed to any INSERT that omitted the
+  -- column — which byo-intake.ts's did, so every BYO row landed "mail DNS is
+  -- working" while its byo_status was still 'pending_scan'/'pending_dns'. That
+  -- is unreachable today only by coincidence (every dns_status reader either
+  -- filters source='provisioned' or resolves through a committed domain intent,
+  -- and candidate generation excludes names this tenant already holds), which is
+  -- exactly the "accidental invariant" shape: nothing pins it, and the next
+  -- unfiltered reader inherits a lie. Both writers now state the column
+  -- explicitly and the default fails un-ready.
+  --
+  -- NB tenant-do.ts's addColumnIfMissing backfill deliberately keeps 'ready'.
+  -- Its default applies to rows that PREDATE the column, which were live and
+  -- working; flipping it there would re-open DNS on every such domain and file
+  -- an aging alert for each. Different question, different safe answer.
+  dns_status TEXT NOT NULL DEFAULT 'pending',
   -- INCIDENT 2026-08-05 root cause — WHICH DNS operation applies to this domain
   -- ('purchased' = the vendor registered it and owns its nameservers;
   -- 'connected' = registered elsewhere and pointed at the vendor). The vendor
@@ -478,9 +495,24 @@ CREATE TABLE IF NOT EXISTS soft_bounces (
 -- retryable, so an intent that awaits vendor I/O can't be run twice. Rows are
 -- evicted at write time once older than the TTL (engine/idempotency.ts) so the
 -- table can't grow unbounded per tenant.
+-- The DEFAULT is the SAFE value, not the terminal one (docs/adversarial/
+-- class-sweep-cached-terminal-2026-08-17.md member 10). It used to be 'done':
+-- the replay table's completion column defaulted to "this key is finished", so
+-- any INSERT that omitted the status column short-circuited its key on the spot. No
+-- writer omits it today — all three set it explicitly — which is exactly what
+-- makes it the class's most dangerous shape: an invariant held by coincidence,
+-- with nothing pinning it, one careless INSERT away from a silent replay.
+-- The CHECK makes a done row with a NULL response unrepresentable in the same move.
+--
+-- NB: this reaches DOs created from here on. CREATE TABLE IF NOT EXISTS does
+-- not alter an existing table, and SQLite cannot ALTER-ADD a CHECK, so a live
+-- DO keeps the unconstrained table until something rebuilds it. Deliberate:
+-- the state is unreachable from every current writer, and idempotency.ts's
+-- reclaim branch now repairs a done-with-NULL-response row in place rather
+-- than deadlocking on it, so a rebuild would be risk without a live payoff.
 CREATE TABLE IF NOT EXISTS request_idempotency (
   key TEXT PRIMARY KEY,
-  status TEXT NOT NULL DEFAULT 'done',
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status <> 'done' OR response_json IS NOT NULL),
   response_json TEXT,
   created_at INTEGER NOT NULL
 );

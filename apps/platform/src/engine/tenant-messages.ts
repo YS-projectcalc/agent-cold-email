@@ -21,17 +21,25 @@ import type { TenantContext } from "../tenant-context.js";
  * undefined-by-convention: the type promised nothing, the comment that stood
  * here claimed "both real emit points use 'action_required'" while
  * provisioning.ts's SUCCESS-PENDING emit already used 'info', and four public
- * tool descriptions tell agents to read this field. The union is now the
- * contract, and it matches admin/schemas.ts's `z.enum(["info",
- * "action_required"])` on the operator route.
+ * tool descriptions tell agents to read this field.
  *
- * 'action_required' means the account will not progress until someone acts;
- * 'info' means the condition resolves on its own. NOT DB-enforced — the
- * `tenant_messages` CHECK would have to be added by table rebuild inside every
- * live DO, and the writes all funnel through this module's two emit helpers,
- * so the type is the enforcement point.
+ * THREE RUNGS, and the third one is load-bearing (docs/adversarial/
+ * class-sweep-signal-inversion-2026-08-17.md guard A2):
+ *
+ * - 'info' — the condition resolves on its own; nothing is required.
+ * - 'action_required' — the account will not progress until someone acts, and
+ *   acting works.
+ * - 'terminal' — the platform has STOPPED. Retrying will never help; the only
+ *   way forward is a human. Emitting the terminal give-up (F3) without this
+ *   rung re-opened the same defect one layer up: the message existed, and an
+ *   agent branching on `severity` read a dead paid domain identically to a
+ *   transient vendor hiccup, so it retried forever exactly as before.
+ *
+ * NOT DB-enforced — the `tenant_messages` CHECK would have to be added by table
+ * rebuild inside every live DO, and the writes all funnel through this module's
+ * two emit helpers, so the type is the enforcement point.
  */
-export type TenantMessageSeverity = "info" | "action_required";
+export type TenantMessageSeverity = "info" | "action_required" | "terminal";
 
 export interface TenantMessage {
   id: string;
@@ -187,12 +195,19 @@ interface TenantMessageRow {
 /**
  * Reads a stored severity back into the union. Anything unrecognised resolves
  * to 'action_required' rather than 'info': the emit helpers can only ever write
- * the two union members, so this is reachable only by a hand-written row, and
- * an over-reported action item costs an agent one look while an under-reported
- * one is precisely the silent-stall class this channel exists to prevent.
+ * a union member, so this is reachable only by a hand-written row or by a row
+ * written before a rung existed, and an over-reported action item costs an
+ * agent one look while an under-reported one is precisely the silent-stall
+ * class this channel exists to prevent.
+ *
+ * Note the unknown case does NOT resolve to 'terminal' either: claiming the
+ * platform has permanently stopped, on the strength of a value we do not
+ * recognise, would be its own false terminal.
  */
 function toSeverity(raw: string): TenantMessageSeverity {
-  return raw === "info" ? "info" : "action_required";
+  if (raw === "info") return "info";
+  if (raw === "terminal") return "terminal";
+  return "action_required";
 }
 
 function toTenantMessage(row: TenantMessageRow): TenantMessage {

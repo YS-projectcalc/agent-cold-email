@@ -33,6 +33,32 @@ describe("registerByoDomain", () => {
     expect(record.abuseVerdict).toBe("clear");
   });
 
+  // docs/adversarial/class-sweep-cached-terminal-2026-08-17.md UNCERTAIN-1,
+  // settled. This INSERT omitted `dns_status`, and the column's DEFAULT was
+  // 'ready' — a completion claim about mail DNS nobody had checked, written on
+  // every BYO row at intake while its byo_status was still pending. It is
+  // unreachable today only by coincidence: every dns_status reader either
+  // filters source='provisioned' or resolves through a committed domain intent.
+  // That coincidence is the whole hazard, so it is pinned here rather than left
+  // in an OUT column.
+  it("does NOT record mail DNS as ready — the column is stated, not defaulted", async () => {
+    const tenantId = await tenant("Byo Dns Status Co", "dnsstatus@example.com");
+    await withTenantContext(tenantId, (ctx) =>
+      registerByoDomain(ctx, { domain: "byo-dns-status.com", domainRelationship: "fresh_standalone" }),
+    );
+    const row = await withTenantContext(tenantId, (ctx) =>
+      ctx.sql
+        .exec<{ dns_status: string; byo_status: string }>(
+          `SELECT dns_status, byo_status FROM domains WHERE tenant_id = ? AND domain = ?`,
+          ctx.tenantId,
+          "byo-dns-status.com",
+        )
+        .one(),
+    );
+    expect(row.byo_status).toBe("pending_dns");
+    expect(row.dns_status).not.toBe("ready");
+  });
+
   it("registers a primary domain as records_to_apply/pending_consent, primary breaker tier, lowercased+trimmed", async () => {
     const tenantId = await tenant("Primary Register Co", "primary@example.com");
     const record = await withTenantContext(tenantId, (ctx) =>

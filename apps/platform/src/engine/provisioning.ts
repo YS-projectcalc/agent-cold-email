@@ -375,25 +375,44 @@ export async function provisionDomainWithMailboxes(
   return { domainId, domain: purchased.domain, mailboxEmails };
 }
 
+/**
+ * `provisioning` NAMES A STATE THAT STILL OWES WORK, and it exists for no other
+ * reason (docs/adversarial/class-sweep-cached-terminal-2026-08-17.md member 3).
+ * A completed provision omits it; every value it can take means "returned, not
+ * finished". That is what lets `isSetupProvisioningIncomplete` below test for
+ * the field's PRESENCE rather than enumerate values — a future non-terminal
+ * outcome is covered the moment it is added to this union, which is the
+ * opposite of the hardcoded-allowlist failure the sweeps keep finding. A future
+ * TERMINAL outcome must therefore not be spelled here.
+ *
+ * `capacity_pending` was the class's worst payload precisely because it was
+ * absent: the back-pressure return handed back the FULL-SUCCESS shape
+ * `{jobId, billing}` with no discriminator at all, so neither the customer nor
+ * the replay layer could tell a held provision from a completed one.
+ */
 export type SetupInfrastructureRunResult =
-  | { jobId: string; billing: MailboxBilling; provisioning?: "pending"; pendingDomain?: string }
+  | { jobId: string; billing: MailboxBilling; provisioning?: "pending" | "capacity_pending"; pendingDomain?: string }
   | { quoteOnly: true; billing: MailboxBilling };
 
 /**
  * Does a RECORDED `runSetupInfrastructure` outcome still owe work?
  *
- * Handed to `withRequestIdempotency` by the one production call site
- * (tenant-do.ts's setupInfrastructure) so a 202 SUCCESS-PENDING result stops
- * replaying once a double-submit window has passed — see that wrapper's
- * "INCOMPLETE-outcome reclaim" doc for why replaying it forever was F1.
+ * Used by engine/setup-terminality.ts to classify this saga's outcome for the
+ * request-replay layer — see that file and `withRequestIdempotency`'s class doc
+ * for why recording an unfinished outcome as replayable was F1.
  *
- * It lives HERE, next to the branch that produces the shape, on purpose: a
+ * It lives HERE, next to the branches that produce the shapes, on purpose: a
  * predicate parked at the call site would silently go stale the day this saga
- * grows a second "accepted, not finished" return. Total by construction — it is
- * handed a `JSON.parse` of a row that may predate the current result type.
+ * grows another "accepted, not finished" return. Total by construction — it is
+ * also handed a `JSON.parse` of a row that may predate the current result type.
  */
 export function isSetupProvisioningIncomplete(result: SetupInfrastructureRunResult): boolean {
-  return typeof result === "object" && result !== null && "provisioning" in result && result.provisioning === "pending";
+  return (
+    typeof result === "object" &&
+    result !== null &&
+    "provisioning" in result &&
+    result.provisioning !== undefined
+  );
 }
 
 /**
@@ -641,7 +660,16 @@ export async function runSetupInfrastructure(
       // partially-failed batch bills only what came up, floored at 5). The
       // billing projection reflects REALITY (what landed), not the ask.
       await syncMailboxQuantity(ctx);
-      return { jobId: newId("job"), billing: buildMailboxBilling(ctx, liveProvisioned()) };
+      // `provisioning: "capacity_pending"` is what makes this outcome legible —
+      // to the agent AND to the replay layer (cached-terminal member 3). Without
+      // it this returned the same `{jobId, billing}` a completed provision does,
+      // so the recorded response was frozen as an ordinary success: the founder
+      // raised the ceiling, the agent retried with its key, and the stale
+      // success replayed while nothing provisioned. spend-ceiling.ts's own
+      // docblock asserted the opposite ("a retry after the founder raises the
+      // ceiling re-runs cleanly") — true for the inner per-mailbox wrapper it
+      // was written about, false for this outer one, which caught the throw.
+      return { jobId: newId("job"), billing: buildMailboxBilling(ctx, liveProvisioned()), provisioning: "capacity_pending" };
     }
     if (err instanceof RegistrarUnarmedError) {
       await alertRegistrarUnarmed(ctx, input.primaryDomain, err, mailer);
@@ -670,7 +698,16 @@ export async function runSetupInfrastructure(
         severity: "info",
         body: retrySetupMessageBody(inFlightDomain, step),
         actionHint: { tool: "setup_infrastructure", idempotencyKey: setupKey ?? null },
-        dedupKey: inFlightDomain ?? `tenant:${ctx.tenantId}`,
+        // OUTCOME-SCOPED, not just domain-scoped (docs/adversarial/
+        // class-sweep-dedup-semantics-2026-08-17.md IN-6). Both retry_setup
+        // emits used to key on the bare domain, so this INFORMATIONAL note
+        // overwrote an unread 'action_required' one IN PLACE — same row, same
+        // kind, severity silently downgraded, body replaced. An agent polling
+        // messages[] then read "nothing needed" where an action item had
+        // stood. Two different outcomes are two different conditions and get
+        // two different rows; each still refreshes its own on re-trigger, so
+        // the no-spam guarantee is unchanged.
+        dedupKey: `pending:${inFlightDomain ?? `tenant:${ctx.tenantId}`}`,
       });
       return {
         jobId: newId("job"),
@@ -700,7 +737,10 @@ export async function runSetupInfrastructure(
         severity: "action_required",
         body: retrySetupMessageBody(inFlightDomain, step),
         actionHint: { tool: "setup_infrastructure", idempotencyKey: setupKey ?? null },
-        dedupKey: inFlightDomain ?? `tenant:${ctx.tenantId}`,
+        // See the sibling emit above: the outcome is part of the row's
+        // identity, so an informational propagation note can never overwrite
+        // this action item in place.
+        dedupKey: `retry:${inFlightDomain ?? `tenant:${ctx.tenantId}`}`,
       });
     } else if (err instanceof VendorError) {
       // F3 (docs/adversarial/agent-channel-product-audit-2026-08-17.md) — the
@@ -722,10 +762,14 @@ export async function runSetupInfrastructure(
       const { step } = customerSafeVendorFailure(err);
       emitTenantMessage(ctx, {
         kind: "setup_failed",
-        severity: "action_required",
+        // 'terminal', not 'action_required' (signal-inversion guard A2). The
+        // emit alone was not the fix: with only two rungs, the one message
+        // that means "we have stopped, retrying will never work" was
+        // byte-indistinguishable to a branching agent from "retry and it will".
+        severity: "terminal",
         body: setupFailedMessageBody(inFlightDomain, step),
         actionHint: { tool: "contact_operator" },
-        dedupKey: inFlightDomain ?? `tenant:${ctx.tenantId}`,
+        dedupKey: `failed:${inFlightDomain ?? `tenant:${ctx.tenantId}`}`,
       });
     }
     throw err;

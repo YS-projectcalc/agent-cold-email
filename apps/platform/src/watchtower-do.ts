@@ -134,7 +134,9 @@ export class WatchtowerDO extends DurableObject<Env> {
     const stale = ageMs >= SWEEP_STALE_MS;
     const result: CheckResult = {
       name: CRON_SWEEP_CHECK,
-      healthy: !stale,
+      // reobserved: `stale` is derived from the heartbeat just read out of
+      // storage, so the healthy claim is a current measurement.
+      ...(stale ? { healthy: false as const } : { healthy: true as const, basis: "reobserved" as const }),
       detail: stale
         ? `No ops sweep has completed for ~${Math.round(ageMs / 60000)} min (last: ${new Date(heartbeat).toISOString()}). ` +
           `The 5-minute Cron Trigger appears to have stopped, so EVERY other watchtower alert is silent too — ` +

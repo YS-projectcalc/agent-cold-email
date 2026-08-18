@@ -132,6 +132,9 @@ describe("BLOCKING-3 — the DO probe covers the class that holds tenant state",
     expect(results.find((r) => r.name === "do_storage")).toEqual({
       name: "do_storage",
       healthy: true,
+      // The probe just ran, so the healthy claim is a current measurement — not
+      // an entity dropping out of a filtered query (watchtower-alerts.ts's basis).
+      basis: "reobserved",
       detail: "DO storage probe ok (RateLimiterDO + TenantDO canary)",
     });
 

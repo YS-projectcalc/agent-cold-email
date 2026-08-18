@@ -65,7 +65,7 @@ describe("collectLegSignals", () => {
   });
 
   it("ignores legs that carry no counters (the watchtower returns an array)", () => {
-    const signals = collectLegSignals({ watchtower: [{ name: "d1", action: "healthy", emailSent: false }] });
+    const signals = collectLegSignals({ watchtower: [{ name: "d1", action: "healthy", emailSent: false, why: "suppressed_cooldown" }] });
     expect(signals).toEqual({ legsThrew: [], counted: 0, detail: "" });
   });
 });
@@ -169,7 +169,14 @@ describe("NB-3 — a warmup cancellation the platform gave up on reaches the fou
     expect(mailer.sent[0]!.text).not.toMatch(/inboxkit/i); // operator alert, but the source tripwire owns this class
   });
 
-  it("throttles a persisting one and recovers when the window clears", async () => {
+  // The clear is NOT sold as a recovery any more (signal-inversion arm B).
+  // `gaveUpWarmupCancels` is a count over the digest window and nothing
+  // re-checks whether those subscriptions were ever cancelled — warmup-cancel.ts
+  // guarantees the platform will never retry them — so the count reaching zero
+  // means the window moved, not that the money stopped. The founder was
+  // previously told "RECOVERED" a day after being told the subscriptions "may
+  // STILL BE BILLING".
+  it("throttles a persisting one, and the window clearing reports NO LONGER TRACKED rather than RECOVERED", async () => {
     const mailer = new SandboxOpsMailer();
     for (let i = 0; i < 12; i++) {
       await reportSweepSignals(env, mailer, { legs: {}, digest: digestWith({ gaveUpWarmupCancels: 2 }) }, T0 + i * 300_000);
@@ -179,8 +186,11 @@ describe("NB-3 — a warmup cancellation the platform gave up on reaches the fou
     await reportSweepSignals(env, mailer, { legs: {}, digest: digestWith({ gaveUpWarmupCancels: 0 }) }, T0 + 12 * 300_000);
     expect(mailer.sent.map((m) => m.subject)).toEqual([
       "[coldrig] Warmup cancellations gave up: UNHEALTHY",
-      "[coldrig] Warmup cancellations gave up: RECOVERED",
+      "[coldrig] Warmup cancellations gave up: NO LONGER TRACKED",
     ]);
+    // And the body must not repeat a fixed-it claim, whatever the producer wrote.
+    expect(mailer.sent[1]!.text).toContain("NOT evidence that the condition was fixed");
+    expect(mailer.sent[1]!.text).not.toContain("No warmup-pool cancellation has been abandoned");
   });
 
   it("reports NOTHING when the digest leg threw — unknown must not read as recovered", async () => {

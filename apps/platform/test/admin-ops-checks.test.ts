@@ -1,3 +1,4 @@
+import type { RecoveryBasis } from "@coldstart/shared";
 import { beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 import { reconcileAlerts } from "../src/admin/watchtower.js";
@@ -30,8 +31,8 @@ const T0 = 1_800_000_000_000;
 function unhealthy(name: string, detail = "down"): CheckResult {
   return { name, healthy: false, detail };
 }
-function healthy(name: string, detail = "ok"): CheckResult {
-  return { name, healthy: true, detail };
+function healthy(name: string, detail = "ok", basis: RecoveryBasis = "reobserved"): CheckResult {
+  return { name, healthy: true, detail, basis };
 }
 
 // watchtower_state persists in D1 and is not rolled back between tests in

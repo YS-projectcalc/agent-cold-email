@@ -107,6 +107,15 @@ export interface SendPipelineSignals {
    * claiming the opposite.
    */
   provisionedDomains: { domain: string; dnsStatus: string; status: string }[];
+  /**
+   * Every credential push row this tenant holds, with its status — the
+   * re-read the aging-push CLEAR needs (signal-inversion arm B, the exact
+   * sibling of provisionedDomains above). `agingPendingPushes` requires
+   * status='pending', and lifecycle.ts writes 'revoked' on suspend/teardown,
+   * so a mailbox whose credentials were revoked leaves that query exactly like
+   * one that finally received them.
+   */
+  credentialPushes: { email: string; status: string }[];
 }
 
 export interface MailboxProvenanceRow {
@@ -414,6 +423,14 @@ function readSendPipelineSignals(ctx: TenantContext): SendPipelineSignals {
       gaveUp: row.dns_gave_up_at !== null,
     }));
 
+  const credentialPushes = ctx.sql
+    .exec<{ email: string; status: string }>(
+      `SELECT email, status FROM mailbox_cred_pushes WHERE tenant_id = ?`,
+      ctx.tenantId,
+    )
+    .toArray()
+    .map((row) => ({ email: row.email, status: row.status }));
+
   const provisionedDomains = ctx.sql
     .exec<{ domain: string; dns_status: string; status: string }>(
       `SELECT domain, dns_status, status FROM domains WHERE tenant_id = ? AND source = 'provisioned'`,
@@ -429,5 +446,6 @@ function readSendPipelineSignals(ctx: TenantContext): SendPipelineSignals {
     agingPendingPushes,
     agingPendingDomains,
     provisionedDomains,
+    credentialPushes,
   };
 }

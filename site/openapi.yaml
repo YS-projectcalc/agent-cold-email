@@ -139,6 +139,16 @@ paths:
             (MailboxBilling) is the SPEC §18 projection for the real
             post-provision mailbox count. A quoteOnly:true request instead
             returns 200 with { quoteOnly: true, billing } and provisions nothing.
+
+
+            A `provisioning` field is present only when the call returned
+            OWING work, and names which state: "pending" (the last domain's
+            DNS registration is still completing — `pendingDomain` names it)
+            or "capacity_pending" (held at a spend/plan-slot limit; an
+            operator has to raise it before a retry can proceed). An outcome
+            carrying `provisioning`, and a quoteOnly preview, are NOT recorded
+            against your Idempotency-Key — retrying with the same key re-runs
+            the call rather than replaying the unfinished answer.
           content:
             application/json:
               schema:
@@ -1505,7 +1515,9 @@ components:
     NotActivated:
       description: >
         A required vendor integration is not yet enabled for this account.
-        Nothing was charged; the operator has been notified.
+        Nothing was charged. This condition has no automatic operator
+        notification behind it, so the response says so and points at
+        contact_operator rather than implying a human is already on it.
       content:
         application/json:
           schema:
@@ -2154,7 +2166,14 @@ components:
       properties:
         id: { type: string }
         kind: { type: string }
-        severity: { type: string, enum: [info, action_required] }
+        severity:
+          type: string
+          enum: [info, action_required, terminal]
+          description: >
+            info = resolves on its own, nothing is required. action_required =
+            nothing progresses until you act, and acting works. terminal = the
+            platform has stopped; retrying will never help and only a human can
+            move it (the message's actionHint names contact_operator).
         body: { type: string }
         actionHint: { type: object, nullable: true }
         source: { type: string, enum: [system, operator] }

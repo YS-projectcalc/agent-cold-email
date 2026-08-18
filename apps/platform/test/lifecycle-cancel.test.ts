@@ -109,6 +109,62 @@ describe("POST /cancel — voluntary cancellation + teardown/reclaim (D5)", () =
     expect(frozenTick.sent).toBe(0);
   });
 
+  // docs/adversarial/class-sweep-cached-terminal-2026-08-17.md UNCERTAIN-2,
+  // settled. N4 established the rule — "the claim is a statement about a
+  // resource; when the resource is destroyed the statement has to go with it" —
+  // and applied it to ONE of the five request-idempotency key namespaces. The
+  // other four survived teardown for the full 30-day TTL.
+  //
+  // The consequence is not merely a stale body: a replay RETURNS BEFORE `fn`
+  // RUNS, so `assertNotLifecycleFrozen` — the guard that exists to stop a
+  // canceled tenant provisioning — never executes. A torn-down account
+  // re-calling setup with the key it used before is handed its old success.
+  it("teardown invalidates the recorded responses, so a canceled tenant cannot replay a pre-teardown success", async () => {
+    const { tenantId, token } = await mintTenant("Replay After Cancel Co", "managed");
+    await activatePaidPlan(tenantId, "managed");
+
+    const spec = JSON.stringify({
+      brand: "Replay After Cancel Co",
+      primaryDomain: "replayaftercancel.com",
+      domains: 1,
+      inboxesEach: 1,
+      persona: "Sender",
+      physicalAddress: "1 St",
+      senderIdentity: "Sender <s@replayaftercancel.com>",
+    });
+    const first = await api<{ jobId: string }>("/setup-infrastructure", {
+      method: "POST",
+      token,
+      headers: { "idempotency-key": "resub-key" },
+      body: spec,
+    });
+    expect(first.status).toBe(202);
+
+    const readKeys = () =>
+      runInDurableObject(tenantStub(tenantId), (_i, s) =>
+        s.storage.sql.exec<{ key: string }>(`SELECT key FROM request_idempotency`).toArray(),
+      );
+    expect((await readKeys()).length).toBeGreaterThan(0);
+
+    const cancel = await api<CancelResponse>("/cancel", { method: "POST", token, body: JSON.stringify({ immediate: true }) });
+    expect(cancel.status).toBe(200);
+    expect(cancel.body.teardown).not.toBeNull();
+
+    // Every recorded response went with the resources it described.
+    expect(await readKeys()).toEqual([]);
+
+    // And the freeze guard actually runs: the same key is refused, not replayed.
+    const replay = await api<{ error?: string; jobId?: string }>("/setup-infrastructure", {
+      method: "POST",
+      token,
+      headers: { "idempotency-key": "resub-key" },
+      body: spec,
+    });
+    expect(replay.status).toBe(400);
+    expect(replay.body.jobId).toBeUndefined();
+    expect(replay.body.error).toMatch(/frozen/i);
+  });
+
   it("immediate cancel releases all infra, stops campaigns, books annual-domain liability, and reflects in account()", async () => {
     const { tenantId, token } = await mintTenant("Cancel Co", "managed");
     await activatePaidPlan(tenantId, "managed");

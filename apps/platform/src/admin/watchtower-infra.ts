@@ -23,7 +23,7 @@
 
 import type { Env } from "../env.js";
 import type { OpsMailer } from "../ops-mail/ops-mailer.js";
-import { alertEmailFor, trySend, type AlertOutcome, type CheckResult } from "./watchtower-alerts.js";
+import { alertEmailFor, reasonForNoEmail, trySend, type AlertOutcome, type CheckResult } from "./watchtower-alerts.js";
 import { SWEEP_STALE_MS } from "./watchtower-grading.js";
 
 /** One instance, platform-wide — this is control state, not per-tenant state. */
@@ -52,11 +52,21 @@ export async function reconcileD1Alert(env: Env, mailer: OpsMailer, result: Chec
   try {
     const decision = await watchtowerStub(env).reconcileD1Alert(result.healthy, nowMs);
     const email = alertEmailFor(env, result, decision.transition, decision.prevSinceTs, nowMs);
-    const emailSent = email ? await trySend(mailer, email) : false;
-    return { name: result.name, action: decision.transition.action, emailSent };
+    const notified = email ? await trySend(mailer, email) : null;
+    return {
+      name: result.name,
+      action: decision.transition.action,
+      emailSent: notified?.delivered ?? false,
+      // Same translation the D1-backed store uses (watchtower.ts's
+      // reconcileAlerts), not a second one: this file exists because the `d1`
+      // check needs a different STORE, and a check reported through two stores
+      // that describe the same non-delivery differently is the reporting
+      // divergence this wave is about.
+      why: notified?.why ?? reasonForNoEmail(decision.transition.action),
+    };
   } catch (err) {
     console.error("watchtower: could not reconcile the D1 check — the WatchtowerDO is unreachable, so this outage is UNREPORTED", err);
-    return { name: result.name, action: "unreportable", emailSent: false };
+    return { name: result.name, action: "unreportable", emailSent: false, why: "send_failed" };
   }
 }
 

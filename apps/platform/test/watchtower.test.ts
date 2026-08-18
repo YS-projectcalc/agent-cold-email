@@ -1,3 +1,4 @@
+import type { RecoveryBasis } from "@coldstart/shared";
 import { beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 import { reconcileAlerts, runWatchtower } from "../src/admin/watchtower.js";
@@ -5,7 +6,7 @@ import type { CheckResult } from "../src/admin/watchtower-alerts.js";
 import { WATCHTOWER_COOLDOWN_MS } from "../src/admin/watchtower-policy.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
 import type { OpsMailer, OpsEmailMessage } from "../src/ops-mail/ops-mailer.js";
-import { signup } from "./helpers.js";
+import { envWithFailingD1Statements, signup } from "./helpers.js";
 
 // D2 monitoring — the alert state machine is the core correctness surface.
 // Every case drives `reconcileAlerts` with SYNTHETIC CheckResult[] + a
@@ -25,8 +26,8 @@ const SWEEP = 300_000; // the live cron cadence
 function unhealthy(name: string, detail = "down"): CheckResult {
   return { name, healthy: false, detail };
 }
-function healthy(name: string, detail = "ok"): CheckResult {
-  return { name, healthy: true, detail };
+function healthy(name: string, detail = "ok", basis: RecoveryBasis = "reobserved"): CheckResult {
+  return { name, healthy: true, detail, basis };
 }
 
 // The watchtower state machine persists in D1 (watchtower_state/cursor), which
@@ -49,11 +50,11 @@ describe("watchtower alert state machine (reconcileAlerts)", () => {
   it("alerts once on a CONFIRMED healthy->unhealthy, with the [coldrig] <check>: UNHEALTHY subject + specifics", async () => {
     const mailer = new SandboxOpsMailer();
     const pending = await reconcileAlerts(env, mailer, [unhealthy("d1", "D1 unreachable: boom")], T0);
-    expect(pending).toEqual([{ name: "d1", action: "pending", emailSent: false }]);
+    expect(pending).toEqual([{ name: "d1", action: "pending", emailSent: false, why: "pending_debounce" }]);
 
     const outcomes = await reconcileAlerts(env, mailer, [unhealthy("d1", "D1 unreachable: boom")], T0 + SWEEP);
 
-    expect(outcomes).toEqual([{ name: "d1", action: "alerted", emailSent: true }]);
+    expect(outcomes).toEqual([{ name: "d1", action: "alerted", emailSent: true, why: "sent" }]);
     expect(mailer.sent).toHaveLength(1);
     expect(mailer.sent[0]!.subject).toBe("[coldrig] D1 database: UNHEALTHY");
     expect(mailer.sent[0]!.to).toBe(env.OPS_ALERT_EMAIL);
@@ -166,9 +167,9 @@ describe("watchtower alert state machine (reconcileAlerts)", () => {
       T0 + 5 * 60_000,
     );
     expect(second).toEqual([
-      { name: "d1", action: "suppressed", emailSent: false },
-      { name: "do_storage", action: "recovered", emailSent: true },
-      { name: "engine", action: "suppressed", emailSent: false },
+      { name: "d1", action: "suppressed", emailSent: false, why: "suppressed_cooldown" },
+      { name: "do_storage", action: "recovered", emailSent: true, why: "sent" },
+      { name: "engine", action: "suppressed", emailSent: false, why: "suppressed_cooldown" },
     ]);
     // Exactly ONE new email — the recovery. No storm from the persisting two.
     expect(mailer.sent).toHaveLength(4);
@@ -183,7 +184,17 @@ describe("watchtower alert state machine (reconcileAlerts)", () => {
     expect((await stateOf("d1"))?.status).toBe("healthy");
   });
 
-  it("a dark/failing OpsMailer never throws and still advances state (graceful degradation)", async () => {
+  // CONTRACT CHANGED DELIBERATELY (docs/adversarial/
+  // class-sweep-cached-terminal-2026-08-17.md member 5). This test used to
+  // assert that a FAILED send still advanced the announcement counters, so the
+  // next sweep suppressed. That is the defect: `last_alert_ts` is documented as
+  // "last time an alert was actually SENT", the founder had been told nothing,
+  // and on recovery they would receive a RECOVERED email for an incident that
+  // was never announced. An undelivered alert is now re-attempted until it
+  // lands. The anti-storm property is preserved in the sense that matters: at
+  // most one send ATTEMPT per check per tick, and no further email once one
+  // is delivered.
+  it("a dark/failing OpsMailer never throws, never claims it announced, and keeps trying until it lands", async () => {
     const throwing: OpsMailer = {
       async send(_msg: OpsEmailMessage) {
         throw new Error("E_SENDER_NOT_VERIFIED (dark)");
@@ -194,11 +205,57 @@ describe("watchtower alert state machine (reconcileAlerts)", () => {
     const out = await reconcileAlerts(env, throwing, [unhealthy("d1")], T0 + SWEEP);
     expect(out[0]!.action).toBe("alerted");
     expect(out[0]!.emailSent).toBe(false);
-    // State advanced despite the send failure -> next sweep suppresses (no
-    // retry-storm) instead of re-attempting every tick.
+    expect(out[0]!.why).toBe("send_failed");
     expect((await stateOf("d1"))?.status).toBe("unhealthy");
+    // Nothing was announced, so nothing is suppressed: the next sweep tries again.
     const next = await reconcileAlerts(env, throwing, [unhealthy("d1")], T0 + SWEEP + 60_000);
-    expect(next[0]!.action).toBe("suppressed");
+    expect(next[0]!.action).toBe("alerted");
+    expect(next[0]!.emailSent).toBe(false);
+    // And when the channel comes back, the founder actually gets the alert.
+    const working = new SandboxOpsMailer();
+    const landed = await reconcileAlerts(env, working, [unhealthy("d1")], T0 + SWEEP + 120_000);
+    expect(landed[0]!).toMatchObject({ action: "alerted", emailSent: true, why: "sent" });
+    expect(working.sent).toHaveLength(1);
+    // NOW it is announced, so the following sweep goes quiet.
+    const quiet = await reconcileAlerts(env, working, [unhealthy("d1")], T0 + SWEEP + 180_000);
+    expect(quiet[0]!.action).toBe("suppressed");
+    expect(working.sent).toHaveLength(1);
+  });
+
+  // docs/adversarial/class-sweep-hol-blocking-2026-08-17.md. The loop body
+  // touches D1 (read the prior state, write the new one) and the write can
+  // throw on a partial D1 degradation — the shape most engine code can actually
+  // observe (helpers.ts's dbFailingStatements). Before per-check isolation, the
+  // FIRST check whose upsert failed rejected the whole call, so every check
+  // ORDERED AFTER IT lost its alert too. The array is ordered, so the same
+  // unlucky check shadowed the same tail on every tick: head-of-line blocking
+  // on the one code path whose job is to tell a human something is broken.
+  it("one check's D1 failure does not silence the checks after it", async () => {
+    // Event-report checks: IMMEDIATE policy, so each alerts on its first
+    // observation. That matters here — a debounced check needs its state
+    // PERSISTED to reach a second observation, and the whole point of this
+    // scenario is that persisting is what fails.
+    const names = ["a@x.com", "b@x.com", "c@x.com"].map((e) => `mailbox_provisioning:${e}`);
+    const broken = envWithFailingD1Statements(/INSERT INTO watchtower_state/);
+    const mailer = new SandboxOpsMailer();
+
+    // Must not reject, and must return one outcome per check.
+    const outcomes = await reconcileAlerts(broken, mailer, names.map((n) => unhealthy(n, `${n} is stuck`)), T0);
+
+    expect(outcomes.map((o) => o.name)).toEqual(names);
+    // Each one's own failure, and nothing more: the state write is what broke,
+    // and every check says so about itself.
+    expect(outcomes.map((o) => o.action)).toEqual(["unreportable", "unreportable", "unreportable"]);
+    // THE CLAIM UNDER TEST — all three founder emails were attempted. Today:
+    // the call rejects after the first, and b@ and c@ are never even composed.
+    expect(mailer.sent).toHaveLength(3);
+    // Each names its own mailbox (subjects carry the human label, not the raw
+    // check name), so this is three distinct alerts and not one repeated.
+    expect(mailer.sent.map((m) => m.subject)).toEqual([
+      "[coldrig] Mailbox provisioning a@x.com: UNHEALTHY",
+      "[coldrig] Mailbox provisioning b@x.com: UNHEALTHY",
+      "[coldrig] Mailbox provisioning c@x.com: UNHEALTHY",
+    ]);
   });
 });
 
