@@ -40,6 +40,16 @@ export interface TeardownSummary {
    * record is retired) but the vendor is never touched for it. */
   domainsReleased: number;
   mailboxesReleased: number;
+  /**
+   * Mailboxes this teardown FAILED to release, which are therefore still live
+   * at the vendor. Before per-item isolation (IN-3) a vendor refusal threw and
+   * the teardown was loud and stuck; it now completes, so without this field
+   * the record asserts a whole reclaim over a partial one and the only trace is
+   * a customer-visible MAILBOX_RELEASE_FAILED activity row. `mailboxesReleased`
+   * is deliberately not adjusted for it — that field counts what was actually
+   * reclaimed, and this one counts what still needs a hand.
+   */
+  mailboxReleaseFailures: number;
   campaignsStopped: number;
   /** Unconsumed remainder of the tenant's annual domain registrations we eat by
    * reclaiming mid-term (integer cents) — 'purchased' domains only; we never
@@ -67,12 +77,13 @@ function readTeardownRecord(ctx: TenantContext): TeardownSummary | null {
       effective: string;
       domains_released: number;
       mailboxes_released: number;
+      mailbox_release_failures: number;
       campaigns_stopped: number;
       annual_domain_liability_cents: number;
       ts: number;
     }>(
-      `SELECT reason, effective, domains_released, mailboxes_released, campaigns_stopped,
-              annual_domain_liability_cents, ts
+      `SELECT reason, effective, domains_released, mailboxes_released, mailbox_release_failures,
+              campaigns_stopped, annual_domain_liability_cents, ts
        FROM teardown_records WHERE tenant_id = ?`,
       ctx.tenantId,
     )
@@ -83,6 +94,7 @@ function readTeardownRecord(ctx: TenantContext): TeardownSummary | null {
     effective: row.effective,
     domainsReleased: row.domains_released,
     mailboxesReleased: row.mailboxes_released,
+    mailboxReleaseFailures: row.mailbox_release_failures,
     campaignsStopped: row.campaigns_stopped,
     annualDomainLiabilityCents: row.annual_domain_liability_cents,
     ts: row.ts,
@@ -434,7 +446,7 @@ export async function teardownTenant(
   //    stops the tick's capacity picker immediately, and the G4 account slot
   //    counter is decremented by the real plan-slot mailboxes released. The
   //    revoke-before-mark crash-safety ordering lives in releaseMailboxes.
-  const { releasedCount: mailboxesReleased } = await releaseMailboxes(ctx, {}, engineClient);
+  const { releasedCount: mailboxesReleased, failedCount: mailboxReleaseFailures } = await releaseMailboxes(ctx, {}, engineClient);
 
   // 3. Stop all campaigns (reuse the existing pause-all path — CLAUDE.md rule c).
   const campaignsStopped = ctx.sql
@@ -453,6 +465,7 @@ export async function teardownTenant(
     // counted here (the field's own doc says "reclaimed").
     domainsReleased: domainOutcome.results.length,
     mailboxesReleased,
+    mailboxReleaseFailures,
     campaignsStopped,
     annualDomainLiabilityCents,
     ts: now,
@@ -479,13 +492,15 @@ export async function teardownTenant(
 
   ctx.sql.exec(
     `INSERT INTO teardown_records
-       (tenant_id, reason, effective, domains_released, mailboxes_released, campaigns_stopped, annual_domain_liability_cents, ts)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (tenant_id, reason, effective, domains_released, mailboxes_released, mailbox_release_failures,
+        campaigns_stopped, annual_domain_liability_cents, ts)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ctx.tenantId,
     summary.reason,
     summary.effective,
     summary.domainsReleased,
     summary.mailboxesReleased,
+    summary.mailboxReleaseFailures,
     summary.campaignsStopped,
     summary.annualDomainLiabilityCents,
     summary.ts,

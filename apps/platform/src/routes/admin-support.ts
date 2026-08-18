@@ -1,7 +1,8 @@
 import { Hono } from "hono";
+import type { Collapsed } from "@coldstart/shared";
 import { SupportTriageInput } from "../admin/schemas.js";
 import { countSupportTicketsByStatus, insertSupportTicket, listOpenAndEscalatedSupportTickets } from "../admin/db.js";
-import { triageSupportMessage } from "../admin/support-kb.js";
+import { triageSupportMessage, type SupportTriageResult } from "../admin/support-kb.js";
 import { RealClock } from "../clock.js";
 import type { Env } from "../env.js";
 import { newId } from "../schema.js";
@@ -35,7 +36,19 @@ export const adminSupportRoute = new Hono<{ Bindings: Env }>()
       messageId: parsed.data.messageId ?? null,
     });
 
-    return c.json({ ticketId: id, category, draft, status, deduplicated: !inserted }, 201);
+    // Typed as `Collapsed` (packages/shared/src/provenance.ts) because that is
+    // exactly what `deduplicated` is here: the redelivery got a 201 that looks
+    // like a fresh admission, and this field is the only thing separating the
+    // two. Naming the type keeps the qualifier from being re-invented ad hoc at
+    // the next site that collapses a duplicate into a success.
+    const body: Collapsed<SupportTriageResult & { ticketId: string }> = {
+      ticketId: id,
+      category,
+      draft,
+      status,
+      deduplicated: !inserted,
+    };
+    return c.json(body, 201);
   })
   .get("/admin/support/digest", async (c) => {
     const [tickets, counts] = await Promise.all([

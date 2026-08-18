@@ -1,9 +1,10 @@
 /**
  * The operator's read-only view of one tenant's provisioning state — closes
  * UNVERIFIABLE-1/2/3 in `docs/adversarial/agent-channel-product-audit-2026-08-17.md`:
- * whether a `setup_infrastructure` idempotency key already replays a stale
- * response instead of doing work, which ordinal a domain occupies, and a
- * domain's real DNS standing. Nothing in this codebase read `domains`,
+ * which FINISHED outcomes a `setup_infrastructure` idempotency key has recorded
+ * (the Settled contract means unfinished outcomes are never recorded, so a
+ * stale-replay can no longer exist by construction — the row list is the
+ * proof), which ordinal a domain occupies, and a domain's real DNS standing. Nothing in this codebase read `domains`,
  * `domain_intents`, or `request_idempotency` from OUTSIDE the tenant's own DO
  * before this — the audit needed a throwaway sandbox clone to answer those
  * questions at all (F6's sibling gap, one table over from tenant_messages).

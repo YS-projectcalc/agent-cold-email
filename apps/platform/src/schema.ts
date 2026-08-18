@@ -709,6 +709,14 @@ CREATE TABLE IF NOT EXISTS teardown_records (
   effective TEXT NOT NULL,
   domains_released INTEGER NOT NULL DEFAULT 0,
   mailboxes_released INTEGER NOT NULL DEFAULT 0,
+  -- Mailboxes the vendor refused to release during this teardown, so they are
+  -- STILL LIVE and still cost money on both sides. Split from
+  -- mailboxes_released rather than netted out of it: that column counts what
+  -- was reclaimed, and a teardown that reclaimed 3 of 4 must not read the same
+  -- as one that reclaimed 3 of 3. DEFAULT 0 backfills every pre-existing row,
+  -- which is exactly right — before per-item isolation a failed release THREW,
+  -- so no historical record can describe a partial teardown.
+  mailbox_release_failures INTEGER NOT NULL DEFAULT 0,
   campaigns_stopped INTEGER NOT NULL DEFAULT 0,
   annual_domain_liability_cents INTEGER NOT NULL DEFAULT 0,
   ts INTEGER NOT NULL
@@ -1044,11 +1052,17 @@ CREATE INDEX IF NOT EXISTS idx_mailbox_cred_pushes_pending
 -- + CLAUDE.md rule h — tenant-scoped, one tenant per DO, never cross-tenant).
 -- 'kind' + 'source' are free-form/enum-by-convention exactly like
 -- deliverability_actions.action/events.type above (no DB-level enum
--- shorthand in this codebase; the emit helper is the one writer). 'severity' is
--- 'info' | 'action_required' — a real union on the TypeScript side
--- (engine/tenant-messages.ts's TenantMessageSeverity), not DB-enforced: a CHECK
--- would need a table rebuild inside every live DO, and every write funnels
--- through that module's two emit helpers. 'source' is
+-- shorthand in this codebase; the emit helper is the one writer). 'severity' has
+-- THREE rungs — 'info' | 'action_required' | 'terminal' — a real union on the
+-- TypeScript side (engine/tenant-messages.ts's TenantMessageSeverity), not
+-- DB-enforced: a CHECK would need a table rebuild inside every live DO, and
+-- every write funnels through that module's two emit helpers. The third rung
+-- says the platform has STOPPED and only a human can move it, which is a claim
+-- only code that OBSERVED the stop can make — so the operator admin route caps
+-- its own INPUT at 'info' | 'action_required' (admin/schemas.ts's
+-- AdminOperatorMessageInput) rather than letting a human assert it by hand
+-- through a free-text surface. Rows carrying any of the three read back fine.
+-- 'source' is
 -- 'system' (every row this increment writes) | 'operator' (increment 2, not
 -- built here). 'action_hint' is JSON (a structured hint the agent can act on,
 -- e.g. { tool, idempotencyKey }), NULL when there is none. 'dedup_key' backs

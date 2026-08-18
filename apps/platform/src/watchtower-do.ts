@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import type { Notified } from "@coldstart/shared";
 import {
   alertEmailFor,
   policyFor,
@@ -7,7 +8,7 @@ import {
   D1_CHECK,
   type CheckResult,
 } from "./admin/watchtower-alerts.js";
-import { decideAlert, type AlertTransition, type PersistedAlertState } from "./admin/watchtower-policy.js";
+import { decideAlert, withheldAlertState, type AlertTransition, type PersistedAlertState } from "./admin/watchtower-policy.js";
 import { DEAD_MAN_INTERVAL_MS, EMPTY_STREAK, gradeStreak, SWEEP_STALE_MS, type Grade, type StreakState } from "./admin/watchtower-grading.js";
 import type { Env } from "./env.js";
 import { createOpsMailer, type OpsMailer } from "./ops-mail/ops-mailer.js";
@@ -67,13 +68,37 @@ export class WatchtowerDO extends DurableObject<Env> {
   }
 
   /**
-   * BLOCKING-1 — reconcile the `d1` health check against DO storage, so the
+   * BLOCKING-1 — decide the `d1` health check against DO storage, so the
    * decision to email that D1 is down never itself reads D1. Returns the
    * decision; the caller sends (it holds the OpsMailer) and must treat a throw
    * from here as "cannot alert", never as "healthy".
+   *
+   * DECIDES ONLY — nothing is persisted here (cached-terminal member 5). The
+   * announcement counters this transition would advance mean "the founder was
+   * told", and only the Worker learns whether that is true, so the write is its
+   * own step: `commitD1Alert`, after the send. A caller that decides and never
+   * commits leaves the state exactly as it found it — the next sweep re-decides
+   * and re-attempts, which is the safe direction for the one check that exists
+   * to report its own store being down.
    */
-  async reconcileD1Alert(healthy: boolean, nowMs: number): Promise<RemoteAlertDecision> {
-    return this.applyAlert(D1_ALERT_KEY, D1_CHECK, healthy, nowMs);
+  async decideD1Alert(healthy: boolean, nowMs: number): Promise<RemoteAlertDecision> {
+    return (await this.readAndDecide(D1_ALERT_KEY, D1_CHECK, healthy, nowMs)).decision;
+  }
+
+  /**
+   * Bank what the send outcome entitles us to record — the other half of
+   * `decideD1Alert`, called by the Worker once it knows.
+   *
+   * Re-derives the transition from the SAME (prev, healthy, nowMs) rather than
+   * taking a state from the caller: `decideAlert` is pure and nothing was
+   * written in between, so this is the identical transition, and the DO stays
+   * the only thing that decides what the DO stores. `notified` is `null` when
+   * no email was OWED (suppressed / pending / steady-healthy) — not a delivery
+   * and not a failure, so the transition is banked in full.
+   */
+  async commitD1Alert(healthy: boolean, nowMs: number, notified: Notified | null): Promise<void> {
+    const { prev, decision } = await this.readAndDecide(D1_ALERT_KEY, D1_CHECK, healthy, nowMs);
+    await this.bankAlert(D1_ALERT_KEY, prev, decision.transition, notified);
   }
 
   /**
@@ -144,13 +169,19 @@ export class WatchtowerDO extends DurableObject<Env> {
         : `Ops sweep completed ~${Math.round(ageMs / 60000)} min ago (last: ${new Date(heartbeat).toISOString()}).`,
     };
 
-    const decision = await this.applyAlert(DEAD_MAN_ALERT_KEY, result.name, result.healthy, nowMs);
+    // DECIDE -> SEND -> BANK, in that order (cached-terminal member 5). This
+    // alarm holds its own mailer, so unlike the `d1` check it needs no second
+    // RPC — but it owes the same guarantee: `trySend` never throws, so the bank
+    // step always runs, and it records an announcement only if one happened.
+    const { prev, decision } = await this.readAndDecide(DEAD_MAN_ALERT_KEY, result.name, result.healthy, nowMs);
     const email = alertEmailFor(this.env, result, decision.transition, decision.prevSinceTs, nowMs);
-    if (email) await trySend(this.mailer, email);
+    const notified = email ? await trySend(this.mailer, email) : null;
+    await this.bankAlert(DEAD_MAN_ALERT_KEY, prev, decision.transition, notified);
   }
 
   /**
-   * The shared read -> decide -> persist step for both DO-backed checks.
+   * The shared read -> decide step for both DO-backed checks. Deliberately does
+   * NOT persist: see `bankAlert`.
    *
    * Takes the CHECK NAME as well as the storage key so the policy comes from
    * the same `policyFor` table the D1-backed store uses (founder ruling
@@ -160,12 +191,34 @@ export class WatchtowerDO extends DurableObject<Env> {
    *
    * `prev` is read as `PersistedAlertState` because a value written by the
    * PREVIOUS deploy has no debounce counters and DO storage has no migration
-   * step — `decideAlert` normalizes it.
+   * step — `decideAlert` normalizes it. It is returned as well as the decision
+   * because `withheldAlertState` needs the state being LEFT, not the one being
+   * proposed.
    */
-  private async applyAlert(key: string, checkName: string, healthy: boolean, nowMs: number): Promise<RemoteAlertDecision> {
+  private async readAndDecide(
+    key: string,
+    checkName: string,
+    healthy: boolean,
+    nowMs: number,
+  ): Promise<{ prev: PersistedAlertState | null; decision: RemoteAlertDecision }> {
     const prev = (await this.ctx.storage.get<PersistedAlertState>(key)) ?? null;
     const transition = decideAlert(prev, healthy, nowMs, policyFor(checkName));
-    await this.ctx.storage.put(key, transition.next);
-    return { transition, prevSinceTs: prev?.sinceTs ?? null };
+    return { prev, decision: { transition, prevSinceTs: prev?.sinceTs ?? null } };
+  }
+
+  /**
+   * Persist exactly what the send outcome entitles us to record — the same rule
+   * `admin/watchtower.ts`'s D1-backed loop applies, so the two stores cannot
+   * drift on the one question that matters here: an alert the founder never
+   * received must not advance the counters that say they were told.
+   */
+  private async bankAlert(
+    key: string,
+    prev: PersistedAlertState | null,
+    transition: AlertTransition,
+    notified: Notified | null,
+  ): Promise<void> {
+    const withheld = notified !== null && !notified.delivered;
+    await this.ctx.storage.put(key, withheld ? withheldAlertState(prev, transition) : transition.next);
   }
 }

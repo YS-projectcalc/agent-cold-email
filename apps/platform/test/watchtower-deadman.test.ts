@@ -4,6 +4,7 @@ import { recordSweepHeartbeat, watchtowerStub } from "../src/admin/watchtower-in
 import { SWEEP_STALE_MS } from "../src/admin/watchtower-grading.js";
 import { runScheduledOpsSweep } from "../src/scheduled.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
+import type { OpsEmailMessage, OpsMailer } from "../src/ops-mail/ops-mailer.js";
 import type { WatchtowerDO } from "../src/watchtower-do.js";
 import { envWithDeadDb } from "./helpers.js";
 
@@ -30,13 +31,18 @@ async function reset(): Promise<void> {
   });
 }
 
+/** Install a mailer on the DO instance the alarm will run on. */
+async function installMailer(mailer: OpsMailer): Promise<void> {
+  await runInDurableObject(watchtowerStub(env), (instance: WatchtowerDO) => {
+    instance.mailer = mailer;
+  });
+}
+
 /** Swap in a recording mailer and hand it back, so a test can read what the
  * alarm sent. The alarm runs on this same instance. */
 async function captureAlarmMail(): Promise<SandboxOpsMailer> {
   const mailer = new SandboxOpsMailer();
-  await runInDurableObject(watchtowerStub(env), (instance: WatchtowerDO) => {
-    instance.mailer = mailer;
-  });
+  await installMailer(mailer);
   return mailer;
 }
 
@@ -97,6 +103,34 @@ describe("BLOCKING-2 — the cron dead-man (DO alarm)", () => {
       "[coldrig] Ops sweep (cron): UNHEALTHY",
       "[coldrig] Ops sweep (cron): RECOVERED",
     ]);
+  });
+
+  // CACHED-TERMINAL MEMBER 5 at the check of LAST RESORT (docs/adversarial/
+  // class-sweep-cached-terminal-2026-08-17.md:90 — "same shape at
+  // watchtower-do.ts:147"). The alarm persisted the transition and then threw
+  // the send result away entirely, so a send that failed still stamped
+  // `lastAlertTs`/`alertCount`: the next alarm read an announced episode and
+  // went quiet for the full 6h re-alert gap. The condition it reports is
+  // precisely the one where "no email" means nothing, so 6h of banked silence
+  // is the worst possible failure direction for this check.
+  it("re-attempts the dead-man alert once the channel comes back — an undelivered one is never banked", async () => {
+    await recordSweepHeartbeat(env, Date.now() - (SWEEP_STALE_MS + 60_000));
+
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await installMailer({
+      async send(_msg: OpsEmailMessage) {
+        throw new Error("E_SENDER_NOT_VERIFIED (dark)");
+      },
+    } satisfies OpsMailer);
+    expect(await runDurableObjectAlarm(watchtowerStub(env))).toBe(true);
+    errSpy.mockRestore();
+
+    // Channel restored, cron still dead: this alarm owes the founder the alert
+    // the dark one never delivered.
+    const mailer = await captureAlarmMail();
+    await runDurableObjectAlarm(watchtowerStub(env));
+
+    expect(mailer.sent.map((m) => m.subject)).toEqual(["[coldrig] Ops sweep (cron): UNHEALTHY"]);
   });
 
   it("a D1 outage does NOT fire the dead-man — the cron is firing, and BLOCKING-1 owns that incident", async () => {

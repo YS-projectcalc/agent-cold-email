@@ -48,6 +48,7 @@ import { cancelTenant, terminateTenant, type CancelResult, type TerminateResult 
 import { getInfrastructureStatus } from "./engine/infrastructure-status.js";
 import { runSetupInfrastructure } from "./engine/provisioning.js";
 import { settleSetupInfrastructure } from "./engine/setup-terminality.js";
+import { settleRemoveMailboxes } from "./engine/remove-mailboxes-terminality.js";
 import { runProvisioningReconcile } from "./engine/provisioning-reconcile.js";
 import { launchCampaign, listCampaigns, pauseAllCampaigns, pauseCampaign, type CampaignListItem } from "./engine/campaigns.js";
 import { runTick } from "./engine/tick.js";
@@ -339,6 +340,10 @@ export class TenantDO extends DurableObject<Env> {
     this.addColumnIfMissing("mailboxes", "cap_override", "INTEGER");
     // D5 teardown/reclaim marker on mailboxes (see schema.ts).
     this.addColumnIfMissing("mailboxes", "released_at", "INTEGER");
+    // A teardown that left mailboxes live at the vendor (see schema.ts). 0 for
+    // every pre-existing record: before per-item isolation a failed release
+    // threw, so no historical teardown can have been partial.
+    this.addColumnIfMissing("teardown_records", "mailbox_release_failures", "INTEGER NOT NULL DEFAULT 0");
     // A4 (CLASS A) — per-send retry counter (see schema.ts).
     this.addColumnIfMissing("scheduled_sends", "attempts", "INTEGER NOT NULL DEFAULT 0");
     // Stuck-'sending' reclaim marker (persist-before-confirm class; see
@@ -1019,9 +1024,11 @@ export class TenantDO extends DurableObject<Env> {
       return await withRequestIdempotency(
         ctx,
         idempotencyKey ? `remove_mailboxes:${idempotencyKey}` : undefined,
-        // TERMINAL: releaseMailboxes THROWS on any vendor release failure, so a
-        // non-throwing return means every selected mailbox was actually released.
-        async () => terminal(await removeMailboxes(ctx, input)),
+        // Terminality is READ OFF THE RESULT (engine/remove-mailboxes-terminality.ts),
+        // never inferred from "it did not throw": per-item isolation means a
+        // vendor refusal now comes back as `failedCount` rather than an
+        // exception, and a partial release still owes the mailbox it left live.
+        async () => settleRemoveMailboxes(await removeMailboxes(ctx, input)),
       );
     } finally {
       this.releaseInFlight = false;

@@ -1444,6 +1444,16 @@ components:
         /threads/{id}/reply.
 
 
+        Only a FINISHED outcome replays. A call that returned while still
+        owing work — a 202 that is still provisioning, or a
+        /remove-mailboxes response whose `failedCount` is above zero because
+        the provider refused a mailbox — is not recorded, so resending its key
+        RE-RUNS the request and finishes the job instead of handing back the
+        partial. That is what makes "retry with the same key" a true
+        instruction rather than a guaranteed no-op; the response body always
+        says which case you are in.
+
+
         It is a REPLAY key, never a request discriminator: on
         /setup-infrastructure, changing it or omitting it does not cause
         anything extra to be provisioned. On /remove-mailboxes it is the only

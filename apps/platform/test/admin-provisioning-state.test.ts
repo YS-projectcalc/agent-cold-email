@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { nonTerminal, terminal } from "@coldstart/shared";
 import { domainIntentKey } from "../src/engine/provision-intents.js";
 import { withRequestIdempotency } from "../src/engine/idempotency.js";
 import { adminApi, api, mintTenant, withTenantContext } from "./helpers.js";
@@ -133,15 +134,20 @@ describe("GET /admin/tenants/:id/provisioning-state", () => {
     });
 
     // The exact scenario UNVERIFIABLE-1 needs: a setup_infrastructure key that
-    // replayed to 'done' with a real (never-returned) response body.
+    // replays to 'done' with a real (never-returned) response body.
+    //
+    // Under the `Settled` contract (engine/idempotency.ts) a row exists ONLY
+    // for a TERMINAL outcome, so the fixture states the word: this is the
+    // `{ jobId, billing }` shape runSetupInfrastructure returns when it owes
+    // nothing further — the one thing this endpoint can list. What it must
+    // never do is put that body on the wire.
     await withTenantContext(tenantId, (ctx) =>
-      withRequestIdempotency(ctx, "setup_infrastructure:apd-setup-a-2mbx", () => ({
-        provisioning: "pending",
-        pendingDomain: "deadco1.com",
-      })),
+      withRequestIdempotency(ctx, "setup_infrastructure:apd-setup-a-2mbx", () =>
+        terminal({ jobId: "job-apd-setup-a", billing: { provisionedAfter: 2 } }),
+      ),
     );
     // A DIFFERENT intent's key must NOT appear (the prefix filter).
-    await withTenantContext(tenantId, (ctx) => withRequestIdempotency(ctx, "launch_campaign:unrelated-key", () => ({ ok: true })));
+    await withTenantContext(tenantId, (ctx) => withRequestIdempotency(ctx, "launch_campaign:unrelated-key", () => terminal({ ok: true })));
 
     const res = await adminApi<ProvisioningStateResponse>(`/admin/tenants/${tenantId}/provisioning-state`);
     expect(res.status).toBe(200);
@@ -183,7 +189,28 @@ describe("GET /admin/tenants/:id/provisioning-state", () => {
     expect(typeof res.body.requestIdempotency[0]!.createdAt).toBe("number");
     expect(res.body.requestIdempotency[0]).not.toHaveProperty("responseJson");
     expect(res.body.requestIdempotency[0]).not.toHaveProperty("response_json");
-    expect(JSON.stringify(res.body.requestIdempotency)).not.toContain("pendingDomain");
+    expect(JSON.stringify(res.body.requestIdempotency)).not.toContain("job-apd-setup-a");
+  });
+
+  // What this endpoint asserts under the `Settled` contract, stated once. A
+  // non-terminal setup outcome RELEASES its claim instead of recording it, so
+  // the wedged-key shape the endpoint was originally built to diagnose — a
+  // 'done' row holding a 202 that owed a domain's DNS — can no longer be
+  // minted. An empty `requestIdempotency` therefore means "no finished key is
+  // frozen here", never "this tenant never called setup_infrastructure"; the
+  // in-flight/owing state is read from `domainIntents` + `domains` above.
+  it("a NON-TERMINAL setup outcome leaves no row — this lists FINISHED keys only", async () => {
+    const { tenantId } = await mintTenant("Prov State NonTerminal Co", "managed");
+
+    await withTenantContext(tenantId, (ctx) =>
+      withRequestIdempotency(ctx, "setup_infrastructure:still-provisioning", () =>
+        nonTerminal({ provisioning: "pending", pendingDomain: "deadco1.com" }),
+      ),
+    );
+
+    const res = await adminApi<ProvisioningStateResponse>(`/admin/tenants/${tenantId}/provisioning-state`);
+    expect(res.status).toBe(200);
+    expect(res.body.requestIdempotency).toEqual([]);
   });
 
   it("tenant isolation — tenant A's domains/intents/idempotency rows never appear under tenant B's id", async () => {
@@ -198,7 +225,7 @@ describe("GET /admin/tenants/:id/provisioning-state", () => {
         a.tenantId,
       );
     });
-    await withTenantContext(a.tenantId, (ctx) => withRequestIdempotency(ctx, "setup_infrastructure:only-a-key", () => ({ ok: true })));
+    await withTenantContext(a.tenantId, (ctx) => withRequestIdempotency(ctx, "setup_infrastructure:only-a-key", () => terminal({ ok: true })));
 
     const resA = await adminApi<ProvisioningStateResponse>(`/admin/tenants/${a.tenantId}/provisioning-state`);
     expect(resA.body.domains.map((d) => d.domain)).toEqual(["onlya.com"]);

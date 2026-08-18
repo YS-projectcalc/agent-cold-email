@@ -27,6 +27,14 @@ export function settleSetupInfrastructure(
   // quote-then-commit flow explicitly, and both calls carry the same
   // Idempotency-Key header, so freezing the quote is the most reachable member
   // of the class — it needs no vendor failure and no crash.
-  if ("quoteOnly" in result) return nonTerminal(result);
+  //
+  // The typeof/null guard is what makes the TOTALITY that `idempotency.ts` and
+  // `isSetupProvisioningIncomplete` both promise actually true: this predicate
+  // is handed a `JSON.parse` of a row that may predate the current result
+  // shape, and the `in` operator THROWS on a primitive or null. No writer can
+  // currently produce a non-object payload under this key, so today the guard
+  // costs nothing — but the claim above it was false without it, and it would
+  // have thrown inside the synchronous pre-await prefix and 500'd the call.
+  if (typeof result === "object" && result !== null && "quoteOnly" in result) return nonTerminal(result);
   return terminal(result);
 }

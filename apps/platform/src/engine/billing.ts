@@ -985,7 +985,17 @@ export function buildMailboxBilling(ctx: TenantContext, provisionedAfter: number
 }
 
 export interface RemoveMailboxesResult {
+  /** Mailboxes that COMPLETED the release — can be less than the `count` asked for. */
   releasedCount: number;
+  /**
+   * Mailboxes the vendor refused to release, which are therefore STILL LIVE and
+   * still billed on both sides. On the wire because an agent that asked for 3
+   * and read `releasedCount: 2` otherwise has no field telling it whether the
+   * other one is gone; and because this is what makes the outcome NON-TERMINAL
+   * (engine/remove-mailboxes-terminality.ts), so the retry the docs instruct is
+   * a real re-attempt rather than a replay of the partial.
+   */
+  failedCount: number;
   /** The projected bill after the release (the lower count, floored at $99). */
   billing: MailboxBilling;
 }
@@ -1002,8 +1012,8 @@ export interface RemoveMailboxesResult {
  */
 export async function removeMailboxes(ctx: TenantContext, input: RemoveMailboxesInput): Promise<RemoveMailboxesResult> {
   assertNotLifecycleFrozen(ctx, "remove_mailboxes");
-  const { releasedCount } = await releaseMailboxes(ctx, { limit: input.count });
+  const { releasedCount, failedCount } = await releaseMailboxes(ctx, { limit: input.count });
   // Decrease: syncMailboxQuantity picks proration_behavior 'none' (desired < synced).
   await syncMailboxQuantity(ctx);
-  return { releasedCount, billing: buildMailboxBilling(ctx, provisionedMailboxCount(ctx)) };
+  return { releasedCount, failedCount, billing: buildMailboxBilling(ctx, provisionedMailboxCount(ctx)) };
 }
