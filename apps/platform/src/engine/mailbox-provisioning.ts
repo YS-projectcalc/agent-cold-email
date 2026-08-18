@@ -55,6 +55,7 @@ import {
   markMailboxIntent,
   MAX_BUY_DISPATCHES,
   readBuyDispatch,
+  readMailboxIntent,
   recordMailboxIntent,
   type MailboxIntentRow,
 } from "./provision-intents.js";
@@ -282,7 +283,7 @@ async function runMailboxProvisioningUnit(
   // Silent for any address that was never flagged.
   await alertMailboxResolved(ctx, opts.email, "the mailbox is confirmed ready at the provider", opts.mailer);
 
-  const warmupStartedAt = await startWarmupUnlessAlreadyRunning(ctx, intent, opts);
+  const warmupStartedAt = await startWarmupUnlessAlreadyRunning(ctx, opts);
   return { email: opts.email, provider: bought.provider, provisionedAt: bought.provisionedAt, warmupStartedAt };
 }
 
@@ -458,22 +459,64 @@ async function dispatchBuy(
  * (the H4 defect, whose replay half the idempotency claim closed and whose
  * crash half needs this durable marker).
  *
+ * ⚠ A MARKER CANNOT CLOSE THE WINDOW IT IS WRITTEN AFTER (class E member E1,
+ * docs/adversarial/class-sweep-vendor-truth-2026-08-18.md). The only guard here
+ * used to be the local `'warming'` status, and that status is written AFTER the
+ * vendor call returns. A crash inside that window — or a lost status write —
+ * leaves a paid subscription at the vendor and no record of it, and the next
+ * attempt reads "not warming yet" and enrols again, at $3/month, forever. The
+ * shape is now PRE-CHECK-THEN-ACT, the same shape the buy leg already uses:
+ * consult the durable marker, and when it does not settle the question, ASK THE
+ * VENDOR. `absent` is the only answer that authorizes the charge; a lookup that
+ * did not finish buys nothing and costs one retry.
+ *
+ * A vendor-confirmed ACTIVE subscription also WRITES the missing marker, which
+ * is the crash recovery: without it every subsequent attempt would re-ask, and
+ * the record would stay behind reality indefinitely.
+ *
+ * THE INTENT IS RE-READ HERE, never taken from the saga's opening snapshot
+ * (E2). `acquireMailbox` runs in between and writes this very row, so the
+ * snapshot is stale by construction at exactly the moment it is consulted.
+ *
  * G2 money-out site #2. Its cost is already priced into COST_MAILBOX_CENTS at
  * the provision reserve (spendCostCents's 'warmup' branch reserves 0), so this
  * wrap is for choke-point completeness — no money-out vendor call escapes the
  * enumerated inventory — not a second charge.
  */
-async function startWarmupUnlessAlreadyRunning(
-  ctx: TenantContext,
-  intent: MailboxIntentRow,
-  opts: { email: string; intentKey: string },
-): Promise<number> {
-  if (intent.status === "warming" || intent.status === "committed") {
+async function startWarmupUnlessAlreadyRunning(ctx: TenantContext, opts: { email: string; intentKey: string }): Promise<number> {
+  const intent = readMailboxIntent(ctx, opts.intentKey);
+  if (intent?.status === "warming" || intent?.status === "committed") {
     // The ramp start is re-stamped to now rather than recovered. A resume lands
     // minutes-to-a-day after the real enrolment, and the drift only ever makes
     // the 28-day ramp START LATER — the safe direction for a warmup.
     return ctx.clock.now();
   }
+
+  const vendorState = await ctx.adapters.mailbox.warmupSubscriptionState(opts.email);
+  if (vendorState === "active") {
+    // The vendor holds a subscription our records do not. Record it — the
+    // marker this branch exists because of was never written — and charge
+    // nothing.
+    markMailboxIntent(ctx, opts.intentKey, "warming");
+    logAction(ctx, "MAILBOX_WARMUP_ADOPTED", opts.email, {
+      reason: "the provider already has a warmup subscription for this mailbox from an interrupted attempt — recorded instead of re-enrolled",
+      priorStatus: intent?.status ?? "unknown",
+    });
+    return ctx.clock.now();
+  }
+  if (vendorState === "inconclusive") {
+    // NOT folded into 'absent' (the vendor-verdict discipline). An unfinished
+    // search is not proof there is no subscription, and enrolling on it is a
+    // real recurring charge. RETRYABLE: the durable intent means the next
+    // attempt resumes here rather than re-buying anything upstream.
+    throw new VendorError(
+      `mailbox ${opts.email} was purchased, but whether its warmup is already running could not be confirmed. ` +
+        `Nothing was charged for the failed step — retry to finish it.`,
+      true,
+      { step: MAILBOX_STEP },
+    );
+  }
+
   const warmup = await withSpendCeiling(ctx, "warmup", () =>
     ctx.adapters.mailbox.startWarmup(opts.email, `warmup:${ctx.tenantId}:${opts.email}`),
   );

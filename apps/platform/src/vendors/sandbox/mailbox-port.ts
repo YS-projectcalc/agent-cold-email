@@ -6,6 +6,7 @@ import type {
   MailboxReadiness,
   ProvisionedMailbox,
   ReleaseResult,
+  WarmupSubscriptionState,
 } from "@coldstart/shared";
 
 // Sandbox MailboxPort — deterministic, healthy-by-default mailboxes. Actual
@@ -49,6 +50,24 @@ export class SandboxMailboxPort implements MailboxPort {
 
   async startWarmup(_email: string, _idempotencyKey: string): Promise<{ started: boolean; startedAt: number }> {
     return { started: true, startedAt: this.clock.now() };
+  }
+
+  /**
+   * Mailboxes this sandbox should report as ALREADY warmup-enrolled at the
+   * vendor. Empty by default, so every existing sandbox provision still enrols
+   * exactly as before.
+   *
+   * Settable for the same reason `terminal` above is (guard D3): the state that
+   * matters here — a paid subscription the vendor holds and our marker does not
+   * record — is a CRASH remnant, and an always-absent sandbox is where that
+   * remnant hides. E1's whole defect was that no fixture could drive the
+   * already-enrolled branch, so the second $3/month charge was unreachable by
+   * any test while being reachable in production.
+   */
+  readonly warmupActive = new Set<string>();
+
+  async warmupSubscriptionState(email: string): Promise<WarmupSubscriptionState> {
+    return this.warmupActive.has(email) ? "active" : "absent";
   }
 
   async cancelWarmup(_email: string, _idempotencyKey: string): Promise<CancelWarmupResult> {

@@ -30,6 +30,8 @@ import {
   CRED_PUSH_AGING_CHECK,
   D1_CHECK,
   DOMAIN_DNS_AGING_CHECK,
+  DOMAIN_ORPHAN_CHECK,
+  MAILBOX_ORPHAN_CHECK,
   MAILBOX_PROVISIONING_CHECK,
   MAILBOX_REBUY_CHECK,
   SEND_STARVED_CHECK,
@@ -40,6 +42,7 @@ import {
 import { decideAlert, withheldAlertState, type AlertState } from "./watchtower-policy.js";
 import { FAILURE_SIGNAL_WINDOW_MS, gradeFailureSignals } from "./watchtower-grading.js";
 import { reconcileD1Alert, recordWatchtowerCompleted } from "./watchtower-infra.js";
+import { evaluateVendorChecks } from "./watchtower-vendor.js";
 
 // A probe to the external engine must not hang the whole sweep on a stalled
 // socket — bound it well under any reasonable cron budget.
@@ -64,6 +67,16 @@ export function mailboxRebuyCheckName(email: string): string {
 /** The watchtower check tracking ONE mailbox's overdue engine credential push. */
 export function credPushAgingCheckName(email: string): string {
   return `${CRED_PUSH_AGING_CHECK}${email}`;
+}
+
+/** Item 2 — the watchtower check tracking ONE mailbox_intents row with no matching live mailboxes row. */
+export function mailboxOrphanCheckName(email: string): string {
+  return `${MAILBOX_ORPHAN_CHECK}${email}`;
+}
+
+/** Item 2 — the domain twin: ONE domain_intents row with no matching domains row. */
+export function domainOrphanCheckName(domain: string): string {
+  return `${DOMAIN_ORPHAN_CHECK}${domain}`;
 }
 
 /** The watchtower check tracking whether ONE tenant has due mail and no way to send it. */
@@ -123,6 +136,12 @@ export async function evaluateHealthChecks(env: Env, nowMs: number): Promise<Che
       results.push({ name: "engine", healthy: false, detail: `engine /health unreachable: ${errMsg(err)}` });
     }
   }
+
+  // Item 1 (docs/adversarial/class-sweep-vendor-truth-2026-08-18.md) —
+  // account-wide InboxKit checks (vendor_wallet, warmup_duplicates). Same
+  // placement as `engine` above: an external probe unrelated to D1, so it
+  // runs even during a D1 outage; skip-dark ([]) when InboxKit is not armed.
+  results.push(...(await evaluateVendorChecks(env)));
 
   // Everything below reads D1. With D1 down these scans cannot run, and the
   // `d1` result above is the honest, complete report of that state.
@@ -252,8 +271,23 @@ export function sendPipelineChecks(
   reported: ReadonlySet<string>,
 ): CheckResult[] {
   const results: CheckResult[] = [];
-  const { activated, agingPendingDomains, agingPendingPushes, credentialPushes, dueNonDemoPendingSends, eligibleMailboxes, provisionedDomains } =
-    summary.sendPipeline;
+  const {
+    activated,
+    agingPendingDomains,
+    agingPendingPushes,
+    credentialPushes,
+    dueNonDemoPendingSends,
+    eligibleMailboxes,
+    provisionedDomains,
+    // Item 2 (docs/adversarial/class-sweep-vendor-truth-2026-08-18.md) — defaulted
+    // to `[]` because existing fixtures in sibling test files predate these
+    // fields (a bare `??`/destructure default, not a product fallback: a real
+    // TenantOpsSummary always supplies them, engine/ops-summary.ts).
+    mailboxOrphans = [],
+    mailboxIntentEmails = [],
+    domainOrphans = [],
+    domainIntentCandidates = [],
+  } = summary.sendPipeline;
 
   // Vendor-verdict class fix, guard C — the escalation edge un-ready domains
   // owed. CORRECTED (gate delta NOTE 4, docs/adversarial/
@@ -390,6 +424,79 @@ export function sendPipelineChecks(
             healthy: true,
             basis: "no_longer_applicable",
             detail: `Tenant ${tenantId} (${summary.brand}) still has ZERO eligible mailboxes; it simply has no due sends right now.`,
+          },
+    );
+  }
+
+  // Item 2 (docs/adversarial/class-sweep-vendor-truth-2026-08-18.md, class C
+  // stage 1) — a mailbox_intents row at 'bought'/'dangling'/'warming' with no
+  // matching live mailboxes row, past the grace bound: the vendor may hold a
+  // resource this platform has no record of, billing every month invisibly.
+  // Scoped to activated tenants for the same reason every other §1c check is
+  // — an unactivated tenant's intents are sandbox ones.
+  const orphanMailboxes = activated ? mailboxOrphans : [];
+  for (const orphan of orphanMailboxes) {
+    const minutes = Math.round(orphan.pendingForMs / 60000);
+    results.push({
+      name: mailboxOrphanCheckName(orphan.email),
+      healthy: false,
+      detail:
+        `Mailbox intent ${orphan.email} (tenant ${tenantId}) has sat at a post-purchase status for ${minutes} min with ` +
+        `no live mailboxes row — the vendor may hold a mailbox this platform has no record of and cannot bill or manage. ` +
+        `Ask the vendor what it holds for this address before buying a replacement.`,
+    });
+  }
+  const orphanMailboxesNow = new Set(orphanMailboxes.map((o) => o.email));
+  for (const name of reported) {
+    if (!name.startsWith(MAILBOX_ORPHAN_CHECK)) continue;
+    const email = name.slice(MAILBOX_ORPHAN_CHECK.length);
+    if (orphanMailboxesNow.has(email)) continue;
+    if (!mailboxIntentEmails.includes(email)) continue; // another tenant's intent
+    // A live mailboxes row appearing is an affirmative fact worth reobserving;
+    // any OTHER reason the row left the query (intent released, reconciled by
+    // hand) is the "left this check's scope" clear — mirrors the domain_dns_aging/
+    // cred_push_aging clears above exactly.
+    const nowLive = summary.mailboxProvenance.some((m) => m.email === email && m.released_at === null);
+    results.push(
+      nowLive
+        ? { name, healthy: true, basis: "reobserved", detail: `Mailbox intent ${email} (tenant ${tenantId}) now has a live mailboxes row.` }
+        : {
+            name,
+            healthy: true,
+            basis: "no_longer_applicable",
+            detail: `Mailbox intent ${email} (tenant ${tenantId}) is no longer in a post-purchase status with no live row.`,
+          },
+    );
+  }
+
+  // The domain twin: a domain_intents row marked 'committed' with no matching
+  // domains row past the grace bound.
+  const orphanDomains = activated ? domainOrphans : [];
+  for (const orphan of orphanDomains) {
+    const minutes = Math.round(orphan.pendingForMs / 60000);
+    results.push({
+      name: domainOrphanCheckName(orphan.domain),
+      healthy: false,
+      detail:
+        `Domain intent ${orphan.domain} (tenant ${tenantId}) has been marked committed for ${minutes} min with no matching ` +
+        `domains row — the vendor may hold a domain this platform has no record of. Ask the vendor what it holds before buying a replacement.`,
+    });
+  }
+  const orphanDomainsNow = new Set(orphanDomains.map((o) => o.domain));
+  for (const name of reported) {
+    if (!name.startsWith(DOMAIN_ORPHAN_CHECK)) continue;
+    const domain = name.slice(DOMAIN_ORPHAN_CHECK.length);
+    if (orphanDomainsNow.has(domain)) continue;
+    if (!domainIntentCandidates.includes(domain)) continue; // another tenant's intent
+    const nowLive = provisionedDomains.some((d) => d.domain === domain);
+    results.push(
+      nowLive
+        ? { name, healthy: true, basis: "reobserved", detail: `Domain intent ${domain} (tenant ${tenantId}) now has a matching domains row.` }
+        : {
+            name,
+            healthy: true,
+            basis: "no_longer_applicable",
+            detail: `Domain intent ${domain} (tenant ${tenantId}) is no longer committed with no matching row.`,
           },
     );
   }

@@ -14,6 +14,7 @@ import {
   type ProvisionedMailbox,
   type PurchasedDomain,
   type ReleaseResult,
+  type WarmupSubscriptionState,
 } from "@coldstart/shared";
 import { billableMailboxCount, releaseMailboxes } from "../src/engine/lifecycle.js";
 import { ABSENCE_MIN_AGE_MS } from "../src/engine/mailbox-acquisition.js";
@@ -39,6 +40,8 @@ interface VendorLog {
   buys: string[];
   warmups: string[];
   stateChecks: string[];
+  /** Every `warmupSubscriptionState` lookup — the E1 pre-check, which must happen BEFORE any paid enrolment. */
+  warmupChecks: string[];
 }
 
 /**
@@ -47,12 +50,27 @@ interface VendorLog {
  * checks. `buyThrows` models the ambiguous failure — the call throws, and
  * whether the order landed is unknowable from here.
  */
-function asyncMailboxVendor(opts: { readyAfterChecks?: number; buyThrows?: VendorError; vendorHasItAlready?: string[] } = {}): {
+function asyncMailboxVendor(
+  opts: {
+    readyAfterChecks?: number;
+    buyThrows?: VendorError;
+    vendorHasItAlready?: string[];
+    /**
+     * Addresses the vendor ALREADY holds a paid warmup subscription for — the
+     * crash remnant E1 exists for: `/warmup/add` succeeded and the process died
+     * before the local marker was written. Modelled here because the SANDBOX
+     * port cannot express it either, which is the same reason this file's other
+     * fixtures exist.
+     */
+    vendorWarmupAlready?: string[];
+  } = {},
+): {
   port: MailboxPort;
   log: VendorLog;
 } {
-  const log: VendorLog = { buys: [], warmups: [], stateChecks: [] };
+  const log: VendorLog = { buys: [], warmups: [], stateChecks: [], warmupChecks: [] };
   const bought = new Set<string>(opts.vendorHasItAlready ?? []);
+  const warmupEnrolled = new Set<string>(opts.vendorWarmupAlready ?? []);
   const checks = new Map<string, number>();
   const readyAfter = opts.readyAfterChecks ?? 0;
 
@@ -80,7 +98,15 @@ function asyncMailboxVendor(opts: { readyAfterChecks?: number; buyThrows?: Vendo
       if (!bought.has(email) || (checks.get(email) ?? 0) <= readyAfter) {
         throw new VendorError(`inboxkit has no mailbox matching ${email}`, false);
       }
+      // The subscription is now real and billing at the vendor, whatever
+      // happens to our process next — which is the whole point of the
+      // pre-check below.
+      warmupEnrolled.add(email);
       return { started: true, startedAt: Date.now() };
+    },
+    async warmupSubscriptionState(email: string): Promise<WarmupSubscriptionState> {
+      log.warmupChecks.push(email);
+      return warmupEnrolled.has(email) ? "active" : "absent";
     },
     async cancelWarmup(): Promise<CancelWarmupResult> {
       return { cancelled: true, cancelledAt: Date.now() };

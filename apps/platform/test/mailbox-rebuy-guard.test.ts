@@ -14,6 +14,7 @@ import {
   type ProvisionedMailbox,
   type PurchasedDomain,
   type ReleaseResult,
+  type WarmupSubscriptionState,
 } from "@coldstart/shared";
 import { mailboxProvisioningCheckName, mailboxRebuyCheckName } from "../src/admin/watchtower.js";
 import { ABSENCE_MIN_AGE_MS } from "../src/engine/mailbox-acquisition.js";
@@ -96,6 +97,11 @@ function fallibleMailboxVendor(
     async startWarmup(email: string): Promise<{ started: boolean; startedAt: number }> {
       if (!listed.has(email)) throw new VendorError(`no mailbox matching ${email}`, false);
       return { started: true, startedAt: Date.now() };
+    },
+    // Nothing enrolled at the vendor: this fixture's subject is the BUY
+    // guard, so the warmup pre-check must never be what changes an outcome here.
+    async warmupSubscriptionState(): Promise<WarmupSubscriptionState> {
+      return "absent";
     },
     async cancelWarmup(): Promise<CancelWarmupResult> {
       return { cancelled: true, cancelledAt: Date.now() };

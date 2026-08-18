@@ -37,17 +37,25 @@ export interface MailboxHealthReport {
   /** Soft (transient 4.x.x) bounce fraction — visible here but never triggers pause/burn (A3). */
   softBounceRate: number;
   // Gate (d) — display honesty (adversary inboxkit-adapters-2026-07-20 finding
-  // 4): these are VENDOR-REPORTED approximations (InboxKit's coarse
-  // health_status enum -> a 0-100 score, and the bounce-rate complement as a
-  // placement PROXY — NOT a real inbox-placement test), never first-party
-  // measurements. The control loop's burn/pause decisions use local counts
-  // ONLY; these two are display-only. The `vendor*` prefix carries that
-  // provenance so a consuming agent never treats them as measured (the pre-fix
+  // 4): these are VENDOR-REPORTED, never first-party measurements. The control
+  // loop's burn/pause decisions use local counts ONLY; these two are
+  // display-only. The `vendor*` prefix carries that provenance so a consuming
+  // agent never treats them as measured (the pre-fix
   // `reputationScore`/`placementRate` names read as first-party truth).
+  //
+  // NULLABLE, and that is the second half of the same honesty (class F,
+  // docs/adversarial/class-sweep-vendor-truth-2026-08-18.md). The prose above
+  // used to describe these as approximations DERIVED from vendor fields —
+  // a score from a `health_status` enum, a placement proxy from the bounce
+  // rate. The live endpoint sends neither field, so the "approximations" were a
+  // constant and a NaN. The vendor reports no reputation and no placement
+  // signal at all today, so both are `null` on the real adapter; a number here
+  // now means a vendor actually said it.
   /** H-status (pipeline F4) — 'ok' when the vendor health lookup succeeded,
-   * 'unknown' when it failed for THIS mailbox. The two `vendor*` numbers below
-   * are 0 and meaningless when this is 'unknown'; previously that case took the
-   * whole endpoint down with a 500 instead. */
+   * 'unknown' when it failed for THIS mailbox. The two `vendor*` fields below
+   * are null and meaningless when this is 'unknown'; previously that case took
+   * the whole endpoint down with a 500 instead. Note 'ok' does NOT imply the
+   * numbers are present — a lookup can succeed and still report nothing. */
   vendorHealth: "ok" | "unknown";
   /**
    * Why the lookup failed — an ABSTRACT, provider-blind sentence, null when
@@ -59,8 +67,8 @@ export interface MailboxHealthReport {
    * this failure goes to the Worker log instead.
    */
   vendorHealthError: string | null;
-  vendorReputationScore: number;
-  vendorPlacementRate: number;
+  vendorReputationScore: number | null;
+  vendorPlacementRate: number | null;
   /** SPEC.md §19.2/§19.6 [F7] — last time runPollInbox() polled this mailbox (engine/reply-processor.ts); null before the first poll. Backs the Settings→Mailboxes "last polled" UI claim. */
   lastPolledAt: number | null;
 }
@@ -149,8 +157,14 @@ export async function getInfrastructureStatus(ctx: TenantContext): Promise<Infra
         // ask", which the previous 0-or-500 shape could not express.
         vendorHealth: vendor ? ("ok" as const) : ("unknown" as const),
         vendorHealthError,
-        vendorReputationScore: vendor?.reputationScore ?? 0,
-        vendorPlacementRate: vendor?.placementRate ?? 0,
+        // `?? null`, NEVER `?? 0`. A zero here is a claim — "the vendor scored
+        // this mailbox at zero reputation" — and it was false on both paths
+        // that produced it: a failed lookup and a vendor that reports no such
+        // field at all. Widening MailboxHealth to nullable would have been
+        // undone right here by a `?? 0`, which is where the fabrication would
+        // simply have moved.
+        vendorReputationScore: vendor?.reputationScore ?? null,
+        vendorPlacementRate: vendor?.placementRate ?? null,
         lastPolledAt: s.lastPolledAt,
       };
     }),

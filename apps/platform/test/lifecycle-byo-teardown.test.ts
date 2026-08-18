@@ -22,6 +22,7 @@ import type {
   ProvisionedMailbox,
   PurchasedDomain,
   ReleaseResult,
+  WarmupSubscriptionState,
 } from "@coldstart/shared";
 import type { OpsEmailMessage, OpsMailer, OpsSendResult } from "../src/ops-mail/ops-mailer.js";
 import { registerByoDomain } from "../src/engine/byo-intake.js";
@@ -82,6 +83,9 @@ class RecordingMailboxPort implements MailboxPort {
   }
   async cancelWarmup(): Promise<CancelWarmupResult> {
     throw new Error("RecordingMailboxPort.cancelWarmup should never be called by releaseMailboxes");
+  }
+  async warmupSubscriptionState(): Promise<WarmupSubscriptionState> {
+    throw new Error("RecordingMailboxPort.warmupSubscriptionState should never be called by releaseMailboxes");
   }
   async release(email: string, _idempotencyKey: string): Promise<ReleaseResult> {
     this.releaseCalls.push(email);

@@ -9,9 +9,11 @@ import type {
   ReleaseResult,
   VendorReadiness,
 } from "@coldstart/shared";
+import { z } from "zod";
 import { forEachIsolated } from "../../isolated-loop.js";
 import { logVendorFailure } from "../../vendor-failure.js";
 import { InboxKitClient, type InboxKitClientConfig } from "./inboxkit-client.js";
+import { inboxKitAppError } from "./inboxkit-errors.js";
 import { classifyVendorLifecycle, normalizeLifecycleToken } from "./vendor-lifecycle.js";
 
 /**
@@ -133,8 +135,9 @@ export class RealInboxKitDomainPort implements DomainPort {
     const outcome = await forEachIsolated(
       candidates,
       async (domain) => {
-        const body = await this.client.request<CheckAvailabilityResponse>("searchLookalikes", "GET", "/domains/available", {
+        const body = await this.client.request("searchLookalikes", "GET", "/domains/available", {
           query: { domain },
+          schema: CheckAvailabilityResponseSchema,
         });
         results.push({ domain, available: body.available === true });
       },
@@ -191,8 +194,9 @@ export class RealInboxKitDomainPort implements DomainPort {
   private async listDomainRecords(): Promise<ListedDomain[]> {
     const rows: ListedDomain[] = [];
     for (let page = 1; page <= MAX_DOMAIN_PAGES; page++) {
-      const body = await this.client.request<ListDomainsResponse>("listOwnedDomains", "POST", "/domains/list", {
+      const body = await this.client.request("listOwnedDomains", "POST", "/domains/list", {
         body: { page, limit: DOMAIN_PAGE_SIZE },
+        schema: ListDomainsResponseSchema,
       });
       if (body.error) {
         throw new VendorError(`inboxkit domains/list failed: ${body.message ?? "no message"}`, true);
@@ -241,17 +245,34 @@ export class RealInboxKitDomainPort implements DomainPort {
       },
     });
     if (body.error) {
-      throw new VendorError(`inboxkit domains/register failed for ${domain}: ${body.message ?? "no message"}`, false);
+      throw inboxKitAppError(`inboxkit domains/register failed for ${domain}: ${body.message ?? "no message"}`, body);
     }
     if (typeof body.url === "string") {
       // A Stripe checkout session was created instead of a wallet-funded
       // purchase — the wallet balance was insufficient. Our pipeline has no
-      // interactive-checkout step, so this is a permanent, operator-fixable
-      // (top up the InboxKit wallet) failure, not a retry candidate.
-      throw new VendorError(`inboxkit domains/register for ${domain} requires a Stripe checkout (insufficient wallet balance): ${body.url}`, false);
+      // interactive-checkout step, so this call cannot proceed.
+      //
+      // THE COMMENT HERE ALREADY SAID "operator-fixable (top up the InboxKit
+      // wallet)" while the code threw a flat permanent grade, and a green test
+      // pinned that grade (canon class A). The knowledge existed; the type had
+      // nowhere to put it, so it lived in a comment and the customer's agent was
+      // told to check its inputs. It is structural, not text-matched: a checkout
+      // URL in place of a wallet debit IS the insufficient-balance signal.
+      throw inboxKitAppError(
+        `inboxkit domains/register for ${domain} requires a Stripe checkout (insufficient wallet balance): ${body.url}`,
+        body,
+        { operatorActionable: true },
+      );
     }
     if (body.payment_type !== "wallet") {
-      throw new VendorError(`inboxkit domains/register for ${domain} returned an unrecognized response shape (no wallet payment_type)`, false);
+      throw inboxKitAppError(
+        `inboxkit domains/register for ${domain} returned an unrecognized response shape (no wallet payment_type)`,
+        body,
+        // An unrecognized payment shape is a contract question for whoever owns
+        // this integration, and it is cleared by them — never by the caller
+        // changing its request.
+        { operatorActionable: true },
+      );
     }
     // A domain InboxKit registers for us is one InboxKit HOLDS — the
     // discriminator is a fact about the operation, not a lookup.
@@ -355,11 +376,14 @@ export class RealInboxKitDomainPort implements DomainPort {
   }
 }
 
-interface CheckAvailabilityResponse {
-  error: boolean;
-  available?: boolean;
-  banned?: boolean;
-}
+// SCHEMAS for the two READS whose fields decide something (class F — see the
+// header on mailbox-port.ts's schemas for the require-only-what-we-read rule).
+// GET /domains/available, verified live 2026-07-20.
+const CheckAvailabilityResponseSchema = z.object({
+  error: z.boolean().optional(),
+  available: z.boolean().optional(),
+  banned: z.boolean().optional(),
+});
 
 interface RegisterDomainsResponse {
   error: boolean;
@@ -391,33 +415,35 @@ interface RemoveDomainsResponse {
 //    nameserver_match_status: "pending", last_nameserver_check: null,
 //    actual_nameservers: [], nameservers: ["alexandra.ns.cloudflare.com", …]}
 // Every field this adapter reads is from that live capture.
-interface ListDomainsResponse {
-  error: boolean;
-  message?: string;
-  domains?: RawDomainRow[];
-  total?: number;
-  pages?: number;
-}
-
-interface RawDomainRow {
-  uid?: string;
-  name?: string;
-  status?: string;
-  connection_type?: string;
-  assigned_mailboxes?: number;
+const RawDomainRowSchema = z.object({
+  uid: z.string().optional(),
+  name: z.string().optional(),
+  status: z.string().optional(),
+  connection_type: z.string().optional(),
+  assigned_mailboxes: z.number().optional(),
   /**
    * Vendor's own coarse propagation verdict. Meaningful on a CONNECTED domain
    * only — on a purchased one the checker behind it does not run until mailbox
    * processing, so it reads "pending" indefinitely (contract note above).
    */
-  dns_propagation_status?: string;
+  dns_propagation_status: z.string().optional(),
   /** Vendor's own verdict on whether the domain's real nameservers match the ones it assigned. Same connected-only caveat. */
-  nameserver_match_status?: string;
+  nameserver_match_status: z.string().optional(),
   /** The nameservers InboxKit assigned (what SHOULD be in effect). */
-  nameservers?: string[];
+  nameservers: z.array(z.string()).optional(),
   /** The nameservers actually observed in DNS (empty until the registrar change propagates). */
-  actual_nameservers?: string[];
-}
+  actual_nameservers: z.array(z.string()).optional(),
+});
+
+const ListDomainsResponseSchema = z.object({
+  error: z.boolean(),
+  message: z.string().optional(),
+  domains: z.array(RawDomainRowSchema).optional(),
+  total: z.number().optional(),
+  pages: z.number().optional(),
+});
+
+type RawDomainRow = z.infer<typeof RawDomainRowSchema>;
 
 /** A listed domain that actually carries a name — the only kind the walk keeps. */
 type ListedDomain = RawDomainRow & { name: string };

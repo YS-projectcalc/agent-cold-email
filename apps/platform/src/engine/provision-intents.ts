@@ -224,6 +224,27 @@ export function recordMailboxIntent(ctx: TenantContext, key: string, email: stri
     .one();
 }
 
+/**
+ * The mailbox intent recorded at `key`, or undefined — READ-ONLY, unlike
+ * `recordMailboxIntent`, which writes one. The domain half's `readDomainIntent`
+ * sibling.
+ *
+ * Exists because a SNAPSHOT of this row taken at the top of the saga is stale by
+ * the time the warmup leg reads it (class E member E2, the enabler for E1): the
+ * acquisition leg in between WRITES the status, so a caller holding the
+ * pre-acquire snapshot decides "has this mailbox already been enrolled?" from a
+ * value it knows is superseded. Re-read at the point of the decision.
+ */
+export function readMailboxIntent(ctx: TenantContext, key: string): MailboxIntentRow | undefined {
+  return ctx.sql
+    .exec<MailboxIntentRow>(
+      `SELECT key, email, status, provider FROM mailbox_intents WHERE key = ? AND tenant_id = ?`,
+      key,
+      ctx.tenantId,
+    )
+    .toArray()[0];
+}
+
 /** The mailbox intent + per-mailbox idempotency key for an address — derivable from the address alone. */
 export function mailboxIntentKey(tenantId: string, email: string): string {
   return `mbx:${tenantId}:${email}`;

@@ -1089,15 +1089,17 @@ CREATE INDEX IF NOT EXISTS idx_mailbox_cred_pushes_pending
 -- 'kind' + 'source' are free-form/enum-by-convention exactly like
 -- deliverability_actions.action/events.type above (no DB-level enum
 -- shorthand in this codebase; the emit helper is the one writer). 'severity' has
--- THREE rungs — 'info' | 'action_required' | 'terminal' — a real union on the
--- TypeScript side (engine/tenant-messages.ts's TenantMessageSeverity), not
--- DB-enforced: a CHECK would need a table rebuild inside every live DO, and
--- every write funnels through that module's two emit helpers. The third rung
--- says the platform has STOPPED and only a human can move it, which is a claim
--- only code that OBSERVED the stop can make — so the operator admin route caps
--- its own INPUT at 'info' | 'action_required' (admin/schemas.ts's
--- AdminOperatorMessageInput) rather than letting a human assert it by hand
--- through a free-text surface. Rows carrying any of the three read back fine.
+-- FOUR rungs — 'info' | 'action_required' | 'operator_pending' | 'terminal' —
+-- a real union on the TypeScript side (engine/tenant-messages.ts's
+-- TenantMessageSeverity), not DB-enforced: a CHECK would need a table rebuild
+-- inside every live DO, and every write funnels through that module's two emit
+-- helpers. (That absence is why the 4th rung shipped with NO migration.) The
+-- last two both say the platform has STOPPED and differ on whether the SAME
+-- retry works once someone acts — claims only code that OBSERVED the stop can
+-- make — so the operator admin route caps its own INPUT at
+-- 'info' | 'action_required' (admin/schemas.ts's AdminOperatorMessageInput)
+-- rather than letting a human assert either by hand through a free-text
+-- surface. Rows carrying any of the four read back fine.
 -- 'source' is
 -- 'system' (every row this increment writes) | 'operator' (increment 2, not
 -- built here). 'action_hint' is JSON (a structured hint the agent can act on,

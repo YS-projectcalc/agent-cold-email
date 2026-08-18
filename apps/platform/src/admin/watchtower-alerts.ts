@@ -75,6 +75,10 @@ const CHECK_LABELS: Record<string, string> = {
   cron_sweep: "Ops sweep (cron)",
   cron_legs: "Ops sweep legs",
   warmup_cancel_gave_up: "Warmup cancellations gave up",
+  // Item 1 (docs/adversarial/class-sweep-vendor-truth-2026-08-18.md) — the
+  // two account-wide InboxKit checks (admin/watchtower-vendor.ts).
+  vendor_wallet: "InboxKit vendor wallet",
+  warmup_duplicates: "Duplicate warmup subscriptions",
 };
 
 /**
@@ -104,6 +108,12 @@ export const TENANT_DO_WEDGED_CHECK = "tenant_do_wedged:";
 // domain stuck at dns_status != 'ready' never had. Its own prefix so it cannot
 // dedup against, or be deduped by, any mailbox-scoped check.
 export const DOMAIN_DNS_AGING_CHECK = "domain_dns_aging:";
+// Item 2 (docs/adversarial/class-sweep-vendor-truth-2026-08-18.md, class C
+// stage 1) — a post-purchase mailbox/domain intent with no matching live row
+// past the grace bound (engine/ops-summary.ts's mailboxOrphans/domainOrphans).
+// Own prefixes, same reasoning as DOMAIN_DNS_AGING_CHECK above.
+export const MAILBOX_ORPHAN_CHECK = "mailbox_orphan:";
+export const DOMAIN_ORPHAN_CHECK = "domain_orphan:";
 
 /**
  * The three checks whose names cross a module boundary, as constants rather
@@ -135,6 +145,12 @@ export function labelFor(name: string): string {
   }
   if (name.startsWith(DOMAIN_DNS_AGING_CHECK)) {
     return `Domain DNS stalled ${name.slice(DOMAIN_DNS_AGING_CHECK.length)}`;
+  }
+  if (name.startsWith(MAILBOX_ORPHAN_CHECK)) {
+    return `Mailbox intent orphaned ${name.slice(MAILBOX_ORPHAN_CHECK.length)}`;
+  }
+  if (name.startsWith(DOMAIN_ORPHAN_CHECK)) {
+    return `Domain intent orphaned ${name.slice(DOMAIN_ORPHAN_CHECK.length)}`;
   }
   return CHECK_LABELS[name] ?? name;
 }

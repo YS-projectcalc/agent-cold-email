@@ -13,6 +13,7 @@ import {
   type ProvisionedMailbox,
   type PurchasedDomain,
   type ReleaseResult,
+  type WarmupSubscriptionState,
 } from "@coldstart/shared";
 import { runSetupInfrastructure } from "../src/engine/provisioning.js";
 import { listSurfacedTenantMessages } from "../src/engine/tenant-messages.js";
@@ -125,6 +126,9 @@ function stuckMailboxPort(): MailboxPort {
     },
     async cancelWarmup(): Promise<CancelWarmupResult> {
       return { cancelled: true, cancelledAt: Date.now() };
+    },
+    async warmupSubscriptionState(): Promise<WarmupSubscriptionState> {
+      return "absent";
     },
     async getHealth(email: string): Promise<MailboxHealth> {
       return { email, reputationScore: 90, bounceRate: 0, complaintRate: 0, placementRate: 1 };

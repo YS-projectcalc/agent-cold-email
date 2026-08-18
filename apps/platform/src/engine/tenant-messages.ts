@@ -23,23 +23,39 @@ import type { TenantContext } from "../tenant-context.js";
  * provisioning.ts's SUCCESS-PENDING emit already used 'info', and four public
  * tool descriptions tell agents to read this field.
  *
- * THREE RUNGS, and the third one is load-bearing (docs/adversarial/
- * class-sweep-signal-inversion-2026-08-17.md guard A2):
+ * FOUR RUNGS, and each of the last two is load-bearing (docs/adversarial/
+ * class-sweep-signal-inversion-2026-08-17.md guard A2, then
+ * class-sweep-vendor-truth-2026-08-18.md class A):
  *
  * - 'info' — the condition resolves on its own; nothing is required.
  * - 'action_required' — the account will not progress until someone acts, and
- *   acting works.
+ *   acting works. The actor is YOU, the agent reading this.
+ * - 'operator_pending' — the platform has stopped AND the agent cannot restart
+ *   it, but this is not the end of the road: an OPERATOR clears the blocker
+ *   (funds a provider account, rotates a credential, ships a fix) and then the
+ *   agent's SAME retry completes, unchanged. Without this rung that outcome had
+ *   to borrow one of its neighbours, and both lied — 'action_required' tells an
+ *   agent to act when no action of its own can work, and 'terminal' tells it to
+ *   stop forever over something a top-up clears in a minute. The latter is what
+ *   actually happened: an empty provider wallet was reported as permanent, and
+ *   the customer's agent correctly obeyed and gave up.
  * - 'terminal' — the platform has STOPPED. Retrying will never help; the only
  *   way forward is a human. Emitting the terminal give-up (F3) without this
  *   rung re-opened the same defect one layer up: the message existed, and an
  *   agent branching on `severity` read a dead paid domain identically to a
  *   transient vendor hiccup, so it retried forever exactly as before.
  *
+ * The 'operator_pending' / 'terminal' distinction is exactly "will the SAME
+ * retry work later" — the question `VendorError.operatorActionable` answers,
+ * and these two rungs are its message-channel projection.
+ *
  * NOT DB-enforced — the `tenant_messages` CHECK would have to be added by table
  * rebuild inside every live DO, and the writes all funnel through this module's
- * two emit helpers, so the type is the enforcement point.
+ * two emit helpers, so the type is the enforcement point. Adding this rung
+ * therefore needed NO migration (verified against schema.ts: `severity` is a
+ * bare `TEXT NOT NULL`).
  */
-export type TenantMessageSeverity = "info" | "action_required" | "terminal";
+export type TenantMessageSeverity = "info" | "action_required" | "operator_pending" | "terminal";
 
 export interface TenantMessage {
   id: string;
@@ -202,11 +218,13 @@ interface TenantMessageRow {
  *
  * Note the unknown case does NOT resolve to 'terminal' either: claiming the
  * platform has permanently stopped, on the strength of a value we do not
- * recognise, would be its own false terminal.
+ * recognise, would be its own false terminal. Nor to 'operator_pending', which
+ * makes the equal-and-opposite claim that a human elsewhere is the blocker.
  */
 function toSeverity(raw: string): TenantMessageSeverity {
   if (raw === "info") return "info";
   if (raw === "terminal") return "terminal";
+  if (raw === "operator_pending") return "operator_pending";
   return "action_required";
 }
 
@@ -371,7 +389,21 @@ export function ackMessage(ctx: TenantContext, id: string): AckMessageResult {
 // MessageListPage/TenantMessage (the first, working occurrence). A generic
 // index-signature type reachable from a SECOND RPC method is the trigger,
 // not this field's data shape.
-export type OperatorTenantMessage = Omit<TenantMessage, "actionHint"> & { actionHint: object | null; expiresAt: number | null };
+// Item 6 (founder-ordered, docs/adversarial/class-sweep-vendor-truth-2026-08-18.md
+// addendum) — `readAt` (TenantMessage's own field, shared with the two
+// AGENT-facing surfaces above and NEVER renamed there) is replaced here with
+// `ackedAt`, ONLY on this operator-facing type. `tenant_messages.read_at`'s
+// ONLY writer is the tenant agent's explicit `ackMessage` tool
+// (ackMessage below) — a null does NOT mean the agent never saw the message,
+// only that it has not acked it; this endpoint lists every message
+// REGARDLESS of ack state. The old `readAt` name told the operator "the
+// agent read this" when the true claim was narrower and misled the operator
+// for a full day during a live incident.
+export type OperatorTenantMessage = Omit<TenantMessage, "actionHint" | "readAt"> & {
+  actionHint: object | null;
+  expiresAt: number | null;
+  ackedAt: number | null;
+};
 
 export type OperatorMessageListResult = {
   messages: OperatorTenantMessage[];
@@ -396,9 +428,14 @@ function clampOperatorMessageLimit(limit: number | undefined): number {
  * an AUDIT view, unlike the two agent-facing surfaces above:
  * listSurfacedTenantMessages caps at 5 and hides read/expired rows;
  * listMessagesPage partitions unread-first for an agent's inbox triage.
- * Here the operator is asking "did the customer's agent ever read this?", so
- * every row is in scope regardless of read/expired state, newest-first only
- * (no unread partition), and `expiresAt` is returned (the agent-facing
+ * Here the operator is asking "has the customer's agent ACKED this?" — NOT
+ * "has it been seen" (Item 6, docs/adversarial/class-sweep-vendor-truth-
+ * 2026-08-18.md addendum): this call itself LISTS every message regardless of
+ * ack state, so a message can be read by this very response without ever
+ * being acked. `ackedAt` (OperatorTenantMessage, above) is set ONLY by the
+ * tenant's explicit `ackMessage` call; null means "not acked", never "not
+ * seen". Every row is in scope regardless of ack/expired state, newest-first
+ * only (no unread partition), and `expiresAt` is returned (the agent-facing
  * shapes omit it — an agent never needs its own expiry). `total` counts the
  * SAME filter the returned page used (tenant_id, plus read_at IS NULL when
  * `unreadOnly`), so it always tells the caller whether `limit` truncated the
@@ -430,7 +467,14 @@ export function listMessagesForOperator(
   const total = ctx.sql.exec<{ n: number }>(`SELECT COUNT(*) as n FROM tenant_messages WHERE ${where}`, ...binds).one().n;
 
   return {
-    messages: rows.map((row) => ({ ...toTenantMessage(row), expiresAt: row.expires_at })),
+    // Item 6 — `readAt` -> `ackedAt`: same underlying column (`read_at`,
+    // ackMessage's ONLY writer), renamed on THIS surface only so the field
+    // name states its true semantics rather than implying "the agent saw
+    // this", which this endpoint cannot know.
+    messages: rows.map((row) => {
+      const { readAt, ...message } = toTenantMessage(row);
+      return { ...message, expiresAt: row.expires_at, ackedAt: readAt };
+    }),
     total,
   };
 }

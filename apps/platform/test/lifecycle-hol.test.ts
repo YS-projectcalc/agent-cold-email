@@ -22,6 +22,7 @@ import {
   type ProvisionedMailbox,
   type PurchasedDomain,
   type ReleaseResult,
+  type WarmupSubscriptionState,
 } from "@coldstart/shared";
 import { getTeardownSummary, releaseMailboxes, teardownTenant } from "../src/engine/lifecycle.js";
 import type { TenantContext } from "../src/tenant-context.js";
@@ -44,6 +45,9 @@ class PartlyStuckMailboxPort implements MailboxPort {
     throw new Error("not used");
   }
   async cancelWarmup(): Promise<CancelWarmupResult> {
+    throw new Error("not used");
+  }
+  async warmupSubscriptionState(): Promise<WarmupSubscriptionState> {
     throw new Error("not used");
   }
   async release(email: string): Promise<ReleaseResult> {

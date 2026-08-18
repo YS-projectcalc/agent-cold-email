@@ -50,6 +50,48 @@ export function logAction(ctx: TenantContext, action: string, target: string, de
   );
 }
 
+/**
+ * Founder alert for a REPLACE_DOMAIN failure on a plain VendorError — the
+ * sibling of registrar-alert.ts's alertRegistrarUnarmed for every OTHER
+ * vendor failure on this same path (Item 4, docs/adversarial/
+ * class-sweep-vendor-truth-2026-08-18.md, class B). Before this, only the
+ * registrar-not-armed hard block paged the founder; a transient InboxKit
+ * outage or a terminal DNS give-up on the replacement domain left the
+ * customer's automatic replacement silently paused with no alert — only a
+ * server `console.error` line (logVendorFailure) that nobody watches as an
+ * alert channel.
+ *
+ * Same shape as alertRegistrarUnarmed: best-effort, gated on
+ * `OPS_ALERT_EMAIL`, NEVER throws (an unsendable alert must not fail the
+ * sweep that triggered it). Customer-facing wording is untouched — this is
+ * purely an operator notification, `customerSafeVendorDetail`'s row (below,
+ * at the call site) still owns what the tenant sees.
+ */
+async function alertReplaceDomainFailed(
+  ctx: TenantContext,
+  burningDomain: string,
+  err: VendorError,
+  terminal: boolean,
+  mailer: OpsMailer,
+): Promise<void> {
+  if (!ctx.env.OPS_ALERT_EMAIL) return;
+  const text =
+    `Tenant ${ctx.tenantId}'s automatic domain replacement for burning domain "${burningDomain}" ` +
+    `${terminal ? "bought a replacement domain and then hit a terminal DNS failure — the replacement has been abandoned" : "failed"}.\n\n` +
+    `${err.message}\n\n` +
+    `Automatic domain replacement is paused for this tenant until the underlying issue clears.`;
+  try {
+    await mailer.send({
+      to: ctx.env.OPS_ALERT_EMAIL,
+      subject: `[coldrig] domain replacement failed (tenant ${ctx.tenantId})`,
+      text,
+      html: `<p>${escapeHtml(text).replace(/\n/g, "<br>")}</p>`,
+    });
+  } catch (mailErr) {
+    console.error(`replace-domain-failed alert: send to ${ctx.env.OPS_ALERT_EMAIL} failed (dark or transient)`, mailErr);
+  }
+}
+
 function applyThrottle(
   ctx: TenantContext,
   action: Extract<DeliverabilityAction, { type: "THROTTLE" }>,
@@ -262,14 +304,6 @@ async function applyReplaceDomain(
       });
     } catch (err) {
       if (!(err instanceof VendorError)) throw err; // a genuine bug (not a vendor signal) must NOT be swallowed
-      if (err instanceof RegistrarUnarmedError) {
-        await alertRegistrarUnarmed(ctx, profile.primary_domain, err, mailer);
-      }
-      // The raw vendor text goes to the Worker log; this row is customer-readable
-      // (account().recentActions) so it carries the abstract step instead — an
-      // `error: err.message` here shipped the provider's name and endpoint
-      // straight into the activity feed.
-      logVendorFailure(`REPLACE_DOMAIN ${action.domain}`, err);
       // A TERMINAL vendor verdict on the replacement's own domain is recorded
       // under its OWN action, because countReplacementsInWindow counts it
       // (see that function): the replacement DID buy a domain, and without that
@@ -277,6 +311,23 @@ async function applyReplaceDomain(
       // `instanceof` in-process, where the prototype is intact — this catch is
       // in the same DO invocation as the throw, unlike the HTTP surface.
       const terminal = err instanceof DomainDnsTerminalError;
+      if (err instanceof RegistrarUnarmedError) {
+        await alertRegistrarUnarmed(ctx, profile.primary_domain, err, mailer);
+      } else {
+        // Item 4 (docs/adversarial/class-sweep-vendor-truth-2026-08-18.md, class
+        // B): every OTHER VendorError on this path — a transient InboxKit outage,
+        // a terminal DNS give-up on the replacement — used to alert nobody, only
+        // logVendorFailure below (a server log line, never read as an alert
+        // channel). Same alert machinery as the registrar-unarmed sibling (best-
+        // effort, never throws, gated on OPS_ALERT_EMAIL); customer wording is
+        // unchanged (customerSafeVendorDetail below still owns it).
+        await alertReplaceDomainFailed(ctx, action.domain, err, terminal, mailer);
+      }
+      // The raw vendor text goes to the Worker log; this row is customer-readable
+      // (account().recentActions) so it carries the abstract step instead — an
+      // `error: err.message` here shipped the provider's name and endpoint
+      // straight into the activity feed.
+      logVendorFailure(`REPLACE_DOMAIN ${action.domain}`, err);
       logAction(
         ctx,
         terminal ? "REPLACE_DOMAIN_TERMINAL" : "REPLACE_DOMAIN_FAILED",

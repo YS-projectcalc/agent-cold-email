@@ -116,6 +116,48 @@ export interface SendPipelineSignals {
    * one that finally received them.
    */
   credentialPushes: { email: string; status: string }[];
+  /**
+   * Item 2 (docs/adversarial/class-sweep-vendor-truth-2026-08-18.md, class C
+   * stage 1: "vendor-vs-platform divergence — direction A: the vendor holds a
+   * resource, no platform row"). A `mailbox_intents` row stuck at 'bought' /
+   * 'dangling' / 'warming' (the vendor accepted a purchase, or the purchase
+   * call threw and we cannot tell) with NO matching live `mailboxes` row,
+   * older than the grace bound — the vendor may hold a mailbox that bills
+   * every month with no platform record of it. Grace-bounded (not "any such
+   * row") because a purchase in flight legitimately sits in one of these
+   * statuses for the seconds it takes to write the mailboxes row.
+   */
+  mailboxOrphans: { email: string; pendingForMs: number }[];
+  /**
+   * Every email this tenant's `mailbox_intents` table has EVER named,
+   * unconditional on status — the ownership-check set for clearing a
+   * `mailbox_orphan:` alert, the exact role `provisionedDomains`/
+   * `credentialPushes` play for their own checks above. `mailboxProvenance`
+   * cannot serve this role: an intent that never reached a `mailboxes` row
+   * (the exact case this check exists to catch) would never appear there,
+   * which would make ownership always read "not mine" and the alert could
+   * never clear.
+   */
+  mailboxIntentEmails: string[];
+  /** The domain twin of `mailboxOrphans` — a `domain_intents` row marked
+   * 'committed' with no matching `domains` row, older than the grace bound. */
+  domainOrphans: { domain: string; pendingForMs: number }[];
+  /** The domain twin of `mailboxIntentEmails`. */
+  domainIntentCandidates: string[];
+}
+
+/** How long a post-purchase mailbox/domain intent may sit with no matching
+ * live row before it is a founder problem (Item 2, class-sweep-vendor-truth).
+ * Env-tunable (`PROVISIONING_ORPHAN_GRACE_MS`) — a purchase legitimately sits
+ * in an intermediate status for the seconds/minutes it takes the saga to
+ * write the resource's own row; 30 minutes comfortably exceeds any legitimate
+ * in-flight window (mirrors AGING_CRED_PUSH_MS's own reasoning above). */
+export const DEFAULT_PROVISIONING_ORPHAN_GRACE_MS = 30 * 60 * 1000;
+
+function provisioningOrphanGraceMs(ctx: TenantContext): number {
+  const raw = ctx.env.PROVISIONING_ORPHAN_GRACE_MS;
+  const n = raw ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_PROVISIONING_ORPHAN_GRACE_MS;
 }
 
 export interface MailboxProvenanceRow {
@@ -439,6 +481,59 @@ function readSendPipelineSignals(ctx: TenantContext): SendPipelineSignals {
     .toArray()
     .map((row) => ({ domain: row.domain, dnsStatus: row.dns_status, status: row.status }));
 
+  // Item 2 (class-sweep-vendor-truth-2026-08-18, class C stage 1) — see
+  // SendPipelineSignals.mailboxOrphans. Rides this same opsSummary RPC (no
+  // new subrequests, no vendor calls): a purely local join against
+  // mailbox_intents, which every provisioning saga already writes.
+  const orphanGraceMs = provisioningOrphanGraceMs(ctx);
+  const mailboxOrphans = ctx.sql
+    .exec<{ email: string; updated_at: number }>(
+      `SELECT mi.email AS email, mi.updated_at AS updated_at
+       FROM mailbox_intents mi
+       WHERE mi.tenant_id = ?
+         AND mi.status IN ('bought', 'dangling', 'warming')
+         AND mi.updated_at <= ?
+         AND NOT EXISTS (
+           SELECT 1 FROM mailboxes m WHERE m.tenant_id = mi.tenant_id AND m.email = mi.email AND m.released_at IS NULL
+         )
+       ORDER BY mi.updated_at ASC`,
+      ctx.tenantId,
+      now - orphanGraceMs,
+    )
+    .toArray()
+    .map((row) => ({ email: row.email, pendingForMs: now - row.updated_at }));
+
+  const mailboxIntentEmails = ctx.sql
+    .exec<{ email: string }>(`SELECT DISTINCT email FROM mailbox_intents WHERE tenant_id = ?`, ctx.tenantId)
+    .toArray()
+    .map((row) => row.email);
+
+  // The domain twin: a domain_intents row already marked 'committed' (see
+  // provision-intents.ts's status vocabulary) whose domains row is missing —
+  // the local record claims full provisioning while the resource table
+  // disagrees, direction-A's shape one table over.
+  const domainOrphans = ctx.sql
+    .exec<{ candidate_domain: string; updated_at: number }>(
+      `SELECT di.candidate_domain AS candidate_domain, di.updated_at AS updated_at
+       FROM domain_intents di
+       WHERE di.tenant_id = ?
+         AND di.status = 'committed'
+         AND di.updated_at <= ?
+         AND NOT EXISTS (
+           SELECT 1 FROM domains d WHERE d.tenant_id = di.tenant_id AND d.domain = di.candidate_domain
+         )
+       ORDER BY di.updated_at ASC`,
+      ctx.tenantId,
+      now - orphanGraceMs,
+    )
+    .toArray()
+    .map((row) => ({ domain: row.candidate_domain, pendingForMs: now - row.updated_at }));
+
+  const domainIntentCandidates = ctx.sql
+    .exec<{ candidate_domain: string }>(`SELECT DISTINCT candidate_domain FROM domain_intents WHERE tenant_id = ?`, ctx.tenantId)
+    .toArray()
+    .map((row) => row.candidate_domain);
+
   return {
     activated,
     dueNonDemoPendingSends,
@@ -447,5 +542,9 @@ function readSendPipelineSignals(ctx: TenantContext): SendPipelineSignals {
     agingPendingDomains,
     provisionedDomains,
     credentialPushes,
+    mailboxOrphans,
+    mailboxIntentEmails,
+    domainOrphans,
+    domainIntentCandidates,
   };
 }

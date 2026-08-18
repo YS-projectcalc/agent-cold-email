@@ -263,6 +263,17 @@ export async function releaseMailboxes(
       }
       // Revoke BEFORE marking released_at (i3i4-r2): a crash in between leaves the
       // row unmarked -> a retry re-attempts release + revoke (both idempotent).
+      //
+      // "BOTH IDEMPOTENT" WAS FALSE FOR release UNTIL 2026-08-18 (canon finding
+      // 2), and this comment asserting it is what made the gap invisible. The
+      // second release of an already-released address resolved its uid, found
+      // the vendor listing nothing, and threw PERMANENTLY — so the retry this
+      // ordering depends on could never write `released_at`, the row stayed
+      // `released_at IS NULL`, and `syncMailboxQuantity` billed the customer for
+      // it every month thereafter. The port contract now requires absence to
+      // read as the goal state, so the sentence above is true as written. No
+      // test could reach it before: the sandbox port returns unconditional
+      // success and contains zero throws.
       await revokePushedMailboxCredentials(ctx, m.email, engineClient);
       ctx.sql.exec(
         `UPDATE mailboxes SET released_at = ?, deliv_status = 'paused' WHERE id = ? AND tenant_id = ?`,

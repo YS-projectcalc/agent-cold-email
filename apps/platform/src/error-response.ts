@@ -28,6 +28,8 @@ export interface ErrorResponse {
 /** Errors carrying extra structured fields worth forwarding. */
 interface StructuredError extends Error {
   retryable?: boolean;
+  /** VendorError's third value — see the VendorError branch below. Read as a FIELD, not via instanceof: an error crossing the DO->Worker RPC boundary arrives with no prototype. */
+  operatorActionable?: boolean;
   missingFields?: string[];
   currentRev?: number;
   currentLayout?: unknown;
@@ -156,6 +158,34 @@ export function toErrorResponse(err: unknown): ErrorResponse {
   if (name === "VendorError") {
     const retryable = error?.retryable === true;
     const step = vendorStep(error as StructuredError);
+    // THE THIRD BRANCH (class A, docs/adversarial/
+    // class-sweep-vendor-truth-2026-08-18.md). Two branches could not express
+    // an operator-clearable refusal, so it took the "rejected" one and every
+    // such failure reached the customer's agent as "Retrying as-is will not
+    // help — check your inputs". For an empty provider wallet both halves were
+    // false: there was nothing wrong with the inputs, and the identical retry
+    // succeeded the moment a human topped up. The agent believed us and
+    // disabled its retry loop, which is precisely the behaviour that sentence
+    // asks for.
+    //
+    // Wording follows the CapacityPendingError template — the honest
+    // back-pressure message this codebase already had: held, not failed;
+    // nothing charged; someone else acts; then the SAME retry completes.
+    if (!retryable && error?.operatorActionable === true) {
+      return {
+        status: 502,
+        body: {
+          error:
+            "This request is on hold: an upstream provider refused it for a reason only an operator can clear. " +
+            "Nothing was charged for the failed step. Do NOT change your inputs — once the operator clears it, " +
+            "retrying this same request (same idempotency key) completes it. Call contact_operator to reach a human.",
+          code: "vendor_operator_blocked",
+          ...(step ? { step } : {}),
+          retryable,
+          operatorActionable: true,
+        },
+      };
+    }
     return {
       status: 502,
       body: {

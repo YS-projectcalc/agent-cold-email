@@ -47,6 +47,8 @@ const KNOWN_NON_SPEND_ARMING = new Set([
   "SDN_INGEST_TOKEN", // G1a droplet-relay — bearer secret gating POST /admin/sdn/ingest; ingesting a CSV costs nothing and arms no vendor spend
   "AUTOSEND_DISABLED", // wave-2 auto-send kill switch — it can only SUPPRESS sending, never enable it
   "PROVISIONING_RECONCILE_ENABLED", // C3 part d — a cron LEG on/off switch, not a vendor credential; the spend it drives is gated by INBOXKIT_*/isRealSpendArmed exactly as the on-demand setup path is
+  "WALLET_FLOOR_CREDITS", // watchtower vendor_wallet check floor — a spend BOUND like SPEND_CEILING_CENTS, not an enabler
+  "PROVISIONING_ORPHAN_GRACE_MS", // watchtower mailbox_orphan:/domain_orphan: detection-timing bound, not a vendor credential
 ]);
 
 function parseEnvFields(source: string): { all: Set<string>; spendArming: Set<string> } {

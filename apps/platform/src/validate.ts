@@ -35,6 +35,22 @@ export function parseBoolQueryParam(raw: string | undefined): boolean | undefine
 }
 
 /**
+ * Query-string integers need the SAME empty-string handling as the booleans
+ * above, for a different reason: Hono's `c.req.query("limit")` returns `""`
+ * (not `undefined`) for a literal `?limit=`, and `Number("")` is `0` — a
+ * caller that only checks `raw !== undefined` (D9, docs/adversarial/
+ * class-sweep-vendor-truth-2026-08-18.md) clamps an explicitly-empty param to
+ * its minimum instead of falling back to the intended default. Returns
+ * `undefined` for an absent OR empty value so the caller's own default
+ * applies; a present-but-non-numeric value passes through as `NaN` for the
+ * caller's own clamp (every caller here already guards `Number.isFinite`) to
+ * catch.
+ */
+export function parseIntQueryParam(raw: string | undefined): number | undefined {
+  return raw ? Number(raw) : undefined;
+}
+
+/**
  * THE one sanctioned way to read a request body in this codebase. Returns the
  * body text, or `null` when it exceeds `maxBytes` of ACTUAL bytes read.
  *

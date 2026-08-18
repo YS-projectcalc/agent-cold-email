@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NotActivatedError, VendorError } from "@coldstart/shared";
 import { InboxKitClient } from "../src/vendors/real/inboxkit-client.js";
-import { mapInboxKitError } from "../src/vendors/real/inboxkit-errors.js";
+import { inboxKitAppError, mapInboxKitError } from "../src/vendors/real/inboxkit-errors.js";
 import { IK_API_KEY, IK_APP_ERROR_UNAUTHORIZED, IK_GATEWAY_ERROR_401, IK_GATEWAY_ERROR_404, IK_WORKSPACE_ID } from "./fixtures/inboxkit.js";
 
 // Unit contract for the shared InboxKit HTTP client: auth-header
@@ -106,18 +106,23 @@ describe("mapInboxKitError — the two live-verified InboxKit error envelopes", 
     expect(err).toBeInstanceOf(VendorError);
     expect(err.message).toContain("Not found");
     expect(err.retryable).toBe(false);
+    // A route the vendor does not serve is OURS to fix (the state
+    // showMailboxCredentials is in), never the caller's inputs.
+    expect(err.operatorActionable).toBe(true);
   });
 
   it("extracts message from the gateway/auth-layer {code,message} 401 shape", () => {
     const err = mapInboxKitError(401, IK_GATEWAY_ERROR_401, "GET /account");
     expect(err.message).toContain("jwt malformed");
     expect(err.retryable).toBe(false);
+    expect(err.operatorActionable).toBe(true);
   });
 
   it("extracts message from the app-level {error:true,message} envelope", () => {
     const err = mapInboxKitError(401, IK_APP_ERROR_UNAUTHORIZED, "POST /mailboxes/buy");
     expect(err.message).toContain("Unauthorized");
     expect(err.retryable).toBe(false);
+    expect(err.operatorActionable).toBe(true);
   });
 
   it("grades 5xx as retryable regardless of envelope shape", () => {
@@ -129,8 +134,53 @@ describe("mapInboxKitError — the two live-verified InboxKit error envelopes", 
     expect(mapInboxKitError(429, { code: 429, message: "rate limited" }, "ctx").retryable).toBe(true);
   });
 
-  it("grades an unlisted 4xx as permanent", () => {
-    expect(mapInboxKitError(400, { error: true, message: "bad request" }, "ctx").retryable).toBe(false);
+  // REWRITTEN (class A). It asserted `retryable === false` and called that
+  // "permanent", which is the conflation the class is named after: the grade is
+  // now a STATUS-and-REASON pair, and "this caller cannot retry it" says nothing
+  // about whether anyone can clear it. An ordinary 400 is genuinely the
+  // caller's — nobody else can fix it — so both halves are asserted here.
+  it("grades an unlisted 4xx as permanent AND nobody-else's-to-fix", () => {
+    const err = mapInboxKitError(400, { error: true, message: "bad request" }, "ctx");
+    expect(err.retryable).toBe(false);
+    expect(err.operatorActionable).toBe(false);
+  });
+
+  it("grades 402 Payment Required — and any funding-worded refusal — as operator-actionable", () => {
+    const paymentRequired = mapInboxKitError(402, { error: true, message: "Insufficient wallet balance to purchase mailboxes" }, "POST /mailboxes/buy");
+    expect(paymentRequired.retryable).toBe(false);
+    expect(paymentRequired.operatorActionable).toBe(true);
+
+    // 403 — a suspended/delinquent workspace. Account-wide, so grading it
+    // "check your inputs" mis-addresses EVERY tenant at once.
+    expect(mapInboxKitError(403, { code: 403, message: "Forbidden" }, "ctx").operatorActionable).toBe(true);
+
+    // The wire shape of a funds refusal is UNVERIFIED (canon Part 6 #1), so the
+    // body path has to work on a status the status path does not catch.
+    const wordedOnly = mapInboxKitError(409, { error: true, message: "Not enough credits to add warmup" }, "POST /warmup/add");
+    expect(wordedOnly.operatorActionable).toBe(true);
+  });
+
+  it("a RETRYABLE failure is never also operator-actionable — a transient failure needs nobody", () => {
+    expect(mapInboxKitError(500, { error: true, message: "Insufficient balance" }, "ctx").operatorActionable).toBe(false);
+    expect(mapInboxKitError(429, { code: 429, message: "rate limited" }, "ctx").operatorActionable).toBe(false);
+  });
+
+  it("grades the 200-{error:true} envelope the HTTP layer never sees — same three-valued answer", () => {
+    // THE INCIDENT SHAPE if the vendor answers a funds refusal with a 200:
+    // `mapInboxKitError` is never reached, so the app-envelope constructor has
+    // to grade it or the whole fix has a hole the size of the incident.
+    const funding = inboxKitAppError("inboxkit warmup/add did not create a subscription for a@b.com: Insufficient wallet balance", {
+      error: true,
+      message: "Insufficient wallet balance",
+    });
+    expect(funding.retryable).toBe(false);
+    expect(funding.operatorActionable).toBe(true);
+
+    const ordinary = inboxKitAppError("inboxkit mailboxes/buy did not return a mailbox for a@b.com: local part rejected", {
+      error: true,
+      message: "local part rejected",
+    });
+    expect(ordinary.operatorActionable).toBe(false);
   });
 
   it("falls back to a generic message when the body has neither shape", () => {

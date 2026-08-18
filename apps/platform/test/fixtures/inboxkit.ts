@@ -63,15 +63,52 @@ export const IK_MAILBOX_LIST_EMPTY = {
   limit: 0,
 };
 
+/**
+ * GET /email-insights/mailbox/{uid}/health.
+ *
+ * capturedFrom: GET https://api.inboxkit.com/v1/api/email-insights/mailbox/{uid}/health
+ * capturedAt:   2026-08-18 (live, read-only — docs/adversarial/class-sweep-vendor-truth-2026-08-18.md Part 3 #8)
+ *
+ * ⚠ THIS FIXTURE REPLACES AN INVENTED ONE. The previous version had
+ * `health_status: "healthy"`, `bounce_rate: 1.8`, `reply_rate`, `sent_7d`,
+ * `received_7d` — none of which this endpoint returns. It was written in the
+ * same commit as the adapter that read those fields, so it restated the code's
+ * premise rather than the vendor's behaviour, and the contract test built on it
+ * was green while the live path produced `NaN`. A fixture is only worth
+ * anything if it came from the vendor; hence the provenance header, which every
+ * new fixture in this file gets.
+ *
+ * ⚠ `data.status` is ACTIVITY, not lifecycle: it reads "inactive" for a mailbox
+ * whose `/mailboxes/list` status is "active" and whose 7d/30d volumes are zero.
+ * Never feed it to classifyVendorLifecycle.
+ */
 export const IK_MAILBOX_HEALTH_SUCCESS = {
   success: true,
   data: {
-    health_status: "healthy",
-    bounce_rate: 1.8,
-    reply_rate: 22.3,
-    sent_7d: 85,
-    received_7d: 62,
-    last_event_at: "2026-01-15T14:30:00.000Z",
+    status: "inactive",
+    bounce_rate_30d: 1.8,
+    total_7d: 0,
+    total_30d: 0,
+    last_event_at: "0001-01-01T00:00:00Z",
+  },
+};
+
+/**
+ * The same endpoint for a mailbox the vendor reports NOTHING about — the
+ * normal shape for a brand-new mailbox, and the one that used to produce
+ * `NaN` bounce rates and a fabricated reputation score of 50.
+ *
+ * capturedFrom: same endpoint as above; `data` present, metric fields absent.
+ * capturedAt:   2026-08-18 (derived from the same live capture: the fields this
+ *               adapter reads are optional on the wire, never guaranteed).
+ */
+export const IK_MAILBOX_HEALTH_NO_METRICS = {
+  success: true,
+  data: {
+    status: "inactive",
+    total_7d: 0,
+    total_30d: 0,
+    last_event_at: "0001-01-01T00:00:00Z",
   },
 };
 
@@ -363,17 +400,20 @@ export const IK_DOMAIN_REMOVE_SUCCESS = {
 };
 
 /**
- * show-mailbox-credentials response (self-serve I3 credential push). ⚠️
- * UNVERIFIED SHAPE — a documented-guess placeholder (ROADMAP 2026-07-20 "GET
- * show-mailbox-credentials (full smtp+imap creds)"); confirm at the first live
- * mailbox. All values synthetic (CLAUDE.md rule g).
+ * show-mailbox-credentials — WHAT THE ENDPOINT ACTUALLY ANSWERS.
+ *
+ * capturedFrom: GET https://api.inboxkit.com/v1/api/mailboxes/{uid}/credentials
+ * capturedAt:   2026-08-18 (live, read-only)
+ *
+ * The route does not exist; the gateway 404s it. The fixture that stood here
+ * was an invented SUCCESS payload for it — a documented-shape guess whose
+ * contract test proved only that our mapper can read our own invention. It is
+ * deleted rather than corrected: there is nothing to correct it to until the
+ * endpoint is real. The adapter's mapping stays UNVERIFIED and untested by
+ * design, and this 404 is graded operator-actionable (ours to fix), never
+ * "check your inputs".
  */
-export const IK_MAILBOX_CREDENTIALS_SUCCESS = {
-  data: {
-    imap: { host: "imap.gmail.com", port: 993, secure: true, username: "john.doe@example-lookalike.com", password: "imap-app-pass" },
-    smtp: { host: "smtp.gmail.com", port: 465, secure: true, username: "john.doe@example-lookalike.com", password: "smtp-app-pass" },
-  },
-};
+export const IK_MAILBOX_CREDENTIALS_NOT_FOUND = { code: 404, message: "Not found" };
 
 /** InboxKit programmatic OAuth consent response (I3c). ⚠️ UNVERIFIED SHAPE — documented guess. */
 export const IK_CONSENT_SUCCESS = {

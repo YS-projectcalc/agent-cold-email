@@ -29,14 +29,41 @@ export class VendorError extends Error {
    */
   public readonly step?: string;
 
+  /**
+   * THE THIRD VALUE (class A, docs/adversarial/class-sweep-vendor-truth-2026-08-18.md).
+   * `retryable` carries a two-valued answer to a three-valued question, and the
+   * missing third value is the one that cost a customer a week: a refusal that
+   * THIS caller cannot clear by retrying, and that nobody needs to change their
+   * inputs for, because an OPERATOR clears it and then the SAME retry completes.
+   *
+   * The live instance: an empty vendor credit wallet refused `/warmup/add`,
+   * `retryable:false` rendered to the customer's agent as "Retrying as-is will
+   * not help — check your inputs", and the agent correctly disabled its retry
+   * loop for a condition a $19 top-up cleared. Same shape for a rotated vendor
+   * JWT (401), a delinquent workspace (402/403) and a vendor response whose
+   * shape drifted out from under our schema.
+   *
+   * `retryable` is deliberately UNTOUCHED — openapi.yaml publishes it and ~10
+   * sites branch on it, and the two questions are genuinely independent: this
+   * flag says WHO can clear the refusal, not whether an immediate re-attempt
+   * would work. `operatorActionable` is only ever meaningful alongside
+   * `retryable: false` (a retryable failure needs nobody).
+   *
+   * An OWN enumerable property, like `retryable` and `step`: an error crossing
+   * the DO->Worker RPC boundary arrives with its own properties but NO
+   * prototype, so every consumer reads the field rather than the class.
+   */
+  public readonly operatorActionable: boolean;
+
   constructor(
     message: string,
     public readonly retryable: boolean,
-    options?: { cause?: unknown; step?: string },
+    options?: { cause?: unknown; step?: string; operatorActionable?: boolean },
   ) {
     super(message, options);
     this.name = "VendorError";
     this.step = options?.step;
+    this.operatorActionable = options?.operatorActionable ?? false;
   }
 }
 

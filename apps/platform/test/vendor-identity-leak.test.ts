@@ -62,7 +62,18 @@ const VENDOR_NAME_ALLOWED = (file: string): boolean =>
   ["src/env.ts", "src/tenant-do.ts", "src/engine/activation.ts", "src/engine/billing.ts", "src/engine/mailbox-credential-push.ts", "src/engine/spend-ceiling.ts", "src/engine/provisioning.ts"].includes(file) ||
   // Operator-only surfaces: the founder's ops digest/alert email. Explicitly
   // OUT of the customer class — an operator needs the vendor named.
-  file === "src/admin/ops-sweep.ts";
+  file === "src/admin/ops-sweep.ts" ||
+  // Item 1 (docs/adversarial/class-sweep-vendor-truth-2026-08-18.md) — the
+  // account-wide vendor checks (admin/watchtower-vendor.ts) and their alert
+  // vocabulary (admin/watchtower-alerts.ts's `vendor_wallet`/
+  // `warmup_duplicates` labels). Every string these two files produce is
+  // EITHER emailed to `env.OPS_ALERT_EMAIL` (watchtower-alerts.ts's
+  // `alertEmailFor`, unconditionally hardcoded — never a customer address)
+  // OR served from `GET /admin/ops/checks` (admin-token-gated, the same
+  // operator surface ops-sweep.ts's digest is on). Same class as the entry
+  // above, one file over.
+  file === "src/admin/watchtower-alerts.ts" ||
+  file === "src/admin/watchtower-vendor.ts";
 
 describe("the emitted vendor-step vocabulary is abstract", () => {
   it("no abstract label contains a vendor endpoint path (the fingerprint)", () => {
@@ -108,6 +119,7 @@ describe("a caught vendor error never reaches a customer read-surface intact", (
       provisioningState: (e) => base.provisioningState(e),
       startWarmup: (e, k) => base.startWarmup(e, k),
       cancelWarmup: (e, k) => base.cancelWarmup(e, k),
+      warmupSubscriptionState: (e) => base.warmupSubscriptionState(e),
       release: (e, k) => base.release(e, k),
       getHealth: (): Promise<MailboxHealth> => {
         throw new VendorError("inboxkit GET /email-insights/mailbox/mbx-1/health -> HTTP 500: upstream", true);

@@ -29,6 +29,7 @@ import type {
   ProvisionedMailbox,
   PurchasedDomain,
   ReleaseResult,
+  WarmupSubscriptionState,
 } from "@coldstart/shared";
 import { VendorError, type SetupInfrastructureInput } from "@coldstart/shared";
 import { withRequestIdempotency } from "../src/engine/idempotency.js";
@@ -103,6 +104,9 @@ function ports(log: Log, opts: { d0Verdict: "not_yet" | "ready" }): { domain: Do
     },
     async cancelWarmup(): Promise<{ cancelled: boolean; cancelledAt: number }> {
       return { cancelled: true, cancelledAt: Date.now() };
+    },
+    async warmupSubscriptionState(): Promise<WarmupSubscriptionState> {
+      return "absent";
     },
     async release(): Promise<ReleaseResult> {
       return { released: true, releasedAt: Date.now() };
@@ -453,6 +457,9 @@ describe("abortedAt masking — an ordinary slot failure before a ceiling breach
       },
       async cancelWarmup(): Promise<{ cancelled: boolean; cancelledAt: number }> {
         return { cancelled: true, cancelledAt: Date.now() };
+      },
+      async warmupSubscriptionState(): Promise<WarmupSubscriptionState> {
+        return "absent";
       },
       async release(): Promise<ReleaseResult> {
         return { released: true, releasedAt: Date.now() };
