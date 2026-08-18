@@ -32,6 +32,7 @@ import type {
 } from "@coldstart/shared";
 import { VendorError, type SetupInfrastructureInput } from "@coldstart/shared";
 import { withRequestIdempotency } from "../src/engine/idempotency.js";
+import { domainIntentKey } from "../src/engine/provision-intents.js";
 import { runSetupInfrastructure } from "../src/engine/provisioning.js";
 import { periodKey } from "../src/engine/spend-ceiling.js";
 import { settleSetupInfrastructure } from "../src/engine/setup-terminality.js";
@@ -383,6 +384,121 @@ describe("cached-terminal member 3 — a capacity-gated setup must not freeze as
     expect(log.buys.length).toBeGreaterThan(0);
     expect(log.mailboxBuys.length).toBeGreaterThan(0);
   }, 60_000);
+});
+
+// abortedAt-vs-failures[0] masking (2026-08-18 fix, found by the merge
+// resolver during the class sweep). Both isolation loops — this saga's
+// per-ordinal loop AND mailbox-provisioning.ts's per-slot loop — used to
+// rethrow `outcome.failures[0].error` and never consult `outcome.abortedAt`
+// (isolated-loop.ts). So an ORDINARY per-slot failure occurring BEFORE a
+// ceiling breach masked the CapacityPendingError: provisionMailboxesForDomain
+// rethrew the ordinary error, the outer ordinal loop's abortOn never matched
+// it (it is not a CapacityPendingError), and — pre-fix — the loop fell
+// through to the next ordinal and burned a reservation attempt against a
+// ceiling that had already refused, instead of leaving the tenant
+// capacity_pending.
+describe("abortedAt masking — an ordinary slot failure before a ceiling breach must not eclipse it", () => {
+  it("surfaces capacity_pending, not slot 1's unrelated rejection, and never touches ordinal 1", async () => {
+    const { tenantId } = await mintTenant("Capmask", "managed");
+    await activatePaidPlan(tenantId, "managed");
+    await env.DB.prepare("DELETE FROM vendor_spend_entries").run();
+    await env.DB.prepare("DELETE FROM vendor_spend_ledger").run();
+    // Domain (1500¢) + one committed mailbox (690¢) = 2190¢ fits under 2500¢;
+    // a THIRD reservation (+690¢ = 2880¢) does not — the ceiling breaches on
+    // slot 3, well after slot 1's ordinary rejection has already resolved and
+    // released its own (unrelated) reservation.
+    await setCeilingCents(2500);
+
+    const log = { buys: [] as string[], listOwned: 0, mailboxBuys: [] as string[] };
+    const domain: DomainPort = {
+      async searchLookalikes(_b, primaryDomain, count): Promise<LookalikeCandidate[]> {
+        const slug = primaryDomain.split(".")[0];
+        return Array.from({ length: count }, (_v, i) => ({ domain: `${slug}${i}.com`, available: true }));
+      },
+      async listOwnedDomains(): Promise<OwnedDomain[]> {
+        log.listOwned++;
+        return [];
+      },
+      async buy(d: string): Promise<PurchasedDomain> {
+        log.buys.push(d);
+        return { domain: d, purchasedAt: Date.now(), registrar: "test", connectionType: "purchased" };
+      },
+      async setDns(): Promise<DomainDnsResult> {
+        return { verdict: { kind: "ready" }, records: ALL_TRUE };
+      },
+      async release(): Promise<ReleaseResult> {
+        return { released: true, releasedAt: Date.now() };
+      },
+    };
+    const mailbox: MailboxPort = {
+      async provision(d: string, localPart: string): Promise<ProvisionedMailbox> {
+        // sender11 — ordinal 0's FIRST slot — an ORDINARY, non-retryable
+        // rejection (the provisioning-hol.test.ts dead-address pattern),
+        // resolved (and its own reservation released) before the third
+        // slot's reservation is ever attempted.
+        if (localPart === "sender11") {
+          throw new VendorError("inboxkit mailboxes/buy -> HTTP 422: local part rejected", false);
+        }
+        log.mailboxBuys.push(`${localPart}@${d}`);
+        return { email: `${localPart}@${d}`, provider: "google", provisionedAt: Date.now() };
+      },
+      async provisioningState(): Promise<MailboxReadiness> {
+        return { kind: "ready" };
+      },
+      async getHealth(email: string): Promise<MailboxHealth> {
+        return { email, reputationScore: 90, bounceRate: 0, complaintRate: 0, placementRate: 1 };
+      },
+      async startWarmup(): Promise<{ started: boolean; startedAt: number }> {
+        return { started: true, startedAt: Date.now() };
+      },
+      async cancelWarmup(): Promise<{ cancelled: boolean; cancelledAt: number }> {
+        return { cancelled: true, cancelledAt: Date.now() };
+      },
+      async release(): Promise<ReleaseResult> {
+        return { released: true, releasedAt: Date.now() };
+      },
+    };
+
+    const result = await withTenantContext(tenantId, (base) =>
+      runSetupInfrastructure(
+        { ...base, adapters: { ...base.adapters, kind: "real", domain, mailbox } },
+        {
+          brand: "Capmask",
+          primaryDomain: "capmask.com",
+          domains: 2,
+          inboxesEach: 3,
+          persona: "Sender",
+          physicalAddress: "1 Test St",
+          senderIdentity: "S <s@capmask.com>",
+          quoteOnly: false as const,
+        },
+        new SandboxOpsMailer(),
+        "cap-mask-1",
+      ).catch((e: unknown) => e),
+    );
+
+    // THE ASSERTION THE PRE-FIX CODE FAILS: pre-fix, provisionMailboxesForDomain
+    // rethrew slot 1's masked ordinary VendorError instead of the abort cause,
+    // so this call REJECTED with "local part rejected" instead of ever
+    // returning the back-pressure shape.
+    expect(result).toMatchObject({ provisioning: "capacity_pending" });
+
+    // Only the healthy middle slot landed — the rejected slot and the
+    // ceiling-blocked slot did not (true either way; this pins the setup,
+    // not the fix).
+    expect(log.mailboxBuys).toEqual(["sender12@capmask0.com"]);
+
+    // Ordinal 1 must never be attempted: no domain_intents row for it at all.
+    // Pre-fix, the outer loop's abortOn never matched (it saw slot 1's masked
+    // VendorError, not the CapacityPendingError), so it fell through to
+    // ordinal 1 — which recorded an intent, ran the adopt-before-buy lookup,
+    // and burned a reservation attempt that the already-breached ceiling
+    // refused (leaving a 'dangling' row behind).
+    const domainIntentRows = await runInDurableObject(tenantStub(tenantId), (_i, s) =>
+      s.storage.sql.exec<{ key: string }>(`SELECT key FROM domain_intents WHERE tenant_id = ?`, tenantId).toArray(),
+    );
+    expect(domainIntentRows.map((r) => r.key)).toEqual([domainIntentKey(tenantId, 0)]);
+  }, 30_000);
 });
 
 describe("Q4 — the 6h bound must cover the NULL-anchor (pre-deploy) population", () => {

@@ -174,12 +174,22 @@ export async function provisionMailboxesForDomain(
     },
   );
 
-  // Report the first failure to the caller (which isolates per ORDINAL, IN-1)
-  // AFTER every slot has had its chance. Throwing rather than returning a
-  // partial list is deliberate: the mailbox count is what the customer is billed
-  // on, so a short domain must never read to the agent as a completed one.
-  const firstFailure = outcome.failures[0];
-  if (firstFailure) throw firstFailure.error;
+  // Report the ABORT CAUSE over an earlier ordinary slot failure (2026-08-18
+  // fix). A spend-ceiling breach (abortOn) is a TENANT-level condition the
+  // caller's per-ordinal loop (provisioning.ts) has to recognize and stop on
+  // — but `outcome.failures[0]` is the FIRST failure in slot order, which is
+  // an earlier ordinary rejection whenever one preceded the breach. Rethrowing
+  // that instead masked the CapacityPendingError: the outer loop's own
+  // abortOn never matched an ordinary VendorError, so it fell through to the
+  // next ordinal and burned a reservation attempt against a ceiling that had
+  // already refused, instead of leaving the tenant capacity_pending.
+  // Falls back to the first ordinary failure when the loop ran to completion
+  // without aborting. Either way this happens AFTER every slot has had its
+  // chance — throwing rather than returning a partial list is deliberate: the
+  // mailbox count is what the customer is billed on, so a short domain must
+  // never read to the agent as a completed one.
+  const reportedFailure = outcome.abortedAt ?? outcome.failures[0];
+  if (reportedFailure) throw reportedFailure.error;
 
   return outcome.results;
 }

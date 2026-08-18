@@ -692,13 +692,19 @@ export async function runSetupInfrastructure(
     console.error(`setup_infrastructure: mailbox quantity sync failed for tenant ${ctx.tenantId}`, syncErr);
   }
 
-  const firstFailure = outcome.failures[0];
-  if (firstFailure) {
-    // The FIRST failure in ordinal order is what the call reports — deterministic,
-    // and it is the head item the class is named for. A later ordinal's failure
-    // surfaces on the retry that clears this one.
-    const err = firstFailure.error;
-    const inFlightDomain = inFlightByOrdinal.get(firstFailure.item.domainIndex);
+  // Report the ABORT CAUSE over an earlier ordinal's ordinary failure
+  // (2026-08-18 fix, symmetric with mailbox-provisioning.ts's per-slot loop —
+  // see its doc comment). A spend-ceiling/registrar-unarmed breach (abortOn)
+  // is TENANT-GLOBAL and must never be eclipsed by an earlier ordinal's
+  // unrelated failure just because that one happened first in `failures`.
+  const reportedFailure = outcome.abortedAt ?? outcome.failures[0];
+  if (reportedFailure) {
+    // Absent an abort, the FIRST failure in ordinal order is what the call
+    // reports — deterministic, and it is the head item the class is named
+    // for. A later ordinal's failure surfaces on the retry that clears this
+    // one.
+    const err = reportedFailure.error;
+    const inFlightDomain = inFlightByOrdinal.get(reportedFailure.item.domainIndex);
     if (err instanceof CapacityPendingError) {
       // G2/G4 graceful back-pressure — NOT a failure. withSpendCeiling already
       // set the tenant's capacity_pending marker, released the reservation, and
