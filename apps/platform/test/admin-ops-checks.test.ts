@@ -2,7 +2,7 @@ import type { RecoveryBasis } from "@coldstart/shared";
 import { beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
 import { reconcileAlerts } from "../src/admin/watchtower.js";
-import type { CheckResult } from "../src/admin/watchtower-alerts.js";
+import { CRON_SWEEP_CHECK, D1_CHECK, type CheckResult } from "../src/admin/watchtower-alerts.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
 import { adminApi, api } from "./helpers.js";
 
@@ -24,6 +24,7 @@ interface CheckRow {
 interface ChecksResponse {
   checks: CheckRow[];
   unhealthyCount: number;
+  excludesDoStoreChecks: string[];
 }
 
 const T0 = 1_800_000_000_000;
@@ -157,5 +158,24 @@ describe("GET /admin/ops/checks — admin read surface for watchtower per-check 
     ).all();
 
     expect(after.results).toEqual(before.results);
+  });
+
+  // Item 3e (docs/adversarial/class-sweep-vendor-truth-2026-08-18.md, D7) —
+  // `d1`/`cron_sweep` live in WatchtowerDO storage, never this table, so a D1
+  // outage (the ONE condition this endpoint's own name suggests it would
+  // catch) can leave `unhealthyCount: 0` while the platform is actively down.
+  // The response must say so explicitly, not just in a code comment nobody
+  // consuming the JSON ever reads.
+  it("discloses which checks this table structurally CANNOT report, so 0 can never read as all-clear", async () => {
+    // Every row healthy — the exact shape a D1 outage would ALSO produce here
+    // (this table cannot record the outage itself).
+    const mailer = new SandboxOpsMailer();
+    await reconcileAlerts(env, mailer, [healthy("engine")], T0);
+
+    const res = await adminApi<ChecksResponse>("/admin/ops/checks");
+    expect(res.status).toBe(200);
+    expect(res.body.unhealthyCount).toBe(0);
+    expect(res.body.excludesDoStoreChecks).toEqual(expect.arrayContaining([D1_CHECK, CRON_SWEEP_CHECK]));
+    expect(res.body.excludesDoStoreChecks.length).toBe(2);
   });
 });

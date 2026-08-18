@@ -68,7 +68,7 @@ import {
   type MessageListPage,
   type OperatorMessageListResult,
 } from "./engine/tenant-messages.js";
-import { getProvisioningStateForOperator, type ProvisioningState } from "./engine/provisioning-state.js";
+import { getProvisioningStateForOperator, type ProvisioningState, type ProvisioningStateOptions } from "./engine/provisioning-state.js";
 import { contactOperator, type ContactOperatorResult } from "./engine/contact-operator.js";
 import { reconcileOrphanedAdmissions } from "./engine/contact-operator-reconcile.js";
 import { runPollInbox } from "./engine/reply-processor.js";
@@ -1333,11 +1333,13 @@ export class TenantDO extends DurableObject<Env> {
    * GET /admin/tenants/:id/provisioning-state (routes/admin-provisioning-state.ts
    * ONLY; never a tenant-facing route) — see engine/provisioning-state.ts's
    * doc for what this closes (UNVERIFIABLE-1/2/3, agent-channel-product-audit
-   * -2026-08-17.md). PURE SELECT across domains/domain_intents/
-   * request_idempotency, same posture as listMessagesForOperator above.
+   * -2026-08-17.md; Item 3 / D minimal, class-sweep-vendor-truth-2026-08-18.md).
+   * PURE SELECT across domains/domain_intents/mailbox_intents/
+   * mailbox_buy_dispatches/request_idempotency, same posture as
+   * listMessagesForOperator above.
    */
-  getProvisioningStateForOperator(): ProvisioningState {
-    return getProvisioningStateForOperator(this.requireContext());
+  getProvisioningStateForOperator(options?: ProvisioningStateOptions): ProvisioningState {
+    return getProvisioningStateForOperator(this.requireContext(), options);
   }
 
   /**
