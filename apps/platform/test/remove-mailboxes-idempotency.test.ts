@@ -40,15 +40,15 @@ function liveMailboxes(tenantId: string): Promise<number> {
   );
 }
 
-async function seedTenant(brand: string, primaryDomain: string) {
+async function seedTenant(brand: string, primaryDomain: string, domains = 2, inboxesEach = 2) {
   const { tenantId, token } = await signup(brand, `founder@${primaryDomain}`);
-  await api("/setup-infrastructure", { method: "POST", token, body: setupBody(brand, primaryDomain, 2, 2) });
-  expect(await liveMailboxes(tenantId)).toBe(4);
+  await api("/setup-infrastructure", { method: "POST", token, body: setupBody(brand, primaryDomain, domains, inboxesEach) });
+  expect(await liveMailboxes(tenantId)).toBe(domains * inboxesEach);
   return { tenantId, token };
 }
 
 function removeN(token: string, count: number, idempotencyKey?: string) {
-  return api<{ releasedCount?: number; failedCount?: number; error?: string }>("/remove-mailboxes", {
+  return api<{ releasedCount?: number; failedCount?: number; unreleased?: string[]; error?: string }>("/remove-mailboxes", {
     method: "POST",
     token,
     body: JSON.stringify({ count, acknowledged: true }),
@@ -122,19 +122,23 @@ function removeClaims(tenantId: string): Promise<{ key: string; status: string }
 }
 
 /**
- * One mailbox the vendor permanently refuses to release (a 404 on an address
+ * Mailboxes the vendor permanently refuses to release (a 404 on an address
  * already gone at the provider, a 403 on one it will not delete), every other
  * one released normally. `attempts` records every release the vendor was asked
  * for, so a test can prove a retry did real work rather than replaying.
+ *
+ * A `Set` is read LIVE on every call, so a test can heal the vendor mid-run
+ * (`stuck.clear()`) and watch the next retry finish what it owed.
  */
-async function failReleaseFor(tenantId: string, stuckEmail: string, attempts: string[]): Promise<void> {
+async function failReleaseFor(tenantId: string, stuck: string | Set<string>, attempts: string[]): Promise<void> {
+  const stuckAddresses = typeof stuck === "string" ? new Set([stuck]) : stuck;
   await runInDurableObject(tenantStub(tenantId), (instance) => {
     const bundle = (instance as unknown as { sandboxAdapters: { mailbox: { release: unknown } } | null }).sandboxAdapters;
     if (!bundle) throw new Error("no cached sandbox bundle to break — seed the tenant first");
     const original = bundle.mailbox.release as (email: string, key: string) => Promise<unknown>;
     bundle.mailbox.release = async (email: string, key: string) => {
       attempts.push(email);
-      if (email === stuckEmail) throw new VendorError("mailbox not found at the provider", false, { step: "mailbox release" });
+      if (stuckAddresses.has(email)) throw new VendorError("mailbox not found at the provider", false, { step: "mailbox release" });
       return original.call(bundle.mailbox, email, key);
     };
   });
@@ -192,6 +196,107 @@ describe("B3 — a PARTIAL release is never recorded as the finished answer", ()
     // Nothing further was asked of the vendor.
     expect(attempts).toHaveLength(2);
     expect(await liveMailboxEmails(tenantId)).toHaveLength(2);
+  });
+});
+
+// N1 (docs/adversarial/wave-1-2-integration-gate-2026-08-18.md, round-2
+// re-attack). B3 correctly made a PARTIAL release non-terminal, which is what
+// frees the key for the retry the platform's own docs instruct. What made that
+// unsafe is the retry VEHICLE: "release N" is a RELATIVE destructive op, so a
+// mailbox the vendor permanently refuses keeps `failedCount >= 1` forever, the
+// key never freezes, and every instructed retry re-resolved "the N newest live"
+// and destroyed `count - failedCount` HEALTHY mailboxes. Measured by the gate:
+// 20 live, one stuck, ask 3, six retries -> 12 destroyed and still counting, for
+// a customer who asked to release 3. The loss is irreversible in the way that
+// matters — a released mailbox loses its warmup reputation, which costs real
+// money and the platform's own documented four-week ramp to rebuild.
+//
+// The fix makes the keyed retry ABSOLUTE: the first execution under a key
+// durably records the resolved target set (engine/remove-intents.ts), and every
+// same-key retry re-drives exactly that set's still-unreleased members.
+describe("N1 — a keyed retry is ABSOLUTE: only the set the first call resolved can ever be released", () => {
+  it("a permanently stuck mailbox cannot make a retry destroy anything beyond the count asked for", async () => {
+    // 15 live is the demo plan's provisioning cap (engine/quota.ts) — enough to
+    // run the gate's six retries and still be the same measurement: on the old
+    // code they destroy 12 healthy mailboxes for a customer who asked for 3.
+    const { tenantId, token } = await seedTenant("Absolute Retry Co", "absoluteretry.com", 3, 5);
+    const live = await liveMailboxEmails(tenantId);
+    const target = live.slice(0, 3);
+    // Mid-window: inside the 3 this call selects, neither the head nor the tail.
+    const stuck = new Set([live[1] as string]);
+    const attempts: string[] = [];
+    await failReleaseFor(tenantId, stuck, attempts);
+
+    const first = await removeN(token, 3, "downgrade-absolute");
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({ releasedCount: 2, failedCount: 1 });
+    expect(await liveMailboxes(tenantId)).toBe(13);
+
+    // The gate's probe verbatim: five more of the retry the platform instructs.
+    let retryBody = first.body;
+    for (let attempt = 2; attempt <= 6; attempt++) {
+      const retry = await removeN(token, 3, "downgrade-absolute");
+      expect(retry.status).toBe(200);
+      // THE INVARIANT: not one healthy mailbox beyond the 3 originally asked for,
+      // however many times the agent retries. (On the pre-fix code this reads 11,
+      // then 9, 7, 5, 3 — `count - failedCount` destroyed per pass, forever.)
+      expect(await liveMailboxes(tenantId)).toBe(13);
+      // Counts are scoped to the RECORDED intent, so they report the downgrade
+      // as a whole (2 of the 3 are gone) rather than this pass in isolation.
+      expect(retry.body).toMatchObject({ releasedCount: 2, failedCount: 1 });
+      retryBody = retry.body;
+    }
+    // Nothing outside the originally-resolved set was ever asked of the vendor.
+    expect([...new Set(attempts)].sort()).toEqual([...target].sort());
+    // The response names what is still owed, so the agent need not derive it.
+    expect(retryBody.unreleased).toEqual([...stuck]);
+
+    // The vendor heals: the retry finishes exactly the intent's last member.
+    stuck.clear();
+    const healed = await removeN(token, 3, "downgrade-absolute");
+    expect(healed.body).toMatchObject({ releasedCount: 3, failedCount: 0, unreleased: [] });
+    expect(await liveMailboxes(tenantId)).toBe(12); // the 3 asked for, and only those
+
+    // Terminal at last, so the key freezes: a further retry replays with zero
+    // vendor calls, exactly as a whole release always has.
+    const releasesAtFreeze = attempts.length;
+    const replay = await removeN(token, 3, "downgrade-absolute");
+    expect(replay.body).toEqual(healed.body);
+    expect(attempts).toHaveLength(releasesAtFreeze);
+    expect(await liveMailboxes(tenantId)).toBe(12);
+  });
+
+  it("two stuck mailboxes mid-window: every retry drives exactly that pair and nothing else", async () => {
+    const { tenantId, token } = await seedTenant("Two Stuck Co", "twostuck.com", 1, 7);
+    const live = await liveMailboxEmails(tenantId);
+    const target = live.slice(0, 4);
+    // Non-adjacent, both mid-window: the healthy mailboxes at live[0] and
+    // live[2] sit BETWEEN them, so a retry that re-resolved would take them.
+    const stuck = new Set([live[1] as string, live[3] as string]);
+    const attempts: string[] = [];
+    await failReleaseFor(tenantId, stuck, attempts);
+
+    const first = await removeN(token, 4, "downgrade-pair");
+    expect(first.body).toMatchObject({ releasedCount: 2, failedCount: 2 });
+    expect(attempts).toEqual(target);
+    expect(await liveMailboxes(tenantId)).toBe(5);
+
+    let retryBody = first.body;
+    for (let attempt = 2; attempt <= 4; attempt++) {
+      attempts.length = 0;
+      const retry = await removeN(token, 4, "downgrade-pair");
+      expect(await liveMailboxes(tenantId)).toBe(5);
+      // Exactly the stuck pair reached the vendor — no healthy mailbox was touched.
+      expect([...attempts].sort()).toEqual([...stuck].sort());
+      expect(retry.body).toMatchObject({ releasedCount: 2, failedCount: 2 });
+      retryBody = retry.body;
+    }
+    expect([...(retryBody.unreleased as string[])].sort()).toEqual([...stuck].sort());
+
+    stuck.clear();
+    const healed = await removeN(token, 4, "downgrade-pair");
+    expect(healed.body).toMatchObject({ releasedCount: 4, failedCount: 0, unreleased: [] });
+    expect(await liveMailboxes(tenantId)).toBe(3); // exactly the 4 asked for
   });
 });
 

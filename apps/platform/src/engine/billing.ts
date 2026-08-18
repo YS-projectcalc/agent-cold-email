@@ -36,6 +36,7 @@ import type { TenantContext } from "../tenant-context.js";
 import { assertNotLifecycleFrozen, readLifecycleState } from "./billing-state.js";
 import { billableMailboxCount, clearTeardownRecord, releaseMailboxes } from "./lifecycle.js";
 import { reactivateFromDunning } from "./ops-summary.js";
+import { recordRemoveIntent, resolveRemoveTargets, stillLiveTargets } from "./remove-intents.js";
 
 /**
  * F1 residual fix (adversarial re-attack round-2, 2026-07-21 —
@@ -985,17 +986,29 @@ export function buildMailboxBilling(ctx: TenantContext, provisionedAfter: number
 }
 
 export interface RemoveMailboxesResult {
-  /** Mailboxes that COMPLETED the release — can be less than the `count` asked for. */
+  /**
+   * Mailboxes of this downgrade that are RELEASED — can be less than the `count`
+   * asked for. On a keyed call the downgrade is the recorded intent
+   * (engine/remove-intents.ts), so this counts every member released by any
+   * attempt under that key, not just the one that happened to finish it.
+   */
   releasedCount: number;
   /**
-   * Mailboxes the vendor refused to release, which are therefore STILL LIVE and
-   * still billed on both sides. On the wire because an agent that asked for 3
-   * and read `releasedCount: 2` otherwise has no field telling it whether the
-   * other one is gone; and because this is what makes the outcome NON-TERMINAL
-   * (engine/remove-mailboxes-terminality.ts), so the retry the docs instruct is
-   * a real re-attempt rather than a replay of the partial.
+   * Mailboxes of this downgrade that are STILL LIVE because the vendor refused
+   * to release them — still billed on both sides. On the wire because an agent
+   * that asked for 3 and read `releasedCount: 2` otherwise has no field telling
+   * it whether the other one is gone; and because this is what makes the outcome
+   * NON-TERMINAL (engine/remove-mailboxes-terminality.ts), so the retry the docs
+   * instruct is a real re-attempt rather than a replay of the partial.
    */
   failedCount: number;
+  /**
+   * Those same mailboxes, by address (`length === failedCount`). The agent is
+   * told to retry, and a retry is only intelligible if it can see WHAT is still
+   * owed — the gate's N3: a disclosure that names a risk without naming the
+   * still-owed thing leaves the caller to derive it.
+   */
+  unreleased: string[];
   /** The projected bill after the release (the lower count, floored at $99). */
   billing: MailboxBilling;
 }
@@ -1009,11 +1022,36 @@ export interface RemoveMailboxesResult {
  * first). Reuses the shared releaseMailboxes path (revoke-before-mark + G4
  * slot decrement). The quoted consent is enforced at the boundary
  * (RemoveMailboxesInput.acknowledged must be an explicit `true`).
+ *
+ * `intentKey` makes the call ABSOLUTE (N1, docs/adversarial/wave-1-2-integration-
+ * gate-2026-08-18.md round 2). With a key, the addresses are resolved ONCE and
+ * recorded (engine/remove-intents.ts), and every same-key retry drives exactly
+ * that set's still-live members — so a mailbox the vendor permanently refuses
+ * can keep the outcome non-terminal forever without a single further healthy
+ * mailbox being destroyed. Without a key there is nothing durable to anchor a
+ * set to, so the selection is per call, which is what an unkeyed "release one
+ * more" means; tenant-do.ts documents what does and does not protect that path.
  */
-export async function removeMailboxes(ctx: TenantContext, input: RemoveMailboxesInput): Promise<RemoveMailboxesResult> {
+export async function removeMailboxes(
+  ctx: TenantContext,
+  input: RemoveMailboxesInput,
+  intentKey?: string,
+): Promise<RemoveMailboxesResult> {
   assertNotLifecycleFrozen(ctx, "remove_mailboxes");
-  const { releasedCount, failedCount } = await releaseMailboxes(ctx, { limit: input.count });
+  // Resolved (and, when keyed, written down) BEFORE the first vendor call, so a
+  // crash mid-release cannot let the retry choose a different set.
+  const targets = intentKey ? recordRemoveIntent(ctx, intentKey, input.count) : resolveRemoveTargets(ctx, input.count);
+  await releaseMailboxes(ctx, { ids: stillLiveTargets(ctx, targets).map((t) => t.mailboxId) });
   // Decrease: syncMailboxQuantity picks proration_behavior 'none' (desired < synced).
   await syncMailboxQuantity(ctx);
-  return { releasedCount, failedCount, billing: buildMailboxBilling(ctx, provisionedMailboxCount(ctx)) };
+  // Read the outcome off the mailboxes themselves rather than off this call's
+  // tally: on a retry, what the customer is owed is measured against the whole
+  // downgrade, not against the pass that happens to be running.
+  const unreleased = stillLiveTargets(ctx, targets);
+  return {
+    releasedCount: targets.length - unreleased.length,
+    failedCount: unreleased.length,
+    unreleased: unreleased.map((t) => t.email),
+    billing: buildMailboxBilling(ctx, provisionedMailboxCount(ctx)),
+  };
 }

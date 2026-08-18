@@ -384,3 +384,247 @@ them separately as NEW rather than folding them into these three.
 Re-review must re-run, and quote, all four battery legs on the **merged** HEAD —
 with `set -o pipefail` or by reading vitest's summary line directly, per the
 process note in §1.
+
+---
+---
+
+# RE-ATTACK — round 2, 2026-08-18
+
+**Ref:** same worktree, **HEAD `36bec2d`** ("gate blockers B1-B3 + ratified
+cleanups"), one commit past `3d2c194`. `git status --porcelain` empty at start
+and end. Read-only git. Three probe files written, executed, deleted.
+
+## R2 VERDICT
+
+# NO-SHIP — B1/B2/B3 all CLOSED, but N1 is BLOCKING as measured
+
+**All three round-1 blockers are genuinely fixed** — verified by re-running my
+round-1 probes verbatim, which now pass, plus anti-storm controls I added to
+check the fixes did not over-correct. The battery is genuinely green on all six
+legs with real exit codes.
+
+**The blocker is N1**, the residual the orchestrator ruled ship-with-disclosure.
+It is real, and the disclosed magnitude — *"can release beyond the stragglers by
+up to `count`"* — **understates it by an unbounded factor**. Measured: a customer
+who asked to release **3** loses **12 and counting**.
+
+### Battery at `36bec2d` — six legs, real exit codes, nothing piped
+
+| Leg | Command | Exit | Result |
+|---|---|---|---|
+| typecheck (all 5 workspaces) | `npm run typecheck` | **0** | clean |
+| platform tests | `npx vitest run` (apps/platform) | **0** | **186/186 files; 1762 passed / 1 skipped** |
+| engine tests | `npx vitest run` (apps/engine) | **0** | 17 passed / 2 skipped; 140 passed / 4 skipped |
+| dashboard tests | `npx vitest run` (apps/dashboard) | **0** | 29 files; 143 passed |
+| cli tests | `node --test test/*.test.mjs` | **0** | 12 pass / 0 fail |
+| build | `npm run build --workspaces` | **0** | `wrangler deploy --dry-run` + `tsc` clean |
+
+Exit codes captured with `cmd > log 2>&1; echo $?` — no pipe anywhere, per §1's
+process note. Builder's claim (186f/1762p/1skip, typecheck 0, dry-run clean)
+**confirmed exactly**. The platform file count is 186 both for the builder and
+for me, which also confirms my probe files were never collected.
+
+## Per-blocker re-attack outcome
+
+### B1 — CLOSED ✅
+`admin-provisioning-state.test.ts` fixtures now state the word (`terminal(...)` /
+`nonTerminal(...)`), and the wave gained a NEW test that pins the semantic rather
+than just restoring the green: *"a NON-TERMINAL setup outcome leaves no row —
+this lists FINISHED keys only"*, asserting `requestIdempotency` is `[]`. That is
+the right shape — it makes the endpoint's post-contract meaning a test rather
+than a comment.
+
+Two round-1 non-blocking items were closed in the same change without being
+asked for, and both are correct:
+- **NB-9** — `provisioning-state.ts`'s docstring now says the endpoint lists
+  FINISHED outcomes and that a stale replay "can no longer exist by construction".
+- **NB-3** — `setup-terminality.ts:30` now guards
+  `typeof result === "object" && result !== null && "quoteOnly" in result`, which
+  makes the TOTALITY that two other docstrings promise actually true.
+
+### B2 — CLOSED ✅
+The fix is DECIDE → SEND → BANK at both DO-backed sites, with the split done
+correctly per site rather than pasted:
+- **dead-man** (`watchtower-do.ts:172-181`): sends from inside the alarm, so
+  `readAndDecide` → `trySend` → `bankAlert` needs no extra RPC. `trySend` never
+  throws, so the bank step always runs.
+- **`d1`** (`watchtower-do.ts:81-101` + `watchtower-infra.ts:57-77`): split into
+  `decideD1Alert` (persists nothing) and `commitD1Alert`, with the Worker doing
+  decide → send → commit. `commitD1Alert` re-derives the transition from the same
+  `(prev, healthy, nowMs)` rather than trusting a caller-supplied state, which
+  keeps the DO the only thing that decides what the DO stores.
+
+**My round-1 probes, re-run verbatim: 5/5 pass.** Including the three that
+reproduced the defect:
+
+| Probe | Round 1 (`3d2c194`) | Round 2 (`36bec2d`) |
+|---|---|---|
+| `d1`, send fails, next tick | `"suppressed"` ❌ | `"alerted"` ✅ |
+| `d1` recovers while channel dark | `["[coldrig] D1 database: RECOVERED"]` ❌ | no RECOVERED ✅ |
+| dead-man dark, then channel restored, cron still dead | `[]` ❌ | `["[coldrig] Ops sweep (cron): UNHEALTHY"]` ✅ |
+
+I added **two anti-storm controls** the round-1 probe did not have, because the
+obvious way to "fix" this is to over-correct into a per-tick email storm. Both
+pass: once a `d1` alert lands the next sweep is `"suppressed"` with exactly one
+email total; once a dead-man alert lands the next alarm sends nothing. The fix
+closes the silence without reopening the storm.
+
+Grepped for stale callers of the renamed DO method: the only `reconcileD1Alert`
+references are the Worker-side function and its one call site
+(`watchtower.ts:42,475`). No orphan.
+
+**One residual, NON-BLOCKING** (`watchtower-infra.ts:63-71`): a `commitD1Alert`
+that throws is caught and logged, leaving the state un-banked. The comment says
+the cost is "at worst a duplicate alert", which is right for an *alerted*
+transition — but for a **debounced first observation** (`action: "pending"`) the
+un-banked state also loses `unhealthyObs`, so a *persistently* failing commit
+would leave the `d1` check re-deciding `"pending"` forever and never confirming.
+It needs decide-succeeds-while-commit-fails to persist, which is a narrow DO
+storage-write failure, and the failure direction (no alert) is the same one the
+catch is protecting against elsewhere. Worth a sentence in the comment; not worth
+blocking.
+
+### B3 — CLOSED ✅
+`engine/remove-mailboxes-terminality.ts` reads terminality off the result
+(`failedCount === 0`), `failedCount` is on the wire in `RemoveMailboxesResult`,
+the false justifying comment at `tenant-do.ts:1024` is replaced, and teardown is
+swept (`TeardownSummary.mailboxReleaseFailures` + the persisted column).
+
+**Round-1 probe re-run: passes.** After a partial release the idempotency row is
+now **absent entirely** (not `done`), and the same-key retry makes real vendor
+calls instead of replaying:
+```
+B3 idempotency row = null          (round 1: {"status":"done", ...})
+B3 release calls   = 3 -> after same-key retry = 5   (round 1: 3 -> 3)
+```
+
+## Rulings on N1–N3
+
+### N1 — over-release residual: **BLOCKING** (disclosed magnitude is wrong)
+
+**The disclosure says "by up to `count`". Measured, it is `count - failedCount`
+per retry, with no terminating condition.**
+
+Executed: 20 live mailboxes, one permanently stuck at the vendor, customer asks
+to release **3**, then does what the platform tells it to do — retry the same
+key. Six retries:
+
+```
+attempt 1: releasedCount=2 failedCount=1 liveAfter=18
+attempt 2: releasedCount=2 failedCount=1 liveAfter=16
+attempt 3: releasedCount=2 failedCount=1 liveAfter=14
+attempt 4: releasedCount=2 failedCount=1 liveAfter=12
+attempt 5: releasedCount=2 failedCount=1 liveAfter=10
+attempt 6: releasedCount=2 failedCount=1 liveAfter=8
+TOTAL DESTROYED = 12   for a customer who asked to release 3
+```
+
+**Why it never terminates — two individually-fine properties that are jointly
+unsafe.** A mailbox the vendor permanently refuses can never be released, so it
+can never leave `released_at IS NULL`, so it is selected on every subsequent
+call, so `failedCount ≥ 1` is a **permanent** state, so the outcome is
+**permanently non-terminal**, so the key never freezes, so the instructed retry
+has no terminating condition — and each pass of that non-terminating retry
+destroys `count - failedCount` healthy mailboxes. B3's fix (correctly) made the
+outcome non-terminal; what makes that unsafe here is that the retry vehicle is a
+**RELATIVE destructive** op. This is the same shape `audit-dashboard-idempotency-2026-08-06`
+BLOCKING-2 named for the unkeyed path; the keyed path has now inherited it.
+
+The loss is irreversible in the way that matters: a released mailbox loses its
+warmup and its sending reputation, and rebuilding costs real money plus the
+platform's own documented four-week ramp.
+
+**A safe retry DOES exist, and I verified it** — this is the cheap way out, so
+the fix need not be the ledgered durable-intent fast-follow. Because every
+mailbox newer than a straggler was in the same window and succeeded, **the failed
+mailboxes are always exactly the newest live rows**, so `count = failedCount`
+targets precisely the stragglers. Executed against the hard case (two stuck,
+non-adjacent, mid-window, on a 7-mailbox fleet): the derived retry touched
+**exactly** `{s1, s2}` and nothing else, and once the vendor healed the total
+destroyed was **exactly the 4 the customer asked for**.
+
+**So the ruling is not "this is unfixable" — it is "the guard must be
+server-side, and it is cheap."** Any fix must make the retry **absolute**
+(target the failed set) rather than relative. Today the platform depends on the
+customer's autonomous agent noticing `failedCount > 0`, *not* doing the natural
+thing (resend the identical request with the identical key), and recomputing
+`count` — while `withRequestIdempotency` silently permits same-key-different-body,
+so nothing catches the mistake. That is too much load-bearing weight on an agent
+following prose.
+
+I am flagging this rather than deferring to the existing ruling because **the
+ruling was made against the wrong number.** Ship-with-disclosure against "up to
+3" is a defensible call; against "12 and climbing, irreversibly" it should be
+re-made by the founder. If it is re-made and still ships, that is a legitimate
+override — but it should be an informed one.
+
+### N2 — the DDL delta: **SOUND** ✅
+`teardown_records.mailbox_release_failures INTEGER NOT NULL DEFAULT 0` via
+`addColumnIfMissing`. Verified on every axis I attacked:
+- **Right mechanism.** `teardown_records` is a per-tenant **DO** table
+  (`schema.ts`), and DOs have no numbered-migration path, so `addColumnIfMissing`
+  is the established pattern — the same form already used for
+  `scheduled_sends.attempts INTEGER NOT NULL DEFAULT 0`. No D1 migration is owed;
+  `migrations/` is untouched.
+- **Ordering is safe.** `tenant-do.ts:204` execs `TENANT_DO_SCHEMA` (which
+  `CREATE TABLE IF NOT EXISTS`-es `teardown_records`) and `:205` calls
+  `ensureColumnMigrations()`. The table always exists before the ALTER.
+- **SQLite constraint satisfied.** SQLite refuses `ADD COLUMN ... NOT NULL`
+  without a non-null DEFAULT; `DEFAULT 0` is supplied.
+- **Historical semantics are correct, and I checked the claim rather than
+  accepting it.** The justification is "before per-item isolation a failed
+  release THREW, so no historical record can describe a partial teardown". Traced
+  it: pre-wave `releaseMailboxes` had an unguarded `for` loop, and
+  `teardownTenant`'s `INSERT INTO teardown_records` sits *after* the release
+  call — so a throw propagated out before any row was written. **DEFAULT 0 is
+  exactly right for every pre-existing row.**
+- No PK reshape, no rebuild, no read of the column before it is added
+  (`readTeardownRecord`'s SELECT runs only via DO methods, i.e. post-constructor).
+
+This is one DDL delta, not zero — §4's "zero DDL" observation no longer holds —
+but it is the safe pattern, correctly applied, and it buys a real honesty gain
+(a teardown that reclaimed 3 of 4 no longer reads like one that reclaimed 3 of 3).
+
+### N3 — new claims: **TRUE, with one gap that is N1's**
+- **`setup_infrastructure` MCP description — TRUE, and it closes round-1 NB-2.**
+  It now names `provisioning`, `pending`, `capacity_pending` and `pendingDomain`,
+  says *"Its ABSENCE is what says the provision finished; do not read a returned
+  jobId as completion"*, and states the not-recorded behaviour. Each claim checks
+  out against the code I traced in round 1. It even hedges `pendingDomain` as
+  *"names one of them"*, which correctly handles the multi-pending case I raised
+  in NB-8 — that round-1 note is now closed too.
+- **openapi `Idempotency-Key` — TRUE.** "Only a FINISHED outcome replays"
+  matches `withRequestIdempotency` exactly, and naming `/remove-mailboxes`'
+  `failedCount` as the discriminator is accurate.
+- **`remove_mailboxes` MCP description — TRUE but insufficient.** Every sentence
+  is factually right, including the over-release disclosure. The gap is that
+  *"ask for what is actually still owed"* is the only safe action and the
+  description never says what that value is — it is `failedCount`, which I had to
+  derive and verify. A disclosure that names a risk without naming the safe
+  action leaves the agent to guess, and the natural guess (resend identical) is
+  the destructive one. **If N1 ships as a disclosed residual over my objection,
+  this sentence must at minimum say "retry with `count` set to `failedCount`".**
+  Separately, and pre-existing: the description says the response contains
+  `quote`; the field is `billing`. The fix rewrote this exact sentence and
+  carried the inaccuracy forward.
+
+## R2 attacks that failed
+
+| Attack | Why it held |
+|---|---|
+| B2 over-correction into a per-tick alert storm | Two added controls pass — one email per landed alert, `"suppressed"` thereafter, at both the `d1` and dead-man sites. |
+| Stale caller of the renamed `reconcileD1Alert` DO method | Only the Worker-side function of the same name remains; `watchtower.ts:475` is its one call site. Typecheck clean across all workspaces. |
+| `commitD1Alert` re-deriving a DIFFERENT transition than the one emailed (concurrent sweep mutating `prev` across the Worker's send await) | Walked all four interleavings. `decideAlert` is pure; a concurrent commit that already banked an announcement is *preserved* by `withheldAlertState` (it reads `previous`, not the proposed state), and a delivered-then-re-derived transition lands on `suppressed`, which regresses nothing. |
+| B3 fix leaving the teardown sibling unswept | Swept — `lifecycle.ts:449` destructures `failedCount`, and it reaches both `TeardownSummary` and a persisted column. |
+| N2 column read before it is added / on a table that does not yet exist | Refuted by the constructor ordering at `tenant-do.ts:204-205`. |
+| N2 `DEFAULT 0` mis-describing historical rows | Refuted by tracing pre-wave control flow: the INSERT is downstream of the throw. |
+| B1 fix being a green-restoring edit rather than a semantic ruling | It is a ruling — a new test pins the non-terminal-leaves-no-row invariant, and the module docstring was corrected to match. |
+
+## R2 residuals (non-blocking, carried forward)
+
+1. `commitD1Alert` throw loses `unhealthyObs` on a `pending` transition — see B2
+   above.
+2. `remove_mailboxes` description says `quote`; the field is `billing`.
+3. Round-1 NB-1, NB-4, NB-6, NB-7, NB-10 and the three §6 NEW items are
+   untouched by this fix and still stand.
+

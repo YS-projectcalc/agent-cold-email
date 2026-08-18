@@ -22,13 +22,20 @@ import { nonTerminal, terminal, type Settled } from "@coldstart/shared";
 import type { RemoveMailboxesResult } from "./billing.js";
 
 export function settleRemoveMailboxes(result: RemoveMailboxesResult): Settled<RemoveMailboxesResult> {
-  // Every mailbox this call selected is gone at the vendor: nothing further is
-  // owed, so the response is safe to freeze under the key.
+  // Every mailbox this downgrade asked for is gone at the vendor: nothing
+  // further is owed, so the response is safe to freeze under the key.
   if (result.failedCount === 0) return terminal(result);
   // At least one is STILL LIVE. Recording this would freeze a half-finished
   // downgrade as the answer forever; releasing the claim lets a same-key retry
-  // re-run and pick the stragglers up (`releaseMailboxes` is retry-safe by
-  // construction — it is driven by `released_at IS NULL`, and both the vendor
-  // release and the credential revoke are idempotent).
+  // re-run and pick the stragglers up.
+  //
+  // WHAT MAKES THAT RE-RUN SAFE is not this file — it is that the retry is
+  // ABSOLUTE (engine/remove-intents.ts): the same key drives the addresses the
+  // first execution recorded, so an outcome that stays non-terminal forever (a
+  // mailbox the vendor permanently refuses) costs nothing but repeated attempts
+  // at that mailbox. Before the intent existed, this correct non-terminal
+  // verdict handed an unbounded retry to a RELATIVE destructive op, and every
+  // pass took `count - failedCount` healthy mailboxes with it (N1,
+  // docs/adversarial/wave-1-2-integration-gate-2026-08-18.md round 2).
   return nonTerminal(result);
 }

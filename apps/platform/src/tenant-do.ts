@@ -993,11 +993,19 @@ export class TenantDO extends DurableObject<Env> {
    * BLOCKING-2 (audit-dashboard-idempotency-2026-08-06). "Release N" is
    * RELATIVE and irreversible through this API, so every unprotected repeat
    * destroyed another N: a same-key replay released twice, and a concurrent
-   * double-submit released 2N. Two guards, because the two shapes are different
+   * double-submit released 2N. Three guards, because the shapes are different
    * failures:
    *
-   *  - The KEY, honored durably: a replay returns the recorded response and
-   *    re-releases nothing. This is the one the docs already promised.
+   *  - The KEY, honored durably: a replay of a FINISHED release returns the
+   *    recorded response and re-releases nothing. This is the one the docs
+   *    already promised.
+   *  - The KEY AGAIN, as a durable INTENT (N1, wave-1-2-integration-gate-
+   *    2026-08-18 round 2): the first execution records the addresses it
+   *    resolved, and a same-key retry drives exactly those. The replay guard
+   *    alone was not enough, because a partial release is deliberately NOT
+   *    recorded (see settleRemoveMailboxes) — so the instructed retry re-ran a
+   *    RELATIVE op and destroyed `count - failedCount` healthy mailboxes per
+   *    pass, with no terminating condition while one mailbox stayed stuck.
    *  - SINGLE-FLIGHT, for the caller that sends no key (every browser caller):
    *    at most one release may be running for a tenant at a time. Deliberately
    *    an in-memory flag rather than a durable claim — both submits necessarily
@@ -1008,9 +1016,9 @@ export class TenantDO extends DurableObject<Env> {
    *    failure mode: `releaseMailboxes` is already crash-retry-safe (driven by
    *    `released_at IS NULL`, with an idempotent release + revoke).
    *
-   * What neither guard can do is make an UNKEYED sequential retry safe — once
-   * the first call has settled, "release 1 more" is genuinely what a second
-   * unkeyed call says. Callers that need retry safety send the key.
+   * What none of them can do is make an UNKEYED sequential retry safe — once the
+   * first call has settled, "release 1 more" is genuinely what a second unkeyed
+   * call says. Callers that need retry safety send the key.
    */
   async removeMailboxes(input: RemoveMailboxesInput, idempotencyKey?: string): Promise<RemoveMailboxesResult> {
     const ctx = this.requireContext();
@@ -1020,15 +1028,19 @@ export class TenantDO extends DurableObject<Env> {
       );
     }
     this.releaseInFlight = true;
+    // ONE key namespaces both the replay claim and the release intent: they are
+    // two statements about the same request, and a set recorded under a
+    // different anchor than the claim could be adopted by the wrong retry.
+    const key = idempotencyKey ? `remove_mailboxes:${idempotencyKey}` : undefined;
     try {
       return await withRequestIdempotency(
         ctx,
-        idempotencyKey ? `remove_mailboxes:${idempotencyKey}` : undefined,
+        key,
         // Terminality is READ OFF THE RESULT (engine/remove-mailboxes-terminality.ts),
         // never inferred from "it did not throw": per-item isolation means a
         // vendor refusal now comes back as `failedCount` rather than an
         // exception, and a partial release still owes the mailbox it left live.
-        async () => settleRemoveMailboxes(await removeMailboxes(ctx, input)),
+        async () => settleRemoveMailboxes(await removeMailboxes(ctx, input, key)),
       );
     } finally {
       this.releaseInFlight = false;

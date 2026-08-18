@@ -1021,6 +1021,38 @@ CREATE TABLE IF NOT EXISTS mailbox_buy_dispatches (
   updated_at INTEGER NOT NULL
 );
 
+-- N1 (docs/adversarial/wave-1-2-integration-gate-2026-08-18.md round 2) — the
+-- durable RELEASE intent, the destructive mirror of the buy intents above: the
+-- exact addresses one keyed remove_mailboxes call resolved, so that every
+-- same-key retry re-drives THAT set instead of re-resolving "the N newest live".
+--
+-- WHY: "release N" is RELATIVE, and a mailbox the vendor permanently refuses
+-- keeps failedCount >= 1 forever — so the outcome is permanently non-terminal
+-- (engine/remove-mailboxes-terminality.ts), the key never freezes, and the retry
+-- the platform's own docs instruct destroyed (count - failedCount) HEALTHY
+-- mailboxes on every pass, without a terminating condition. Measured: a customer
+-- who asked to release 3 lost 12 and counting, irreversibly (a released mailbox
+-- loses its warmup reputation, ~4 weeks to rebuild).
+--
+-- INSERT-ONLY, like the buy intents, and for the same reason: a row that can be
+-- rewritten is a target set that can move, which is the property being removed.
+-- Rows are never deleted — the members are addresses whose release was ASKED
+-- for, so the table's size is bounded by the mailboxes a tenant has ever
+-- downgraded away, not by request volume (a call that resolves no live mailbox
+-- writes nothing).
+CREATE TABLE IF NOT EXISTS mailbox_release_intents (
+  -- The namespaced request-idempotency key ('remove_mailboxes:<customer key>'),
+  -- so the intent and the replay claim it belongs to are the same anchor.
+  key TEXT NOT NULL,
+  tenant_id TEXT NOT NULL,
+  mailbox_id TEXT NOT NULL,
+  -- Carried beside the id so a retry can report the still-owed ADDRESSES back to
+  -- the agent without a join against a row it may not select.
+  email TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (key, mailbox_id)
+);
+
 CREATE TABLE IF NOT EXISTS mailbox_cred_pushes (
   email TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL,

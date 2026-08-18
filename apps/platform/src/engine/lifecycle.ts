@@ -161,7 +161,15 @@ export function billableMailboxCount(ctx: TenantContext): number {
  * counting. Three scopes via `opts`:
  *   - `{}`            — all this tenant's live mailboxes (teardown).
  *   - `{ domainId }`  — one domain's mailboxes (REPLACE_DOMAIN's burned domain).
- *   - `{ limit }`     — the N newest live mailboxes (a customer downgrade).
+ *   - `{ ids }`       — an ALREADY-RESOLVED set (a customer downgrade).
+ *
+ * `ids` replaced a `limit` scope that selected "the N newest live" in here (N1,
+ * docs/adversarial/wave-1-2-integration-gate-2026-08-18.md round 2). A relative
+ * selection made inside the executor is re-made on every retry, so a downgrade
+ * whose first pass left one mailbox stuck at the vendor destroyed N healthy ones
+ * on each following pass. The selection now belongs to the caller that can
+ * record it (engine/remove-intents.ts); this function only ever releases a set
+ * it was handed.
  *
  * PRESERVES the revoke-BEFORE-mark ordering (i3i4-r2 crash-safety): a crash
  * between the vendor release and the `released_at` mark leaves the row unmarked,
@@ -205,9 +213,13 @@ export function billableMailboxCount(ctx: TenantContext): number {
  */
 export async function releaseMailboxes(
   ctx: TenantContext,
-  opts: { domainId?: string; limit?: number } = {},
+  opts: { domainId?: string; ids?: readonly string[] } = {},
   engineClient: EngineMailboxClient = new EngineMailboxClient(engineConfigFromEnv(ctx.env)),
 ): Promise<ReleaseMailboxesResult> {
+  // An explicit set with nothing in it owes nothing: a retry whose every member
+  // is already released reaches here, and there is no vendor call, no intent to
+  // invalidate and no slot to hand back for it.
+  if (opts.ids && opts.ids.length === 0) return { releasedCount: 0, slotCountedReleased: 0, failedCount: 0 };
   const now = ctx.clock.now();
   let query = `SELECT id, email, slot_counted, provider FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL`;
   const params: (string | number)[] = [ctx.tenantId];
@@ -215,11 +227,11 @@ export async function releaseMailboxes(
     query += ` AND domain_id = ?`;
     params.push(opts.domainId);
   }
-  query += ` ORDER BY created_at DESC`;
-  if (opts.limit != null) {
-    query += ` LIMIT ?`;
-    params.push(opts.limit);
+  if (opts.ids) {
+    query += ` AND id IN (${opts.ids.map(() => "?").join(", ")})`;
+    params.push(...opts.ids);
   }
+  query += ` ORDER BY created_at DESC`;
   const mailboxes = ctx.sql.exec<{ id: string; email: string; slot_counted: number; provider: string }>(query, ...params).toArray();
 
   let slotCountedReleased = 0;

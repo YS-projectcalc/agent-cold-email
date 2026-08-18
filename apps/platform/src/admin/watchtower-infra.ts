@@ -72,6 +72,11 @@ export async function reconcileD1Alert(env: Env, mailer: OpsMailer, result: Chec
       // a delivered email IS a delivered email. Un-banked state re-decides on
       // the next sweep, so the cost is at worst a duplicate alert — the
       // opposite of the silence this check exists to prevent.
+      // ACCEPTED RESIDUAL (wave-1-2-integration-gate-2026-08-18 round 2): on a
+      // DEBOUNCED first observation the un-banked state also loses unhealthyObs,
+      // so a PERSISTENTLY failing commit leaves `d1` re-deciding "pending" and
+      // never confirming — narrow (it needs decide-succeeds-while-commit-fails),
+      // and the failure direction is the one this catch already accepts.
       console.error("watchtower: the D1 alert was decided and sent, but its state could not be banked — the next sweep re-attempts it", err);
     }
     return {
