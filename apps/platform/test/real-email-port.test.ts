@@ -58,14 +58,27 @@ describe("RealEmailPort — configured HTTP client", () => {
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({ input, idempotencyKey: "send:t1:r1" });
   });
 
-  it("POSTs the poll contract shape (mailboxEmail + sinceCursor) and returns { events, cursor }", async () => {
+  it("POSTs the poll contract shape (mailboxEmail + sinceCursor) and returns { events, cursor, unreadable }", async () => {
     const events = [{ kind: "reply", mailboxEmail: "m@x.test", threadId: "t", messageId: "<r@x>", fromEmail: "l@x", body: "hi", receivedAt: 1 }];
     const spy = stubFetch({ status: 200, body: { events, cursor: 42 } });
     const out = await new RealEmailPort(CONFIG).poll("m@x.test", 41);
-    expect(out).toEqual({ events, cursor: 42 });
+    // A healthy engine omits `unreadable` entirely; the port normalizes that to
+    // 0 rather than undefined, so the consumer's `if (unreadable)` reads one
+    // shape whichever engine version answered.
+    expect(out).toEqual({ events, cursor: 42, unreadable: 0 });
     const [url, init] = spy.mock.calls[0]!;
     expect(url).toBe("https://engine.example.internal/v1/poll");
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({ mailboxEmail: "m@x.test", sinceCursor: 41 });
+  });
+
+  it("CARRIES the engine's `unreadable` count across the boundary rather than dropping it (IN-7)", async () => {
+    // The count is the engine's report that it PERMANENTLY skipped messages to
+    // un-block this mailbox. Dropping it here would relocate the silence the
+    // isolation was added to end: the cursor still advances past the lost
+    // replies, but nothing an operator reads would ever say so.
+    stubFetch({ status: 200, body: { events: [], cursor: 9, unreadable: 3 } });
+    const out = await new RealEmailPort(CONFIG).poll("m@x.test", 8);
+    expect(out).toEqual({ events: [], cursor: 9, unreadable: 3 });
   });
 
   it("rejects a malformed poll response (missing cursor) as a permanent VendorError", async () => {

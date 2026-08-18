@@ -9,6 +9,8 @@ import type {
   ReleaseResult,
   VendorReadiness,
 } from "@coldstart/shared";
+import { forEachIsolated } from "../../isolated-loop.js";
+import { logVendorFailure } from "../../vendor-failure.js";
 import { InboxKitClient, type InboxKitClientConfig } from "./inboxkit-client.js";
 import { classifyVendorLifecycle, normalizeLifecycleToken } from "./vendor-lifecycle.js";
 
@@ -120,13 +122,42 @@ export class RealInboxKitDomainPort implements DomainPort {
       candidates.push(`${slug}${i}.com`);
     }
 
+    // HEAD-OF-LINE BLOCKING (class sweep 2026-08-17, IN-8). One real network
+    // call per candidate, unguarded, over a DETERMINISTIC candidate list — so a
+    // single name the vendor answers with a permanent 4xx (an over-long label, a
+    // reserved word) threw out of the whole search and made `setup_infrastructure`
+    // fail at plan time for that brand on every retry, even though candidates
+    // 2..N were fine. Same permanence shape as the per-ordinal loop, one layer
+    // earlier.
     const results: LookalikeCandidate[] = [];
-    for (const domain of candidates) {
-      const body = await this.client.request<CheckAvailabilityResponse>("searchLookalikes", "GET", "/domains/available", {
-        query: { domain },
-      });
-      results.push({ domain, available: body.available === true });
-    }
+    const outcome = await forEachIsolated(
+      candidates,
+      async (domain) => {
+        const body = await this.client.request<CheckAvailabilityResponse>("searchLookalikes", "GET", "/domains/available", {
+          query: { domain },
+        });
+        results.push({ domain, available: body.available === true });
+      },
+      {
+        onItemError: ({ item, error }) => {
+          // A probe we could not complete proves nothing about the name, so it
+          // is reported UNAVAILABLE — the direction that costs a usable
+          // candidate rather than attempting a buy we have no reason to believe
+          // will succeed. Order is preserved because the loop is sequential.
+          results.push({ domain: item, available: false });
+          logVendorFailure(`searchLookalikes availability ${item}`, error);
+        },
+      },
+    );
+
+    // EVERY probe failed. That is not one bad candidate — it is the availability
+    // endpoint being down, and reporting "no available lookalikes" for it would
+    // surface as a ValidationError blaming the customer's brand for our vendor's
+    // outage. Re-throw the first failure so it keeps its own grade and reads as
+    // what it is.
+    const firstFailure = outcome.failures[0];
+    if (firstFailure && outcome.results.length === 0) throw firstFailure.error;
+
     return results;
   }
 

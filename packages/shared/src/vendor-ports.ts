@@ -358,6 +358,19 @@ export type PolledEvent = PolledReply | PolledBounce | PolledComplaint;
 export interface PollResult {
   events: PolledEvent[];
   cursor: number;
+  /**
+   * Messages in this batch the adapter could not parse and has PERMANENTLY
+   * SKIPPED (head-of-line class sweep 2026-08-17, IN-7). Absent/0 for every
+   * healthy poll and for the in-process sandbox, which cannot produce one.
+   *
+   * It exists because skipping is the only way a poison message can stop
+   * blocking the mailbox — the consumer advances its cursor PAST it — and a
+   * skipped message is a genuinely lost reply/bounce, not a non-event. The
+   * count travels back so the consumer can record it where an operator will
+   * see it; dropping it at this boundary would make the loss silent, which is
+   * the failure the isolation was added to end, not to relocate.
+   */
+  unreadable?: number;
 }
 
 export interface EmailPort {

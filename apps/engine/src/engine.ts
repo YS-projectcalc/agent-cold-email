@@ -234,16 +234,37 @@ export class EmailEngine {
 
     const messages = await this.imap.fetchRange(creds.imap, sinceCursor, throughUid);
     const events: PollResult["events"] = [];
+    let unreadable = 0;
     for (const msg of messages) {
-      const event = await classifyMessage(
-        msg.source,
-        mailboxEmail,
-        (id) => this.store.resolveThread(id),
-        this.now(),
-      );
-      if (event) events.push(event);
+      // POISON-MESSAGE ISOLATION (head-of-line class sweep 2026-08-17, IN-7).
+      // `classifyReply` runs mailparser's `simpleParser`, which THROWS on a
+      // malformed MIME structure, and this loop had no per-message guard. The
+      // cursor is consumer-owned and deliberately NOT advanced on a failed poll
+      // (reply-processor.ts), so ONE malformed inbound message meant the same
+      // UID range was re-fetched and re-thrown forever: that mailbox's replies,
+      // bounces and complaints were never processed again — stop-on-reply never
+      // fired, so the platform kept mailing prospects who had already answered,
+      // and bounce-driven suppression silently stopped.
+      //
+      // Skipping is what makes the poll RETURN, which is what lets the consumer
+      // advance its cursor PAST the poison message — the durable half of the
+      // fix. That is a real dropped message, so it is counted and reported back
+      // rather than swallowed: the consumer records it ops-visibly.
+      try {
+        const event = await classifyMessage(
+          msg.source,
+          mailboxEmail,
+          (id) => this.store.resolveThread(id),
+          this.now(),
+        );
+        if (event) events.push(event);
+      } catch (err) {
+        unreadable++;
+        // eslint-disable-next-line no-console
+        console.error(`[engine] unreadable message skipped: mailbox=${mailboxEmail} uid=${msg.uid}`, err);
+      }
     }
-    return { events, cursor: throughUid };
+    return { events, cursor: throughUid, unreadable };
   }
 
   /**

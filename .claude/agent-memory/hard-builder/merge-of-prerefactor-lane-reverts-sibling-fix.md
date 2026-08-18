@@ -31,6 +31,21 @@ import edits were correct alone and wrong together:
   pre-existing test fixtures (`buy()` returning no `connectionType`) stopped
   typechecking.
 
+**Trap 3 — a tripwire ALLOWLIST is a claim about the OTHER lane's file.** Lane B
+(loop-isolation) shipped a coverage tripwire whose allowlist carried three
+`STILL OPEN` entries naming defects it had verified unfixed *on its own branch*.
+Lane A (channel-truth) had meanwhile CLOSED one of them (`watchtower.ts`
+`reconcileAlerts`, IN-6) with a real per-result try/catch. Neither lane's suite
+could see it; the merged suite failed on the tripwire's own stale-entry
+assertion. The remedy is to DELETE the entry, not to relax the assertion —
+deleting it is what restores the tripwire over that loop (with the entry
+present, removing the catch again would have been silently allowlisted). The
+same shape applies to any allowlist/expected-failure/snapshot list a lane
+maintains about code it does not own: a sibling lane fixing the listed defect
+turns the list entry into a lie. Prove the deletion is load-bearing with a
+cp-backed mutation (strip the sibling's guard, confirm the site reappears as
+UNEXPLAINED, restore byte-identically).
+
 **How to apply:** after ANY merge whose lanes overlap a refactored file, treat
 `git merge` reporting success as meaning nothing. Run typecheck FIRST (it is the
 cheapest detector of both traps), then run the incoming lane's OWN tests against

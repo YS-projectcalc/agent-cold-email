@@ -1,7 +1,7 @@
 import { VendorError, type SequenceStep } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
-import { buildUnsubscribeUrl, signUnsubscribeToken } from "../unsubscribe-token.js";
+import { buildUnsubscribeUrl, deriveUnsubscribeKey, signWithUnsubscribeKey } from "../unsubscribe-token.js";
 import { customerSafeDetail, customerSafeVendorFailure, logVendorFailure } from "../vendor-failure.js";
 import { isLifecycleFrozen } from "./billing-state.js";
 import { runDeliverabilitySweep } from "./deliverability-actions.js";
@@ -9,6 +9,7 @@ import { sendEligibleMailboxSql } from "./mailbox-eligibility.js";
 import { refreshMailboxWarmupState } from "./mailbox-state.js";
 import { isWithinSendWindow, pickMailboxWithCapacity, type SendWindow } from "./scheduler.js";
 import { renderTemplate } from "./template.js";
+import { emitTenantMessage } from "./tenant-messages.js";
 import { runWarmupCancellationSweep } from "./warmup-cancel.js";
 
 interface DueSend {
@@ -76,11 +77,12 @@ interface ListUnsubscribe {
  */
 async function buildListUnsubscribe(
   ctx: TenantContext,
+  signingKey: CryptoKey,
   mailboxEmail: string,
   threadId: string,
   leadEmail: string,
 ): Promise<ListUnsubscribe> {
-  const sig = await signUnsubscribeToken(ctx.env.TOKEN_HASH_PEPPER, ctx.tenantId, leadEmail);
+  const sig = await signWithUnsubscribeKey(signingKey, ctx.tenantId, leadEmail);
   const baseUrl = ctx.env.PUBLIC_BASE_URL ?? DEFAULT_PUBLIC_BASE_URL;
   const url = buildUnsubscribeUrl(baseUrl, ctx.tenantId, leadEmail, sig);
   const mailto = `<mailto:${mailboxEmail}?subject=${encodeURIComponent(`unsubscribe ${threadId}`)}>`;
@@ -254,6 +256,46 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
   let skipped = 0;
   let deferred = 0;
 
+  // U1 (class sweep 2026-08-17 — VERIFIED, not theoretical). The one-click
+  // unsubscribe signing key is derived ONCE per batch here, not per row inside
+  // the loop. Two reasons, and the first is a live defect:
+  //
+  // 1. An unset OR empty `TOKEN_HASH_PEPPER` makes the derivation THROW
+  //    (`encode(undefined)` and `encode("")` are both zero-length, and WebCrypto
+  //    rejects zero-length raw HMAC key material — reproduced in workerd). From
+  //    inside the loop that throw landed AFTER the atomic claim, so it aborted
+  //    every remaining due row with no per-row grading, no 'failed' event and no
+  //    alert, and left the claimed row to churn attempts through the stuck-
+  //    'sending' reclaim until it hit MAX_SEND_ATTEMPTS. Silent total send
+  //    stoppage. Hoisting it makes the condition detectable BEFORE anything is
+  //    claimed, so nothing is lost and nothing churns.
+  // 2. The per-row signing still awaits (`signWithUnsubscribeKey` below), so the
+  //    claim's "the token signing runs AFTER this claim" invariant is untouched.
+  //
+  // Refusing to send is the correct response, not a fallback: the token backs
+  // BOTH the RFC 8058 header and the CAN-SPAM in-body opt-out link, so a message
+  // built without it would not be lawful to send — the same reasoning as the
+  // blank physical_address/sender_identity fail-safe below.
+  let unsubscribeKey: CryptoKey;
+  try {
+    unsubscribeKey = await deriveUnsubscribeKey(ctx.env.TOKEN_HASH_PEPPER);
+  } catch (err) {
+    console.error(`tick: refusing to send for tenant ${ctx.tenantId} — the unsubscribe signing key is unavailable`, err);
+    // Deduped, so a 5-minute cron cannot turn this into a message storm: one
+    // UNREAD message per tenant until it is read/resolved.
+    emitTenantMessage(ctx, {
+      kind: "send_blocked",
+      severity: "action_required",
+      body:
+        "Sending is paused for this account: the platform cannot sign the one-click unsubscribe link that every message is legally required to carry, " +
+        "so no message can be built compliantly. Nothing was lost — your scheduled sends are still queued and will go out once this is fixed. " +
+        "This is a platform-side configuration problem, not something your account can change; contact support.",
+      dedupKey: `send_blocked:${ctx.tenantId}`,
+    });
+    // Every due row stays 'pending' — never claimed, so no attempt is burned.
+    return { sent: 0, skipped: 0, deferred: due.length };
+  }
+
   for (const row of due) {
     // N7 (wave-2 design v2 §7, WIDENED by the Inc-C audit). The tick-start `now`
     // above goes stale the moment the FIRST row's send() awaits: every later
@@ -383,7 +425,7 @@ export async function runTick(ctx: TenantContext): Promise<{ sent: number; skipp
     // footer) is what the 'sent' event records further down — matching the
     // [NEW-3] rule that the send and its recorded metadata never diverge (see
     // the renderTemplate comment above).
-    const listUnsub = await buildListUnsubscribe(ctx, picked.email, row.thread_id, row.lead_email);
+    const listUnsub = await buildListUnsubscribe(ctx, unsubscribeKey, picked.email, row.thread_id, row.lead_email);
     const sentBody = appendComplianceFooter(renderedBody, profile.sender_identity, profile.physical_address, listUnsub.url);
 
     // The send() network call can THROW with the real EmailPort (the sandbox

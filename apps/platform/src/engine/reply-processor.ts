@@ -1,8 +1,31 @@
 import type { PolledEvent } from "@coldstart/shared";
+import { CRON_PERIOD_MS } from "../admin/ops-sweep.js";
+import { BUDGET_EXPIRED, rotationOffset, withItemBudget } from "../isolated-loop.js";
 import type { TenantContext } from "../tenant-context.js";
+import { logAction } from "./deliverability-actions.js";
 import { recordEventIfNew } from "./events.js";
 import { cancelPendingSteps, suppress, unsubscribeEmail } from "./suppression.js";
 import { lookupThreadRef, type ThreadRef } from "./threads.js";
+
+// IN-9's two constants, both derived from the 5-rung ordering ladder in
+// vendors/real/email-port.ts. Read that comment before changing either.
+//
+// PER-MAILBOX: a poll is SAFELY ABANDONABLE in a way a send is not — abandoning
+// one leaves the consumer-owned cursor un-advanced, so the events are simply
+// redelivered next cycle and deduped on message_id. That is why this sits far
+// below ENGINE_REQUEST_TIMEOUT_MS (120s), which was sized around the engine's
+// ~100s worst-case SMTP TRANSACTION (ladder rung 1) and has no counterpart on
+// the poll path: a poll is one bounded IMAP fetch of at most POLL_BATCH_CAP
+// (300) UIDs. 30s is well above any honest fetch and a quarter of the time a
+// wedged mailbox used to hold the whole tenant.
+const POLL_MAILBOX_BUDGET_MS = 30_000;
+
+// PHASE: checked BETWEEN mailboxes, so the poll can never consume the tick's
+// share of SEND_PIPELINE_TENANT_BUDGET_MS (135s). Worst case is this deadline
+// plus one mailbox budget = 90s (the deadline is checked before starting a
+// mailbox, exactly like the leg deadline in ops-sweep.ts), leaving >= 45s of the
+// tenant budget for the tick — against 0s today, which is the whole harm.
+const POLL_PHASE_BUDGET_MS = 60_000;
 
 // A2 (CLASS A) — a soft (transient 4.x.x) bounce is tallied, not permanently
 // suppressed; only after this many soft bounces for one address — with NO reply
@@ -241,16 +264,29 @@ function processComplaint(ctx: TenantContext, ev: Extract<PolledEvent, { kind: "
  */
 export async function runPollInbox(
   ctx: TenantContext,
+  // Injectable budgets — the same seam `runSendPipelineAllTenants` exposes for
+  // the leg above, and for the same reason: the fairness property (IN-9) is
+  // about wall-clock starvation, so it cannot be asserted without shrinking the
+  // clock. Production callers pass nothing.
+  opts: { mailboxBudgetMs?: number; phaseBudgetMs?: number } = {},
 ): Promise<{ replies: number; bounces: number; complaints: number }> {
+  const mailboxBudgetMs = opts.mailboxBudgetMs ?? POLL_MAILBOX_BUDGET_MS;
+  const phaseBudgetMs = opts.phaseBudgetMs ?? POLL_PHASE_BUDGET_MS;
   // N6 (wave-2 design v2 §7) — RELEASED mailboxes are excluded at the root.
   // Without this, every torn-down mailbox cost a doomed engine round trip on
   // every poll, forever: the cron drives this every 5 minutes, and a released
   // mailbox is unknown to the engine (its credentials were revoked), so each
   // one burns a full request timeout against a slow engine and then throws.
   // The tick's picker excluded them already; this query did not.
+  //
+  // ORDER BY is load-bearing, not tidiness (head-of-line class sweep
+  // 2026-08-17, IN-9): without it SQLite returns whatever order the index walk
+  // produces, which is stable in practice — so which mailbox is starved by the
+  // rotation below would be arbitrary AND unrepeatable, and the fairness
+  // property would be untestable.
   const mailboxes = ctx.sql
     .exec<{ email: string; poll_cursor: number }>(
-      `SELECT email, poll_cursor FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL`,
+      `SELECT email, poll_cursor FROM mailboxes WHERE tenant_id = ? AND released_at IS NULL ORDER BY email`,
       ctx.tenantId,
     )
     .toArray();
@@ -259,7 +295,32 @@ export async function runPollInbox(
   let bounces = 0;
   let complaints = 0;
 
-  for (const mailbox of mailboxes) {
+  // IN-9, THE STALL VARIANT. The per-mailbox catch below has always been correct
+  // for THROWS, and this loop is in-class anyway: every mailbox drew on ONE
+  // shared SEND_PIPELINE_TENANT_BUDGET_MS (135s) and a single engine poll may
+  // consume ENGINE_REQUEST_TIMEOUT_MS (120s), so one mailbox whose IMAP host
+  // black-holes connections burned nearly the whole tenant budget — mailboxes
+  // 2..N were never polled AND runScheduledTick never ran, so the tenant sent
+  // nothing, every 5-minute cycle, permanently. ops-sweep.ts reasons about this
+  // only for a WHOLLY wedged engine ("the tick could not have sent anything
+  // either"); that argument does not hold when exactly one mailbox is wedged.
+  //
+  // The fix is the pattern this repo already invented one layer up, pushed down
+  // inside the tenant: a per-mailbox sub-budget + a cycle-derived rotation
+  // offset. Both halves are required — a budget alone still re-starves the same
+  // head mailbox every cycle, and rotation alone still lets one mailbox eat the
+  // tick's share of the budget.
+  const startedAt = ctx.clock.now();
+  const offset = rotationOffset(startedAt, CRON_PERIOD_MS, mailboxes.length);
+
+  for (let i = 0; i < mailboxes.length; i++) {
+    if (ctx.clock.now() - startedAt >= phaseBudgetMs) {
+      console.warn(
+        `poll phase budget reached after ${i}/${mailboxes.length} mailbox(es) for tenant ${ctx.tenantId} — the rest are deferred to a later cycle (rotation reaches them), and the tick keeps its share of the budget`,
+      );
+      break;
+    }
+    const mailbox = mailboxes[(offset + i) % mailboxes.length] as { email: string; poll_cursor: number };
     // PER-MAILBOX ISOLATION (N6). One mailbox's throw — an uncredentialed
     // address, a transient engine failure, a vendor hiccup — used to abort the
     // WHOLE tenant's poll, so a single bad mailbox silently stopped every
@@ -272,7 +333,31 @@ export async function runPollInbox(
       // high-water, process, then advance it. The engine holds no cursor, so a
       // lost poll response leaves poll_cursor un-advanced and the next poll
       // redelivers the same events (deduped below on message_id).
-      const { events, cursor } = await ctx.adapters.email.poll(mailbox.email, mailbox.poll_cursor);
+      const outcome = await withItemBudget(mailboxBudgetMs, () =>
+        ctx.adapters.email.poll(mailbox.email, mailbox.poll_cursor),
+      );
+      if (outcome === BUDGET_EXPIRED) {
+        // Abandoned, not failed. Nothing below ran, so this mailbox's cursor is
+        // un-advanced and its events are redelivered next cycle and deduped on
+        // message_id — the same no-loss position as a lost poll response. The
+        // abandoned request keeps running engine-side; it writes nothing here.
+        console.warn(`poll for mailbox ${mailbox.email} exceeded its ${mailboxBudgetMs}ms budget — abandoned for this cycle`);
+        continue;
+      }
+      const { events, cursor, unreadable } = outcome;
+      // IN-7 — the engine permanently skipped a message it could not parse, so
+      // the cursor below can move past it and this mailbox keeps working. That
+      // is a reply/bounce we will never see, so it is recorded where an operator
+      // reads it rather than only in the engine's container log. Bounded by
+      // construction: the cursor advances past the poison message, so it is
+      // reported once, not every cycle.
+      if (unreadable) {
+        logAction(ctx, "INBOUND_MESSAGE_UNREADABLE", mailbox.email, {
+          count: unreadable,
+          reason: "the mail engine could not parse these messages and skipped them so this mailbox keeps processing — they are not recoverable",
+          throughCursor: cursor,
+        });
+      }
       for (const ev of events) {
         const ref = lookupThreadRef(ctx, ev.threadId);
         if (!ref) continue; // defensive: unknown thread, nothing to attribute it to

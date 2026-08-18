@@ -22,6 +22,7 @@ import {
   type DeliverabilityAction,
   type DeliverabilityThresholds,
 } from "./deliverability.js";
+import { forEachIsolated } from "../isolated-loop.js";
 import { replacementDomainIntentKey } from "./provision-intents.js";
 import { provisionDomainWithMailboxes, slugify } from "./provisioning.js";
 import { ONE_DAY_MS } from "./warmup.js";
@@ -155,17 +156,39 @@ async function applyReplaceDomain(
   );
   pauseDomainMailboxes(ctx, action.domainId);
 
-  // §7.1 REQUIRED (adversary B2-rework) — RELEASE the burned domain's mailboxes
-  // on the UNCONDITIONAL retire leg, BEFORE the replacement-vs-withhold decision,
-  // so the swap is bill-NEUTRAL-or-lowering in every branch: replacement succeeds
-  // -> release N then provision N = net 0; withheld / vendor-throw -> release N,
-  // no provision = -N. Without this the burned mailboxes keep `released_at IS NULL`,
-  // keep counting, and the autonomous reconcile would push set-to-2N — a silent
-  // double-bill (SPEC §18 "no silent capacity addition") + a G4 vendor-slot leak.
-  // Reuses the teardown release path (revoke-before-mark ordering preserved).
-  await releaseMailboxes(ctx, { domainId: action.domainId });
-
   try {
+    // §7.1 REQUIRED (adversary B2-rework) — RELEASE the burned domain's mailboxes
+    // on the UNCONDITIONAL retire leg, BEFORE the replacement-vs-withhold decision,
+    // so the swap is bill-NEUTRAL-or-lowering in every branch: replacement succeeds
+    // -> release N then provision N = net 0; withheld / vendor-throw -> release N,
+    // no provision = -N. Without this the burned mailboxes keep `released_at IS NULL`,
+    // keep counting, and the autonomous reconcile would push set-to-2N — a silent
+    // double-bill (SPEC §18 "no silent capacity addition") + a G4 vendor-slot leak.
+    // Reuses the teardown release path (revoke-before-mark ordering preserved).
+    //
+    // INSIDE the try since the head-of-line class sweep (2026-08-17, IN-2): it
+    // used to sit ABOVE it, which everyone read as "this is the isolated part",
+    // and its throw escaped applyActions, escaped runDeliverabilitySweep, and
+    // escaped tick.ts's unwrapped call — so one unreleasable mailbox stopped the
+    // tenant's entire send loop, every cycle, while its reputation burned. The
+    // `finally` below now also covers it, so the meter is truthful on that path.
+    const release = await releaseMailboxes(ctx, { domainId: action.domainId });
+    if (release.failedCount > 0) {
+      // §7.1 bill-neutrality is a PRECONDITION of the replacement, not a
+      // side effect of it: provisioning N fresh mailboxes while N burned ones
+      // are still un-released and still counted is exactly the silent
+      // double-bill the release above exists to prevent. Withhold the
+      // replacement (the burning domain is already retired + paused, so nothing
+      // unsafe keeps sending) and say so.
+      logAction(ctx, "REPLACE_DOMAIN_WITHHELD_UNRELEASED", action.domain, {
+        domainId: action.domainId,
+        reason: action.reason,
+        unreleasedMailboxes: release.failedCount,
+        note: "burning domain retired + mailboxes paused; replacement withheld because some mailboxes could not be released and would double-bill",
+      });
+      return;
+    }
+
     if (countReplacementsInWindow(ctx) >= MAX_REPLACEMENTS_PER_WINDOW) {
       // Spawn cap hit: retire but do NOT provision — prevents an infinite
       // burn->replace->burn chain. Surfaced so the agent/owner can intervene.
@@ -403,35 +426,65 @@ export async function applyActions(
   actions: DeliverabilityAction[],
   mailer: OpsMailer = createOpsMailer(ctx.env),
 ): Promise<void> {
-  for (const action of actions) {
-    switch (action.type) {
-      case "THROTTLE":
-        applyThrottle(ctx, action);
-        break;
-      case "PAUSE":
-        applyPause(ctx, action);
-        break;
-      case "ROTATE":
-        // The reroute itself is realized by the tick's capacity picker (it
-        // excludes paused mailboxes); this records the decision + whether there
-        // was a healthy target to reroute to right now.
-        logAction(ctx, "ROTATE", "fleet", {
-          pendingSends: action.pendingSends,
-          healthyTargets: action.healthyTargets,
-          reason: action.reason,
-        });
-        break;
-      case "REPLACE_DOMAIN":
-        await applyReplaceDomain(ctx, action, mailer);
-        break;
-      case "HARD_PAUSE_DOMAIN":
-        await applyHardPauseDomain(ctx, action, mailer);
-        break;
-      case "SOFT_FLAG_DOMAIN":
-        applySoftFlagDomain(ctx, action);
-        break;
-    }
-  }
+  // HEAD-OF-LINE BLOCKING (class sweep 2026-08-17, IN-2). The actions in one
+  // sweep are INDEPENDENT remedies for independent problems — a REPLACE_DOMAIN
+  // on a burning domain and a PAUSE on a degrading mailbox somewhere else — and
+  // `evaluate` emits them in a fixed order, so a persistent failure on the first
+  // one silently withheld every remedy behind it on every cycle. Worse, the
+  // throw escaped all the way to tick.ts's unwrapped `runDeliverabilitySweep`
+  // call, so the tenant's ENTIRE send loop stopped running while its reputation
+  // burned. Each action is isolated here so a remedy that cannot be applied
+  // costs only itself.
+  await forEachIsolated(
+    actions,
+    async (action) => {
+      switch (action.type) {
+        case "THROTTLE":
+          applyThrottle(ctx, action);
+          break;
+        case "PAUSE":
+          applyPause(ctx, action);
+          break;
+        case "ROTATE":
+          // The reroute itself is realized by the tick's capacity picker (it
+          // excludes paused mailboxes); this records the decision + whether there
+          // was a healthy target to reroute to right now.
+          logAction(ctx, "ROTATE", "fleet", {
+            pendingSends: action.pendingSends,
+            healthyTargets: action.healthyTargets,
+            reason: action.reason,
+          });
+          break;
+        case "REPLACE_DOMAIN":
+          await applyReplaceDomain(ctx, action, mailer);
+          break;
+        case "HARD_PAUSE_DOMAIN":
+          await applyHardPauseDomain(ctx, action, mailer);
+          break;
+        case "SOFT_FLAG_DOMAIN":
+          applySoftFlagDomain(ctx, action);
+          break;
+      }
+    },
+    {
+      onItemError: ({ item, error }) => {
+        // Anything reaching here got PAST applyReplaceDomain's own VendorError
+        // handling, so it is either a vendor failure on a leg that has none
+        // (HARD_PAUSE_DOMAIN's alerts) or a genuine bug. Both go to the Worker
+        // log raw AND to the customer-readable feed abstractly — isolating a
+        // real bug is only defensible if the bug is loud.
+        console.error(`deliverability action ${item.type} failed (the remaining actions were still applied)`, error);
+        logAction(
+          ctx,
+          "DELIVERABILITY_ACTION_FAILED",
+          "domain" in item ? item.domain : item.type,
+          customerSafeVendorDetail(error, "a deliverability remedy could not be applied — the remaining remedies were still applied", {
+            actionType: item.type,
+          }),
+        );
+      },
+    },
+  );
 }
 
 /**

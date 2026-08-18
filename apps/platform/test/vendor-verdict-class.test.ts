@@ -452,28 +452,58 @@ function verdictMailboxPort(verdict: MailboxReadiness): { p: MailboxPort; buys: 
   return { p, buys };
 }
 
+/** The lookalike domain setup actually bought — the mailbox local parts are derived from it. */
+function readProvisionedDomain(tenantId: string): Promise<string> {
+  return runInDurableObject(tenantStub(tenantId), (_i, s) =>
+    s.storage.sql.exec<{ domain: string }>(`SELECT domain FROM domains`).one().domain,
+  );
+}
+
 describe("guard A — a TERMINAL mailbox is not 'still being created'", () => {
   it("setup REJECTS non-retryably, writes no billable row, and never re-buys", async () => {
     const { tenantId } = await mintTenant("Dead Mbx Co", "managed");
     await activatePaidPlan(tenantId, "managed");
     const domain = verdictPort({ kind: "ready" });
     const mailbox = verdictMailboxPort({ kind: "terminal", vendorState: "suspended" });
+    const runSetupWithKey = (key: string) =>
+      withTenantContext(tenantId, (base) =>
+        runSetupInfrastructure(
+          { ...base, adapters: { ...base.adapters, domain: domain.p, mailbox: mailbox.p } },
+          setupInput("deadmbx", "deadmbx.com"),
+          new SandboxOpsMailer(),
+          key,
+        ).catch((e: unknown) => e),
+      );
 
-    const outcome = await withTenantContext(tenantId, (base) =>
-      runSetupInfrastructure(
-        { ...base, adapters: { ...base.adapters, domain: domain.p, mailbox: mailbox.p } },
-        setupInput("deadmbx", "deadmbx.com"),
-        new SandboxOpsMailer(),
-        "mbx-terminal-1",
-      ).catch((e: unknown) => e),
-    );
+    const outcome = await runSetupWithKey("mbx-terminal-1");
 
     expect(outcome).toBeInstanceOf(Error);
     expect((outcome as { retryable?: boolean }).retryable).toBe(false);
     expect((outcome as Error).message).not.toMatch(/still being created/i);
     expect(await readMailboxCount(tenantId)).toBe(0);
-    // The buy is dispatched once; a terminal mailbox authorizes no second one.
-    expect(mailbox.buys).toHaveLength(1);
+
+    // ONE PURCHASE PER ORDERED SLOT — NEVER A SECOND FOR THE SAME ADDRESS. The
+    // request orders `inboxesEach: 2`, and each slot is a separate product with
+    // its own deterministic address and its own dispatch claim, so per-slot
+    // isolation (IN-5) reaching the second slot is not a re-buy. A RE-BUY is a
+    // second purchase of ONE address, which is the thing a terminal verdict must
+    // never authorize — asserting a bare total conflated the two, and read as a
+    // money regression the moment the loop stopped aborting at the first slot.
+    const boughtDomain = await readProvisionedDomain(tenantId);
+    expect([...mailbox.buys].sort()).toEqual([`sender11@${boughtDomain}`, `sender12@${boughtDomain}`]);
+
+    // The invariant on the path that actually spends: a RETRY (fresh request
+    // key, so request-idempotency is bypassed and only the durable per-address
+    // dispatch record stands between it and the vendor) re-derives the same two
+    // addresses, is told by the provider that it holds them and they are dead,
+    // and buys NOTHING.
+    const buysBeforeRetry = [...mailbox.buys];
+    const retry = await runSetupWithKey("mbx-terminal-2");
+
+    expect(retry).toBeInstanceOf(Error);
+    expect((retry as { retryable?: boolean }).retryable).toBe(false);
+    expect(mailbox.buys).toEqual(buysBeforeRetry);
+    expect(await readMailboxCount(tenantId)).toBe(0);
   }, 30_000);
 });
 

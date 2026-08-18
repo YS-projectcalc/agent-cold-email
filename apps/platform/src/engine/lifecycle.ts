@@ -9,10 +9,12 @@
 import { newId } from "../schema.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { TenantContext } from "../tenant-context.js";
+import { customerSafeVendorDetail, logVendorFailure } from "../vendor-failure.js";
 import { alertUnresolvedDomainConnectionType } from "./byo-teardown-alert.js";
 import { pauseAllCampaigns } from "./campaigns.js";
 import { logAction } from "./deliverability-actions.js";
 import { EngineMailboxClient } from "./engine-mailbox-client.js";
+import { forEachIsolated } from "../isolated-loop.js";
 import { engineConfigFromEnv, revokePushedMailboxCredentials } from "./mailbox-credential-push.js";
 import { suspendTenant } from "./ops-summary.js";
 import { markMailboxIntentsReleased } from "./provision-intents.js";
@@ -107,8 +109,17 @@ export function clearTeardownRecord(ctx: TenantContext): void {
 }
 
 export interface ReleaseMailboxesResult {
+  /** Mailboxes that COMPLETED the release — vendor released, credentials revoked, row marked. */
   releasedCount: number;
   slotCountedReleased: number;
+  /**
+   * Mailboxes whose release failed and that are therefore STILL LIVE: their
+   * `released_at` is un-marked by design, so they keep counting toward what is
+   * billed and a later attempt retries them. Never folded into `releasedCount`
+   * — the whole point of the split is that a caller sizing a billing decision
+   * must not read an attempted release as a completed one.
+   */
+  failedCount: number;
 }
 
 /**
@@ -200,43 +211,79 @@ export async function releaseMailboxes(
   const mailboxes = ctx.sql.exec<{ id: string; email: string; slot_counted: number; provider: string }>(query, ...params).toArray();
 
   let slotCountedReleased = 0;
-  for (const m of mailboxes) {
-    // CREDSTORE F2 — tombstone FIRST, synchronous, before any await (closes
-    // the reconcile-in-the-await-gap resurrection window; see doc comment
-    // above). Only touches a still-live claim ('pending'/'pushed'); an
-    // already-'revoked' row (a retry) is left alone.
-    ctx.sql.exec(
-      `UPDATE mailbox_cred_pushes SET status = 'revoked', updated_at = ? WHERE email = ? AND tenant_id = ? AND status IN ('pending', 'pushed')`,
-      now,
-      m.email,
-      ctx.tenantId,
-    );
-    // Never release a customer-owned BYO connection at the vendor (see the
-    // function doc comment above) — every other step still runs for it.
-    if (m.provider !== "byo") {
-      await ctx.adapters.mailbox.release(m.email, `release-mbx:${ctx.tenantId}:${m.id}`);
-    }
-    if (m.slot_counted) slotCountedReleased++;
-    // Revoke BEFORE marking released_at (i3i4-r2): a crash in between leaves the
-    // row unmarked -> a retry re-attempts release + revoke (both idempotent).
-    await revokePushedMailboxCredentials(ctx, m.email, engineClient);
-    ctx.sql.exec(
-      `UPDATE mailboxes SET released_at = ?, deliv_status = 'paused' WHERE id = ? AND tenant_id = ?`,
-      now,
-      m.id,
-      ctx.tenantId,
-    );
-  }
+
+  // HEAD-OF-LINE BLOCKING (class sweep 2026-08-17, IN-3). The vendor release was
+  // unguarded and the list is stably ordered, so ONE mailbox the vendor
+  // permanently 404s/403s blocked the release of every mailbox behind it — and
+  // each retry re-died on the same head row. Those rows keep
+  // `released_at IS NULL`, so a cancelling customer stayed billed, indefinitely,
+  // for mailboxes the platform believed it still held. Reached from BOTH
+  // teardown and REPLACE_DOMAIN, so the fix belongs at this shared root.
+  const outcome = await forEachIsolated(
+    mailboxes,
+    async (m) => {
+      // CREDSTORE F2 — tombstone FIRST, synchronous, before any await (closes
+      // the reconcile-in-the-await-gap resurrection window; see doc comment
+      // above). Only touches a still-live claim ('pending'/'pushed'); an
+      // already-'revoked' row (a retry) is left alone.
+      ctx.sql.exec(
+        `UPDATE mailbox_cred_pushes SET status = 'revoked', updated_at = ? WHERE email = ? AND tenant_id = ? AND status IN ('pending', 'pushed')`,
+        now,
+        m.email,
+        ctx.tenantId,
+      );
+      // Never release a customer-owned BYO connection at the vendor (see the
+      // function doc comment above) — every other step still runs for it.
+      if (m.provider !== "byo") {
+        await ctx.adapters.mailbox.release(m.email, `release-mbx:${ctx.tenantId}:${m.id}`);
+      }
+      // Revoke BEFORE marking released_at (i3i4-r2): a crash in between leaves the
+      // row unmarked -> a retry re-attempts release + revoke (both idempotent).
+      await revokePushedMailboxCredentials(ctx, m.email, engineClient);
+      ctx.sql.exec(
+        `UPDATE mailboxes SET released_at = ?, deliv_status = 'paused' WHERE id = ? AND tenant_id = ?`,
+        now,
+        m.id,
+        ctx.tenantId,
+      );
+      if (m.slot_counted) slotCountedReleased++;
+      return m.email;
+    },
+    {
+      onItemError: ({ item, error }) => {
+        // An unreleased mailbox is a LIVE recurring cost on both sides — we keep
+        // billing the customer for it and the vendor keeps billing us — so this
+        // must never fail silently. Same shape as warmup-cancel.ts's give-up row:
+        // ops-visible, customer-safe, honest about what did not happen.
+        logVendorFailure(`release mailbox ${item.email}`, error);
+        logAction(
+          ctx,
+          "MAILBOX_RELEASE_FAILED",
+          item.email,
+          customerSafeVendorDetail(error, "this mailbox could not be released — it is still live and still counted", {
+            note: "the remaining mailboxes were still released; a later release retries this one",
+          }),
+        );
+      },
+    },
+  );
+
   // N4 — a released mailbox no longer exists at the provider, so the durable
   // records asserting "we already provisioned this address" must stop saying so.
   // Without this, a cancel-then-resubscribe replayed the per-mailbox
   // idempotency claim, skipped the vendor buy entirely, and still inserted a
   // BILLABLE local row — a mailbox charged for monthly with nothing behind it.
-  markMailboxIntentsReleased(ctx, mailboxes.map((m) => m.email));
+  //
+  // Only the SUCCEEDED addresses: an address whose vendor release failed still
+  // exists at the provider, so releasing its intent would authorize exactly the
+  // phantom-billable-row replay this invalidation exists to prevent.
+  markMailboxIntentsReleased(ctx, outcome.results);
   // G4 — decrement the account slot counter by the REAL plan-slot mailboxes just
   // released (precise via slot_counted; no-op when none were slot-counted).
+  // `slotCountedReleased` is incremented only on the completed path above, so a
+  // failed release never hands a plan slot back that the vendor still holds.
   await releaseMailboxSlots(ctx, slotCountedReleased, now);
-  return { releasedCount: mailboxes.length, slotCountedReleased };
+  return { releasedCount: outcome.results.length, slotCountedReleased, failedCount: outcome.failures.length };
 }
 
 /**
@@ -299,44 +346,88 @@ export async function teardownTenant(
     )
     .toArray();
 
-  let annualDomainLiabilityCents = 0;
-  for (const d of domains) {
-    const rawType = (d.connection_type ?? "").trim().toLowerCase();
-    const connectionType = rawType === "purchased" || rawType === "connected" ? rawType : "unknown";
+  // HEAD-OF-LINE BLOCKING (class sweep 2026-08-17, IN-4). Both awaits below —
+  // the vendor release and the unresolved-connection-type alert — were
+  // unguarded, and the anchor row that makes teardown idempotent is written only
+  // AFTER this loop. So a throw on one domain left no anchor at all: the
+  // early-return at the top never fired and the ENTIRE teardown (domains,
+  // mailbox release, campaign stop, liability booking) restarted from zero on
+  // every attempt and re-died at the same domain. An abuse-terminated or
+  // cancelled tenant could therefore never finish being torn down, stranding
+  // vendor resources and the liability booking permanently.
+  //
+  // PER-ITEM PROGRESS is anchored by each domain's OWN `status = 'released'`
+  // write, inside the isolated body: the select above excludes released rows, so
+  // a resumed teardown (a DO crash mid-loop, the one case the anchor cannot
+  // cover) skips the domains already done and never re-releases them. A domain
+  // whose release FAILED deliberately keeps its status, so it is retried rather
+  // than silently recorded as reclaimed.
+  const domainOutcome = await forEachIsolated(
+    domains,
+    async (d) => {
+      const rawType = (d.connection_type ?? "").trim().toLowerCase();
+      const connectionType = rawType === "purchased" || rawType === "connected" ? rawType : "unknown";
 
-    if (connectionType === "purchased") {
-      await ctx.adapters.domain.release(d.domain, `release-domain:${ctx.tenantId}:${d.id}`);
-      const liability = computeDomainLiabilityCents(d.purchased_at, now);
-      annualDomainLiabilityCents += liability;
-      if (liability > 0) {
-        ctx.sql.exec(
-          `INSERT OR IGNORE INTO ledger_entries (id, tenant_id, kind, amount_cents, description, ts, source_send_id)
-           VALUES (?, ?, 'liability', ?, ?, ?, ?)`,
-          newId("ledg"),
-          ctx.tenantId,
-          liability,
-          `annual-domain liability: reclaimed ${d.domain} mid-term`,
-          now,
-          `liability:${ctx.tenantId}:${d.id}`,
-        );
+      let liability = 0;
+      if (connectionType === "purchased") {
+        await ctx.adapters.domain.release(d.domain, `release-domain:${ctx.tenantId}:${d.id}`);
+        liability = computeDomainLiabilityCents(d.purchased_at, now);
+        if (liability > 0) {
+          ctx.sql.exec(
+            `INSERT OR IGNORE INTO ledger_entries (id, tenant_id, kind, amount_cents, description, ts, source_send_id)
+             VALUES (?, ?, 'liability', ?, ?, ?, ?)`,
+            newId("ledg"),
+            ctx.tenantId,
+            liability,
+            `annual-domain liability: reclaimed ${d.domain} mid-term`,
+            now,
+            `liability:${ctx.tenantId}:${d.id}`,
+          );
+        }
+      } else if (connectionType === "unknown") {
+        // No proof either way — treated as connected (never released), but
+        // logged AND alerted so a human resolves the ambiguity by hand.
+        logAction(ctx, "DOMAIN_TEARDOWN_UNRESOLVED_CONNECTION_TYPE", d.domain, {
+          reason: "teardown reached this domain with no recorded connection type; treated as connected (never released) — a human should confirm at the vendor",
+        });
+        await alertUnresolvedDomainConnectionType(ctx, d.domain, mailer);
       }
-    } else if (connectionType === "unknown") {
-      // No proof either way — treated as connected (never released), but
-      // logged AND alerted so a human resolves the ambiguity by hand.
-      logAction(ctx, "DOMAIN_TEARDOWN_UNRESOLVED_CONNECTION_TYPE", d.domain, {
-        reason: "teardown reached this domain with no recorded connection type; treated as connected (never released) — a human should confirm at the vendor",
-      });
-      await alertUnresolvedDomainConnectionType(ctx, d.domain, mailer);
-    }
-    // connectionType === 'connected': known-BYO, no log/alert needed — this is
-    // the expected, unambiguous case the founder ruling exists for.
+      // connectionType === 'connected': known-BYO, no log/alert needed — this is
+      // the expected, unambiguous case the founder ruling exists for.
 
-    ctx.sql.exec(
-      `UPDATE domains SET status = 'released' WHERE id = ? AND tenant_id = ?`,
-      d.id,
-      ctx.tenantId,
-    );
-  }
+      ctx.sql.exec(
+        `UPDATE domains SET status = 'released' WHERE id = ? AND tenant_id = ?`,
+        d.id,
+        ctx.tenantId,
+      );
+      return liability;
+    },
+    {
+      onItemError: ({ item, error }) => {
+        // A domain we could not release is a registration that keeps costing us
+        // for the rest of its term with no customer behind it — the same
+        // "money is still leaking" shape as warmup-cancel.ts's give-up, recorded
+        // the same ops-visible way. Its row keeps `status != 'released'`, so the
+        // record stays honest about what we still hold.
+        logVendorFailure(`release domain ${item.domain}`, error);
+        logAction(
+          ctx,
+          "DOMAIN_RELEASE_FAILED",
+          item.domain,
+          customerSafeVendorDetail(error, "this domain could not be reclaimed at the provider — it needs a hand", {
+            note: "the rest of the teardown completed; this domain is still recorded as held and an operator must release it",
+          }),
+        );
+      },
+    },
+  );
+
+  // Summed over the domains this teardown actually RECLAIMED. Deliberately NOT
+  // read back as `SUM(ledger_entries WHERE kind='liability')`: that is the
+  // tenant's LIFETIME liability, and `clearTeardownRecord` keeps the historical
+  // rows across a reactivation on purpose — so a second teardown would report
+  // the first one's liability again. This field describes THIS reclaim.
+  const annualDomainLiabilityCents = domainOutcome.results.reduce((sum, liability) => sum + liability, 0);
 
   // 2. Release ALL this tenant's mailboxes back to the vendor (shared helper,
   //    CLAUDE.md rule c) — released_at marks the reclaim + deliv_status='paused'
@@ -357,7 +448,10 @@ export async function teardownTenant(
   const summary: TeardownSummary = {
     reason: opts.reason,
     effective: opts.effective,
-    domainsReleased: domains.length,
+    // What was actually reclaimed, not what was attempted: a domain whose
+    // vendor release failed is still held, still recorded, and must not be
+    // counted here (the field's own doc says "reclaimed").
+    domainsReleased: domainOutcome.results.length,
     mailboxesReleased,
     campaignsStopped,
     annualDomainLiabilityCents,

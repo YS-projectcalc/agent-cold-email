@@ -10,6 +10,7 @@ import { countWaitlistEmails, lookupTenantContactEmail } from "../db.js";
 import type { Env } from "../env.js";
 import type { TenantOpsSummary } from "../engine/ops-summary.js";
 import { escapeHtml } from "../html-escape.js";
+import { BUDGET_EXPIRED, rotationOffset, withItemBudget } from "../isolated-loop.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import { newId } from "../schema.js";
 import { countSupportTicketsByStatus, countTerminatedTenants, hasDunningEventForCycle, insertDunningEventIfNew, listAllTenantIds } from "./db.js";
@@ -379,29 +380,14 @@ export interface SendPipelineSweepSummary {
   disabled: boolean;
 }
 
-const BUDGET_EXPIRED = Symbol("send-pipeline-budget-expired");
-
-/**
- * Runs `fn` under a wall-clock budget. The abandoned promise keeps running
- * server-side (a DO RPC is not cancellable) — safe, because every effect it can
- * still land is protected by the tick's atomic row claim and the engine's send
- * idempotency, and a next-cycle overlap serializes on the DO input gate. Its
- * rejection is swallowed so an abandoned RPC can never surface as an unhandled
- * rejection that takes down the whole sweep.
- */
-async function withTenantBudget<T>(budgetMs: number, fn: () => Promise<T>): Promise<T | typeof BUDGET_EXPIRED> {
-  const work = fn();
-  work.catch(() => {});
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const expiry = new Promise<typeof BUDGET_EXPIRED>((resolve) => {
-    timer = setTimeout(() => resolve(BUDGET_EXPIRED), budgetMs);
-  });
-  try {
-    return await Promise.race([work, expiry]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
+// The wall-clock budget racer this leg invented now lives in
+// src/isolated-loop.ts beside forEachIsolated (head-of-line class sweep
+// 2026-08-17): the per-tenant STALL it guards against here is the same class as
+// the per-mailbox one inside a tenant's own inbox poll, and one implementation
+// is what stops the two from drifting apart. Behaviour is unchanged — the
+// abandoned RPC keeps running, which is safe because every effect it can still
+// land is protected by the tick's atomic row claim and the engine's send
+// idempotency, and a next-cycle overlap serializes on the DO input gate.
 
 /**
  * WAVE 2 — the auto-send driver. For every tenant: poll, then tick.
@@ -460,15 +446,11 @@ export async function runSendPipelineAllTenants(
   const clock = new RealClock();
   const legStartedAt = clock.now();
 
-  // ROTATION. `listAllTenantIds` has no ORDER BY, i.e. a stable practical
-  // ordering — so without an offset a tenant that consistently burns the budget
-  // would occupy the head of the queue on every cycle and starve everyone behind
-  // it permanently. Cycle-derived and stateless, so it needs no storage and two
-  // Workers can't disagree. It STUTTERS (cron fire times drift around the period
-  // boundary, so consecutive cycles can repeat or skip an offset) — harmless,
-  // and the fairness property to test for is eventual coverage across cycles,
-  // not strict +1 stepping (adversary round-2, R6).
-  const offset = Math.floor(nowMs / CRON_PERIOD_MS) % tenantIds.length;
+  // ROTATION (src/isolated-loop.ts documents the mechanism). `listAllTenantIds`
+  // has no ORDER BY, i.e. a stable practical ordering — so without an offset a
+  // tenant that consistently burns the budget would occupy the head of the queue
+  // on every cycle and starve everyone behind it permanently.
+  const offset = rotationOffset(nowMs, CRON_PERIOD_MS, tenantIds.length);
 
   for (let i = 0; i < tenantIds.length; i++) {
     if (clock.now() - legStartedAt >= legDeadlineMs) {
@@ -480,7 +462,7 @@ export async function runSendPipelineAllTenants(
     }
     const tenantId = tenantIds[(offset + i) % tenantIds.length] as string;
     try {
-      const outcome = await withTenantBudget(budgetMs, async () => {
+      const outcome = await withItemBudget(budgetMs, async () => {
         const stub = env.TENANT.get(env.TENANT.idFromName(tenantId));
         const poll = await stub.runScheduledPoll();
         const tick = await stub.runScheduledTick();
