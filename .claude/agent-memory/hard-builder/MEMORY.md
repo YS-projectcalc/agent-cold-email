@@ -48,6 +48,7 @@
 - [error-isolation-refactor-voids-throw-dependent-invariants](error-isolation-refactor-voids-throw-dependent-invariants.md) — ⚠️ CLASS: fail-fast→per-item isolation (throw becomes `failedCount`) voids every caller invariant justified by the throw; the comment survives reading as true.
 - [fix-shape-differs-when-decider-and-sender-split-across-rpc](fix-shape-differs-when-decider-and-sender-split-across-rpc.md) — ⚠️ a sweep row naming 3 sites got closed at 1; when the DO decides but the Worker sends, withhold-in-place is impossible → two-phase decide/commit.
 - [nonterminal-retry-drives-a-relative-destructive-op](nonterminal-retry-drives-a-relative-destructive-op.md) — ⚠️ a correct NON-TERMINAL verdict hands an unbounded retry to a RELATIVE destructive op; each pass destroys `count-failedCount` healthy resources → record the RESOLVED SET.
+- [orphan-detection-blind-to-the-row-never-created](orphan-detection-blind-to-the-row-never-created.md) — ⚠️ stuck-row orphan checks cannot see the row that was NEVER created (ordinal-target saga reports full success on unbuilt paid capacity); detect via paid-commitment-vs-state, and make recommendations a dry run through the real planner.
 
 ## Test-env gotchas (ColdStart apps/platform vitest)
 - [worktree-without-node-modules-resolves-to-main](worktree-without-node-modules-resolves-to-main.md) — ⚠️ a `.claude/worktrees/*` lane has NO node_modules, so `@coldstart/shared` resolves to the MAIN repo — packages/* edits are invisible to the lane's typecheck/tests until you symlink `node_modules/@coldstart/*`.
