@@ -815,3 +815,171 @@ Re-verification needs exactly one thing beyond the battery: drive
 show both return normally — the committed tests' fleets of 15 and 7 cannot see
 this, so a green suite is not evidence for it.
 
+---
+---
+
+# RE-ATTACK — round 4, 2026-08-18 (scope: R3-1)
+
+**Ref:** same worktree, **HEAD `d6ba57a`** ("R3-1: chunk the remove-intent INSERT
+at 20 rows"), one commit past `dd3a33a`. `git status --porcelain` empty at start
+and end. Read-only git. One probe file written, executed, deleted.
+
+## R4 VERDICT — and the verdict for the WAVE
+
+# SHIP
+
+R3-1 is closed. Every blocker raised across four rounds is now closed and
+re-verified by the probe that originally reproduced it. The battery is green on
+every leg with real exit codes. One new NON-BLOCKING note (R4-1) and the carried
+non-blockers are listed below; none of them gates the deploy.
+
+### Battery at `d6ba57a` — real exit codes, nothing piped
+
+| Leg | Exit | Result |
+|---|---|---|
+| `npm run typecheck` (5 workspaces) | **0** | 0 × `error TS` |
+| `npx vitest run` (apps/platform) | **0** | **186/186 files; 1766 passed / 1 skipped** |
+| `npx vitest run` (apps/engine) | **0** | 140 passed / 4 skipped |
+| `npm run build --workspaces` | **0** | `wrangler deploy --dry-run` + `tsc` clean |
+
+Builder's claim (186f/1766p/1skip, typecheck 0) **confirmed exactly**.
+
+## R3-1 — CLOSED ✅
+
+The fix chunks at `RELEASE_INTENT_CHUNK_SIZE = 20`
+(`remove-intents.ts:31-38`). The arithmetic is right and the comment shows its
+work: 5 params/row with no fixed params ahead of them, so `floor(100/5) = 20` is
+the exact ceiling — correctly distinguished from `sdn-list.ts`'s 16, which
+rounds a 6-column remainder away.
+
+**My round-3 requirement, driven independently of the committed tests** — every
+chunk boundary, on a 60-mailbox fleet, through the production `removeMailboxes`
+with a key:
+
+| `count` | chunks | params in largest chunk | result | intent rows |
+|---|---|---|---|---|
+| **20** | 1 | **100 — the ceiling itself** | released 20, live 60→40 | 20 |
+| **21** | 2 | 100 | released 21, live 60→39 | 21 |
+| **40** | 2 | 100 | released 40, live 60→20 | 40 |
+| **41** | 3 | 100 | released 41, live 60→19 | 41 |
+| **60** | 3 | 100 | released 60, live 60→**0** | 60 |
+
+Every one returns `failedCount: 0, unreleased: []` and releases exactly the count
+asked for. `count: 21` — the exact value that threw
+`too many SQL variables at offset 447` at `dd3a33a` — now completes. I re-ran the
+ceiling control in the same file: 100 params still OK, 101 still throws, so the
+boundary has not moved under me and `20` sits precisely on it rather than near it.
+
+Two further properties I checked because chunking is where they could break:
+- **No duplicate rows across chunks.** Intent row count equals target count at
+  every size (20/21/40/41/60), so the `INSERT OR IGNORE` chunk loop is not
+  double-writing a boundary row.
+- **Replay of a full three-chunk intent.** A same-key retry after a completed
+  60-member downgrade re-records nothing (rows 60 → 60) and re-drives nothing,
+  returning `releasedCount: 60`. The chunking did not disturb the
+  recorded-set-wins property N1 depends on.
+
+### The allowlist entry is honest
+`loop-isolation-scan.ts:180-186` adds the chunk loop with the reason *"one
+logical `recordRemoveIntent` write split under the 100-bound-param ceiling, not
+independent per-target items"*. Checked, and it is the correct call rather than a
+papered-over HOL site: the chunks are parts of ONE write, so isolating a failing
+chunk and carrying on is exactly the behaviour you do **not** want — it would
+manufacture the half-written intent. Same category as `admin/db.ts`,
+`demo.ts` and `sdn-list.ts`, which the list already carries. And because the
+platform suite is green, `loop-isolation-coverage.test.ts`'s **stale-entry**
+assertion passed, which means the entry matches a site the scanner really
+detects — it is not a dead entry parked in the list.
+
+### The committed tests are the right vehicle
+`remove-mailboxes-idempotency.test.ts` gains HTTP-driven drives at `count: 21`
+and `count: 60` that assert the live count, the intent row count, and a
+zero-vendor-call replay. They are RED-proven against the unchunked code. Those
+are better than my probes (they go through the route, not the engine function),
+and they close the "a scale defect is invisible to a suite written from the bug
+report" gap for this specific class.
+
+### NB-R3-2 was fixed correctly
+The `mailbox_release_intents` schema comment now says size scales with **distinct
+keys**, not mailboxes, and explains the exact case I raised — a permanently
+refused mailbox is re-resolved under every new key that targets it.
+
+---
+
+## R4-1 · NON-BLOCKING — the new atomicity comment overstates its guarantee
+
+`remove-intents.ts:101-109` justifies chunking with:
+
+> *"the guarantee was never 'one SQL statement', it's the Durable Object's INPUT
+> GATE … there is no point between chunks for a crash to land on, so every chunk
+> lands or none do, exactly as before chunking."*
+
+The first half is right and is the reasoning I endorsed in round 3. The last
+clause is not quite true, and I measured it. **DO SqlStorage writes DO survive an
+exception raised later in the same turn and caught** — which is precisely what
+`withRequestIdempotency` does with any throw out of `fn`:
+
+```
+PROBE: INSERT one intent row, then throw, then CATCH (as withRequestIdempotency does).
+       Read back in a SEPARATE runInDurableObject turn:
+       rows surviving a caught mid-turn throw = 1        (expected 0 if "none do" held)
+```
+
+So the guarantee covers a *crash* (turn never commits) but not a *caught throw
+between chunks*. If chunk 2 threw and chunk 1 had landed,
+`readRemoveIntent`'s early return would adopt the short set as the whole
+downgrade on the retry: the customer's downgrade completes short, reports
+`failedCount: 0`, and freezes as terminal — an under-release reported as success.
+
+**Why this is NON-BLOCKING, stated as precisely as I can make it:** there is no
+input-dependent way to make chunk 2 throw while chunk 1 succeeds. Every full
+chunk binds identically 100 params and the final chunk is smaller, so the param
+ceiling can no longer discriminate between them; `INSERT OR IGNORE` suppresses
+the only constraint (the composite PK); the table has no other constraint and
+every column is fed a non-null value derived once, outside the loop. What remains
+is an infrastructure-level storage error landing exactly between two chunks —
+which would almost certainly have hit chunk 1 as well. It is also strictly better
+than `dd3a33a`, where `count ≥ 21` threw **every** time, and identical to it for
+`count ≤ 20` (one chunk).
+
+**Cheap hardening if anyone wants it, no redesign:** the function already ends
+with `return readRemoveIntent(ctx, key)`. One length check on that read-back —
+throw if it is shorter than `targets` — converts a silent short set into a loud
+failure. I would pair it with deleting the key's rows so the retry re-resolves
+rather than adopting the short set. Worth a follow-up line, not a round.
+
+---
+
+## Wave summary across four rounds
+
+| Round | HEAD | Verdict | Blockers |
+|---|---|---|---|
+| 1 | `3d2c194` | NO-SHIP | B1 typecheck+suite RED at HEAD · B2 member 5 fixed at 1 of 3 sites · B3 partial release recorded terminal |
+| 2 | `36bec2d` | NO-SHIP | B1/B2/B3 closed · **N1** — the B3 fix made an unbounded destructive retry loop (asked 3, measured 12 destroyed) |
+| 3 | `dd3a33a` | SHIP-AFTER-FIXES | N1 closed · **R3-1** — the N1 fix re-committed the 100-bound-param class (threw at 21, `count` maxes at 60) |
+| 4 | `d6ba57a` | **SHIP** | R3-1 closed. None. |
+
+Every blocker was closed by a fix I then re-verified with the probe that
+originally reproduced it, not by a green suite. Three of the four rounds found
+that **the previous round's fix bred the next blocker** — worth remembering when
+this pattern recurs: a fix to a correctness invariant deserves the same attack
+budget as the original code, and the last fix is always the prime suspect.
+
+## Residuals carried into the deploy (none gating)
+
+1. **R4-1** — the chunk-atomicity comment overstates its guarantee; unreachable
+   by input. Cheap hardening above.
+2. **NB-R3-1** — a key reused after the 30-day `request_idempotency` ageout
+   reports a success that did not happen (safe direction, documented). The clean
+   fix is `Collapsed<T>`'s `deduplicated` flag, still the zero-consumer type from
+   round 1 NB-4 — this is its first real consumer.
+3. **R2 residual 1** — `commitD1Alert` throwing on a `pending` transition also
+   loses `unhealthyObs`. Accepted in-code at `watchtower-infra.ts:75-79`,
+   correctly documented as an accepted residual rather than dropped.
+4. Round-1 NB-1, NB-6, NB-7, NB-10 and the three §6 NEW observations
+   (`deliverability_actions` has no prune; the three new `*_FAILED` action kinds
+   reach no watchtower check; `releasedCount`'s meaning change is undocumented on
+   the wire) are untouched and still stand. The `*_FAILED`-reach-no-check item is
+   the one I would put highest on a follow-up list: those three conditions are
+   exactly what an operator would want paged on.
+
