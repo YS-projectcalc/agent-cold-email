@@ -32,7 +32,8 @@
  * Every uncertain branch fails toward NOT SPENDING.
  */
 
-import { VendorError, type MailboxReadiness } from "@coldstart/shared";
+import { operatorNotifiedClause, VendorError, type MailboxReadiness, type Notified } from "@coldstart/shared";
+import { notifiedFromOutcome } from "../admin/watchtower-alerts.js";
 import { mailboxProvisioningCheckName, mailboxRebuyCheckName, readCheckStatus, reportCheck } from "../admin/watchtower.js";
 import { RealClock } from "../clock.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
@@ -150,18 +151,27 @@ export async function confirmVendorOwnership(
  * The founder alert for a mailbox whose purchase is stuck. Fires on ENTERING the
  * state; the watchtower's own dedup keeps a tenant retrying every minute from
  * turning it into a storm.
+ *
+ * RETURNS WHETHER IT LANDED (docs/adversarial/
+ * class-sweep-signal-inversion-2026-08-17.md guard A1). The state machine
+ * behind `reportCheck` withholds on a cooldown, withholds pending a confirming
+ * observation, and swallows a dark channel or a send failure — none of which
+ * the thrower could see while this returned void, so the customer error it
+ * composes asserted a notification the platform had often not made.
  */
 export async function alertMailboxStuck(
   ctx: TenantContext,
   email: string,
   detail: string,
   mailer: OpsMailer = createOpsMailer(ctx.env),
-): Promise<void> {
-  await reportCheck(
-    ctx.env,
-    mailer,
-    { name: mailboxProvisioningCheckName(email), healthy: false, detail: `tenant ${ctx.tenantId}: ${detail}` },
-    new RealClock().now(),
+): Promise<Notified> {
+  return notifiedFromOutcome(
+    await reportCheck(
+      ctx.env,
+      mailer,
+      { name: mailboxProvisioningCheckName(email), healthy: false, detail: `tenant ${ctx.tenantId}: ${detail}` },
+      new RealClock().now(),
+    ),
   );
 }
 
@@ -189,7 +199,7 @@ export async function alertMailboxResolved(
     console.error(`watchtower: could not read check "${name}"`, err);
     return;
   }
-  await reportCheck(ctx.env, mailer, { name, healthy: true, detail: `tenant ${ctx.tenantId}: ${detail}` }, new RealClock().now());
+  await reportCheck(ctx.env, mailer, { name, healthy: true, basis: "reobserved", detail: `tenant ${ctx.tenantId}: ${detail}` }, new RealClock().now());
 }
 
 /**
@@ -203,12 +213,14 @@ export async function alertMailboxRebuyFailed(
   email: string,
   detail: string,
   mailer: OpsMailer = createOpsMailer(ctx.env),
-): Promise<void> {
-  await reportCheck(
-    ctx.env,
-    mailer,
-    { name: mailboxRebuyCheckName(email), healthy: false, detail: `tenant ${ctx.tenantId}: ${detail}` },
-    new RealClock().now(),
+): Promise<Notified> {
+  return notifiedFromOutcome(
+    await reportCheck(
+      ctx.env,
+      mailer,
+      { name: mailboxRebuyCheckName(email), healthy: false, detail: `tenant ${ctx.tenantId}: ${detail}` },
+      new RealClock().now(),
+    ),
   );
 }
 
@@ -248,29 +260,35 @@ export function unresolvedPurchaseError(ctx: TenantContext, email: string, reaso
  * again is not a recovery — it is a second charge on top of a mailbox that
  * already exists and cannot send. The founder alert is what gets it replaced.
  */
-export function terminalMailboxError(ctx: TenantContext, email: string, vendorState: string): VendorError {
+export function terminalMailboxError(ctx: TenantContext, email: string, vendorState: string, notified: Notified): VendorError {
   logAction(ctx, "MAILBOX_PURCHASE_TERMINAL", email, {
     reason:
       "the provider holds this address and reports it as no longer usable — no further purchase was attempted and no billable row was written",
     step: MAILBOX_STEP,
     retryable: false,
     vendorState,
+    // Recorded on the operator-readable activity row too: "we could not tell
+    // the founder" is exactly what a human reading this row later needs.
+    notified: notified.why,
   });
   return new VendorError(
-    `mailbox ${email} is held by the provider but reported as no longer usable, so it cannot send. No second purchase was made. The operator has been notified.`,
+    `mailbox ${email} is held by the provider but reported as no longer usable, so it cannot send. No second purchase was made. ` +
+      operatorNotifiedClause(notified),
     false,
     { step: MAILBOX_STEP },
   );
 }
 
-export function abandonedPurchaseError(ctx: TenantContext, email: string): VendorError {
+export function abandonedPurchaseError(ctx: TenantContext, email: string, notified: Notified): VendorError {
   logAction(ctx, "MAILBOX_PURCHASE_ABANDONED", email, {
     reason: "the automatic retry for this address was already used and the provider still reports nothing — no further purchase will be attempted",
     step: MAILBOX_STEP,
     retryable: false,
+    notified: notified.why,
   });
   return new VendorError(
-    `mailbox ${email} could not be created after an automatic retry, and no further purchase will be attempted for it. The operator has been notified.`,
+    `mailbox ${email} could not be created after an automatic retry, and no further purchase will be attempted for it. ` +
+      operatorNotifiedClause(notified),
     false,
     { step: MAILBOX_STEP },
   );

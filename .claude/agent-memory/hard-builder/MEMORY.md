@@ -1,6 +1,8 @@
 # hard-builder memory index
 
 > One line per memory. The fix recipes, repro shapes and revert-proofs live in the linked files — open the file before acting on a hook.
+- [total-count-assertion-proxies-per-resource-invariant](total-count-assertion-proxies-per-resource-invariant.md) — ⚠️ a money guard asserting a TOTAL vendor-call count as a proxy for a PER-RESOURCE invariant reads as a P0 the moment an isolation fix stops the early abort; print call ARGUMENTS, re-assert as identity + fresh-key retry leg.
+- [wall-clock-rotation-makes-order-assertions-periodic-flakes](wall-clock-rotation-makes-order-assertions-periodic-flakes.md) — `rotationOffset(clock.now(),…)` flips list order every cron period; fixed-order assertions are wall-clock flakes — pin the clock and assert coverage + rotation, not order.
 
 ## Failure mechanisms (check before diagnosing a hard case)
 - [confirmation-guard-deletes-one-shot-signals](confirmation-guard-deletes-one-shot-signals.md) — ⚠️ a debounce at a SHARED alert choke point delays a re-sampled check but DELETES a one-shot event report; classify producers by cadence.

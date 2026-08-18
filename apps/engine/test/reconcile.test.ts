@@ -71,6 +71,72 @@ afterEach(() => {
 const resolveGmail: (from: string) => SendTransport | undefined = () => gmailTransport;
 const resolveSmtp: (from: string) => SendTransport | undefined = () => undefined; // omitted send ⇒ smtp
 
+// U3 of the head-of-line class sweep (docs/adversarial/class-sweep-hol-blocking-
+// 2026-08-17.md), settled. This loop runs at BOOT, before server.listen, and
+// index.ts's `main().catch` exits 1 — so an unguarded throw is a crash loop that
+// starves every dangling AND all sends and polls for every tenant.
+//
+// The verdict is split, and the tests below assert BOTH halves. The only throw
+// surfaces reachable here are store.park / store.recordSend, which are appends
+// to one fsync'd log (gmail.lookup has a catch-all; resolveSend is a map read).
+// So a PARTIAL failure is worth isolating — one item must not cost the others —
+// while a WHOLLY unwritable store must still abort boot, because "park + alert"
+// is not implementable when parking is itself an append, and an engine that can
+// durably record nothing must not accept traffic.
+describe("U3 — one unresolvable dangling must not cost the others, but a dead store still aborts boot", () => {
+  /** Fails `park` for one specific key — the partial/intermittent case. */
+  function storeWithPoisonedPark(store: EngineStore, poisonKey: string): EngineStore {
+    return new Proxy(store, {
+      get(target, prop, receiver) {
+        if (prop !== "park") return Reflect.get(target, prop, receiver);
+        return (key: string, reason: string): void => {
+          if (key === poisonKey) throw new Error("simulated durable append failure");
+          target.park(key, reason);
+        };
+      },
+    });
+  }
+
+  it("parks the other danglings and leaves the failing one dangling for the next boot", async () => {
+    const store = new EngineStore(dir, { now: () => 1 });
+    store.appendIntent("k-poison", { transport: "smtp", from: SENDER, to: A_LEAD, mintedId: "<a@x>", threadId: "thr_a" });
+    store.appendIntent("k-ok", { transport: "smtp", from: SENDER, to: B_LEAD, mintedId: "<b@x>", threadId: "thr_b" });
+
+    // Pre-fix this THREW out of reconcile, so index.ts exited 1 and the engine
+    // crash-looped: no dangling was resolved and no traffic was ever accepted.
+    const summary = await reconcile({
+      store: storeWithPoisonedPark(store, "k-poison"),
+      resolveSend: resolveSmtp,
+      now: () => 1,
+    });
+
+    expect(summary).toMatchObject({ parked: 1, failed: 1 });
+    expect(store.listParked().map((p) => p.key)).toEqual(["k-ok"]);
+    // The failing one stays dangling, so it is still BLOCKED (drop, never
+    // duplicate) and the next boot retries it — the state is behind reality,
+    // never ahead of it.
+    expect(store.isBlocked("k-poison")).toBe(true);
+    expect(store.listDanglings().map((d) => d.key)).toEqual(["k-poison"]);
+  });
+
+  it("a store that can resolve NOTHING still aborts boot rather than starting blind", async () => {
+    const store = new EngineStore(dir, { now: () => 1 });
+    store.appendIntent("k1", { transport: "smtp", from: SENDER, to: A_LEAD, mintedId: "<a@x>", threadId: "thr_a" });
+    store.appendIntent("k2", { transport: "smtp", from: SENDER, to: B_LEAD, mintedId: "<b@x>", threadId: "thr_b" });
+
+    const dead = new Proxy(store, {
+      get(target, prop, receiver) {
+        if (prop !== "park") return Reflect.get(target, prop, receiver);
+        return (): void => {
+          throw new Error("disk full");
+        };
+      },
+    });
+
+    await expect(reconcile({ store: dead, resolveSend: resolveSmtp, now: () => 1 })).rejects.toThrow(/disk full/);
+  });
+});
+
 describe("reconcile — per-transport verifiers (park on any uncertainty)", () => {
   it("smtp dangling ⇒ PARK (nothing server-side to read)", async () => {
     const store = new EngineStore(dir, { now: () => 1 });

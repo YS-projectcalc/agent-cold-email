@@ -107,6 +107,11 @@ export async function reportSweepSignals(
     results.push({
       name: CRON_LEGS_CHECK,
       healthy: true,
+      // reobserved: the streak grader is fed a freshly collected signal bag
+      // every tick, so the healthy claim is a current observation. (What that
+      // bag can FAIL to see is the watch-completeness sweep's finding, not a
+      // basis question.)
+      basis: "reobserved",
       detail: "Every ops-sweep leg completed with zero errors on consecutive ticks.",
     });
   }
@@ -114,9 +119,23 @@ export async function reportSweepSignals(
   // NB-3 — the one digest watchdog with no other alert path and a money cost.
   if (input.digest) {
     const gaveUp = input.digest.gaveUpWarmupCancels;
+    // NO_LONGER_APPLICABLE on the clear, deliberately (signal-inversion arm B).
+    // `gaveUp` is a count over the DIGEST WINDOW, and nothing anywhere re-checks
+    // whether the abandoned subscriptions were ever cancelled —
+    // warmup-cancel.ts guarantees the platform will never retry them. So 24h
+    // after the last give-up the count reaches zero on a timer and the old code
+    // told the founder the condition had cleared, a day after telling them
+    // those subscriptions "may STILL BE BILLING". Real recurring vendor charges,
+    // self-cleared by the passage of time.
+    //
+    // This closes the false CLEAR only. The separate defect at this site — a
+    // rising give-up count (1 -> 12) suppressed inside the alert cooldown — is
+    // a different mechanism and is NOT fixed here.
     results.push({
+      ...(gaveUp === 0
+        ? { healthy: true as const, basis: "no_longer_applicable" as const }
+        : { healthy: false as const }),
       name: "warmup_cancel_gave_up",
-      healthy: gaveUp === 0,
       // The vendor is deliberately NOT named here (test/vendor-identity-leak.ts's
       // source tripwire): the digest already names it on the operator-only
       // surface that is allowlisted for exactly that, and this line is

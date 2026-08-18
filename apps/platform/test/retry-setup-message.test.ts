@@ -326,3 +326,76 @@ describe("retry_setup tenant message — fires when setDns retry is exhausted", 
     expect(messages[0]!.body).not.toMatch(/mailbox/i);
   });
 });
+
+/**
+ * A DomainPort that FAILS setDns retryably on the first setup call and then
+ * answers "not listed yet" on the next one — i.e. the domain progresses from
+ * "the vendor refused our nameserver call" to "bought, registration still
+ * propagating". Both outcomes emit `kind:"retry_setup"` for the SAME domain,
+ * at different severities, which is the collision under test.
+ */
+function failThenPropagatingDomainPort(): DomainPort & { mode: "throw" | "not_yet" } {
+  return {
+    // Flipped by the test between setup attempts. Switching on a CALL count
+    // would be guessing setDnsWithRetry's in-call backoff budget; the
+    // distinction that matters is which setup attempt this is.
+    mode: "throw" as "throw" | "not_yet",
+    async searchLookalikes(): Promise<LookalikeCandidate[]> {
+      return [{ domain: "downgradeco.com", available: true }];
+    },
+    async listOwnedDomains(): Promise<OwnedDomain[]> {
+      return [];
+    },
+    async buy(domain: string): Promise<PurchasedDomain> {
+      return { domain, purchasedAt: Date.now(), registrar: "test-registrar", connectionType: "purchased" };
+    },
+    async setDns(): Promise<DomainDnsResult> {
+      if (this.mode === "throw") throw new VendorError("inboxkit domains/nameservers failed: domain not found", true);
+      // A not-ready ANSWER (never a throw) is what marks the failure
+      // `notPropagated`, which is the one benign case domain-dns.ts turns into
+      // DomainPropagationPendingError -> the 202 SUCCESS-PENDING branch.
+      return domainDnsResult({ kind: "not_yet" });
+    },
+    async release(): Promise<ReleaseResult> {
+      return { released: true, releasedAt: Date.now() };
+    },
+  };
+}
+
+// docs/adversarial/class-sweep-dedup-semantics-2026-08-17.md IN-6. Both
+// retry_setup emits keyed on the bare domain, and emitTenantMessage's GUARDRAIL
+// A refreshes an unread row for the same (tenant, kind, dedup_key) IN PLACE —
+// body, actionHint and SEVERITY. So the informational 202 note overwrote a
+// standing action item with "nothing needed", on the one channel four tool
+// descriptions tell agents to branch on.
+describe("an unread action item is not silently downgraded by a later informational note", () => {
+  it("keeps both rows: the action_required retry AND the info propagation note", async () => {
+    const { tenantId } = await signup("Downgrade Co", "founder@downgradeco.test");
+    const domain = failThenPropagatingDomainPort();
+    const input = { ...SETUP_INPUT, brand: "Downgrade Co", primaryDomain: "downgradeco.com" };
+    const run = () =>
+      withTenantContext(tenantId, (base) =>
+        runSetupInfrastructure({ ...base, adapters: { ...base.adapters, domain } }, input, undefined, "downgrade-key").catch(
+          (e: unknown) => e,
+        ),
+      );
+
+    // 1. Retryable DNS failure -> an ACTION ITEM the agent has not read.
+    const first = await run();
+    expect(first).toBeInstanceOf(VendorError);
+    expect((first as VendorError).retryable).toBe(true);
+    const afterFirst = await withTenantContext(tenantId, (ctx) => listSurfacedTenantMessages(ctx));
+    expect(afterFirst.map((m) => m.severity)).toEqual(["action_required"]);
+
+    // 2. The same domain now reads "bought, still propagating" — the 202
+    //    SUCCESS-PENDING branch, which emits the same KIND at severity 'info'.
+    domain.mode = "not_yet";
+    const second = await run();
+    expect(second).toMatchObject({ provisioning: "pending", pendingDomain: "downgradeco.com" });
+
+    const messages = await withTenantContext(tenantId, (ctx) => listSurfacedTenantMessages(ctx));
+    const severities = messages.filter((m) => m.kind === "retry_setup").map((m) => m.severity).sort();
+    // TODAY (pre-fix): ["info"] — one row, the action item overwritten in place.
+    expect(severities).toEqual(["action_required", "info"]);
+  }, 30_000);
+});

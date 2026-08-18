@@ -187,10 +187,16 @@ export async function registerByoDomain(ctx: TenantContext, input: RegisterByoDo
   // actually ambiguous). The backstop itself stays — it's still correct for a
   // genuinely unclassified legacy row — this just stops manufacturing false
   // positives against it.
+  // `dns_status` is STATED, not defaulted (cached-terminal UNCERTAIN-1). A BYO
+  // domain's mail DNS is the customer's to point at us and `byo_status` is what
+  // tracks it; omitting the column let the table's old DEFAULT assert 'ready'
+  // — a completion claim about DNS nobody had looked at — on every BYO row
+  // from intake onward. 'pending' is the honest value: this platform has not
+  // confirmed mail DNS on this domain.
   ctx.sql.exec(
     `INSERT INTO domains
-       (id, tenant_id, domain, status, purchased_at, connection_type, source, is_primary, dns_mode, byo_status, scan_json, abuse_gate_json, reputation_branch, breaker_tier, first_send_eligible_at)
-     VALUES (?, ?, ?, 'active', ?, 'connected', 'byo', ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, tenant_id, domain, status, purchased_at, dns_status, connection_type, source, is_primary, dns_mode, byo_status, scan_json, abuse_gate_json, reputation_branch, breaker_tier, first_send_eligible_at)
+     VALUES (?, ?, ?, 'active', ?, 'pending', 'connected', 'byo', ?, ?, ?, ?, ?, ?, ?, ?)`,
     domainId,
     ctx.tenantId,
     domain,

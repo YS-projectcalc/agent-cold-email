@@ -17,6 +17,7 @@
  * it failed without us shipping internal detail — or the provider's identity.
  */
 
+import { NOT_NOTIFIED, operatorNotifiedClause } from "@coldstart/shared";
 import { customerSafeVendorFailure } from "./vendor-failure.js";
 
 export interface ErrorResponse {
@@ -81,11 +82,18 @@ export function toErrorResponse(err: unknown): ErrorResponse {
   // G5 gate (a) — customer body stays GENERIC (N-G5-1): err.message names
   // internal env vars + arming docs, which belong in the founder ops alert
   // (registrar-alert.ts), never in a tenant response.
+  // The notification claim is NOT made here (docs/adversarial/
+  // class-sweep-signal-inversion-2026-08-17.md guard A1). alertRegistrarUnarmed
+  // is wired at exactly three catches, early-returns when OPS_ALERT_EMAIL is
+  // unset and swallows send failure — and this mapper, which runs for EVERY
+  // producer of the error including the ones with no catch at all (teardown's
+  // domain.release out of POST /cancel), holds no notification result to cite.
+  // A customer told a human is already on it stops escalating.
   if (name === "RegistrarUnarmedError") {
     return {
       status: 503,
       body: {
-        error: "Domain registration is not yet enabled for this account. No purchase was made. The operator has been notified.",
+        error: `Domain registration is not yet enabled for this account. No purchase was made. ${operatorNotifiedClause(NOT_NOTIFIED)}`,
         code: "registrar_unarmed",
       },
     };
@@ -119,11 +127,17 @@ export function toErrorResponse(err: unknown): ErrorResponse {
 
   // H6 — a vendor seam that is not armed. GENERIC message on purpose: the raw
   // one names ACTIVATION.md and env vars.
+  // Same rule, and this one is starker: NOTHING ANYWHERE NOTIFIES FOR THIS
+  // ERROR. All twelve throw sites (vendors/real/*-port.ts, inboxkit-client.ts,
+  // engine-mailbox-client.ts) are unwrapped by any alert function and no
+  // watchtower check covers "a vendor seam is dark" — so the old sentence was
+  // false by construction, on the one error whose only fix is an operator
+  // arming something.
   if (name === "NotActivatedError") {
     return {
       status: 503,
       body: {
-        error: "This capability is not enabled for this account yet. Nothing was charged. The operator has been notified.",
+        error: `This capability is not enabled for this account yet. Nothing was charged. ${operatorNotifiedClause(NOT_NOTIFIED)}`,
         code: "not_activated",
         step: vendorStep(error as StructuredError),
       },
@@ -147,7 +161,7 @@ export function toErrorResponse(err: unknown): ErrorResponse {
       body: {
         error: retryable
           ? "An upstream provider failed while handling this request. Nothing was charged for the failed step. Retry shortly."
-          : "An upstream provider rejected this request. Nothing was charged for the failed step. Retrying as-is will not help — check your inputs or contact support.",
+          : "An upstream provider rejected this request. Nothing was charged for the failed step. Retrying as-is will not help — check your inputs, or call contact_operator to reach a human.",
         code: "vendor_error",
         ...(step ? { step } : {}),
         retryable,

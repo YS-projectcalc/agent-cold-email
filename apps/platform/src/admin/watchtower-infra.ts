@@ -23,7 +23,7 @@
 
 import type { Env } from "../env.js";
 import type { OpsMailer } from "../ops-mail/ops-mailer.js";
-import { alertEmailFor, trySend, type AlertOutcome, type CheckResult } from "./watchtower-alerts.js";
+import { alertEmailFor, reasonForNoEmail, trySend, type AlertOutcome, type CheckResult } from "./watchtower-alerts.js";
 import { SWEEP_STALE_MS } from "./watchtower-grading.js";
 
 /** One instance, platform-wide — this is control state, not per-tenant state. */
@@ -47,16 +47,52 @@ export function watchtowerStub(env: Env) {
  * report, and saying so in the sweep log is the honest outcome. It must not
  * take down the rest of the sweep, which is still able to run whenever it was
  * the DO (not D1) that failed.
+ *
+ * DECIDE -> SEND -> COMMIT (cached-terminal member 5). This check straddles the
+ * boundary — the DO owns the state, the Worker owns the mailer — so the state
+ * write is a SECOND RPC that happens only once the send outcome is known. The
+ * DO used to persist the transition at decision time, which meant an alert that
+ * never left the building still stamped `last_alert_ts` and `alert_count`: the
+ * next sweep read an announced episode and suppressed for 6h, and a recovery
+ * emailed the founder that an incident they were never told about was over.
+ * That is the same defect `withheldAlertState` closed in the D1-backed store,
+ * and this is the parity the file previously only claimed.
  */
 export async function reconcileD1Alert(env: Env, mailer: OpsMailer, result: CheckResult, nowMs: number): Promise<AlertOutcome> {
   try {
-    const decision = await watchtowerStub(env).reconcileD1Alert(result.healthy, nowMs);
+    const stub = watchtowerStub(env);
+    const decision = await stub.decideD1Alert(result.healthy, nowMs);
     const email = alertEmailFor(env, result, decision.transition, decision.prevSinceTs, nowMs);
-    const emailSent = email ? await trySend(mailer, email) : false;
-    return { name: result.name, action: decision.transition.action, emailSent };
+    const notified = email ? await trySend(mailer, email) : null;
+    try {
+      await stub.commitD1Alert(result.healthy, nowMs, notified);
+    } catch (err) {
+      // The decision was made and (maybe) delivered; only the bookkeeping
+      // failed. Reported honestly below rather than as `unreportable`, because
+      // a delivered email IS a delivered email. Un-banked state re-decides on
+      // the next sweep, so the cost is at worst a duplicate alert — the
+      // opposite of the silence this check exists to prevent.
+      // ACCEPTED RESIDUAL (wave-1-2-integration-gate-2026-08-18 round 2): on a
+      // DEBOUNCED first observation the un-banked state also loses unhealthyObs,
+      // so a PERSISTENTLY failing commit leaves `d1` re-deciding "pending" and
+      // never confirming — narrow (it needs decide-succeeds-while-commit-fails),
+      // and the failure direction is the one this catch already accepts.
+      console.error("watchtower: the D1 alert was decided and sent, but its state could not be banked — the next sweep re-attempts it", err);
+    }
+    return {
+      name: result.name,
+      action: decision.transition.action,
+      emailSent: notified?.delivered ?? false,
+      // Same translation the D1-backed store uses (watchtower.ts's
+      // reconcileAlerts), not a second one: this file exists because the `d1`
+      // check needs a different STORE, and a check reported through two stores
+      // that describe the same non-delivery differently is the reporting
+      // divergence this wave is about.
+      why: notified?.why ?? reasonForNoEmail(decision.transition.action),
+    };
   } catch (err) {
     console.error("watchtower: could not reconcile the D1 check — the WatchtowerDO is unreachable, so this outage is UNREPORTED", err);
-    return { name: result.name, action: "unreportable", emailSent: false };
+    return { name: result.name, action: "unreportable", emailSent: false, why: "send_failed" };
   }
 }
 

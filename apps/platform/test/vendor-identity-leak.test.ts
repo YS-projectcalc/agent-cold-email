@@ -6,6 +6,7 @@ import { getInfrastructureStatus } from "../src/engine/infrastructure-status.js"
 import { toErrorResponse } from "../src/error-response.js";
 import { ABSTRACT_VENDOR_STEPS, customerSafeVendorFailure } from "../src/vendor-failure.js";
 import { activatePaidPlan, mintTenant, tenantStub, withTenantContext } from "./helpers.js";
+import { strippedSource } from "./source-text.js";
 
 // FOUNDER RULE: customer- and agent-facing surfaces never reveal which upstream
 // provider we use (docs/adversarial/sweep-vendor-leak-2026-08-05.md). Vendor
@@ -38,22 +39,6 @@ const SOURCES = {
 // deeper `../../../packages/shared/src/foo.ts` both normalize to a
 // repo-root-relative path (`src/foo.ts`, `packages/shared/src/foo.ts`).
 const normalize = (key: string) => key.replace(/^(\.\.\/)+/, "");
-
-/**
- * Source text with comments removed. Comments naming the vendor are FINE and
- * valuable — they explain the integration. What must not exist outside the
- * adapter layer is emittable text: a string literal that can reach a customer.
- * Stripping comments is what keeps this tripwire from crying wolf, and a guard
- * that cries wolf gets silenced.
- */
-export function strippedSource(source: string): string {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/(?:^|\s)\/\/[^\n]*/g, "")
-    // `--` line comments inside the embedded SQL schema (schema.ts is one big
-    // template literal), which document the integration exactly as TS comments do.
-    .replace(/^[ \t]*--.*$/gm, "");
-}
 
 /** Files with non-comment vendor-name text, outside the layer allowed to have it. */
 export function findVendorNameLeaks(sources: Record<string, string>, allowed: (file: string) => boolean): string[] {

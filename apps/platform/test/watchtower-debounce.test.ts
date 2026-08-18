@@ -1,3 +1,4 @@
+import type { RecoveryBasis } from "@coldstart/shared";
 import { beforeEach, describe, expect, it } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
 import { reconcileAlerts, runWatchtower, tenantDoWedgedCheckName } from "../src/admin/watchtower.js";
@@ -39,8 +40,8 @@ const STEADY_REALERT_MS = 24 * 3_600_000;
 function unhealthy(name: string, detail = "down"): CheckResult {
   return { name, healthy: false, detail };
 }
-function healthy(name: string, detail = "ok"): CheckResult {
-  return { name, healthy: true, detail };
+function healthy(name: string, detail = "ok", basis: RecoveryBasis = "reobserved"): CheckResult {
+  return { name, healthy: true, detail, basis };
 }
 
 beforeEach(async () => {
@@ -58,13 +59,13 @@ describe("A — transition debounce (D1-backed store)", () => {
 
     // One bad observation...
     const first = await reconcileAlerts(env, mailer, [unhealthy("do_storage", "TenantDO canary probe failed")], T0);
-    expect(first).toEqual([{ name: "do_storage", action: "pending", emailSent: false }]);
+    expect(first).toEqual([{ name: "do_storage", action: "pending", emailSent: false, why: "pending_debounce" }]);
     expect(mailer.sent).toEqual([]);
 
     // ...and it is fine again on the very next sweep. The founder never hears
     // about it: no UNHEALTHY, and no RECOVERED for an alert that never went out.
     const second = await reconcileAlerts(env, mailer, [healthy("do_storage")], T0 + SWEEP);
-    expect(second).toEqual([{ name: "do_storage", action: "healthy", emailSent: false }]);
+    expect(second).toEqual([{ name: "do_storage", action: "healthy", emailSent: false, why: "nothing_owed" }]);
     expect(mailer.sent).toEqual([]);
   });
 
@@ -75,7 +76,7 @@ describe("A — transition debounce (D1-backed store)", () => {
     expect(mailer.sent).toEqual([]);
 
     const confirming = await reconcileAlerts(env, mailer, [unhealthy("engine", "engine /health -> HTTP 503")], T0 + SWEEP);
-    expect(confirming).toEqual([{ name: "engine", action: "alerted", emailSent: true }]);
+    expect(confirming).toEqual([{ name: "engine", action: "alerted", emailSent: true, why: "sent" }]);
     expect(mailer.sent.map((m) => m.subject)).toEqual(["[coldrig] Engine /health: UNHEALTHY"]);
     // The specifics still ride into the body — the debounce delays the email, it
     // does not degrade it.
@@ -102,7 +103,7 @@ describe("A — transition debounce (D1-backed store)", () => {
     await reconcileAlerts(env, mailer, [unhealthy("engine")], T0 + SWEEP);
     const recovered = await reconcileAlerts(env, mailer, [healthy("engine")], T0 + 2 * SWEEP);
 
-    expect(recovered).toEqual([{ name: "engine", action: "recovered", emailSent: true }]);
+    expect(recovered).toEqual([{ name: "engine", action: "recovered", emailSent: true, why: "sent" }]);
     expect(mailer.sent.map((m) => m.subject)).toEqual([
       "[coldrig] Engine /health: UNHEALTHY",
       "[coldrig] Engine /health: RECOVERED",
@@ -202,7 +203,7 @@ describe("C — the DO-backed d1 check debounces too, and still pages inside the
 
     const pagedAt = T0 + SWEEP;
     const outcomes = await runWatchtower(broken, mailer, pagedAt);
-    expect(outcomes[0]).toEqual({ name: "d1", action: "alerted", emailSent: true });
+    expect(outcomes[0]).toEqual({ name: "d1", action: "alerted", emailSent: true, why: "sent" });
     expect(mailer.sent.map((m) => m.subject)).toEqual(["[coldrig] D1 database: UNHEALTHY"]);
     // Worst case the outage began just after the previous sweep, so the founder
     // is paged at most 2 cron periods after it started.

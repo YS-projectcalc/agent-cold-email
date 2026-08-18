@@ -147,7 +147,24 @@ CREATE TABLE IF NOT EXISTS domains (
   -- re-driven). Previously setDns ran BEFORE the INSERT, so the vendor's ~32s
   -- async registration racing our immediate nameservers call threw and stranded
   -- a domain we had already paid for.
-  dns_status TEXT NOT NULL DEFAULT 'ready',
+  --
+  -- The DEFAULT is the UN-READY value (docs/adversarial/
+  -- class-sweep-cached-terminal-2026-08-17.md UNCERTAIN-1, settled). It used to
+  -- be 'ready': a completion claim, handed to any INSERT that omitted the
+  -- column — which byo-intake.ts's did, so every BYO row landed "mail DNS is
+  -- working" while its byo_status was still 'pending_scan'/'pending_dns'. That
+  -- is unreachable today only by coincidence (every dns_status reader either
+  -- filters source='provisioned' or resolves through a committed domain intent,
+  -- and candidate generation excludes names this tenant already holds), which is
+  -- exactly the "accidental invariant" shape: nothing pins it, and the next
+  -- unfiltered reader inherits a lie. Both writers now state the column
+  -- explicitly and the default fails un-ready.
+  --
+  -- NB tenant-do.ts's addColumnIfMissing backfill deliberately keeps 'ready'.
+  -- Its default applies to rows that PREDATE the column, which were live and
+  -- working; flipping it there would re-open DNS on every such domain and file
+  -- an aging alert for each. Different question, different safe answer.
+  dns_status TEXT NOT NULL DEFAULT 'pending',
   -- INCIDENT 2026-08-05 root cause — WHICH DNS operation applies to this domain
   -- ('purchased' = the vendor registered it and owns its nameservers;
   -- 'connected' = registered elsewhere and pointed at the vendor). The vendor
@@ -478,9 +495,24 @@ CREATE TABLE IF NOT EXISTS soft_bounces (
 -- retryable, so an intent that awaits vendor I/O can't be run twice. Rows are
 -- evicted at write time once older than the TTL (engine/idempotency.ts) so the
 -- table can't grow unbounded per tenant.
+-- The DEFAULT is the SAFE value, not the terminal one (docs/adversarial/
+-- class-sweep-cached-terminal-2026-08-17.md member 10). It used to be 'done':
+-- the replay table's completion column defaulted to "this key is finished", so
+-- any INSERT that omitted the status column short-circuited its key on the spot. No
+-- writer omits it today — all three set it explicitly — which is exactly what
+-- makes it the class's most dangerous shape: an invariant held by coincidence,
+-- with nothing pinning it, one careless INSERT away from a silent replay.
+-- The CHECK makes a done row with a NULL response unrepresentable in the same move.
+--
+-- NB: this reaches DOs created from here on. CREATE TABLE IF NOT EXISTS does
+-- not alter an existing table, and SQLite cannot ALTER-ADD a CHECK, so a live
+-- DO keeps the unconstrained table until something rebuilds it. Deliberate:
+-- the state is unreachable from every current writer, and idempotency.ts's
+-- reclaim branch now repairs a done-with-NULL-response row in place rather
+-- than deadlocking on it, so a rebuild would be risk without a live payoff.
 CREATE TABLE IF NOT EXISTS request_idempotency (
   key TEXT PRIMARY KEY,
-  status TEXT NOT NULL DEFAULT 'done',
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status <> 'done' OR response_json IS NOT NULL),
   response_json TEXT,
   created_at INTEGER NOT NULL
 );
@@ -677,6 +709,14 @@ CREATE TABLE IF NOT EXISTS teardown_records (
   effective TEXT NOT NULL,
   domains_released INTEGER NOT NULL DEFAULT 0,
   mailboxes_released INTEGER NOT NULL DEFAULT 0,
+  -- Mailboxes the vendor refused to release during this teardown, so they are
+  -- STILL LIVE and still cost money on both sides. Split from
+  -- mailboxes_released rather than netted out of it: that column counts what
+  -- was reclaimed, and a teardown that reclaimed 3 of 4 must not read the same
+  -- as one that reclaimed 3 of 3. DEFAULT 0 backfills every pre-existing row,
+  -- which is exactly right — before per-item isolation a failed release THREW,
+  -- so no historical record can describe a partial teardown.
+  mailbox_release_failures INTEGER NOT NULL DEFAULT 0,
   campaigns_stopped INTEGER NOT NULL DEFAULT 0,
   annual_domain_liability_cents INTEGER NOT NULL DEFAULT 0,
   ts INTEGER NOT NULL
@@ -981,6 +1021,42 @@ CREATE TABLE IF NOT EXISTS mailbox_buy_dispatches (
   updated_at INTEGER NOT NULL
 );
 
+-- N1 (docs/adversarial/wave-1-2-integration-gate-2026-08-18.md round 2) — the
+-- durable RELEASE intent, the destructive mirror of the buy intents above: the
+-- exact addresses one keyed remove_mailboxes call resolved, so that every
+-- same-key retry re-drives THAT set instead of re-resolving "the N newest live".
+--
+-- WHY: "release N" is RELATIVE, and a mailbox the vendor permanently refuses
+-- keeps failedCount >= 1 forever — so the outcome is permanently non-terminal
+-- (engine/remove-mailboxes-terminality.ts), the key never freezes, and the retry
+-- the platform's own docs instruct destroyed (count - failedCount) HEALTHY
+-- mailboxes on every pass, without a terminating condition. Measured: a customer
+-- who asked to release 3 lost 12 and counting, irreversibly (a released mailbox
+-- loses its warmup reputation, ~4 weeks to rebuild).
+--
+-- INSERT-ONLY, like the buy intents, and for the same reason: a row that can be
+-- rewritten is a target set that can move, which is the property being removed.
+-- Rows are never deleted. Table size scales with the number of DISTINCT KEYS a
+-- tenant has ever used for a downgrade, NOT with mailboxes ever released
+-- (PRIMARY KEY is (key, mailbox_id), not mailbox_id alone): a same-key retry
+-- writes nothing further (recordRemoveIntent returns the already-recorded
+-- set), but a mailbox the vendor permanently refuses is re-resolved and
+-- re-INSERTed under every NEW key that ever targets it, so one permanently
+-- stuck mailbox can appear in as many rows as keys have targeted it (a call
+-- that resolves no live mailbox writes nothing, so idle tenants add none).
+CREATE TABLE IF NOT EXISTS mailbox_release_intents (
+  -- The namespaced request-idempotency key ('remove_mailboxes:<customer key>'),
+  -- so the intent and the replay claim it belongs to are the same anchor.
+  key TEXT NOT NULL,
+  tenant_id TEXT NOT NULL,
+  mailbox_id TEXT NOT NULL,
+  -- Carried beside the id so a retry can report the still-owed ADDRESSES back to
+  -- the agent without a join against a row it may not select.
+  email TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (key, mailbox_id)
+);
+
 CREATE TABLE IF NOT EXISTS mailbox_cred_pushes (
   email TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL,
@@ -1012,7 +1088,17 @@ CREATE INDEX IF NOT EXISTS idx_mailbox_cred_pushes_pending
 -- + CLAUDE.md rule h — tenant-scoped, one tenant per DO, never cross-tenant).
 -- 'kind' + 'source' are free-form/enum-by-convention exactly like
 -- deliverability_actions.action/events.type above (no DB-level enum
--- shorthand in this codebase; the emit helper is the one writer). 'source' is
+-- shorthand in this codebase; the emit helper is the one writer). 'severity' has
+-- THREE rungs — 'info' | 'action_required' | 'terminal' — a real union on the
+-- TypeScript side (engine/tenant-messages.ts's TenantMessageSeverity), not
+-- DB-enforced: a CHECK would need a table rebuild inside every live DO, and
+-- every write funnels through that module's two emit helpers. The third rung
+-- says the platform has STOPPED and only a human can move it, which is a claim
+-- only code that OBSERVED the stop can make — so the operator admin route caps
+-- its own INPUT at 'info' | 'action_required' (admin/schemas.ts's
+-- AdminOperatorMessageInput) rather than letting a human assert it by hand
+-- through a free-text surface. Rows carrying any of the three read back fine.
+-- 'source' is
 -- 'system' (every row this increment writes) | 'operator' (increment 2, not
 -- built here). 'action_hint' is JSON (a structured hint the agent can act on,
 -- e.g. { tool, idempotencyKey }), NULL when there is none. 'dedup_key' backs

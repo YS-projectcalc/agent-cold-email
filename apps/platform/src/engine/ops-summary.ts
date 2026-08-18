@@ -11,7 +11,7 @@
 import { isPaidPlan, monthlyRevenueCents } from "@coldstart/shared";
 import type { TenantContext } from "../tenant-context.js";
 import { readActivationState } from "./activation.js";
-import { DNS_PENDING_MAX_MS } from "./domain-dns.js";
+import { DNS_PENDING_MAX_MS, dnsUnreadyForMs } from "./domain-dns.js";
 import { countSendEligibleMailboxes } from "./mailbox-eligibility.js";
 import { getDeliverabilitySummary } from "./reporting.js";
 
@@ -89,12 +89,33 @@ export interface SendPipelineSignals {
    */
   agingPendingDomains: { domain: string; pendingForMs: number; gaveUp: boolean }[];
   /**
-   * Every provisioned domain name this tenant holds. Read ONLY as the ownership
-   * set for clearing an aging-domain alert (a check row names a domain, and the
-   * watchtower must not clear another tenant's) — the exact role
-   * `mailboxProvenance` plays for the credential-push checks.
+   * Every provisioned domain this tenant holds, with the two columns that
+   * decide whether an aging alert may be cleared as GOOD news.
+   *
+   * Read as the ownership set for clearing an aging-domain alert (a check row
+   * names a domain, and the watchtower must not clear another tenant's) — the
+   * exact role `mailboxProvenance` plays for the credential-push checks — and
+   * deliberately NOT status-filtered, so a domain that has since left 'active'
+   * can still have its own stale alert cleared instead of being pinned
+   * unhealthy forever.
+   *
+   * That is also why the row carries `dnsStatus`/`status` rather than just a
+   * name (F10, docs/adversarial/agent-channel-product-audit-2026-08-17.md):
+   * `agingPendingDomains` additionally requires `status='active'` AND
+   * `dns_status != 'ready'`, so a released or burning domain LEAVES that set
+   * without its DNS ever having come up, and the watchtower used to clear it
+   * claiming the opposite.
    */
-  provisionedDomainNames: string[];
+  provisionedDomains: { domain: string; dnsStatus: string; status: string }[];
+  /**
+   * Every credential push row this tenant holds, with its status — the
+   * re-read the aging-push CLEAR needs (signal-inversion arm B, the exact
+   * sibling of provisionedDomains above). `agingPendingPushes` requires
+   * status='pending', and lifecycle.ts writes 'revoked' on suspend/teardown,
+   * so a mailbox whose credentials were revoked leaves that query exactly like
+   * one that finally received them.
+   */
+  credentialPushes: { email: string; status: string }[];
 }
 
 export interface MailboxProvenanceRow {
@@ -389,14 +410,34 @@ function readSendPipelineSignals(ctx: TenantContext): SendPipelineSignals {
       // longer means "just admitted, age unknown" — the third disjunct admits
       // rows this deploy never observed, and for those `purchased_at` IS the
       // age signal (same fallback the admission query itself uses).
-      pendingForMs: row.dns_first_checked_at === null ? now - row.purchased_at : now - row.dns_first_checked_at,
+      //
+      // Now literally the same function the customer-facing bound uses
+      // (domain-dns.ts's dnsUnreadyForMs) rather than a restatement of it, so
+      // the two surfaces cannot drift apart about the same domain
+      // (docs/adversarial/agent-channel-product-audit-2026-08-17.md, Q4). The
+      // purchase stamp is passed unguarded here — unlike the bound, this
+      // surface is only consulted for ACTIVATED tenants (admin/watchtower.ts),
+      // and activation implies the clock migration, so `purchased_at` is
+      // already comparable to `now` wherever this value is read.
+      pendingForMs: dnsUnreadyForMs(now, row.dns_first_checked_at, row.purchased_at),
       gaveUp: row.dns_gave_up_at !== null,
     }));
 
-  const provisionedDomainNames = ctx.sql
-    .exec<{ domain: string }>(`SELECT domain FROM domains WHERE tenant_id = ? AND source = 'provisioned'`, ctx.tenantId)
+  const credentialPushes = ctx.sql
+    .exec<{ email: string; status: string }>(
+      `SELECT email, status FROM mailbox_cred_pushes WHERE tenant_id = ?`,
+      ctx.tenantId,
+    )
     .toArray()
-    .map((row) => row.domain);
+    .map((row) => ({ email: row.email, status: row.status }));
+
+  const provisionedDomains = ctx.sql
+    .exec<{ domain: string; dns_status: string; status: string }>(
+      `SELECT domain, dns_status, status FROM domains WHERE tenant_id = ? AND source = 'provisioned'`,
+      ctx.tenantId,
+    )
+    .toArray()
+    .map((row) => ({ domain: row.domain, dnsStatus: row.dns_status, status: row.status }));
 
   return {
     activated,
@@ -404,6 +445,7 @@ function readSendPipelineSignals(ctx: TenantContext): SendPipelineSignals {
     eligibleMailboxes: countSendEligibleMailboxes(ctx, now),
     agingPendingPushes,
     agingPendingDomains,
-    provisionedDomainNames,
+    provisionedDomains,
+    credentialPushes,
   };
 }

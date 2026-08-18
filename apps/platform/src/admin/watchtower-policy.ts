@@ -232,3 +232,33 @@ export function decideAlert(
 function healthyState(sinceTs: number): AlertState {
   return { status: "healthy", sinceTs, lastAlertTs: null, unhealthyObs: 0, alertCount: 0 };
 }
+
+/**
+ * The state to persist when a transition's email was composed and NOT
+ * delivered (docs/adversarial/class-sweep-cached-terminal-2026-08-17.md member
+ * 5). `decideAlert` computes `next` BEFORE anything is sent, so persisting it
+ * unconditionally recorded a dark channel as an announcement: `lastAlertTs` and
+ * `alertCount` advanced, the backoff engaged, and the founder — who was told
+ * nothing — later received a RECOVERED email for an incident that was never
+ * announced.
+ *
+ * Every counter that means "the founder knows" therefore stays exactly where it
+ * was, while the OBSERVATION counters still advance. The next sweep recomputes
+ * the same transition and tries again, so the anti-storm property is preserved
+ * in the only sense that matters: at most one send attempt per check per tick,
+ * and no email at all once one lands.
+ *
+ * A withheld RECOVERY keeps the episode open rather than banking the healthy
+ * state. That leaves the check reading unhealthy for one more tick — an error
+ * in the SAFE direction, and self-correcting, because the recovery is retried
+ * until it is actually delivered.
+ */
+export function withheldAlertState(prev: PersistedAlertState | null, transition: AlertTransition): AlertState {
+  const previous = normalizeAlertState(prev);
+  if (transition.action === "recovered") return previous ?? transition.next;
+  return {
+    ...transition.next,
+    lastAlertTs: previous?.lastAlertTs ?? null,
+    alertCount: previous?.alertCount ?? 0,
+  };
+}

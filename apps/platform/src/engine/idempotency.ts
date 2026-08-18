@@ -1,4 +1,4 @@
-import { RequestInProgressError } from "@coldstart/shared";
+import { RequestInProgressError, type Settled } from "@coldstart/shared";
 import type { TenantContext } from "../tenant-context.js";
 
 // NB1 — request_idempotency rows are evicted at write time once older than this,
@@ -24,6 +24,27 @@ const REQUEST_IDEMPOTENCY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 // a genuinely dead claim (crashed DO) unblocks a retry promptly instead of
 // waiting anywhere near the 30-day full-eviction horizon.
 const REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS = 10 * 60 * 1000;
+
+/** Per-call-site options — see `recordedIsNonTerminal`. */
+export interface RequestIdempotencyOptions<T> {
+  /**
+   * MIGRATION AFFORDANCE, and nothing more. Classifies an ALREADY-RECORDED
+   * response as one that should never have been recorded.
+   *
+   * Rows written under the `Settled` contract below cannot be wrong: a
+   * non-terminal outcome no longer writes a row at all, so `status='done'` now
+   * MEANS terminal by construction. But rows written BEFORE this contract are
+   * `done` regardless, and the population that needs the fix most is the one
+   * already wedged in production — so the replay path asks this predicate about
+   * the stored payload.
+   *
+   * SYNCHRONOUS by contract (it runs inside the claim-then-execute prefix,
+   * before any await) and TOTAL (it is handed a `JSON.parse` of a row that may
+   * predate the current result shape). Deletable once every pre-contract row
+   * has aged out of REQUEST_IDEMPOTENCY_TTL_MS.
+   */
+  recordedIsNonTerminal?: (recorded: T) => boolean;
+}
 
 /**
  * Request-level idempotency (B2, CLASS B). When a client presents an
@@ -60,13 +81,39 @@ const REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS = 10 * 60 * 1000;
  * instead of conflicting — see the reclaim branch below for how this stays
  * atomic under a concurrent retry race. A 'pending' claim within the window
  * still rejects with the retryable conflict, unchanged.
+ *
+ * TERMINALITY IS ASSERTED, NOT INFERRED (docs/adversarial/
+ * class-sweep-cached-terminal-2026-08-17.md; audit F1 is its member 1). THE
+ * INVARIANT: a recorded outcome may be replayed for the row's life only if it
+ * is TERMINAL. Control flow cannot decide that — "fn() returned" is not "the
+ * work finished", and `runSetupInfrastructure` has THREE returns that owe work
+ * (a `quoteOnly` preview that provisions nothing, a capacity-pending
+ * back-pressure return, and the 202 SUCCESS-PENDING branch). Recording those as
+ * ordinary replayable results made the platform's own retry instruction
+ * ("retry with the same idempotency key to finish it") a guaranteed no-op:
+ * every later same-key call replayed a stale response with zero vendor calls
+ * and an empty messages[] — the exact eternal-"pending" shape
+ * engine/domain-dns.ts's class fix closed INSIDE the saga and left open in
+ * front of it.
+ *
+ * So `fn` returns `Settled<T>` and every call site must WRITE the word. A
+ * `terminal: false` outcome is handed to THIS caller unchanged — the customer
+ * still gets its 202 — and its claim is RELEASED, exactly as a throw releases
+ * one: a result that owes work is no more cacheable than an error. Nothing
+ * about the in-flight window changes, so two concurrent same-key calls still
+ * resolve to one run; what changes is only that a SEQUENTIAL retry re-runs
+ * instead of replaying, which is what makes the retry instruction true. That
+ * re-run is safe by construction at the one site that can be non-terminal:
+ * setup_infrastructure's purchases are gated by the ordinal-derived domain
+ * intents, never by this key (tenant-do.ts).
  */
 export async function withRequestIdempotency<T>(
   ctx: TenantContext,
   key: string | undefined,
-  fn: () => T | Promise<T>,
+  fn: () => Settled<T> | Promise<Settled<T>>,
+  opts?: RequestIdempotencyOptions<T>,
 ): Promise<T> {
-  if (!key) return fn();
+  if (!key) return (await fn()).value;
 
   const now = ctx.clock.now();
   const existing = ctx.sql
@@ -77,24 +124,46 @@ export async function withRequestIdempotency<T>(
     .toArray()[0];
   if (existing) {
     if (existing.status === "done" && existing.response_json !== null) {
-      return JSON.parse(existing.response_json) as T;
-    }
-    // 'pending': another turn claimed this key. Within the trust window it's
-    // presumed genuinely still running fn() — running it again would double
-    // the side effect, so reject with a retryable conflict.
-    if (now - existing.created_at < REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS) {
+      const recorded = JSON.parse(existing.response_json) as T;
+      // Under the Settled contract a 'done' row is terminal by construction, so
+      // this replays. The predicate is asked only about rows written BEFORE
+      // that contract existed — see RequestIdempotencyOptions.
+      if (!(opts?.recordedIsNonTerminal?.(recorded) ?? false)) return recorded;
+      // A pre-contract row recording work that was never finished. Re-claim IN
+      // PLACE, synchronously, before any await below — the same "one input-gate
+      // turn" guarantee the fresh-claim INSERT and the stale-claim reclaim rely
+      // on. A concurrent same-key call can only observe this row AFTER the flip
+      // lands (its own SELECT cannot run until this synchronous prefix yields
+      // at fn()'s first await), so it reads 'pending' with a freshly-set
+      // created_at and takes the conflict branch below — exactly one caller
+      // ever proceeds to run fn(). The stale response is cleared with it: a
+      // 'pending' row's body is never read, and either exit below removes the
+      // row rather than resurrecting a response the retry has just disproved.
+      ctx.sql.exec(
+        `UPDATE request_idempotency SET status = 'pending', response_json = NULL, created_at = ? WHERE key = ? AND status = 'done'`,
+        now,
+        key,
+      );
+    } else if (now - existing.created_at < REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS) {
+      // 'pending': another turn claimed this key. Within the trust window it's
+      // presumed genuinely still running fn() — running it again would double
+      // the side effect, so reject with a retryable conflict.
       throw new RequestInProgressError();
+    } else {
+      // Past the window: presumed dead (the claiming DO crashed mid-fn — see
+      // the class doc above). Same in-place, pre-await reclaim as the branch
+      // above, and atomic under a concurrent retry for the same reason.
+      //
+      // Deliberately NOT guarded on `status='pending'` (cached-terminal member
+      // 10's residual): this branch is reached only when the row is not a
+      // replayable 'done', which includes the `done`+NULL row the schema's old
+      // DEFAULT could mint. The old guard matched nothing for such a row, so
+      // `created_at` was never re-stamped and every retry took the conflict
+      // branch above for a full claim TTL — a spurious 409 with no serialized
+      // winner. Re-stamping AND normalising the status repairs it in the same
+      // one turn, without a separate repair pass.
+      ctx.sql.exec(`UPDATE request_idempotency SET status = 'pending', created_at = ? WHERE key = ?`, now, key);
     }
-    // Past the window: presumed dead (the claiming DO crashed mid-fn — see
-    // the class doc above). Reclaim IN PLACE, synchronously, before any
-    // await below — the same "one input-gate turn" guarantee the fresh-claim
-    // INSERT relies on. A concurrent retry of this SAME stale key can only
-    // observe this row AFTER the re-stamp lands (its own SELECT can't run
-    // until this synchronous prefix yields at fn()'s first await), so it
-    // reads 'pending' with a freshly-set created_at and falls into the
-    // conflict branch above instead of reclaiming a second time — exactly
-    // one retry ever proceeds to run fn().
-    ctx.sql.exec(`UPDATE request_idempotency SET created_at = ? WHERE key = ? AND status = 'pending'`, now, key);
   } else {
     // Claim BEFORE the first await (see the class doc): synchronous SELECT + INSERT
     // land in one input-gate turn, so the claim is durable before fn() can yield.
@@ -111,13 +180,21 @@ export async function withRequestIdempotency<T>(
   );
 
   try {
-    const result = await fn();
+    const settled = await fn();
+    if (!settled.terminal) {
+      // Owes work: release the claim exactly as a throw does. THIS caller keeps
+      // its value; no later caller inherits it as an answer. Recording it is
+      // what froze a preview / a back-pressure return / a 202 as the permanent
+      // reply to a key the agent was told to reuse.
+      ctx.sql.exec(`DELETE FROM request_idempotency WHERE key = ? AND status = 'pending'`, key);
+      return settled.value;
+    }
     ctx.sql.exec(
       `UPDATE request_idempotency SET status = 'done', response_json = ? WHERE key = ?`,
-      JSON.stringify(result),
+      JSON.stringify(settled.value),
       key,
     );
-    return result;
+    return settled.value;
   } catch (err) {
     // Clear the claim so a retry re-runs fn() (failures are not cached).
     ctx.sql.exec(`DELETE FROM request_idempotency WHERE key = ? AND status = 'pending'`, key);

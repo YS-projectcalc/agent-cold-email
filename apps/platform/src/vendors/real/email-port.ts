@@ -92,7 +92,14 @@ export class RealEmailPort implements EmailPort {
     if (!Array.isArray(body?.events) || typeof body?.cursor !== "number") {
       throw new VendorError("engine /v1/poll returned a malformed PollResult", false);
     }
-    return { events: body.events as PollResult["events"], cursor: body.cursor };
+    // `unreadable` is carried across the boundary, never dropped: it is the
+    // engine's report that it permanently skipped a message to un-block this
+    // mailbox (IN-7), and the consumer is what records that loss.
+    return {
+      events: body.events as PollResult["events"],
+      cursor: body.cursor,
+      unreadable: typeof body.unreadable === "number" ? body.unreadable : 0,
+    };
   }
 
   /**

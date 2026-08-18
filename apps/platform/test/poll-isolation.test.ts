@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { runInDurableObject } from "cloudflare:test";
 import { VendorError } from "@coldstart/shared";
-import type { PollResult } from "@coldstart/shared";
+import type { Clock, PollResult } from "@coldstart/shared";
+import { CRON_PERIOD_MS } from "../src/admin/ops-sweep.js";
 import { runPollInbox } from "../src/engine/reply-processor.js";
 import { activatePaidPlan, api, mintTenant, seedBenignSdnList, tenantStub, withTenantContext } from "./helpers.js";
 
@@ -59,6 +60,24 @@ async function cursorsOf(tenantId: string): Promise<Record<string, number>> {
   return Object.fromEntries(rows.map((r) => [r.email, r.poll_cursor]));
 }
 
+/**
+ * A clock pinned to an instant whose CYCLE-DERIVED rotation offset (IN-9's
+ * `rotationOffset`) over `length` mailboxes is exactly `offset`.
+ *
+ * These tenants are PAID, so they run on the RealClock (helpers.ts mirrors
+ * TenantDO's selection) and `advanceClock` — the virtual-clock lever
+ * poll-stall-rotation.test.ts uses — is not available to them. Reading the wall
+ * clock instead is what made this file flip its result every 5 minutes: which
+ * mailbox leads is a function of the cron period the suite happens to run in.
+ * Pinned within `length` periods of now, so every other time-derived value the
+ * poll writes (last_polled_at) stays realistic.
+ */
+function clockAtRotation(offset: number, length: number): Clock {
+  const period = Math.floor(Date.now() / CRON_PERIOD_MS);
+  const aligned = period - (period % length) + offset;
+  return { now: () => aligned * CRON_PERIOD_MS };
+}
+
 async function tenantWithMailboxes(brand: string, domain: string, mailboxes: SeedMailbox[]): Promise<string> {
   await seedBenignSdnList();
   const { tenantId, token } = await mintTenant(brand, "managed");
@@ -81,31 +100,44 @@ async function tenantWithMailboxes(brand: string, domain: string, mailboxes: See
 }
 
 describe("N6 — one mailbox's failure never costs the tenant its whole poll", () => {
-  it("mailbox A throws => B is still polled, and A's cursor is left un-advanced", async () => {
-    const tenantId = await tenantWithMailboxes("Poll Iso Co", "poll-iso-co.test", [
-      { email: "a@poll-iso-co.test" },
-      { email: "b@poll-iso-co.test" },
-    ]);
+  it("mailbox A throws => B is still polled in EVERY rotation, and A's cursor is left un-advanced", async () => {
+    const A = "a@poll-iso-co.test";
+    const B = "b@poll-iso-co.test";
+    const tenantId = await tenantWithMailboxes("Poll Iso Co", "poll-iso-co.test", [{ email: A }, { email: B }]);
 
-    const polled: string[] = [];
-    await withTenantContext(tenantId, async (ctx) => {
-      ctx.adapters.email.poll = async (email: string): Promise<PollResult> => {
-        polled.push(email);
-        // A is uncredentialed at the engine — the real 422 shape.
-        if (email === "a@poll-iso-co.test") throw new VendorError("unknown mailbox", true);
-        return { events: [], cursor: 500 };
-      };
-      return runPollInbox(ctx);
-    });
+    // WHICH MAILBOX LEADS IS NOT THE PROPERTY UNDER TEST. IN-9 rotates the start
+    // of the list per cron period, so this loop runs BOTH rotations under a
+    // pinned clock instead of asserting one fixed order against the wall clock —
+    // which is what made this case pass or fail purely on the 5-minute window
+    // the suite happened to run in. The isolation invariant is what must hold in
+    // every rotation: A's throw never costs B its poll.
+    const leadPerRotation: string[] = [];
+    for (const offset of [0, 1]) {
+      const polled: string[] = [];
+      await withTenantContext(tenantId, (base) => {
+        base.adapters.email.poll = async (email: string): Promise<PollResult> => {
+          polled.push(email);
+          // A is uncredentialed at the engine — the real 422 shape.
+          if (email === A) throw new VendorError("unknown mailbox", true);
+          return { events: [], cursor: 500 };
+        };
+        return runPollInbox({ ...base, clock: clockAtRotation(offset, 2) });
+      });
+      expect([...polled].sort()).toEqual([A, B]);
+      leadPerRotation.push(polled[0]!);
+    }
 
-    // B was reached even though A came first and threw.
-    expect(polled).toEqual(["a@poll-iso-co.test", "b@poll-iso-co.test"]);
+    // ...and the rotation genuinely rotates: whichever mailbox is behind the
+    // failing one this cycle leads the next, which is what stops a permanently
+    // bad head from starving the rest across cycles.
+    expect(leadPerRotation).toEqual([A, B]);
+
     const cursors = await cursorsOf(tenantId);
     // A's cursor is EXACTLY where it was: nothing below the throw ran, so the
     // events it would have carried are redelivered next poll (deduped on
     // message_id) rather than skipped.
-    expect(cursors["a@poll-iso-co.test"]).toBe(100);
-    expect(cursors["b@poll-iso-co.test"]).toBe(500);
+    expect(cursors[A]).toBe(100);
+    expect(cursors[B]).toBe(500);
   });
 
   it("a throw does not stop the tenant's reply counters for the mailboxes that DID work", async () => {

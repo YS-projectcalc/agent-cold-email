@@ -119,29 +119,44 @@ describe("persisted key derivations are frozen", () => {
   it("the request-idempotency namespace for setup_infrastructure is what the route actually writes", async () => {
     // Asserted through the real route rather than by reading the source: the
     // claim row is what a retry resolves against, so the namespace only matters
-    // as the string that lands in the table. `quoteOnly` returns before any
-    // vendor call, so this exercises the wrapper and nothing else.
+    // as the string that lands in the table.
+    //
+    // It has to be a REAL provision, not a `quoteOnly` preview. A preview is a
+    // non-terminal outcome and no longer records a row at all (cached-terminal
+    // member 2 — the two-call quote-then-commit flow the tool description
+    // instructs used to have the quote freeze as the permanent answer to the
+    // key), so a quote would prove the namespace by leaving nothing behind.
     const { token, tenantId } = await mintTenant("Derivation Co", "demo");
+    const spec = {
+      brand: "Derivation Co",
+      primaryDomain: "derivation.test",
+      domains: 1,
+      inboxesEach: 1,
+      persona: "Sender",
+      physicalAddress: "1 Main St",
+      senderIdentity: "Derivation Co <hello@derivation.test>",
+    };
+    const setupKeys = (): Promise<{ key: string }[]> =>
+      runInDurableObject(tenantStub(tenantId), (_i, s) =>
+        s.storage.sql.exec<{ key: string }>(`SELECT key FROM request_idempotency WHERE key LIKE 'setup%' ORDER BY key`).toArray(),
+      );
+
+    const quote = await api("/setup-infrastructure", {
+      method: "POST",
+      token,
+      headers: { "idempotency-key": "abc-123" },
+      body: JSON.stringify({ ...spec, quoteOnly: true }),
+    });
+    expect(quote.status).toBe(200);
+    expect(await setupKeys()).toEqual([]);
+
     const res = await api("/setup-infrastructure", {
       method: "POST",
       token,
       headers: { "idempotency-key": "abc-123" },
-      body: JSON.stringify({
-        brand: "Derivation Co",
-        primaryDomain: "derivation.test",
-        domains: 1,
-        inboxesEach: 1,
-        persona: "Sender",
-        physicalAddress: "1 Main St",
-        senderIdentity: "Derivation Co <hello@derivation.test>",
-        quoteOnly: true,
-      }),
+      body: JSON.stringify(spec),
     });
-    expect(res.status).toBe(200);
-
-    const keys = await runInDurableObject(tenantStub(tenantId), (_i, s) =>
-      s.storage.sql.exec<{ key: string }>(`SELECT key FROM request_idempotency`).toArray(),
-    );
-    expect(keys).toEqual([{ key: "setup_infrastructure:abc-123" }]);
+    expect(res.status).toBe(202);
+    expect(await setupKeys()).toEqual([{ key: "setup_infrastructure:abc-123" }]);
   });
 });

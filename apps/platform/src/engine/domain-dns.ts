@@ -137,14 +137,21 @@ function isDnsReady(records: DnsRecordSet): boolean {
 interface DnsBoundState {
   status: string;
   firstCheckedAt: number | null;
+  purchasedAt: number;
   checkCount: number;
   gaveUpAt: number | null;
 }
 
 function readDnsBoundState(ctx: TenantContext, domainId: string): DnsBoundState {
   const row = ctx.sql
-    .exec<{ status: string; dns_first_checked_at: number | null; dns_check_count: number; dns_gave_up_at: number | null }>(
-      `SELECT status, dns_first_checked_at, dns_check_count, dns_gave_up_at FROM domains WHERE id = ? AND tenant_id = ?`,
+    .exec<{
+      status: string;
+      dns_first_checked_at: number | null;
+      purchased_at: number;
+      dns_check_count: number;
+      dns_gave_up_at: number | null;
+    }>(
+      `SELECT status, dns_first_checked_at, purchased_at, dns_check_count, dns_gave_up_at FROM domains WHERE id = ? AND tenant_id = ?`,
       domainId,
       ctx.tenantId,
     )
@@ -152,9 +159,67 @@ function readDnsBoundState(ctx: TenantContext, domainId: string): DnsBoundState 
   return {
     status: (row?.status ?? "").trim().toLowerCase(),
     firstCheckedAt: row?.dns_first_checked_at ?? null,
+    purchasedAt: row?.purchased_at ?? 0,
     checkCount: row?.dns_check_count ?? 0,
     gaveUpAt: row?.dns_gave_up_at ?? null,
   };
+}
+
+/**
+ * How long a provisioned domain has been un-ready — THE one arithmetic, shared
+ * by the customer-facing bound below and the founder-facing aging alert
+ * (engine/ops-summary.ts's agingPendingDomains). They must never disagree about
+ * the same domain: on 2026-08-17 the watchtower said `goauthorpitchdesk.com`
+ * was "past the point where propagation explains it" while setup_infrastructure
+ * told the paying customer "Nothing was lost — retry to finish it", because the
+ * alert had a `purchased_at` fallback and the bound did not (docs/adversarial/
+ * agent-channel-product-audit-2026-08-17.md, Q4).
+ *
+ * `dns_first_checked_at` when we have one; `purchasedAt` only as the fallback
+ * for a row this deploy has never observed — the same rule, in the same order,
+ * as the alert's own query. A present anchor is never overridden (the prior
+ * wave's N1 CONTROL), and a `purchasedAt` of `null` means the caller has
+ * decided the purchase stamp is not comparable to `now` at all: see
+ * `comparablePurchaseStamp` for why that is not a hypothetical.
+ *
+ * Clamped at 0, so a stamp sitting in the future reads as "no elapsed time"
+ * rather than a negative age — the fail-safe direction on an is-it-old test.
+ */
+export function dnsUnreadyForMs(now: number, firstCheckedAt: number | null, purchasedAt: number | null): number {
+  const anchor = firstCheckedAt ?? purchasedAt;
+  return anchor === null ? 0 : Math.max(0, now - anchor);
+}
+
+/**
+ * `purchased_at` for this tenant, or null when it cannot be compared to
+ * `ctx.clock.now()`.
+ *
+ * schema.ts ruled `purchased_at` out as the bound's anchor because it MIXES
+ * CLOCK DOMAINS: a real registrar buy stamps `Date.now()`
+ * (vendors/real/inboxkit-domain-port.ts), a sandbox buy stamps
+ * `ctx.clock.now()` (vendors/sandbox/domain-port.ts), and clock-migration.ts
+ * shifts `dns_first_checked_at`/`dns_gave_up_at` but deliberately NOT
+ * `purchased_at`. Using it as a fallback anyway is safe in exactly one
+ * direction and catastrophic in the other: on a tenant whose VIRTUAL clock has
+ * been advanced ahead of real time, a domain bought seconds ago under a
+ * real-time stamp reads as weeks old, and the bound below would give up on a
+ * perfectly healthy fresh purchase. That is not theoretical — it is what the
+ * burn-replacement sweep does (a ~29-virtual-day advance, then a buy), and an
+ * unguarded fallback turned its transient-failure control into a terminal
+ * give-up.
+ *
+ * `clock_mode='real'` is the interlock that removes the ambiguity: on a
+ * migrated tenant `ctx.clock.now()` IS wall time, so a real-adapter stamp is
+ * directly comparable and a leftover pre-migration virtual stamp sits in the
+ * FUTURE (the migration's delta is typically negative — see clock-migration.ts)
+ * and is clamped to 0 above. On a virtual-clock tenant we simply decline to
+ * guess, which costs nothing: that population is sandbox-provisioned, is not
+ * alerted on by the watchtower either (`activated` gate, admin/watchtower.ts),
+ * and has no pre-deploy stalled rows to rescue.
+ */
+function comparablePurchaseStamp(ctx: TenantContext, purchasedAt: number): number | null {
+  const row = ctx.sql.exec<{ clock_mode: string }>(`SELECT clock_mode FROM tenant_profile LIMIT 1`).toArray()[0];
+  return row?.clock_mode === "real" ? purchasedAt : null;
 }
 
 /**
@@ -383,7 +448,11 @@ export async function setDnsWithRetry(
   // goes terminal on its VERY FIRST poll visible to the watchtower's aging query
   // (engine/ops-summary.ts) — otherwise the sharpest possible failure would be
   // the one case with no founder signal at all.
-  const bound = recordDnsObservation(ctx, domainId, failure.notPropagated || failure.terminalVendorState !== undefined);
+  const { bound, pendingForMs } = recordDnsObservation(
+    ctx,
+    domainId,
+    failure.notPropagated || failure.terminalVendorState !== undefined,
+  );
 
   if (failure.terminalVendorState !== undefined) {
     return failTerminal(ctx, domain, domainId, failure, {
@@ -393,7 +462,7 @@ export async function setDnsWithRetry(
       message:
         `domain ${domain} is registered and recorded, but the provider now reports its registration as no longer usable, ` +
         `so its mail DNS will never come up. No mailboxes were purchased onto it. Retrying will not help — this domain ` +
-        `needs to be replaced; contact support.`,
+        `needs to be replaced; call contact_operator to reach a human.`,
     });
   }
 
@@ -402,7 +471,6 @@ export async function setDnsWithRetry(
   // catches the case NO verdict can see: an async registration that failed and
   // was therefore never listed at all, which the port can only report as
   // "not listed yet, forever".
-  const pendingForMs = bound.firstCheckedAt === null ? 0 : ctx.clock.now() - bound.firstCheckedAt;
   if (
     failure.notPropagated &&
     connectionType === "purchased" &&
@@ -414,7 +482,7 @@ export async function setDnsWithRetry(
       detail: { attempts, pendingForMs, checks: bound.checkCount },
       message:
         `domain ${domain} is registered and recorded, but its mail DNS has still not come up long after it should have. ` +
-        `No mailboxes were purchased onto it. Retrying will not help — this domain needs to be replaced; contact support.`,
+        `No mailboxes were purchased onto it. Retrying will not help — this domain needs to be replaced; call contact_operator to reach a human.`,
     });
   }
 
@@ -455,29 +523,51 @@ export async function setDnsWithRetry(
   throw new VendorError(dnsFailureMessage(domain, failure), failure.retryable, { step: failure.step });
 }
 
+interface DnsObservation {
+  /** Post-write bookkeeping (the incremented count, the give-up marker). */
+  bound: DnsBoundState;
+  /**
+   * How long the domain had ALREADY been un-ready when this observation
+   * started — the value the bound is judged against. Computed from the anchor
+   * as it stood BEFORE the write below, which is the whole point: see
+   * recordDnsObservation's doc.
+   */
+  pendingForMs: number;
+}
+
 /**
  * Ages the domain's durable pending state by one observation and returns the
- * post-write bookkeeping.
+ * post-write bookkeeping plus the age that observation found.
  *
  * The anchor is stamped ONCE (COALESCE) so the bound measures the whole wait
  * rather than the gap since the last call — a customer's agent retrying hourly
  * must not be able to renew the "still propagating" story indefinitely, which is
  * precisely what every per-call backoff budget in this codebase does.
+ *
+ * PRE-WRITE AGE (Q4, docs/adversarial/agent-channel-product-audit-2026-08-17.md).
+ * That same COALESCE is why the age cannot be read off the post-write row: for
+ * a domain whose anchor is NULL because the column postdates it, this call
+ * stamps the anchor to NOW and every after-the-fact reading measures 0ms — so
+ * a 504h stall's very first observation looked brand new, and the bound could
+ * not fire until the customer retried, waited six hours, and retried again.
+ * Measuring against the state this call FOUND is what lets the honest verdict
+ * land on the first retry.
  */
-function recordDnsObservation(ctx: TenantContext, domainId: string, answered: boolean): DnsBoundState {
-  if (answered) {
-    const now = ctx.clock.now();
-    ctx.sql.exec(
-      `UPDATE domains
-          SET dns_check_count = dns_check_count + 1,
-              dns_first_checked_at = COALESCE(dns_first_checked_at, ?)
-        WHERE id = ? AND tenant_id = ?`,
-      now,
-      domainId,
-      ctx.tenantId,
-    );
-  }
-  return readDnsBoundState(ctx, domainId);
+function recordDnsObservation(ctx: TenantContext, domainId: string, answered: boolean): DnsObservation {
+  const now = ctx.clock.now();
+  const before = readDnsBoundState(ctx, domainId);
+  const pendingForMs = dnsUnreadyForMs(now, before.firstCheckedAt, comparablePurchaseStamp(ctx, before.purchasedAt));
+  if (!answered) return { bound: before, pendingForMs };
+  ctx.sql.exec(
+    `UPDATE domains
+        SET dns_check_count = dns_check_count + 1,
+            dns_first_checked_at = COALESCE(dns_first_checked_at, ?)
+      WHERE id = ? AND tenant_id = ?`,
+    now,
+    domainId,
+    ctx.tenantId,
+  );
+  return { bound: readDnsBoundState(ctx, domainId), pendingForMs };
 }
 
 /**
@@ -513,7 +603,7 @@ function dnsFailureMessage(domain: string, failure: DnsAttemptFailure): string {
   if (!failure.retryable) {
     return (
       `domain ${domain} is registered and recorded, but its DNS setup was permanently rejected by the provider. ` +
-      `No mailboxes were purchased. Retrying as-is will not help — contact support.`
+      `No mailboxes were purchased. Retrying as-is will not help — call contact_operator to reach a human.`
     );
   }
   if (failure.notPropagated) {

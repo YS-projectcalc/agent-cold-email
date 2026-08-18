@@ -28,10 +28,40 @@ async function importHmacKey(rawKeyBytes: BufferSource): Promise<CryptoKey> {
   return crypto.subtle.importKey("raw", rawKeyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
 }
 
-async function deriveUnsubscribeKey(pepper: string): Promise<CryptoKey> {
+/**
+ * The per-pepper signing key. Derived ONCE per tick by the send path rather than
+ * per row (engine/tick.ts) — it is constant for the whole batch, and hoisting it
+ * is what moves an unusable pepper from "throws mid-batch, after rows are
+ * claimed" to "detected before anything is claimed".
+ *
+ * THE EXPLICIT GUARD IS NOT DEFENSIVE PADDING (U1, class sweep 2026-08-17,
+ * verified in workerd): `new TextEncoder().encode(undefined)` yields a
+ * ZERO-length array, exactly like `encode("")`, and WebCrypto rejects
+ * zero-length raw HMAC key material with `DataError: Imported HMAC key length
+ * (0) must be a non-zero value...`. So BOTH an unset and an empty
+ * TOKEN_HASH_PEPPER throw here — and they used to throw deep inside the send
+ * loop, aborting every remaining due row with no grading, no 'failed' event and
+ * no alert. (Note that `hashApiToken` does NOT fail on the same input: it string-
+ * concatenates, so an unset pepper silently degrades to the literal "undefined"
+ * there. That divergence is why the condition can exist unnoticed at all.)
+ *
+ * Named rather than left to WebCrypto so the operator reads what to fix instead
+ * of a key-length error from a call site three modules away.
+ */
+export async function deriveUnsubscribeKey(pepper: string): Promise<CryptoKey> {
+  if (!pepper) {
+    throw new Error(
+      "TOKEN_HASH_PEPPER is unset or empty — the one-click unsubscribe token cannot be signed, so no compliant message can be built. Set the secret.",
+    );
+  }
   const pepperKey = await importHmacKey(new TextEncoder().encode(pepper));
   const derivedBytes = await crypto.subtle.sign("HMAC", pepperKey, new TextEncoder().encode(KEY_DERIVATION_LABEL));
   return importHmacKey(derivedBytes);
+}
+
+/** Signs with an ALREADY-derived key — the per-row half of the split above. */
+export async function signWithUnsubscribeKey(key: CryptoKey, tenantId: string, email: string): Promise<string> {
+  return toHex(await crypto.subtle.sign("HMAC", key, payloadFor(tenantId, email)));
 }
 
 function payloadFor(tenantId: string, email: string): Uint8Array {
@@ -48,9 +78,7 @@ function toHex(bytes: ArrayBuffer): string {
 /** Signs `tenantId:email` — used both to mint the hosted unsubscribe URL
  * (engine/tick.ts) and, symmetrically, to verify one presented back. */
 export async function signUnsubscribeToken(pepper: string, tenantId: string, email: string): Promise<string> {
-  const key = await deriveUnsubscribeKey(pepper);
-  const sigBuf = await crypto.subtle.sign("HMAC", key, payloadFor(tenantId, email));
-  return toHex(sigBuf);
+  return signWithUnsubscribeKey(await deriveUnsubscribeKey(pepper), tenantId, email);
 }
 
 /** Constant-time verification against a caller-presented `sig` — never

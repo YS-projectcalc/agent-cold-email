@@ -20,7 +20,7 @@
 // isRealSpendArmed env-coverage guard: spend-ceiling-coverage.test.ts asserts
 // no money-out call site bypasses this wrapper.
 
-import { CapacityPendingError } from "@coldstart/shared";
+import { CapacityPendingError, operatorNotifiedClause, type Notified } from "@coldstart/shared";
 import { RealClock } from "../clock.js";
 import type { Env } from "../env.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
@@ -153,13 +153,21 @@ async function currentSlotsUsed(db: D1Database): Promise<number> {
   return row?.slots_used ?? 0;
 }
 
+/**
+ * Returns WHETHER THE FOUNDER WAS ACTUALLY TOLD (docs/adversarial/
+ * class-sweep-signal-inversion-2026-08-17.md guard A1). It used to return
+ * void, and the 409 body one frame up asserted "The operator has been
+ * notified" regardless — while this function early-returns on an unset
+ * OPS_ALERT_EMAIL and swallows every send failure. A customer told a human is
+ * on it stops escalating; that is the whole cost of the claim being decorative.
+ */
 async function alertCapacityPending(
   ctx: TenantContext,
   reason: "spend_ceiling" | "slot_capacity",
   detail: { kind: SpendKind; estCents: number; ceilingCents: number; planSlots: number; slotsUsed: number },
   mailer: OpsMailer,
-): Promise<void> {
-  if (!ctx.env.OPS_ALERT_EMAIL) return;
+): Promise<Notified> {
+  if (!ctx.env.OPS_ALERT_EMAIL) return { delivered: false, why: "dark_channel" };
   const action =
     reason === "slot_capacity"
       ? `slot capacity reached (${detail.slotsUsed}/${detail.planSlots}) — upgrade the InboxKit plan and raise INBOXKIT_PLAN_SLOTS`
@@ -174,8 +182,10 @@ async function alertCapacityPending(
       text,
       html: `<p>${escapeHtml(text).replace(/\n/g, "<br>")}</p>`,
     });
+    return { delivered: true, why: "sent" };
   } catch (mailErr) {
     console.error(`capacity-pending alert: send to ${ctx.env.OPS_ALERT_EMAIL} failed (dark or transient)`, mailErr);
+    return { delivered: false, why: "send_failed" };
   }
 }
 
@@ -186,18 +196,26 @@ async function rejectCapacity(
   mailer: OpsMailer,
 ): Promise<never> {
   const transitioned = setCapacityPendingMarker(ctx);
-  if (transitioned) await alertCapacityPending(ctx, reason, detail, mailer);
+  // Only the FIRST rejection of an episode alerts; a later one is deliberately
+  // withheld because an earlier alert stands — which is a reason the customer
+  // sentence must be able to say, and could not while it was a constant.
+  const notified: Notified = transitioned
+    ? await alertCapacityPending(ctx, reason, detail, mailer)
+    : { delivered: false, why: "suppressed_cooldown" };
   // CUSTOMER-FACING (error-response.ts returns this message verbatim in the 409
   // body), so it names neither the provider nor our internal capacity numbers.
   // It used to read "InboxKit plan-slot capacity reached (3/10)" — the vendor's
   // identity plus our own inventory position, shipped to a tenant. The operator
   // detail lives in the ops alert above, which is exactly the split the founder
   // rule asks for (docs/adversarial/sweep-vendor-leak-2026-08-05.md).
+  //
+  // The notification clause is CHOSEN BY WHAT HAPPENED (packages/shared's
+  // operatorNotifiedClause), never asserted.
+  const limit = reason === "slot_capacity" ? "its provisioning capacity" : "its monthly provisioning limit";
   throw new CapacityPendingError(
     reason,
-    reason === "slot_capacity"
-      ? "provisioning is temporarily held: this account has reached its provisioning capacity. Nothing was charged. The operator has been notified and a retry will succeed once capacity is raised."
-      : "provisioning is temporarily held: this account has reached its monthly provisioning limit. Nothing was charged. The operator has been notified and a retry will succeed once the limit is raised.",
+    `provisioning is temporarily held: this account has reached ${limit}. Nothing was charged. ` +
+      `${operatorNotifiedClause(notified)} A retry will succeed once the limit is raised.`,
   );
 }
 

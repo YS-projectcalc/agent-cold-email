@@ -5,6 +5,7 @@ import { watchtowerStub } from "../src/admin/watchtower-infra.js";
 import { WATCHTOWER_COOLDOWN_MS } from "../src/admin/watchtower-policy.js";
 import { runScheduledOpsSweep } from "../src/scheduled.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
+import type { OpsEmailMessage, OpsMailer } from "../src/ops-mail/ops-mailer.js";
 import { envWithDeadDb } from "./helpers.js";
 
 // AUDIT BLOCKING-1 (docs/adversarial/audit-alerting-completeness-2026-08-06.md)
@@ -44,14 +45,14 @@ describe("BLOCKING-1 — a D1 outage reaches the founder", () => {
     const broken = envWithDeadDb();
     // The debounce state for this check also lives outside D1 — the first
     // observation has to be counted somewhere the outage cannot reach.
-    expect((await runWatchtower(broken, mailer, T0))[0]).toEqual({ name: "d1", action: "pending", emailSent: false });
+    expect((await runWatchtower(broken, mailer, T0))[0]).toEqual({ name: "d1", action: "pending", emailSent: false, why: "pending_debounce" });
 
     const outcomes = await runWatchtower(broken, mailer, T0 + SWEEP);
 
     expect(mailer.sent.map((m) => m.subject)).toEqual(["[coldrig] D1 database: UNHEALTHY"]);
     expect(mailer.sent[0]!.to).toBe(env.OPS_ALERT_EMAIL);
     expect(mailer.sent[0]!.text).toContain("D1 unreachable: D1_ERROR: Network connection lost.");
-    expect(outcomes[0]).toEqual({ name: "d1", action: "alerted", emailSent: true });
+    expect(outcomes[0]).toEqual({ name: "d1", action: "alerted", emailSent: true, why: "sent" });
   });
 
   it("does NOT storm: 24 sweeps across 2h of sustained outage send exactly one email", async () => {
@@ -78,6 +79,56 @@ describe("BLOCKING-1 — a D1 outage reaches the founder", () => {
     // D1 comes back — the real binding, so the rest of the sweep runs too.
     await runWatchtower(env, mailer, confirmedAt + WATCHTOWER_COOLDOWN_MS + SWEEP);
     expect(mailer.sent.map((m) => m.subject)).toContain("[coldrig] D1 database: RECOVERED");
+  });
+
+  // CACHED-TERMINAL MEMBER 5, at the store the class sweep named and the fix
+  // missed (docs/adversarial/class-sweep-cached-terminal-2026-08-17.md:90 —
+  // "same shape at admin/watchtower-infra.ts:55"). The D1-backed store learned
+  // to withhold an undelivered announcement; this one persisted
+  // `transition.next` inside the DO BEFORE the Worker had even attempted the
+  // send, so a failed send banked an announcement nobody received.
+  //
+  // These two cases are the whole reason the `d1` check exists: it is the one
+  // alert that must survive its own store being down, and both failure shapes
+  // below leave the founder with LESS information than silence would.
+  describe("member 5 — an undelivered D1 alert is never banked as announced", () => {
+    const throwing: OpsMailer = {
+      async send(_msg: OpsEmailMessage) {
+        throw new Error("E_SENDER_NOT_VERIFIED (dark)");
+      },
+    };
+
+    it("re-attempts on the next tick instead of suppressing an alert that was never delivered", async () => {
+      const broken = envWithDeadDb();
+      await runWatchtower(broken, throwing, T0); // obs 1 — pending
+      const dark = await runWatchtower(broken, throwing, T0 + SWEEP); // obs 2 — composed, send failed
+      expect(dark[0]).toEqual({ name: "d1", action: "alerted", emailSent: false, why: "send_failed" });
+
+      // Nothing was announced, so nothing may be suppressed. Banking the
+      // transition here bought 6h of silence with an email that never existed.
+      const next = await runWatchtower(broken, throwing, T0 + 2 * SWEEP);
+      expect(next[0]).toEqual({ name: "d1", action: "alerted", emailSent: false, why: "send_failed" });
+
+      // And the moment the channel comes back, the founder actually hears it.
+      const working = new SandboxOpsMailer();
+      const landed = await runWatchtower(broken, working, T0 + 3 * SWEEP);
+      expect(landed[0]).toEqual({ name: "d1", action: "alerted", emailSent: true, why: "sent" });
+      expect(working.sent.map((m) => m.subject)).toEqual(["[coldrig] D1 database: UNHEALTHY"]);
+    });
+
+    it("never sends RECOVERED for an outage the founder was never told about", async () => {
+      const broken = envWithDeadDb();
+      await runWatchtower(broken, throwing, T0);
+      await runWatchtower(broken, throwing, T0 + SWEEP); // alerted into a dark channel
+
+      // D1 comes back (the real binding) with a working channel. A RECOVERED
+      // email here reports the end of an incident that was never announced —
+      // the founder's first and only word about it would be that it is over.
+      const working = new SandboxOpsMailer();
+      const recovered = await runWatchtower(env, working, T0 + 2 * SWEEP);
+      expect(recovered[0]!.action).toBe("healthy");
+      expect(working.sent.map((m) => m.subject)).not.toContain("[coldrig] D1 database: RECOVERED");
+    });
   });
 
   it("the WHOLE cron sweep emails the founder when D1 is dead (end to end, not just the leg)", async () => {

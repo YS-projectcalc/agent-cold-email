@@ -26,6 +26,7 @@ import type {
 // schema (`DemoRunInput.parse({})`), not just the inferred type.
 import { DemoRunInput } from "@coldstart/shared";
 import { isPaidPlan, RateLimitError, RequestInProgressError, TenantIsolationError, type Clock } from "@coldstart/shared";
+import { terminal } from "@coldstart/shared";
 import { DelegatingClock, RealClock, requireVirtualClock, VirtualClock } from "./clock.js";
 import { migrateTenantClockToReal } from "./engine/clock-migration.js";
 import { reconcileLegacyDomainIntentKeys } from "./engine/legacy-domain-intent-keys.js";
@@ -46,6 +47,8 @@ import { runDemo, type DemoRunSummary } from "./engine/demo.js";
 import { cancelTenant, terminateTenant, type CancelResult, type TerminateResult } from "./engine/lifecycle.js";
 import { getInfrastructureStatus } from "./engine/infrastructure-status.js";
 import { runSetupInfrastructure } from "./engine/provisioning.js";
+import { settleSetupInfrastructure } from "./engine/setup-terminality.js";
+import { settleRemoveMailboxes } from "./engine/remove-mailboxes-terminality.js";
 import { runProvisioningReconcile } from "./engine/provisioning-reconcile.js";
 import { launchCampaign, listCampaigns, pauseAllCampaigns, pauseCampaign, type CampaignListItem } from "./engine/campaigns.js";
 import { runTick } from "./engine/tick.js";
@@ -337,6 +340,10 @@ export class TenantDO extends DurableObject<Env> {
     this.addColumnIfMissing("mailboxes", "cap_override", "INTEGER");
     // D5 teardown/reclaim marker on mailboxes (see schema.ts).
     this.addColumnIfMissing("mailboxes", "released_at", "INTEGER");
+    // A teardown that left mailboxes live at the vendor (see schema.ts). 0 for
+    // every pre-existing record: before per-item isolation a failed release
+    // threw, so no historical teardown can have been partial.
+    this.addColumnIfMissing("teardown_records", "mailbox_release_failures", "INTEGER NOT NULL DEFAULT 0");
     // A4 (CLASS A) — per-send retry counter (see schema.ts).
     this.addColumnIfMissing("scheduled_sends", "attempts", "INTEGER NOT NULL DEFAULT 0");
     // Stuck-'sending' reclaim marker (persist-before-confirm class; see
@@ -740,7 +747,16 @@ export class TenantDO extends DurableObject<Env> {
       // gating the resume path": intents written under the OLD key were
       // orphaned, not un-consulted (ticket sup_3ca260e4; the rebind is
       // engine/legacy-domain-intent-keys.ts).
-      () => runSetupInfrastructure(ctx, input, undefined, idempotencyKey),
+      // THE ONE CALL SITE WITH NON-TERMINAL RETURNS (docs/adversarial/
+      // class-sweep-cached-terminal-2026-08-17.md members 1-3). This saga can
+      // RETURN while still owing work, and until the wrapper made terminality a
+      // written value, each such outcome froze as the permanent answer to a key
+      // the platform's own retry_setup message tells the agent to reuse.
+      async () => settleSetupInfrastructure(await runSetupInfrastructure(ctx, input, undefined, idempotencyKey)),
+      // Pre-contract rows are 'done' regardless of what they recorded, so the
+      // replay path re-classifies the stored payload for the population already
+      // wedged in production.
+      { recordedIsNonTerminal: (recorded) => !settleSetupInfrastructure(recorded).terminal },
     );
   }
 
@@ -790,7 +806,10 @@ export class TenantDO extends DurableObject<Env> {
     return withRequestIdempotency(
       ctx,
       idempotencyKey ? `launch_campaign:${idempotencyKey}` : undefined,
-      () => launchCampaign(ctx, input),
+      // TERMINAL: launchCampaign is fully synchronous and returns only after the
+      // campaign, its leads and its scheduled_sends rows have landed; a duplicate
+      // submit THROWS with the existing id rather than returning a success shape.
+      async () => terminal(await launchCampaign(ctx, input)),
     );
   }
 
@@ -936,7 +955,9 @@ export class TenantDO extends DurableObject<Env> {
     return withRequestIdempotency(
       ctx,
       idempotencyKey ? `reply:${threadId}:${idempotencyKey}` : undefined,
-      () => replyToThread(ctx, threadId, body, idempotencyKey),
+      // TERMINAL: returns a messageId only after the send is confirmed; the
+      // sent_message_keys short-circuit can only replay a send that provably went out.
+      async () => terminal(await replyToThread(ctx, threadId, body, idempotencyKey)),
     );
   }
 
@@ -972,11 +993,19 @@ export class TenantDO extends DurableObject<Env> {
    * BLOCKING-2 (audit-dashboard-idempotency-2026-08-06). "Release N" is
    * RELATIVE and irreversible through this API, so every unprotected repeat
    * destroyed another N: a same-key replay released twice, and a concurrent
-   * double-submit released 2N. Two guards, because the two shapes are different
+   * double-submit released 2N. Three guards, because the shapes are different
    * failures:
    *
-   *  - The KEY, honored durably: a replay returns the recorded response and
-   *    re-releases nothing. This is the one the docs already promised.
+   *  - The KEY, honored durably: a replay of a FINISHED release returns the
+   *    recorded response and re-releases nothing. This is the one the docs
+   *    already promised.
+   *  - The KEY AGAIN, as a durable INTENT (N1, wave-1-2-integration-gate-
+   *    2026-08-18 round 2): the first execution records the addresses it
+   *    resolved, and a same-key retry drives exactly those. The replay guard
+   *    alone was not enough, because a partial release is deliberately NOT
+   *    recorded (see settleRemoveMailboxes) — so the instructed retry re-ran a
+   *    RELATIVE op and destroyed `count - failedCount` healthy mailboxes per
+   *    pass, with no terminating condition while one mailbox stayed stuck.
    *  - SINGLE-FLIGHT, for the caller that sends no key (every browser caller):
    *    at most one release may be running for a tenant at a time. Deliberately
    *    an in-memory flag rather than a durable claim — both submits necessarily
@@ -987,9 +1016,9 @@ export class TenantDO extends DurableObject<Env> {
    *    failure mode: `releaseMailboxes` is already crash-retry-safe (driven by
    *    `released_at IS NULL`, with an idempotent release + revoke).
    *
-   * What neither guard can do is make an UNKEYED sequential retry safe — once
-   * the first call has settled, "release 1 more" is genuinely what a second
-   * unkeyed call says. Callers that need retry safety send the key.
+   * What none of them can do is make an UNKEYED sequential retry safe — once the
+   * first call has settled, "release 1 more" is genuinely what a second unkeyed
+   * call says. Callers that need retry safety send the key.
    */
   async removeMailboxes(input: RemoveMailboxesInput, idempotencyKey?: string): Promise<RemoveMailboxesResult> {
     const ctx = this.requireContext();
@@ -999,11 +1028,19 @@ export class TenantDO extends DurableObject<Env> {
       );
     }
     this.releaseInFlight = true;
+    // ONE key namespaces both the replay claim and the release intent: they are
+    // two statements about the same request, and a set recorded under a
+    // different anchor than the claim could be adopted by the wrong retry.
+    const key = idempotencyKey ? `remove_mailboxes:${idempotencyKey}` : undefined;
     try {
       return await withRequestIdempotency(
         ctx,
-        idempotencyKey ? `remove_mailboxes:${idempotencyKey}` : undefined,
-        () => removeMailboxes(ctx, input),
+        key,
+        // Terminality is READ OFF THE RESULT (engine/remove-mailboxes-terminality.ts),
+        // never inferred from "it did not throw": per-item isolation means a
+        // vendor refusal now comes back as `failedCount` rather than an
+        // exception, and a partial release still owes the mailbox it left live.
+        async () => settleRemoveMailboxes(await removeMailboxes(ctx, input, key)),
       );
     } finally {
       this.releaseInFlight = false;

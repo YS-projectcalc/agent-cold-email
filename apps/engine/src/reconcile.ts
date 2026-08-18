@@ -44,6 +44,13 @@ export interface ReconcileSummary {
   parked: number;
   /** Parked specifically because the aggregate deadline was hit before a verify. */
   overflowParked: number;
+  /**
+   * Danglings this boot could neither finalize nor park because resolving them
+   * THREW. They stay dangling (so `isBlocked` still refuses their key — drop,
+   * never duplicate) and the next boot retries them. Nonzero here is a durable
+   * store problem, not a per-send one.
+   */
+  failed: number;
 }
 
 const DEFAULT_AGGREGATE_DEADLINE_MS = 120_000;
@@ -51,26 +58,60 @@ const DEFAULT_AGGREGATE_DEADLINE_MS = 120_000;
 export async function reconcile(deps: ReconcileDeps): Promise<ReconcileSummary> {
   const aggregateDeadlineMs = deps.aggregateDeadlineMs ?? DEFAULT_AGGREGATE_DEADLINE_MS;
   const startedAt = deps.now();
-  const summary: ReconcileSummary = { finalized: 0, parked: 0, overflowParked: 0 };
+  const summary: ReconcileSummary = { finalized: 0, parked: 0, overflowParked: 0, failed: 0 };
+  const danglings = deps.store.listDanglings();
+  let firstError: unknown;
 
-  for (const d of deps.store.listDanglings()) {
-    // Non-network transports park instantly (no deadline pressure). Only a gmail
-    // send with a provider id verifies — and only while inside the aggregate
-    // deadline; past it, park without verifying.
-    const needsVerify = d.transport === "gmail_api" && d.last === "submitted" && d.providerRef !== undefined && deps.gmail !== undefined;
-    if (needsVerify && deps.now() - startedAt >= aggregateDeadlineMs) {
-      deps.store.park(d.key, "reconcile aggregate deadline exceeded — parked without provider verify");
-      summary.parked++;
-      summary.overflowParked++;
-      continue;
-    }
-    if (needsVerify) {
-      await verifyGmail(deps, d, summary);
-    } else {
-      deps.store.park(d.key, parkReasonFor(d));
-      summary.parked++;
+  for (const d of danglings) {
+    // PER-ITEM ISOLATION (head-of-line class sweep 2026-08-17, U3). This loop
+    // runs at BOOT, before `server.listen`, and index.ts's `main().catch` exits
+    // 1 — so an unguarded throw here is a crash loop that starves every dangling
+    // AND all sends and polls for every tenant.
+    //
+    // Written as a plain try/catch rather than the platform's forEachIsolated:
+    // the engine is a separate Node service and @coldstart/shared is a
+    // devDependency it only imports TYPES from, so a runtime import across that
+    // boundary would not survive the build.
+    //
+    // VERDICT, stated honestly (the sweep listed this as UNCERTAIN): the only
+    // throw surfaces reachable here are `store.park` / `store.recordSend`, both
+    // of which are appends to the same fsync'd log — `gmail.lookup` has a
+    // catch-all (gmail.ts) and `resolveSend` is a map read. A failing append is
+    // a GLOBAL durable-I/O condition (a full or broken disk), so it fails every
+    // item identically: the loop shape is in-class, but the STARVATION half of
+    // the class does not apply, and "park + alert instead of exiting" is not
+    // implementable in that exact failure mode because parking IS an append.
+    // Isolation still earns its place for the partial/intermittent case — one
+    // item's failure no longer costs the others — while a WHOLLY unwritable
+    // store still aborts boot below, which is the correct signal: an engine that
+    // cannot durably record anything must not accept traffic.
+    try {
+      const needsVerify =
+        d.transport === "gmail_api" && d.last === "submitted" && d.providerRef !== undefined && deps.gmail !== undefined;
+      if (needsVerify && deps.now() - startedAt >= aggregateDeadlineMs) {
+        deps.store.park(d.key, "reconcile aggregate deadline exceeded — parked without provider verify");
+        summary.parked++;
+        summary.overflowParked++;
+        continue;
+      }
+      if (needsVerify) {
+        await verifyGmail(deps, d, summary);
+      } else {
+        deps.store.park(d.key, parkReasonFor(d));
+        summary.parked++;
+      }
+    } catch (err) {
+      summary.failed++;
+      firstError ??= err;
+      // eslint-disable-next-line no-console
+      console.error(`[engine] boot reconciliation could not resolve dangling ${d.key} — left dangling for the next boot`, err);
     }
   }
+
+  // EVERY dangling failed. That is the store itself, not the items, and an
+  // engine that cannot write its own log must fail loudly at boot rather than
+  // start and silently fail-closed on every subsequent send.
+  if (summary.failed > 0 && summary.failed === danglings.length) throw firstError;
   return summary;
 }
 

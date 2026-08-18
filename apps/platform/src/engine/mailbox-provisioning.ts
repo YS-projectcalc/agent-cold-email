@@ -23,13 +23,22 @@
  *    every counter about a new state.
  */
 
-import { isPaidPlan, NotActivatedError, VendorError, type MailboxReadiness } from "@coldstart/shared";
+import {
+  CapacityPendingError,
+  isPaidPlan,
+  NotActivatedError,
+  NOT_NOTIFIED,
+  terminal,
+  VendorError,
+  type MailboxReadiness,
+} from "@coldstart/shared";
 import type { OpsMailer } from "../ops-mail/ops-mailer.js";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
-import { logVendorFailure, VENDOR_STEP } from "../vendor-failure.js";
+import { customerSafeVendorDetail, logVendorFailure, VENDOR_STEP } from "../vendor-failure.js";
 import { logAction } from "./deliverability-actions.js";
 import { withRequestIdempotency } from "./idempotency.js";
+import { forEachIsolated } from "../isolated-loop.js";
 import {
   abandonedPurchaseError,
   alertMailboxRebuyFailed,
@@ -127,50 +136,119 @@ export async function provisionMailboxesForDomain(
   },
 ): Promise<string[]> {
   const now = ctx.clock.now();
-  const mailboxEmails: string[] = [];
+  const slots = Array.from({ length: opts.inboxesEach }, (_v, mailboxIndex) => mailboxIndex);
 
-  for (let mailboxIndex = 0; mailboxIndex < opts.inboxesEach; mailboxIndex++) {
-    const email = managedMailboxAddress(opts.personaSlug, opts.domain, opts.domainOrdinal, mailboxIndex);
-    const localPart = email.slice(0, email.indexOf("@"));
-    // ADDRESS-DERIVED (N4). The key used to embed the domain ordinal, which made
-    // it underivable from the mailbox itself — so teardown could not invalidate
-    // the claim, and a re-provision after cancellation replayed a claim about a
-    // mailbox the vendor no longer had, inserting a billable row backed by
-    // nothing. The address alone identifies the resource.
-    const intentKey = mailboxIntentKey(ctx.tenantId, email);
+  // HEAD-OF-LINE BLOCKING (class sweep 2026-08-17, IN-5). The addresses are
+  // DETERMINISTIC (`persona{ordinal+1}{index+1}@domain`), so a vendor that
+  // permanently rejects one of them — or an intent that exhausted
+  // MAX_BUY_DISPATCHES — failed identically on every retry, and without
+  // isolation that one address stopped every LATER address on the domain from
+  // ever being bought. Composed with IN-1's per-ordinal loop it was worse still:
+  // the whole tenant's provisioning stalled permanently at whatever the first
+  // bad item happened to be. The slots are independently completable (separate
+  // purchases, separate address-derived intents), so only the loop tied them.
+  const outcome = await forEachIsolated(
+    slots,
+    (mailboxIndex) => provisionOneMailbox(ctx, opts, mailboxIndex, now),
+    {
+      onItemError: ({ item, error }) => {
+        const email = managedMailboxAddress(opts.personaSlug, opts.domain, opts.domainOrdinal, item);
+        logVendorFailure(`provision mailbox ${email}`, error);
+        // Customer-readable (account().recentActions), so the ABSTRACT step
+        // only — never the adapter's text. This row is what makes the isolation
+        // legible: it is the difference between "we stopped here" and "we
+        // skipped this one and kept going".
+        logAction(
+          ctx,
+          "MAILBOX_SLOT_FAILED",
+          email,
+          customerSafeVendorDetail(error, "this mailbox could not be completed — the remaining mailboxes were still attempted", {
+            slot: item,
+          }),
+        );
+      },
+      // A spend-ceiling breach is a TENANT-level condition, not this address's
+      // fault: every remaining slot would reserve against the same exhausted
+      // ceiling and re-fire the same one-shot alert.
+      abortOn: (err) => err instanceof CapacityPendingError,
+    },
+  );
 
-    // G2 money-out site #1 (design §0 inventory) — the mailbox slot buy. The
-    // spend reserve composes INSIDE withRequestIdempotency (design §G2 collision
-    // note): a replayed provision returns the RECORDED mailbox without re-buying,
-    // so it never re-enters withSpendCeiling and never double-reserves.
-    //
-    // H4: the recorded unit spans the WHOLE per-mailbox vendor effect — buy AND
-    // wait AND startWarmup — so a REPLAY re-runs none of it. What the claim
-    // cannot do is survive a THROW (it is deleted, by design, so failures are
-    // never cached); that half is the intent row's job.
-    const provisioned = await withRequestIdempotency(ctx, `provision:${intentKey}`, () =>
-      runMailboxProvisioningUnit(ctx, { email, localPart, domain: opts.domain, intentKey, mailer: opts.mailer }),
-    );
-    mailboxEmails.push(provisioned.email);
+  // Report the ABORT CAUSE over an earlier ordinary slot failure (2026-08-18
+  // fix). A spend-ceiling breach (abortOn) is a TENANT-level condition the
+  // caller's per-ordinal loop (provisioning.ts) has to recognize and stop on
+  // — but `outcome.failures[0]` is the FIRST failure in slot order, which is
+  // an earlier ordinary rejection whenever one preceded the breach. Rethrowing
+  // that instead masked the CapacityPendingError: the outer loop's own
+  // abortOn never matched an ordinary VendorError, so it fell through to the
+  // next ordinal and burned a reservation attempt against a ceiling that had
+  // already refused, instead of leaving the tenant capacity_pending.
+  // Falls back to the first ordinary failure when the loop ran to completion
+  // without aborting. Either way this happens AFTER every slot has had its
+  // chance — throwing rather than returning a partial list is deliberate: the
+  // mailbox count is what the customer is billed on, so a short domain must
+  // never read to the agent as a completed one.
+  const reportedFailure = outcome.abortedAt ?? outcome.failures[0];
+  if (reportedFailure) throw reportedFailure.error;
 
-    // The row lands only now — after the vendor confirmed the mailbox exists AND
-    // its warmup enrolled. See invariant 2 in the module doc: the billing meter
-    // counts these rows, so one must never exist ahead of the resource.
-    insertProvisionedMailbox(ctx, opts, provisioned, now);
-    markMailboxIntent(ctx, intentKey, "committed");
+  return outcome.results;
+}
 
-    await meterProvisionedMailbox(ctx, provisioned.email, intentKey, now);
+/**
+ * ONE mailbox slot: the recorded vendor unit, then the local row, the meter and
+ * the credential push. Split out of the loop above so each slot is a single
+ * isolated unit with no shared mutable state between iterations.
+ */
+async function provisionOneMailbox(
+  ctx: TenantContext,
+  opts: { domainId: string; domain: string; domainOrdinal: number; personaSlug: string; mailer?: OpsMailer },
+  mailboxIndex: number,
+  now: number,
+): Promise<string> {
+  const email = managedMailboxAddress(opts.personaSlug, opts.domain, opts.domainOrdinal, mailboxIndex);
+  const localPart = email.slice(0, email.indexOf("@"));
+  // ADDRESS-DERIVED (N4). The key used to embed the domain ordinal, which made
+  // it underivable from the mailbox itself — so teardown could not invalidate
+  // the claim, and a re-provision after cancellation replayed a claim about a
+  // mailbox the vendor no longer had, inserting a billable row backed by
+  // nothing. The address alone identifies the resource.
+  const intentKey = mailboxIntentKey(ctx.tenantId, email);
 
-    // Self-serve I3 credential push (F6): record-then-push the just-provisioned
-    // mailbox's credentials to the engine. INERT unless the vendor+engine are
-    // armed AND this is a real vendor mailbox (never sandbox). A push failure is
-    // swallowed (the mailbox is durably recorded 'pending'; the reconcile sweep
-    // retries), so it can never fail a provision whose vendor spend already
-    // happened.
-    await maybePushProvisionedMailbox(ctx, provisioned);
-  }
+  // G2 money-out site #1 (design §0 inventory) — the mailbox slot buy. The
+  // spend reserve composes INSIDE withRequestIdempotency (design §G2 collision
+  // note): a replayed provision returns the RECORDED mailbox without re-buying,
+  // so it never re-enters withSpendCeiling and never double-reserves.
+  //
+  // H4: the recorded unit spans the WHOLE per-mailbox vendor effect — buy AND
+  // wait AND startWarmup — so a REPLAY re-runs none of it. What the claim
+  // cannot do is survive a THROW (it is deleted, by design, so failures are
+  // never cached); that half is the intent row's job.
+  // TERMINAL: every uncertain branch of acquireMailbox THROWS, and this unit
+  // returns only past awaitMailboxReady — the vendor-verdict fix is what made
+  // control flow a sound terminality proxy here (the cached-terminal sweep's
+  // in-repo template). The claim is also invalidated on teardown
+  // (provision-intents.ts), so a re-provision cannot inherit a stale one.
+  const provisioned = await withRequestIdempotency(ctx, `provision:${intentKey}`, async () =>
+    terminal(await runMailboxProvisioningUnit(ctx, { email, localPart, domain: opts.domain, intentKey, mailer: opts.mailer })),
+  );
 
-  return mailboxEmails;
+  // The row lands only now — after the vendor confirmed the mailbox exists AND
+  // its warmup enrolled. See invariant 2 in the module doc: the billing meter
+  // counts these rows, so one must never exist ahead of the resource.
+  insertProvisionedMailbox(ctx, opts, provisioned, now);
+  markMailboxIntent(ctx, intentKey, "committed");
+
+  await meterProvisionedMailbox(ctx, provisioned.email, intentKey, now);
+
+  // Self-serve I3 credential push (F6): record-then-push the just-provisioned
+  // mailbox's credentials to the engine. INERT unless the vendor+engine are
+  // armed AND this is a real vendor mailbox (never sandbox). A push failure is
+  // swallowed (the mailbox is durably recorded 'pending'; the reconcile sweep
+  // retries), so it can never fail a provision whose vendor spend already
+  // happened.
+  await maybePushProvisionedMailbox(ctx, provisioned);
+
+  return provisioned.email;
 }
 
 /**
@@ -273,13 +351,16 @@ async function acquireMailbox(
   // re-buy (it is not absent — something exists and was paid for). A hard,
   // alerted stop, so the address gets replaced by a hand rather than spun on.
   if (verdict.kind === "terminal") {
-    await alertMailboxRebuyFailed(
+    // The customer error one line down CITES this result rather than assuming
+    // it: a cooldown-suppressed or dark alert means nobody was told, and the
+    // agent has to hear that instead of "the operator has been notified".
+    const notified = await alertMailboxRebuyFailed(
       ctx,
       opts.email,
       `the provider holds this address and reports it as no longer usable (${verdict.state}) — no re-buy authorized, this address needs a hand`,
       opts.mailer,
     );
-    throw terminalMailboxError(ctx, opts.email, verdict.state);
+    throw terminalMailboxError(ctx, opts.email, verdict.state, notified);
   }
 
   if (verdict.kind === "unconfirmed") {
@@ -296,13 +377,13 @@ async function acquireMailbox(
 
   // The provider confirms the recorded purchase(s) produced nothing.
   if (dispatch.attempts >= MAX_BUY_DISPATCHES) {
-    await alertMailboxRebuyFailed(
+    const notified = await alertMailboxRebuyFailed(
       ctx,
       opts.email,
       `${dispatch.attempts} purchases are on record and the provider confirms none of them exist — the one automatic re-buy is spent, so this address is abandoned and needs a hand`,
       opts.mailer,
     );
-    throw abandonedPurchaseError(ctx, opts.email);
+    throw abandonedPurchaseError(ctx, opts.email, notified);
   }
 
   await alertMailboxStuck(
@@ -350,7 +431,10 @@ async function dispatchBuy(
   if (attempt > MAX_BUY_DISPATCHES) {
     // Only two provisions racing the same address reach this: the claim, not the
     // budget check above it, is the arbiter, so the loser stops before spending.
-    throw abandonedPurchaseError(ctx, opts.email);
+    // NOT_NOTIFIED because THIS path told nobody — whether the winning caller
+    // alerted is not knowable from here, and guessing that it did is the exact
+    // false claim this argument exists to prevent.
+    throw abandonedPurchaseError(ctx, opts.email, NOT_NOTIFIED);
   }
 
   let bought;
@@ -443,7 +527,7 @@ async function awaitMailboxReady(ctx: TenantContext, email: string, backoffMs: n
         });
         throw new VendorError(
           `mailbox ${email} was purchased, but the provider now reports it as no longer usable. It was NOT billed or enrolled in ` +
-            `warmup, and no second purchase was made. Retrying will not help — this address needs a hand; contact support.`,
+            `warmup, and no second purchase was made. Retrying will not help — this address needs a hand; call contact_operator to reach a human.`,
           false,
           { step: MAILBOX_STEP },
         );

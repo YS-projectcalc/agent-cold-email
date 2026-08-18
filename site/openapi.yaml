@@ -139,6 +139,16 @@ paths:
             (MailboxBilling) is the SPEC §18 projection for the real
             post-provision mailbox count. A quoteOnly:true request instead
             returns 200 with { quoteOnly: true, billing } and provisions nothing.
+
+
+            A `provisioning` field is present only when the call returned
+            OWING work, and names which state: "pending" (the last domain's
+            DNS registration is still completing — `pendingDomain` names it)
+            or "capacity_pending" (held at a spend/plan-slot limit; an
+            operator has to raise it before a retry can proceed). An outcome
+            carrying `provisioning`, and a quoteOnly preview, are NOT recorded
+            against your Idempotency-Key — retrying with the same key re-runs
+            the call rather than replaying the unfinished answer.
           content:
             application/json:
               schema:
@@ -1434,11 +1444,24 @@ components:
         /threads/{id}/reply.
 
 
+        Only a FINISHED outcome replays. A call that returned while still
+        owing work — a 202 that is still provisioning, or a
+        /remove-mailboxes response whose `failedCount` is above zero because
+        the provider refused a mailbox — is not recorded, so resending its key
+        RE-RUNS the request and finishes the job instead of handing back the
+        partial. That is what makes "retry with the same key" a true
+        instruction rather than a guaranteed no-op; the response body always
+        says which case you are in.
+
+
         It is a REPLAY key, never a request discriminator: on
         /setup-infrastructure, changing it or omitting it does not cause
         anything extra to be provisioned. On /remove-mailboxes it is the only
         thing that makes a retry safe, because `count` is relative and
-        releasing mailboxes cannot be undone through this API.
+        releasing mailboxes cannot be undone through this API: the first call
+        under a key records the exact mailboxes it resolved, so a same-key
+        retry finishes that set and can never release one outside it, whatever
+        `count` the retry carries.
 
 
         The mechanism differs by transport — REST takes this as the
@@ -1505,7 +1528,9 @@ components:
     NotActivated:
       description: >
         A required vendor integration is not yet enabled for this account.
-        Nothing was charged; the operator has been notified.
+        Nothing was charged. This condition has no automatic operator
+        notification behind it, so the response says so and points at
+        contact_operator rather than implying a human is already on it.
       content:
         application/json:
           schema:
@@ -2154,7 +2179,14 @@ components:
       properties:
         id: { type: string }
         kind: { type: string }
-        severity: { type: string, enum: [info, action_required] }
+        severity:
+          type: string
+          enum: [info, action_required, terminal]
+          description: >
+            info = resolves on its own, nothing is required. action_required =
+            nothing progresses until you act, and acting works. terminal = the
+            platform has stopped; retrying will never help and only a human can
+            move it (the message's actionHint names contact_operator).
         body: { type: string }
         actionHint: { type: object, nullable: true }
         source: { type: string, enum: [system, operator] }

@@ -63,8 +63,11 @@ async function main(): Promise<void> {
   // fresh snapshot reflects the reconciled state and the log starts empty.
   const summary = await engine.reconcilePendingSends();
   store.compact();
-  if (summary.finalized || summary.parked) {
-    console.log(`[engine] boot reconciliation: finalized ${summary.finalized}, parked ${summary.parked} (overflow ${summary.overflowParked})`);
+  if (summary.finalized || summary.parked || summary.failed) {
+    console.log(
+      `[engine] boot reconciliation: finalized ${summary.finalized}, parked ${summary.parked} (overflow ${summary.overflowParked}), ` +
+        `unresolved ${summary.failed}`,
+    );
   }
 
   // Graceful-drain flag. Flipped false on SIGTERM so new sends are refused
