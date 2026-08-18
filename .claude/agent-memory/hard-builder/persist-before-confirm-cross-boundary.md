@@ -35,6 +35,22 @@ silently dropped or a row is stuck forever. Known members + fixes:
   rows. RED-proof: remove the pre-push record ⇒ a failed push leaves status
   `undefined` instead of 'pending' (billed mailbox lost).
 
+- **Alert state banked before the send (2026-08-18, wave-1+2 gate B2).** The
+  DECIDER and the SENDER on opposite sides of an RPC: `WatchtowerDO.applyAlert`
+  read prev, computed the transition, and `storage.put` it — then the WORKER
+  sent. A failed send still stamped `lastAlertTs`/`alertCount`, so the next tick
+  read an announced episode and SUPPRESSED for 6h, and recovery emailed the
+  founder that an incident they were never told about was over. Same shape in
+  the DO's own dead-man `alarm()`, which discarded `trySend`'s result entirely.
+  FIX: split into `decideD1Alert` (read+decide, persists NOTHING) and
+  `commitD1Alert(healthy, nowMs, notified)` (re-reads prev, re-derives the same
+  pure transition, banks `delivered ? next : withheldAlertState(prev, next)`);
+  the alarm does decide→send→bank in one method since it holds its own mailer.
+  A caller that decides and never commits leaves state untouched ⇒ next tick
+  re-attempts, which is the safe direction. See
+  [[fix-shape-differs-when-decider-and-sender-split-across-rpc]] for why the
+  Worker-side withhold pattern could NOT be pasted in here.
+
 **THE MIRROR (2026-08-06, guarded mailbox re-buy).** For a NON-IDEMPOTENT PURCHASE
 the rule inverts: the *risk* marker must be persisted BEFORE the call. A status
 written after the vendor answers cannot distinguish "nothing was ever sent" from
