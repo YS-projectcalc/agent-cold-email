@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isLifecycleFrozen } from "../src/engine/billing-state.js";
+import { emitTenantMessage } from "../src/engine/tenant-messages.js";
 import { adminApi, api, mintTenant, withTenantContext } from "./helpers.js";
 
 // msgchannel increment 2 — the operator route (POST
@@ -235,6 +236,189 @@ describe("POST /admin/tenants/:id/messages — msgchannel increment 2 operator r
       expect(isLifecycleFrozen("active", "disputed")).toBe(true);
       expect(isLifecycleFrozen("suspended", "active")).toBe(true);
       expect(isLifecycleFrozen("active", "active")).toBe(false);
+    });
+  });
+});
+
+// The read twin — GET /admin/tenants/:id/messages. Same auth/404 pattern as
+// the POST route above, reading the SAME tenant_messages store both
+// increment 1 (emitTenantMessage) and increment 2 (emitOperatorMessage,
+// exercised above via the POST route) write into.
+
+interface OperatorMessageForOperatorDTO {
+  id: string;
+  kind: string;
+  severity: string;
+  body: string;
+  actionHint: Record<string, unknown> | null;
+  source: "system" | "operator";
+  createdAt: number;
+  readAt: number | null;
+  expiresAt: number | null;
+}
+
+interface OperatorMessageListResponse {
+  tenantId: string;
+  messages: OperatorMessageForOperatorDTO[];
+  total: number;
+}
+
+describe("GET /admin/tenants/:id/messages — the read twin of the operator route", () => {
+  describe("auth", () => {
+    it("401s with no Authorization header", async () => {
+      const { tenantId } = await mintTenant("Msg Read NoAuth Co", "managed");
+      const res = await api(`/admin/tenants/${tenantId}/messages`);
+      expect(res.status).toBe(401);
+    });
+
+    it("401s with a wrong admin token", async () => {
+      const { tenantId } = await mintTenant("Msg Read WrongAuth Co", "managed");
+      const res = await adminApi(`/admin/tenants/${tenantId}/messages`, { adminToken: "not-the-admin-token" });
+      expect(res.status).toBe(401);
+    });
+
+    it("401s a tenant's OWN bearer token — this is an admin-only surface", async () => {
+      const { tenantId, token } = await mintTenant("Msg Read TenantAuth Co", "managed");
+      const res = await api(`/admin/tenants/${tenantId}/messages`, { token });
+      expect(res.status).toBe(401);
+    });
+  });
+
+  it("404s an unknown tenant id", async () => {
+    const res = await adminApi("/admin/tenants/does-not-exist/messages");
+    expect(res.status).toBe(404);
+  });
+
+  it("round-trips a system-emitted and an operator-emitted message, newest-first, with the full field shape", async () => {
+    const { tenantId } = await mintTenant("Msg Read Roundtrip Co", "managed");
+    await withTenantContext(tenantId, (ctx) =>
+      emitTenantMessage(ctx, { kind: "retry_setup", severity: "action_required", body: "system says hi" }),
+    );
+    const post = await adminApi(`/admin/tenants/${tenantId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ kind: "operator_notice", body: "operator says hi" }),
+    });
+    expect(post.status).toBe(201);
+
+    const res = await adminApi<OperatorMessageListResponse>(`/admin/tenants/${tenantId}/messages`);
+    expect(res.status).toBe(200);
+    expect(res.body.tenantId).toBe(tenantId);
+    expect(res.body.total).toBe(2);
+    expect(res.body.messages).toHaveLength(2);
+
+    // Newest first: the operator message was emitted second.
+    const [newest, oldest] = res.body.messages;
+    expect(newest).toMatchObject({
+      kind: "operator_notice",
+      severity: "info",
+      body: "operator says hi",
+      source: "operator",
+      readAt: null,
+      expiresAt: null,
+    });
+    expect(typeof newest!.id).toBe("string");
+    expect(typeof newest!.createdAt).toBe("number");
+    expect(oldest).toMatchObject({
+      kind: "retry_setup",
+      severity: "action_required",
+      body: "system says hi",
+      source: "system",
+      readAt: null,
+      expiresAt: null,
+    });
+  });
+
+  it("an acked message shows a non-null readAt in the GET (ack via the existing agent-facing ack path)", async () => {
+    const { tenantId, token } = await mintTenant("Msg Read Ack Co", "managed");
+    await withTenantContext(tenantId, (ctx) => emitTenantMessage(ctx, { kind: "k", severity: "info", body: "ack me" }));
+
+    const before = await adminApi<OperatorMessageListResponse>(`/admin/tenants/${tenantId}/messages`);
+    const id = before.body.messages[0]!.id;
+    expect(before.body.messages[0]!.readAt).toBeNull();
+
+    const ack = await api(`/messages/${id}/ack`, { method: "POST", token });
+    expect(ack.status).toBe(200);
+
+    const after = await adminApi<OperatorMessageListResponse>(`/admin/tenants/${tenantId}/messages`);
+    expect(after.body.messages[0]!.id).toBe(id);
+    expect(after.body.messages[0]!.readAt).not.toBeNull();
+    expect(typeof after.body.messages[0]!.readAt).toBe("number");
+  });
+
+  it("?unreadOnly=1 excludes acked messages (both from the list and from total)", async () => {
+    const { tenantId, token } = await mintTenant("Msg Read Unread Co", "managed");
+    await withTenantContext(tenantId, (ctx) => emitTenantMessage(ctx, { kind: "k", severity: "info", body: "one" }));
+    await withTenantContext(tenantId, (ctx) => emitTenantMessage(ctx, { kind: "k", severity: "info", body: "two" }));
+
+    const all = await adminApi<OperatorMessageListResponse>(`/admin/tenants/${tenantId}/messages`);
+    expect(all.body.total).toBe(2);
+    const toAck = all.body.messages.find((m) => m.body === "one")!.id;
+    const ack = await api(`/messages/${toAck}/ack`, { method: "POST", token });
+    expect(ack.status).toBe(200);
+
+    const unreadOnly = await adminApi<OperatorMessageListResponse>(`/admin/tenants/${tenantId}/messages?unreadOnly=1`);
+    expect(unreadOnly.body.messages).toHaveLength(1);
+    expect(unreadOnly.body.messages[0]!.body).toBe("two");
+    expect(unreadOnly.body.total).toBe(1);
+
+    // Without the filter, both are still there (the ack didn't delete anything).
+    const everything = await adminApi<OperatorMessageListResponse>(`/admin/tenants/${tenantId}/messages`);
+    expect(everything.body.messages).toHaveLength(2);
+    expect(everything.body.total).toBe(2);
+  });
+
+  it("tenant isolation — tenant A's messages never appear under tenant B's id", async () => {
+    const a = await mintTenant("Msg Read Iso A Co", "managed");
+    const b = await mintTenant("Msg Read Iso B Co", "managed");
+    await withTenantContext(a.tenantId, (ctx) => emitTenantMessage(ctx, { kind: "k", severity: "info", body: "for A" }));
+
+    const resA = await adminApi<OperatorMessageListResponse>(`/admin/tenants/${a.tenantId}/messages`);
+    expect(resA.body.messages.map((m) => m.body)).toEqual(["for A"]);
+
+    const resB = await adminApi<OperatorMessageListResponse>(`/admin/tenants/${b.tenantId}/messages`);
+    expect(resB.body.messages).toEqual([]);
+    expect(resB.body.total).toBe(0);
+  });
+
+  it("?limit= bounds the page but `total` still reports the un-truncated count", async () => {
+    const { tenantId } = await mintTenant("Msg Read Limit Co", "managed");
+    for (let i = 0; i < 5; i++) {
+      // eslint-disable-next-line no-await-in-loop
+      await withTenantContext(tenantId, (ctx) => emitTenantMessage(ctx, { kind: "k", severity: "info", body: `m-${i}` }));
+    }
+    const res = await adminApi<OperatorMessageListResponse>(`/admin/tenants/${tenantId}/messages?limit=2`);
+    expect(res.body.messages).toHaveLength(2);
+    expect(res.body.total).toBe(5);
+    expect(res.body.messages[0]!.body).toBe("m-4"); // newest first
+  });
+
+  // Mirrors the POST route's own gate-F2 tests above — this channel's
+  // canonical use case is reaching a tenant IN a trouble state, so the
+  // operator reading what was already sent to one must work identically.
+  describe("lifecycle STATE has no effect on the GET route (mirrors the POST's gate-F2)", () => {
+    it("reads a CANCELED (immediate) tenant's messages", async () => {
+      const { tenantId, token } = await mintTenant("Msg Read Canceled Co", "managed");
+      await withTenantContext(tenantId, (ctx) => emitTenantMessage(ctx, { kind: "k", severity: "info", body: "hi" }));
+      const cancel = await api("/cancel", { method: "POST", token, body: JSON.stringify({ immediate: true }) });
+      expect(cancel.status).toBe(200);
+
+      const res = await adminApi<OperatorMessageListResponse>(`/admin/tenants/${tenantId}/messages`);
+      expect(res.status).toBe(200);
+      expect(res.body.messages).toHaveLength(1);
+    });
+
+    it("reads a SUSPENDED (dunning/terminated) tenant's messages", async () => {
+      const { tenantId } = await mintTenant("Msg Read Suspended Co", "managed");
+      await withTenantContext(tenantId, (ctx) => emitTenantMessage(ctx, { kind: "k", severity: "info", body: "hi" }));
+      const term = await adminApi(`/admin/tenants/${tenantId}/terminate`, {
+        method: "POST",
+        body: JSON.stringify({ reason: "test" }),
+      });
+      expect(term.status).toBe(200);
+
+      const res = await adminApi<OperatorMessageListResponse>(`/admin/tenants/${tenantId}/messages`);
+      expect(res.status).toBe(200);
+      expect(res.body.messages).toHaveLength(1);
     });
   });
 });

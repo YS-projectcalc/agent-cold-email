@@ -362,6 +362,79 @@ export function ackMessage(ctx: TenantContext, id: string): AckMessageResult {
   return { acked: true, alreadyAcked: false };
 }
 
+// `actionHint` is `object | null` here, NOT `Record<string, unknown> | null`
+// like TenantMessage's own field (assignable at runtime — same JSON.parse
+// result, no behavior change): a SECOND RPC-returned type on TenantDO
+// carrying a `Record<string, unknown>` collapses `Rpc.Provider`'s
+// `Serializable<T>` check to `never` (silent — no tsc diagnostic points at
+// the cause), confirmed by bisection against listMessages'
+// MessageListPage/TenantMessage (the first, working occurrence). A generic
+// index-signature type reachable from a SECOND RPC method is the trigger,
+// not this field's data shape.
+export type OperatorTenantMessage = Omit<TenantMessage, "actionHint"> & { actionHint: object | null; expiresAt: number | null };
+
+export type OperatorMessageListResult = {
+  messages: OperatorTenantMessage[];
+  total: number;
+};
+
+export interface ListMessagesForOperatorOptions {
+  limit?: number;
+  unreadOnly?: boolean;
+}
+
+const DEFAULT_OPERATOR_MESSAGE_LIMIT = 50;
+const MAX_OPERATOR_MESSAGE_LIMIT = 200;
+
+function clampOperatorMessageLimit(limit: number | undefined): number {
+  if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_OPERATOR_MESSAGE_LIMIT;
+  return Math.min(Math.max(Math.trunc(limit), 1), MAX_OPERATOR_MESSAGE_LIMIT);
+}
+
+/**
+ * The operator/admin read surface (routes/admin-messages.ts's GET route) —
+ * an AUDIT view, unlike the two agent-facing surfaces above:
+ * listSurfacedTenantMessages caps at 5 and hides read/expired rows;
+ * listMessagesPage partitions unread-first for an agent's inbox triage.
+ * Here the operator is asking "did the customer's agent ever read this?", so
+ * every row is in scope regardless of read/expired state, newest-first only
+ * (no unread partition), and `expiresAt` is returned (the agent-facing
+ * shapes omit it — an agent never needs its own expiry). `total` counts the
+ * SAME filter the returned page used (tenant_id, plus read_at IS NULL when
+ * `unreadOnly`), so it always tells the caller whether `limit` truncated the
+ * result. PURE SELECT, same as the two surfaces above: never writes
+ * `read_at` (ackMessage remains the only writer).
+ */
+export function listMessagesForOperator(
+  ctx: TenantContext,
+  options: ListMessagesForOperatorOptions = {},
+): OperatorMessageListResult {
+  const limit = clampOperatorMessageLimit(options.limit);
+  const conditions = [`tenant_id = ?`];
+  const binds: SqlStorageValue[] = [ctx.tenantId];
+  if (options.unreadOnly) conditions.push(`read_at IS NULL`);
+  const where = conditions.join(" AND ");
+
+  const rows = ctx.sql
+    .exec<TenantMessageRow & { expires_at: number | null }>(
+      `SELECT id, kind, severity, body, action_hint, source, created_at, read_at, expires_at
+       FROM tenant_messages
+       WHERE ${where}
+       ORDER BY created_at DESC, rowid DESC
+       LIMIT ?`,
+      ...binds,
+      limit,
+    )
+    .toArray();
+
+  const total = ctx.sql.exec<{ n: number }>(`SELECT COUNT(*) as n FROM tenant_messages WHERE ${where}`, ...binds).one().n;
+
+  return {
+    messages: rows.map((row) => ({ ...toTenantMessage(row), expiresAt: row.expires_at })),
+    total,
+  };
+}
+
 /**
  * Bounded, tenant-scoped cleanup: deletes expired rows and READ rows past
  * READ_RETENTION_MS. Reuses the existing per-tenant deliverability-sweep cron

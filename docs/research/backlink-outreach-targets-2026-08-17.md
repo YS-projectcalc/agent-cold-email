@@ -1,139 +1,526 @@
-# Backlink / guide outreach targets — 2026-08-17
+# Coldrig authority and editorial outreach playbook — 2026-08-17
 
-**PREP-ONLY.** Nothing in this file has been sent. Every draft below is a starting point, not a queued message.
+**PREP-ONLY. Nothing in this file has been sent or queued.**
 
-> **Standing rule: EVERY outgoing message (email, DM, form submission with a free-text field) requires the founder's per-send approval before it goes out.** No exceptions, no batching consent across targets — one send, one ask.
+> **Standing rule:** every email, DM, form submission, comment, issue, or PR is an external action and requires the founder's approval for that specific send. One send, one approval. Stop outreach immediately if the recipient asks not to be contacted.
 
-**How to use this:** (1) Pick a target, read its "ask" and evidence column below. (2) Read the draft message aloud — if it still sounds right for that specific page, take it to the founder for a go/no-go on that one send. (3) For form-only or PR-route targets there's no message to approve, but the *submission itself* (visiting the URL, filling the form, opening the PR) is still an outbound action — get the same go-ahead before doing it.
+This replaces the first-pass draft with a repeatable system for earning legitimate citations, listings, and links. It is not a link-exchange plan, a mass-mail merge, or a request for unearned endorsement.
 
-## Context
+## Executive verdict
 
-Blind-probe verdict (`docs/research/blind-agent-recommendation-probe-2026-08-16.md`): coldrig appeared in 0/51 agent queries; the gap is index authority/backlinks, not content — the on-site AEO layer (llms.txt, guide pages, compare-vs-* pages) is already built and clean. Coldrig has zero backlinks. This file is the target list for closing that gap through legitimate, human-reviewed listing/guide placements — not link schemes.
+The goal is directionally right, but **“get backlinks so AI agents recommend us” is too simple a model**.
 
----
+Backlinks can help search engines discover and assign authority to Coldrig. They do not force an AI assistant to recommend it. Recommendations become more likely when independent, crawlable sources say something specific and verifiable about Coldrig in the same context as a buyer's question, and when those claims are consistent with Coldrig's own public evidence.
 
-## Skip-list — already covered, don't re-target
+The campaign therefore has four jobs:
 
-- **Official MCP registry** (`io.github.YS-projectcalc/agent-cold-email`) — published v0.2.3, `isLatest` verified 2026-08-17.
-- **glama.ai** — already live (auto-indexed from the registry).
-- **mcp.so** — submission filed as GitHub issue [#3602](https://github.com/chatmcp/mcpso/issues/3602), open.
-- **PulseMCP** — auto-indexes the official registry; no action possible until their intake pause lifts.
-- **awesome-mcp-servers (punkpeye) PR [#10106](https://github.com/punkpeye/awesome-mcp-servers/pull/10106)** — refreshed to the 28-tool entry, open, awaiting maintainer merge.
-- **GSC / Bing / IndexNow** — domain verified, all 35 sitemap URLs re-fired.
+1. **Discovery:** earn clean links from relevant MCP and sales-tool directories so the domain and product are repeatedly discoverable.
+2. **Category definition:** earn editorial mentions that describe Coldrig accurately as agent-operated cold-email infrastructure, not an AI copywriter or persona-style SDR.
+3. **Independent trust:** create places where evaluators can verify what is live, what is limited, and how Coldrig compares without relying on marketing claims.
+4. **Recommendation evidence:** eventually add real user reviews, case studies, and community discussion. A directory footprint without usage evidence may get Coldrig found, but not chosen.
 
----
+The two outreach motions are different:
 
-## Ranked target list (11 verified)
+- **Directory submissions** optimize for completeness, correct metadata, and low effort.
+- **Editorial outreach** optimizes for a useful correction or missing category on a page that already ranks for the buyer's question.
 
-| # | Target | Contact route | Ask |
-|---|---|---|---|
-| 1 | [salestools.club](https://salestools.club/) | Form: [/submit](https://salestools.club/submit) + direct email `akhil@salestools.club` | Add to directory |
-| 2 | [mcpservers.org](https://mcpservers.org/) | Form: [/submit](https://mcpservers.org/submit) | Add to directory |
-| 3 | [coldiq.com](https://coldiq.com/ai-agents) | Booking link / X / LinkedIn (no form) | Add to Cold Outreach AI Agents category |
-| 4 | [crustdata.com blog](https://crustdata.com/blog/best-mcp-servers-for-sales-teams-in-2026) | Email `info@crustdata.com` | Add to "Sales Engagement & Outreach" roundup |
-| 5 | [mcp.directory](https://mcp.directory/) | Form: [/submit](https://mcp.directory/submit) | Add to directory |
-| 6 | [mcp-server-directory.com](https://www.mcp-server-directory.com/) | Form: [/submit](https://www.mcp-server-directory.com/submit) | Add to directory |
-| 7 | [tolkonepiu/best-of-mcp-servers](https://github.com/tolkonepiu/best-of-mcp-servers) | GitHub issue/PR/direct edit of `projects.yaml` | Add ranked entry |
-| 8 | [directoryforai.com](https://directoryforai.com/tool-guides/best-ai-tools-for-cold-email-outreach/) | Form: [/contact/](https://directoryforai.com/contact/) | Add to "Best AI Tools for Cold Email Outreach" |
-| 9 | [sendtrumpet.com blog](https://www.sendtrumpet.com/blog-posts/best-mcp-servers-for-sales-teams-2026) | Email `support@sendtrumpet.com` | Add to "Sales Engagement" section |
-| 10 | [o-mega.ai](https://o-mega.ai/articles/top-10-ai-sales-agents-for-cold-email-outreach-2026-ranked-list) | Email `support@o-mega.ai` | Mention as the infra layer under the ranked agents |
-| 11 | [catchr.io blog](https://www.catchr.io/post/best-mcp-servers-sales-teams) | Form: `/contact-us` (no stated submission process) | Add to roundup |
+Do not pitch either group with “please backlink to us.” The strongest ask is: **“Would you evaluate this as a missing option for the specific reader problem your page already covers?”**
 
-### 1. salestools.club — HIGHEST IMPACT
-**Why it matters:** Directory of "428+ Sales APIs & MCP Configs for AI Agents" — this is the exact class of surface the blind probe named as decisive ("salestools.club-class surfaces"). It ranks for the query pattern buyer agents actually run and is built specifically for agent-operability comparisons, which is coldrig's whole pitch.
-**Evidence it accepts additions:** Homepage states directly: *"If you know a sales API or MCP server I am missing, and I'll review it. [submit it]"* — founder Akhil actively curates (per site copy: validates "every tool to make sure it actually works with AI agents"). Verified `/submit` returns HTTP 200.
-**Ask:** Add coldrig to the directory (likely the sales-engagement / cold-email capability tag).
-**Draft (email to akhil@salestools.club, or paste into the /submit form's free-text field):**
-> Hi Akhil — coldrig (https://coldrig.dev) is cold-email infra built to be run entirely by an agent: 28 MCP tools covering domain purchase, mailbox provisioning, warmup, sending, and reply handling in one surface, plus a free sandbox (`npx agent-cold-email demo`) so an agent can try it before spending anything. Repo's public (https://github.com/YS-projectcalc/agent-cold-email) and it's on the official MCP registry. Would it fit your directory? Happy to just use the submit form if that's easier — no worries either way.
+## What was wrong with the original drafts
 
-### 2. mcpservers.org — HIGH IMPACT
-**Why it matters:** One of the most recognized "Awesome MCP Servers" brands (the GitHub repo `wong2/awesome-mcp-servers`, distinct from the `punkpeye/awesome-mcp-servers` PR already in flight, redirects all submissions here). Ranks for generic "MCP server directory" / "awesome MCP servers" queries — a different audience than the punkpeye list.
-**Evidence it accepts additions:** `wong2/awesome-mcp-servers` README states verbatim: *"We do not accept PRs. Please submit your MCP on the website: https://mcpservers.org/submit."* Verified `/submit` returns HTTP 200 and is a live web form (Server Name, Short Description, Link, Category, Contact Email; free listing, optional $39 premium/faster review — free tier is sufficient here).
-**Ask:** Add to directory via the form.
-**Draft:** Form route — no message needed. Paste into the form: Server Name "coldrig (agent-cold-email)"; Short Description "Agent-operated cold-email infrastructure — 28 MCP tools covering domain purchase, mailbox provisioning, warmup, sending, and reply handling. Free sandbox via `npx agent-cold-email demo`; $99/mo for live sending."; Link `https://github.com/YS-projectcalc/agent-cold-email`; Category: Sales/Marketing or Communication.
+The first drafts were honest and admirably short, but they left conversion on the table:
 
-### 3. coldiq.com — HIGH IMPACT
-**Why it matters:** ColdIQ runs a "Cold Outreach AI Agents" directory category (coldiq.com/category/cold-outreach-ai-agents) plus a broader AI-agents directory (coldiq.com/ai-agents) — exact topical match for "cold outreach AI agents" queries. Founder-run (Michel Lieben), which means a real human reads a DM.
-**Evidence it accepts additions:** No dedicated submit form found; site is clearly hand-curated (small GTM-focused directory, not an auto-scraper) and the founder is reachable directly — a good signal for a manually-curated list that takes suggestions.
-**Ask:** Add coldrig to the Cold Outreach AI Agents category.
-**Draft (via booking.coldiq.com contact form, or DM to @MichLieben on X/LinkedIn):**
-> Hi Michel — saw your Cold Outreach AI Agents directory and thought coldrig (https://coldrig.dev) might fit: it's the infra layer underneath a cold-outreach agent — domain buying, mailbox provisioning, warmup, sending, replies — all as 28 MCP tools an agent calls directly, with a free sandbox to try first. Sits a level below the SDR-persona agents you list, more like what they'd run on. Worth a slot, or is that not the right category? No worries if not.
+- They led with **28 tools** rather than the reader outcome: one agent-operated control plane spanning infrastructure, sending, replies, and health guardrails.
+- “Nothing that actually sends cold email” was too broad and easy to dispute. Apollo and other tools can trigger sequences. Coldrig's more defensible distinction is the **combined infrastructure lifecycle**: domains, mailboxes, warmup state, campaigns, replies, and remediation behind one agent-facing surface.
+- Most messages went to support or generic inboxes instead of the author, editor, curator, or maintainer who owns the page.
+- Every message used the same soft ending (“no worries if not”), which made the drafts feel templated and reduced confidence.
+- The ask was vague (“Would it fit?”) and made the recipient do all the editorial work.
+- Pricing appeared in first-touch emails where pricing was not the subject. It adds cognitive load and can turn an editorial correction into a sales pitch.
+- The drafts did not offer a neutral, ready-to-check fact block or a one-command sandbox test.
+- Directories, articles, founder DMs, forms, and GitHub PRs were treated as the same motion.
+- There was no follow-up sequence, stop rule, or placement-quality measurement.
 
-### 4. crustdata.com blog — MED-HIGH IMPACT
-**Why it matters:** Crustdata is a B2B data-enrichment API vendor, not a cold-email competitor, so there's no rivalry blocking a mention. Their "Best MCP Servers for Sales Teams in 2026" roundup already covers 8 categories including "Sales Engagement & Outreach" (currently: Outreach, Apollo, Amplemarket) — none of which actually send cold email as an MCP tool. Real gap coldrig fills exactly.
-**Evidence it accepts additions:** Real contact email published (`info@crustdata.com`) plus a Contact Us page; this is an actively-maintained 2026-dated content marketing post (companies like this refresh these roundups periodically to stay current).
-**Ask:** Add a line for coldrig in the Sales Engagement & Outreach section.
-**Draft (email to info@crustdata.com):**
-> Hi — I read your "Best MCP Servers for Sales Teams in 2026" post; your Sales Engagement & Outreach section covers Outreach, Apollo, and Amplemarket, but nothing that actually sends cold email as an MCP tool. coldrig (https://coldrig.dev) does exactly that — 28 MCP tools for domain purchase through mailbox provisioning, warmup, sending, and reply handling, plus a free sandbox (`npx agent-cold-email demo`). Might be worth a line in that section if it's still being updated — either way, appreciate the roundup.
+The rewrite below fixes those problems while keeping the copy brief.
 
-### 5. mcp.directory — MEDIUM IMPACT
-**Why it matters:** General MCP server directory (3,000+ servers), ranks for "MCP server directory" queries alongside mcpservers.org/mcp.so.
-**Evidence it accepts additions:** Verified `/submit` returns HTTP 200; live form pulls GitHub Repository URL (required), npm/PyPI package (optional), short description, contact email — auto-detects tools from the MCP implementation, reviewed within 24 hours per the page copy.
-**Ask:** Submit for auto-listing.
-**Draft:** Form route — no message needed. Fields: GitHub Repository URL `https://github.com/YS-projectcalc/agent-cold-email`; description as above.
+## Pre-send credibility gate
 
-### 6. mcp-server-directory.com — MEDIUM IMPACT
-**Why it matters:** Another general MCP directory; incremental index-authority surface, low effort given it's the same submission shape as #5.
-**Evidence it accepts additions:** Verified `/submit` returns HTTP 200 and renders a live form (client-rendered SPA; confirmed via a rendering fetch — GitHub URL required, npm/PyPI optional, description optional, contact email optional).
-**Ask:** Submit for auto-listing.
-**Draft:** Form route — no message needed. Field: GitHub URL `https://github.com/YS-projectcalc/agent-cold-email`.
+Do not begin editorial outreach until these checks pass on the day of send. An editor who finds contradictory public facts is less likely to trust any future pitch.
 
-### 7. tolkonepiu/best-of-mcp-servers — MEDIUM IMPACT
-**Why it matters:** A ranked/scored list (per its own description, ~400 MCP servers grouped into 34 categories, ranked by a project-quality score) — GitHub-native, which matters for agents that search GitHub directly rather than the web, and for the "best-of" framing buyer agents look for.
-**Evidence it accepts additions:** Repo states verbatim: *"If you like to add or update projects, feel free to open an issue, submit a pull request, or directly edit the projects.yaml."* Has a CONTRIBUTING.md with formatting rules.
-**Ask:** Open a PR/issue adding an entry to `projects.yaml`.
-**Draft:** PR route — no message needed. (PR title suggestion: "Add YS-projectcalc/agent-cold-email (coldrig) — Communication/Sales category.")
+### Product facts allowed in outreach
 
-### 8. directoryforai.com — MEDIUM IMPACT
-**Why it matters:** Small, free, generalist directory, but this specific page — "Best AI Tools for Cold Email Outreach" — is a near-verbatim match for one of the exact buyer-agent query patterns from the probe. Currently lists only large incumbents (Instantly, Smartlead, Apollo, Clay, Lemlist, Reply.io, Saleshandy, Woodpecker, Klenty, Snov.io) — no agent-native/MCP entrant yet, which is coldrig's whole differentiation.
-**Evidence it accepts additions:** Live `/contact/` page (verified HTTP 200); site positions itself as "free, always free" and actively guide-driven (this is a maintained tool-guide format, not a static one-off post).
-**Ask:** Add coldrig to the cold-email-outreach guide.
-**Draft (via /contact/ form):**
-> Hi — your "Best AI Tools for Cold Email Outreach" guide covers Instantly, Smartlead, Apollo, etc.; coldrig (https://coldrig.dev) is a newer entrant built specifically to be run by an AI agent rather than a human — 28 MCP tools for the full lifecycle (domains, mailboxes, warmup, sending, replies), free sandbox to test, $99/mo for live sending. Would it be a fit for that list? No pressure if it's not the right category.
+Use only claims that can be verified from current public sources:
 
-### 9. sendtrumpet.com blog — LOWER-MEDIUM IMPACT
-**Why it matters:** Trumpet is a deal-room/buyer-engagement vendor, not a cold-email competitor. Their MCP-for-sales roundup exists and is 2026-dated, but their "Sales Engagement" bucket (Outreach, Salesloft) is about engagement tracking, not sending — a slightly less natural slot than crustdata's equivalent gap.
-**Evidence it accepts additions:** Real support contact (`support@sendtrumpet.com`); no explicit "suggest a tool" language found, so this is a colder ask than #4.
-**Ask:** Add coldrig as the MCP server that actually sends cold email, next to the engagement-tracking tools.
-**Draft (email to support@sendtrumpet.com):**
-> Hi — enjoyed your MCP servers for sales teams roundup. coldrig (https://coldrig.dev) is an agent-operated cold-email infra platform (28 MCP tools: domains, mailboxes, warmup, sending, replies) — could be a natural addition to your Sales Engagement section alongside Outreach/Salesloft, since it's the one MCP server in that space that actually sends the email rather than tracking engagement. No worries if it's outside scope.
+- Brand: **Coldrig**; registry/package handle: **`agent-cold-email`**.
+- Product category: agent-operated cold-email infrastructure; **not** a lead database, copy generator, or autonomous SDR persona.
+- Interfaces: official hosted MCP server, HTTP API, and npm CLI.
+- Surface: **28 high-level authenticated intents** as currently documented.
+- Lifecycle: domain/mailbox provisioning, warmup state, campaign execution, reply handling, health actions, and push webhooks.
+- Evaluation path: `npx agent-cold-email demo` runs a free simulated pipeline with no real spend or sends.
+- Live status: real sending exists for activated tenants, while public demo tenants remain sandboxed.
+- Honest limits: no inbox-placement guarantee and no established multi-year production track record.
+- Pricing, when relevant: starts at $99/month for five provisioned mailboxes, then $10/month per additional mailbox; do not call sends “unlimited.”
 
-### 10. o-mega.ai — LOWER IMPACT
-**Why it matters:** Their "Top 10 AI Sales Agents for Cold Email & Outreach 2026" ranks persona-style autonomous SDR agents (Persana, Coldreach, Salesforge's Agent Frank, Artisan, 11x, etc.) — a different category from coldrig (infra those agents would run on, not a persona-agent itself). Weaker category fit than #1-9, but the query pattern ("AI sales agents for cold email outreach") is close to what the probe's buyer agents actually search.
-**Evidence it accepts additions:** Real contact (`support@o-mega.ai`); no dedicated submission process found, so this is a cold ask with a fit caveat stated up front.
-**Ask:** Suggest coldrig as the infra layer under the ranked agents, or a related "infra" callout if the format allows one.
-**Draft (email to support@o-mega.ai):**
-> Hi — your "Top 10 AI Sales Agents for Cold Email & Outreach" list covers persona-style SDR agents (Persana, Coldreach, Artisan, etc.); coldrig (https://coldrig.dev) sits a level below those — the infra those agents would actually run on to buy domains, provision mailboxes, warm up, send, and handle replies, all via 28 MCP tools. Not sure it fits your exact format, but flagging in case a related "infra" section makes sense. No pressure either way.
+### Fix or confirm before Wave 1
 
-### 11. catchr.io blog — LOWEST IMPACT (include only if the others are exhausted)
-**Why it matters:** Catchr is a marketing-data-integration/MCP vendor running its own MCP-for-sales roundup (Apollo, Salesforce, HubSpot, Pipedrive, Outreach, Gong, Clay, Dynamics 365, Attio, Salesloft) that prominently features Catchr's own product — this is vendor content marketing, not a neutral guide, so acceptance odds are the lowest on this list.
-**Evidence it accepts additions:** No stated submission process or reader-suggestion mechanism; only a generic `/contact-us` route and a `/productdemo` link were found.
-**Ask:** Ask for a line in a future update of the roundup.
-**Draft (via /contact-us form):**
-> Hi — your MCP servers for sales teams roundup lists Apollo, HubSpot, Outreach, and others, but nothing that handles actual cold-email sending infra. coldrig (https://coldrig.dev) does that specifically — 28 MCP tools covering domain purchase through warmup, sending, and replies, free sandbox to try. Would you consider it for a future update? No worries if not a fit.
+- Confirm the live website, GitHub README, GitHub repository description, MCP registry record, npm page, pricing page, and `/for-agents` page all agree on **28 tools**, live-vs-sandbox status, CLI version, and pricing.
+- The GitHub search metadata observed on 2026-08-17 still described **17 MCP tools** even though the current README describes 28. Update the repository's short description if it is still stale.
+- A search snapshot of the pricing page observed on 2026-08-17 still said paid activation was not live, while the current repository says live sending and billing are live. Confirm the live page is current and request recrawling after any correction.
+- The public evaluation page contains an older “twenty-five intent-level tools” line alongside a 28-intent table. Correct that inconsistency before using the page as the main proof link.
+- Run the demo from a clean environment and record the date. If it fails, pause every draft that calls it a one-command evaluation.
 
----
+### Proof links
 
-## Dropped (could not verify)
+Keep first-touch emails to one or two links. Choose the link that best fits the recipient:
 
-Two candidates were dropped for failing verification, not for weak fit:
-- **cursor.directory** (`/plugins`, `/plugins/new`) — returned HTTP 429 on every attempt (3 tries, 2 user agents, with delays). A search-snippet claimed a `/plugins/new` submission path exists, but this could not be independently confirmed live, so it's dropped rather than listed on secondhand evidence.
-- **mcpmarket.com** — same: HTTP 429 on every attempt, submission mechanism unconfirmed.
+- Human overview: <https://coldrig.dev/for-agents>
+- Machine-readable evaluation: <https://coldrig.dev/agent-evaluation.md>
+- Public source and operating contract: <https://github.com/YS-projectcalc/agent-cold-email>
+- Documentation: <https://coldrig.dev/docs>
+- Pricing: <https://coldrig.dev/pricing>
 
-Both are likely real, live sites behind bot-protection rather than dead — worth a manual (human-browser) recheck later if the outreach wave wants more directory coverage, but they don't meet this file's "verified" bar today.
+Do not make the homepage the only link in an editorial pitch. Send the recipient to the evidence they would need to verify the proposed addition.
 
-One candidate was checked and excluded for lack of any contact route: **scrap.io**'s "Best MCP Servers for Sales & Lead Generation" roundup has no suggestion mechanism, no contact page reference, and no email found on the fetched page.
+## Positioning kit
 
-Vendor-authored competitor roundups (Smartlead, Amplemarket, Salesforge, Skyp.ai — all cold-email or adjacent-sales vendors ranking "best MCP servers for sales") were scanned and excluded on sight: these are self-promotional content marketing from direct or near-direct competitors and won't add a rival's tool, so pitching them would just burn a send for near-zero odds. **theresanaiforthat.com** was checked and excluded: it's a paid-submission generalist AI-tool-of-the-day site (not evidence it accepts free additions), and its audience doesn't match the specific "MCP for sales/email" query pattern the blind probe showed buyer agents actually running — lower expected impact than the 11 targets above for a similar or higher cost.
+These blocks keep submissions consistent. Re-verify the facts before every wave.
 
----
+### Category
 
-## Report back
+**Agent-operated cold-email infrastructure**
 
-- **File:** `/Users/yaakovscher/dev/coldstart/docs/research/backlink-outreach-targets-2026-08-17.md`
-- **Target count:** 11 verified (2 dropped for unverifiable 429s: cursor.directory, mcpmarket.com; 1 excluded for no contact route found: scrap.io; several vendor-competitor roundups and one paid generalist directory excluded on fit/evidence grounds — see "Dropped" section for the full accounting).
-- **Direct-send routes vs PR routes:** 10 direct-send (email or human-facing form: salestools.club, mcpservers.org, coldiq.com, crustdata.com, mcp.directory, mcp-server-directory.com, directoryforai.com, sendtrumpet.com, o-mega.ai, catchr.io) vs 1 PR/GitHub route (tolkonepiu/best-of-mcp-servers).
-- **Top 3 highest-impact, with reasoning:**
-  1. **salestools.club** — it's the literal "salestools.club-class surface" the blind probe named as decisive, purpose-built for exactly this comparison (sales APIs/MCP configs for agents), and the founder explicitly invites missing-tool submissions with a working direct email.
-  2. **mcpservers.org** — one of the highest-recognition generic "Awesome MCP Servers" brands, free listing, explicit no-PR/website-only submission instruction confirms it's actively maintained and not abandoned.
-  3. **coldiq.com** — the only target with a category literally named "Cold Outreach AI Agents," run by a reachable human founder, giving both topical precision and a real chance of a reply.
+### 100-character directory description
+
+> Agent-operated cold-email infrastructure over MCP, HTTP, and CLI.
+
+### Short directory description
+
+> Coldrig gives AI agents one MCP, HTTP, or CLI surface for cold-email infrastructure, campaigns, and replies, with a free no-send sandbox for evaluation.
+
+### Neutral editorial description
+
+> Coldrig is cold-email infrastructure designed to be operated by an AI agent. Its official MCP, HTTP, and CLI surfaces expose 28 high-level intents spanning domain and mailbox provisioning, warmup state, campaign execution, reply handling, health actions, and webhooks. A free sandbox lets evaluators run a simulated pipeline without spending or sending. Coldrig does not generate outreach copy or guarantee inbox placement.
+
+### Why an editor's reader would care
+
+> Most sales MCPs expose an existing CRM, database, or sequencer. Coldrig addresses the infrastructure layer an agent otherwise has to assemble across a registrar, mailbox/warmup provider, and sending/reply system.
+
+### One-command verification
+
+> `npx agent-cold-email demo`
+
+### Suggested link destinations
+
+- For a product name in a roundup: <https://coldrig.dev/for-agents>
+- For a technical claim: <https://coldrig.dev/agent-evaluation.md>
+- For an MCP directory or open-source list: <https://github.com/YS-projectcalc/agent-cold-email>
+
+Do not prescribe anchor text to an editor. Let the publisher choose natural wording.
+
+## Who to contact
+
+Use the person who can actually change the page:
+
+1. Named author or reviewer of the article.
+2. Founder/curator of a small hand-maintained directory.
+3. Content lead, managing editor, SEO editor, or partnerships lead.
+4. Maintainer for a GitHub list.
+5. Generic support or `info@` only when no editorial route exists; ask them to forward the note to the page owner.
+
+Do not email multiple people at one company simultaneously. Start with the owner most likely to care, then route through the generic address only if the first path is unavailable.
+
+## Target scoring and waves
+
+Score candidates before adding them to a wave:
+
+- **Query fit (0–3):** does the page answer the same question a buyer asks?
+- **Editorial value (0–3):** would mentioning Coldrig make the page more complete or correct?
+- **Independent trust (0–2):** is this a credible third party rather than a self-serving competitor page?
+- **Reachability (0–1):** is the author/curator or an explicit submission route available?
+- **Effort (0–1):** can the placement be pursued with a clean submission or concise email?
+
+### Ranked list
+
+| Rank | Target | Owner to reach | Route | Score | Motion | Decision |
+|---:|---|---|---|---:|---|---|
+| 1 | [Fastio sales MCP guide](https://fast.io/resources/best-mcp-servers-for-sales-teams/) | Editorial team / page owner | [Contact](https://fast.io/contact/); ask `help@fast.io` to route to the article owner | 10 | Editorial correction | Wave 1 |
+| 2 | [Crustdata sales MCP guide](https://crustdata.com/blog/best-mcp-servers-for-sales-teams-in-2026) | Chris P. (author), then Nithish A. (reviewer) | Author route if found; otherwise `info@crustdata.com` with a forwarding request | 10 | Editorial addition | Wave 1 |
+| 3 | [Salestools Club](https://salestools.club/) | Akhil, founder/curator | [Submit form](https://salestools.club/submit); direct note only if a current email is verified | 10 | Curated directory | Wave 1 |
+| 4 | [Noded verified MCP tracker](https://www.getnoded.ai/post/which-sales-and-cs-tools-actually-have-mcp-servers/) | Steve Wood, author | The article's correction route: `hello@getnoded.ai` or [contact](https://www.getnoded.ai/contact-us/) | 9 | Verified tracker update | Wave 1 |
+| 5 | [ColdIQ cold-outreach agents](https://coldiq.com/category/cold-outreach-ai-agents) | Michel Lieben / directory curator | LinkedIn, X, or [contact](https://booking.coldiq.com/) | 9 | Category placement | Wave 1 |
+| 6 | [Directory for AI cold-email guide](https://directoryforai.com/tool-guides/best-ai-tools-for-cold-email-outreach/) | manunallapaiyan (author) / guide editor | [Submit Tool](https://directoryforai.com/submit-tool/) first; contact second | 9 | Guide + listing | Wave 1 |
+| 7 | [mcpservers.org](https://mcpservers.org/submit) | Directory review team | Submission form | 8 | Directory | Wave 1 |
+| 8 | [MCP.Directory](https://mcp.directory/submit) | Directory review team | Search first; claim existing auto-listing or submit once | 8 | Directory | Wave 1 |
+| 9 | [best-of-mcp-servers](https://github.com/tolkonepiu/best-of-mcp-servers) | Repository maintainers | PR following `CONTRIBUTING.md` | 8 | GitHub list | Wave 1 |
+| 10 | [Oryndex cold email & outreach](https://oryndex.co/discover) | Matic Pogladič, curator | “Submit a Tool” route | 8 | Curated outcome directory | Wave 2 |
+| 11 | [mcp-server-directory.com](https://www.mcp-server-directory.com/) | Directory review team | Submission form, after confirming site works | 6 | Directory | Wave 2 |
+| 12 | [Trumpet sales MCP guide](https://www.sendtrumpet.com/blog-posts/best-mcp-servers-for-sales-teams-2026) | Article owner/content team | Editorial contact if found; `support@sendtrumpet.com` only as a forwarding route | 6 | Editorial addition | Wave 2 |
+| 13 | [Catchr sales MCP guide](https://www.catchr.io/post/best-mcp-servers-sales-teams) | Article owner/content team | [Contact](https://www.catchr.io/contact-us) | 5 | Editorial addition | Wave 2 |
+| 14 | [O-mega AI sales agents guide](https://o-mega.ai/articles/top-10-ai-sales-agents-for-cold-email-outreach-2026-ranked-list) | O-mega editorial team | Contact/support | 3 | Category mismatch | Hold |
+
+### Why the ranking changed
+
+- **Fastio moved to the top** because its article explicitly says domain warming and deliverability remain manual. Coldrig is directly relevant to that stated reader gap.
+- **Crustdata remains high** because its page already assembles a sales MCP stack and has a named author/reviewer. The ask should be about the missing infrastructure layer, not the inaccurate claim that no listed tool sends.
+- **Salestools Club remains high** because it explicitly accepts submissions and promises a niche do-follow link. It already lists a different product called `coldr`; the pitch must prevent name confusion.
+- **Noded is a strong new target** because the author explicitly invites corrections to a source-verified revenue MCP tracker.
+- **ColdIQ is a fit only with honest category framing.** Coldrig is not an AI SDR. Ask the curator whether it belongs in “MCPs for Sales AI Agents” or as infrastructure for the cold-outreach category.
+- **Generic MCP directories are useful for discovery but weaker recommendation evidence** than an editorial inclusion.
+- **O-mega is on hold** because its list is explicitly for autonomous SDR personas. Asking for a ranked slot would miscategorize Coldrig and weaken trust.
+
+## Master editorial email
+
+Use this structure for new editorial targets. Keep the final email between roughly 70 and 120 words.
+
+### Subject options
+
+1. `A missing layer in “[article title]”`
+2. `Source for your [specific section]`
+3. `[Specific correction] in your [topic] guide`
+
+Avoid “quick question,” “collaboration,” “partnership,” “backlink request,” “guest post,” and hype-heavy subjects.
+
+### Body
+
+> Hi [first name] —
+>
+> Your [article/guide] makes a useful distinction between [specific point from the page]. One layer your reader still has to solve is [precise missing job].
+>
+> I’m building Coldrig, agent-operated cold-email infrastructure across MCP, HTTP, and CLI. It covers [two or three capabilities that close that exact gap], and the free sandbox can be checked without spending or sending.
+>
+> Would you be open to evaluating it for [specific section/use case]? Here’s the fact-checked source page: [best proof URL]. I can also send a neutral 60-word entry in your format.
+>
+> — [name], founder of Coldrig
+
+Personalize the first paragraph from the page. Never use a compliment that could have been written without reading it.
+
+## Tailored Wave 1 drafts
+
+### 1. Fastio
+
+**Best subject:** `Source for the manual-warmup gap in your MCP guide`
+
+**Alternates:** `A missing infrastructure option in your sales MCP stack` · `Your Smartlead/Outreach “cons” section`
+
+**Email:**
+
+> Hi Fastio editorial team —
+>
+> Your sales MCP guide says the Smartlead/Outreach layer still leaves domain warming and deliverability setup manual. Coldrig may be a useful option for readers who want that layer agent-operated too: its official MCP, HTTP, and CLI surfaces cover domain/mailbox provisioning, warmup state, campaign execution, replies, and health guardrails.
+>
+> Would you be open to testing it for that section? The free sandbox runs without spending or sending: `npx agent-cold-email demo`. The verification page is https://coldrig.dev/for-agents.
+>
+> — [name], founder of Coldrig
+
+**Why this works:** it attaches Coldrig to a specific gap the article already names. It does not ask Fastio to accept an unsupported superlative.
+
+**Routing note:** send to `help@fast.io` with the subject above and ask for the editor who owns the sales MCP guide. Do not send the same note simultaneously to the product and partnerships contacts.
+
+### 2. Crustdata
+
+**Best subject:** `A missing layer in your sales MCP stack`
+
+**Alternates:** `Source for the outreach section of your MCP guide` · `One addition for “Programmatic Outbound at Scale”`
+
+**Email:**
+
+> Hi Chris —
+>
+> Your MCP guide separates data, CRM, and sequence enrollment well. The remaining layer in the workflow is the sending infrastructure itself: domains, mailboxes, warmup state, health actions, and replies behind one agent-facing surface.
+>
+> That’s what we built Coldrig to cover through an official MCP server, HTTP API, and CLI. Would you be open to evaluating it for the Sales Engagement section or the “Programmatic Outbound at Scale” stack? Here’s the fact-checked evaluation page and free sandbox path: https://coldrig.dev/for-agents.
+>
+> — [name], founder of Coldrig
+
+**Routing note:** if only `info@crustdata.com` is available, start with: `Could you forward this to Chris P. or the editor who owns the sales MCP guide?`
+
+### 3. Salestools Club
+
+**Best subject:** `Coldrig ≠ coldr — possible MCP-ready addition`
+
+**Alternates:** `A separate cold-email MCP for Salestools Club` · `Submission: Coldrig / agent-cold-email`
+
+**Email or founder DM:**
+
+> Hi Akhil —
+>
+> You already list `coldr`, the terminal campaign tool. Coldrig is a separate project, so I wanted to prevent a name collision: it’s agent-operated cold-email infrastructure with an official MCP/HTTP/CLI surface spanning domains, mailboxes, warmup state, campaigns, replies, and webhooks.
+>
+> Would it earn a separate MCP Ready entry under Sales Engagement? The repo and one-command no-send sandbox are here: https://github.com/YS-projectcalc/agent-cold-email. I’m happy to use only the submission form if that’s your preferred route.
+>
+> — [name], founder of Coldrig
+
+**Form fields:**
+
+- Tool name: `Coldrig (agent-cold-email)`
+- Website: `https://coldrig.dev/for-agents`
+- API docs: `https://coldrig.dev/docs`
+- Category: `Sales Engagement`
+- One-liner: `Agent-operated cold-email infrastructure over MCP, HTTP, and CLI.`
+- MCP Ready: `Yes`
+- Agent Skills: select only if Coldrig currently ships a qualifying skill under the directory's definition
+
+**Do not** add Salestools Club's badge merely to accelerate review. Add it later only if being listed is genuinely useful to Coldrig users; avoid a transactional reciprocal-link pattern.
+
+### 4. Noded
+
+**Best subject:** `One official revenue MCP for your verified tracker`
+
+**Alternates:** `Source-verified addition to your July MCP table` · `Cold-email infrastructure MCP for your tracker`
+
+**Email/contact note:**
+
+> Hi Steve —
+>
+> Your revenue MCP tracker asks readers to flag shipped servers backed by primary sources. One possible addition is Coldrig: an official hosted MCP server for agent-operated cold-email infrastructure, listed in the official MCP Registry and backed by a public repository and live endpoint.
+>
+> It exposes 28 high-level intents across provisioning, warmup state, campaigns, replies, health actions, and webhooks. Would you be open to verifying it for a future tracker update if cold-email execution fits your scope? Primary sources: https://github.com/YS-projectcalc/agent-cold-email and https://coldrig.dev/agent-evaluation.md.
+>
+> — [name], founder of Coldrig
+
+**Do not** ask to be called “GA,” mature, or proven. Let the author choose the shipped/status wording from the evidence.
+
+**Routing note:** Steve's author page explicitly welcomes corrections through Noded's contact page. Use `hello@getnoded.ai` or that form and name Steve and the article in the first line.
+
+### 5. ColdIQ
+
+**Best subject:** `Infra category for your cold-outreach agents?`
+
+**Alternates:** `Where would agent-operated email infrastructure fit?` · `Cold-outreach agents still need this layer`
+
+**DM/email:**
+
+> Hi Michel —
+>
+> Your Cold Outreach AI Agents page is mostly persona-style SDRs that research and write outreach. Coldrig is deliberately not one of those: it’s the infrastructure an agent can operate for domains, mailboxes, warmup state, campaigns, replies, and health controls through MCP/HTTP/CLI.
+>
+> Would you be open to evaluating it for your “MCPs for Sales AI Agents” category, or as an infrastructure callout on the cold-outreach page? The distinction and free sandbox are documented here: https://coldrig.dev/for-agents.
+>
+> — [name], founder of Coldrig
+
+**Why this works:** it states the category mismatch before Michel has to object to it and gives him two accurate placement options.
+
+### 6. Directory for AI
+
+**Best subject:** `Infrastructure gap in your cold-email tools guide`
+
+**Alternates:** `A tool for your “technical non-negotiables” section` · `Submission: agent-operated cold-email infrastructure`
+
+**Email/contact form:**
+
+> Hi [first name] —
+>
+> Your cold-email guide says no AI tool can overcome broken sending infrastructure, then lays out authentication, warmup, and per-inbox controls. Coldrig is built specifically for that layer rather than copy generation: an agent can operate provisioning, warmup state, campaigns, replies, and health guardrails through MCP, HTTP, or CLI.
+>
+> Would you be open to evaluating it for an “infrastructure/control plane” entry instead of grouping it with AI writers? The free no-send sandbox and limitations are here: https://coldrig.dev/for-agents.
+>
+> — [name], founder of Coldrig
+
+**Submission note:** submit the product through the site's official tool form first. Use the editorial note only for the guide-specific ask; do not send both on the same day.
+
+### 7. mcpservers.org
+
+This is a form submission, not an email campaign.
+
+- Server Name: `Coldrig (agent-cold-email)`
+- Short Description: `Agent-operated cold-email infrastructure for provisioning, campaigns, replies, and health controls.`
+- Link: `https://github.com/YS-projectcalc/agent-cold-email`
+- Category: `Sales/Marketing`, `Communication`, or the closest available category
+- Contact Email: founder's approved address
+- Premium: use the free listing first; do not pay merely for a do-follow label without evidence that the placement drives relevant discovery
+
+### 8. MCP.Directory
+
+Because this directory auto-discovers from the official MCP Registry, **search before submitting**. If Coldrig already exists, claim the entry instead of creating a duplicate.
+
+- GitHub Repository URL: `https://github.com/YS-projectcalc/agent-cold-email`
+- npm Package: `agent-cold-email`
+- Short Description (under 100 characters): `Agent-operated cold-email infrastructure over MCP, HTTP, and CLI.`
+- Email: founder's approved address
+
+After publication, verify the detected tool count, remote endpoint, package name, category, and description. Request correction if the auto-generated entry repeats stale metadata.
+
+### 9. best-of-mcp-servers
+
+Follow the repository's current `CONTRIBUTING.md` exactly. Do not open an issue and a PR for the same addition.
+
+**PR title:**
+
+> Add YS-projectcalc/agent-cold-email (Coldrig)
+
+**PR body:**
+
+> Adds `YS-projectcalc/agent-cold-email`, the open-source MCP/HTTP/CLI surface for agent-operated cold-email infrastructure. The public repository documents 28 high-level intents, the hosted endpoint, install paths, and a free sandbox demo. I followed the current `projects.yaml` schema and category conventions.
+
+Keep the entry neutral and schema-compliant. Do not insert marketing superlatives into the project description.
+
+## Wave 2 drafts
+
+### Oryndex
+
+**Best subject:** `Submission for “cold email & outreach”`
+
+> Hi Matic —
+>
+> Oryndex organizes tools by the outcome buyers ask for, including “cold email & outreach.” Coldrig is a narrower infrastructure option for that outcome: it lets an AI agent operate domains, mailboxes, warmup state, campaigns, replies, and health controls through MCP, HTTP, or CLI.
+>
+> Would it fit your curated library as agent-operated infrastructure rather than an AI copywriter? The product evidence and no-send sandbox are here: https://coldrig.dev/for-agents.
+>
+> — [name], founder of Coldrig
+
+### mcp-server-directory.com
+
+Use the same repository URL and short description as MCP.Directory. Submit only after the form, review process, and resulting link are manually verified. Do not spend founder time on a broken or opaque submission flow.
+
+### Trumpet
+
+**Best subject:** `An infrastructure layer for your Sales Engagement section`
+
+> Hi Trumpet content team —
+>
+> Your sales MCP roundup covers engagement platforms such as Outreach and Salesloft. A separate reader need is the infrastructure underneath cold outreach: domains, mailboxes, warmup state, campaigns, replies, and health actions that an agent can operate directly.
+>
+> Coldrig covers that layer through an official MCP server, HTTP API, and CLI. Would the article owner be open to evaluating it for a future update? The fact-checked source page and free sandbox path are here: https://coldrig.dev/for-agents.
+>
+> — [name], founder of Coldrig
+
+If using `support@sendtrumpet.com`, begin with a forwarding request. Do not present support as the editorial owner.
+
+### Catchr
+
+**Best subject:** `A cold-email infrastructure category for your MCP guide`
+
+> Hi Catchr content team —
+>
+> Your guide compares official sales MCPs across CRM, data, engagement, and analytics. It does not currently cover agent-operated cold-email infrastructure as its own category.
+>
+> Coldrig is one candidate for that layer: an official MCP/HTTP/CLI surface for provisioning, warmup state, campaign execution, replies, and health controls. Would the article owner be open to evaluating it for a future update? Primary evidence and a free sandbox are here: https://coldrig.dev/for-agents.
+>
+> — [name], founder of Coldrig
+
+Acceptance odds are lower because Catchr's article is vendor content and the page already has a fixed “10 best” frame. Send only after Wave 1.
+
+### O-mega — hold, do not send yet
+
+The page ranks autonomous AI sales-agent personas. Coldrig is infrastructure, not a persona agent. A request for a ranked position would make the article less coherent and encourage the wrong market description. Revisit only if O-mega adds an infrastructure/MCP category or publishes a separate “stack behind AI SDRs” guide.
+
+## Follow-up sequence
+
+Use follow-ups for editorial emails and founder DMs, not for anonymous directory forms unless the site provides a tracking or correction route.
+
+### Follow-up 1 — day 4 or 5
+
+Keep it in the same thread.
+
+> Hi [first name] — resurfacing this because [repeat the article-specific gap in one clause]. If useful, I can send a neutral 60-word entry with a source beside every claim, so your team can evaluate it without rewriting vendor copy.
+>
+> — [name]
+
+### Follow-up 2 — day 11 or 12
+
+> Last note from me on this. The one-command sandbox is `npx agent-cold-email demo`, and the verification page is [URL]. If [section/category] is closed to additions, I’ll mark it accordingly and won’t keep following up.
+>
+> — [name]
+
+Then stop. A third chase is more likely to damage the brand than earn a citation.
+
+### Positive-reply handling
+
+If the recipient asks for copy, send the neutral editorial description from the positioning kit and say:
+
+> Please edit freely and verify each claim independently. The important distinction is that Coldrig is infrastructure an agent operates; it is not a copy generator or an autonomous SDR persona.
+
+If they ask for money, reciprocal links, a badge, or guaranteed placement, pause and evaluate the offer separately. Never disguise sponsored placement as an independent editorial recommendation.
+
+## Personalization checklist
+
+Before approval, every direct message must contain:
+
+- The recipient's correct name and role.
+- The exact article/category name.
+- One observation that proves the page was read.
+- One Coldrig capability tied to the page's missing reader job.
+- One clear ask.
+- One primary proof link, two at most.
+- The sender's real identity and relationship to Coldrig.
+
+Delete any sentence that would work unchanged for every target.
+
+## Campaign operating rules
+
+- Send in small waves: three editorial pitches plus directory/PR submissions, then learn from responses.
+- Do not use open-tracking pixels. Measure replies and live placements; tracking pixels add privacy and deliverability cost without improving this decision.
+- Keep first-touch emails plain text, without attachments, images, calendar links, or a large signature.
+- Do not claim to be a reader/user unless that is true.
+- Do not ask for a “do-follow” link in editorial outreach.
+- Do not offer money, a testimonial, a badge, or a reciprocal link for an independent mention.
+- Do not manufacture reviews, Reddit threads, or third-party endorsements.
+- Do not pitch direct competitors' self-ranking articles unless they create an explicit, neutral submission process. Current competitor roundups from Amplemarket, Salesforge, Skyp, HotHawk, and similar vendors are research inputs, not realistic outreach targets.
+- Re-check the page and contact route on the day of send. Articles, authors, forms, and product claims change.
+
+## Tracking sheet schema
+
+Track the outcome, not vanity opens:
+
+| Field | Purpose |
+|---|---|
+| Target / URL | Exact page being changed |
+| Page type | Editorial, curated directory, general directory, GitHub list, review/community |
+| Owner | Author, editor, founder, maintainer, or review team |
+| Route | Verified email, DM, form, or PR |
+| Specific gap | Why the placement improves that page |
+| Approval ID/date | Founder approval for this one external action |
+| First touch / follow-ups | Dates and subject used |
+| Response | Interested, routed, declined, no response, needs proof |
+| Placement URL | Final live page |
+| Link destination | Coldrig page the publisher chose |
+| Claim accuracy | Tool count, status, category, pricing, and limits correct? |
+| Indexed date | First date the placement appears in search |
+| Referral/qualified traffic | Any meaningful visits or evaluations |
+| Blind-probe result | Whether fresh agents discover or cite the placement |
+
+## Success criteria
+
+The campaign is not successful merely because 20 forms were submitted.
+
+Wave 1 is successful when it produces:
+
+- At least three live, relevant third-party placements from different domains.
+- At least one editorial mention on a page that already ranks for sales MCP or cold-email-tool queries.
+- Correct product categorization and facts on every live placement.
+- A repeat blind-agent probe that reveals which sources are actually retrieved.
+
+After five independent placements have been indexed, rerun the original blind queries and record:
+
+1. Does Coldrig appear at all?
+2. Which third-party source caused discovery?
+3. Is Coldrig described correctly?
+4. Is it shortlisted, rejected, or recommended—and why?
+5. Which trust gap remains: track record, reviews, pricing, maturity, capabilities, or category confusion?
+
+Use those answers to choose the next campaign. If agents find Coldrig but reject it for lack of independent usage proof, another 50 directories are not the solution; customer evidence is.
+
+## Skip list and current status
+
+- Official MCP Registry (`io.github.YS-projectcalc/agent-cold-email`) — published; verify current version and metadata before each wave.
+- Glama — already live via registry auto-indexing.
+- mcp.so — submission issue [#3602](https://github.com/chatmcp/mcpso/issues/3602) open; do not duplicate.
+- PulseMCP — auto-indexes the registry; wait for intake availability.
+- `punkpeye/awesome-mcp-servers` PR [#10106](https://github.com/punkpeye/awesome-mcp-servers/pull/10106) — open; do not create a second PR.
+- GSC, Bing, and IndexNow — already handled; continue monitoring separately from outreach.
+
+Previously dropped targets remain dropped until manually re-verified:
+
+- `cursor.directory` and `mcpmarket.com` returned repeated 429 responses and had no independently verified submission path.
+- `scrap.io` had no usable editorial or submission route.
+- Paid generalist directories with no evidence of relevant discovery should not outrank free, exact-fit editorial opportunities.
+
+## Next approved actions, in order
+
+1. Resolve the public fact inconsistencies in the pre-send gate.
+2. Verify the named page owner and contact route for Fastio, Crustdata, Noded, Directory for AI, and Trumpet.
+3. Submit/claim the no-message directory entries one at a time: Salestools Club, mcpservers.org, MCP.Directory, and Oryndex.
+4. ~~Open the schema-correct `best-of-mcp-servers` PR~~ — ALREADY DONE: [PR #366](https://github.com/tolkonepiu/best-of-mcp-servers/pull/366) is open and verified; do not file a second one.
+5. Send only three personalized editorial emails in the first wave: Fastio, Crustdata, and Noded.
+6. Review replies and live placement accuracy before sending ColdIQ, Directory for AI, or Wave 2.
+
+This sequencing earns easy discovery links while testing the stronger editorial proposition with a small, learnable batch.

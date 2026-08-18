@@ -58,12 +58,16 @@ import { runDeliverabilitySweep } from "./engine/deliverability-actions.js";
 import {
   ackMessage,
   emitOperatorMessage,
+  listMessagesForOperator,
   listMessagesPage,
   pruneTenantMessages,
   type AckMessageResult,
   type EmitOperatorMessageInput,
+  type ListMessagesForOperatorOptions,
   type MessageListPage,
+  type OperatorMessageListResult,
 } from "./engine/tenant-messages.js";
+import { getProvisioningStateForOperator, type ProvisioningState } from "./engine/provisioning-state.js";
 import { contactOperator, type ContactOperatorResult } from "./engine/contact-operator.js";
 import { reconcileOrphanedAdmissions } from "./engine/contact-operator-reconcile.js";
 import { runPollInbox } from "./engine/reply-processor.js";
@@ -1291,6 +1295,30 @@ export class TenantDO extends DurableObject<Env> {
    */
   emitOperatorMessage(input: EmitOperatorMessageInput): void {
     emitOperatorMessage(this.requireContext(), input);
+  }
+
+  /**
+   * The read twin of emitOperatorMessage above — GET
+   * /admin/tenants/:id/messages (routes/admin-messages.ts ONLY; never a
+   * tenant-facing route). An operator audit view of this tenant's WHOLE
+   * message store (see engine/tenant-messages.ts's listMessagesForOperator
+   * doc for why it's unfiltered/newest-first, unlike the two agent-facing
+   * surfaces above). Delivers regardless of lifecycle state, same rationale
+   * as emitOperatorMessage (PURE SELECT — there is nothing to gate).
+   */
+  listMessagesForOperator(options: ListMessagesForOperatorOptions): OperatorMessageListResult {
+    return listMessagesForOperator(this.requireContext(), options);
+  }
+
+  /**
+   * GET /admin/tenants/:id/provisioning-state (routes/admin-provisioning-state.ts
+   * ONLY; never a tenant-facing route) — see engine/provisioning-state.ts's
+   * doc for what this closes (UNVERIFIABLE-1/2/3, agent-channel-product-audit
+   * -2026-08-17.md). PURE SELECT across domains/domain_intents/
+   * request_idempotency, same posture as listMessagesForOperator above.
+   */
+  getProvisioningStateForOperator(): ProvisioningState {
+    return getProvisioningStateForOperator(this.requireContext());
   }
 
   /**

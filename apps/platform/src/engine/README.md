@@ -214,6 +214,11 @@ into a god file:
   windowed deliverability-action counts. Dispatched via
   `TenantDO.opsSummary()`, called ONLY from `../admin/*` (never a tenant
   facade route) — see `../admin/README.md`.
+- `provisioning-state.ts` — the operator's read-only view of one tenant's
+  `domains`/`domain_intents`/`request_idempotency` rows (closes
+  UNVERIFIABLE-1/2/3, `docs/adversarial/agent-channel-product-audit-2026-08-17.md`).
+  PURE SELECT, `../routes/admin-provisioning-state.ts` ONLY, never a tenant
+  facade route. Never returns `response_json` (may embed tenant data).
 - `webhooks.ts` — per-tenant OUTBOUND webhook subscription CRUD (SPEC.md §21 /
   ROADMAP.md WIN-THE-COMPARISON (d)). Backs both
   `routes/webhook-subscriptions.ts` and the MCP
