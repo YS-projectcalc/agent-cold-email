@@ -21,6 +21,14 @@ check.
 (kind, severity) pairs the emitters actually write (grep the `emitTenantMessage` call sites) and
 state which of them the derivation can re-check. Bank the exclusion durably with `expires_at`,
 NEVER `read_at` — `ackMessage` is that column's only writer and the operator surface renames it
-`ackedAt`, so a system stamp there reports an acknowledgement that never happened. Note the
-knock-on: removing a stale row's owed-ness also removes the accidental MASKING it was doing for
-gaps in the reason list (here, the slot-level partial that train 5 still owes a reason for).
+`ackedAt`, so a system stamp there reports an acknowledgement that never happened.
+
+**The knock-on, and its closure.** Removing a stale row's owed-ness also removes the accidental
+MASKING it was doing for gaps in the reason list. That was deferred here rather than disclosed as a
+residual, and the r2 gate found it as a BLOCKING: the gap was the slot-level partial, and the
+expiry silenced AND deleted a live `retry_setup` about it. CLOSED 2026-08-19 by
+`ordinal_slot_shortfall` + a min-age gate on the durable expiry + retention for expired rows —
+see [[resolution-predicate-inherits-its-reason-sets-coverage]] and
+[[destructive-rederivation-outruns-the-grace-it-races]]. The standing lesson: a masking effect
+removed is a coverage claim made; enumerate the gaps in the SAME change, or disclose them as
+residuals in the report — never in a memory file only.

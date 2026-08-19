@@ -47,6 +47,7 @@ import type { TenantContext } from "../tenant-context.js";
 import { buildMailboxBilling } from "./billing.js";
 import { isLifecycleFrozen } from "./billing-state.js";
 import { clampedAge, realNowMs } from "./clamped-age.js";
+import { managedMailboxAddress } from "./mailbox-provisioning.js";
 import { provisioningOrphanGraceMs } from "./ops-summary.js";
 import { planFor, readProvisioningSnapshot, type ProvisioningSnapshot } from "./provisioning-plan.js";
 
@@ -104,6 +105,18 @@ const RE_DERIVABLE_SETUP_MESSAGE_KINDS = new Set(["retry_setup", "setup_failed"]
  * how the two come to disagree, and this file exists because that keeps
  * happening (§7.17.2).
  *
+ * COVERAGE IS THE WHOLE PROPERTY (build gate r2, 2026-08-19). This set is the
+ * complement of "the message is resolved", so a condition `retry_setup` is
+ * EMITTED for that no member of this set covers is silenced and then deleted.
+ * The emit is `provisioning.ts`'s retryable-VendorError arm, and the mailbox
+ * leg of it leaves the ordinal committed, the domain live, DNS ready and only
+ * SOME slots persisted — a state the first four members provably cannot see
+ * (`ordinal_incomplete` needs `live === null`, `domain_dns_incomplete` a
+ * non-ready DNS, `paid_seats_unprovisioned` `billable === 0`,
+ * `setup_capacity_held` `capacity_pending`). `ordinal_slot_shortfall` is the
+ * member that closes it. Adding an emit site for a condition NOT in this set
+ * re-opens the same hole.
+ *
  * `billed_quantity_drift` is deliberately NOT a member: it is a Stripe push
  * that did not land, not unfinished provisioning, and a retry_setup row says
  * nothing about it.
@@ -111,6 +124,7 @@ const RE_DERIVABLE_SETUP_MESSAGE_KINDS = new Set(["retry_setup", "setup_failed"]
 const SETUP_FAMILY_REASONS = new Set<NextStep["reason"]>([
   "paid_seats_unprovisioned",
   "ordinal_incomplete",
+  "ordinal_slot_shortfall",
   "domain_dns_incomplete",
   "setup_capacity_held",
 ]);
@@ -608,6 +622,7 @@ function seatHeadroomStep(ctx: TenantContext, snap: NextStepsSnapshot, owedCount
 
   const free = MINIMUM_BILLABLE_MAILBOXES - billable;
   const action = seatFillAction(snap, distribution, free);
+  const effect = planned.status === "planned" ? billingEffect(ctx, planned.provisionedAfter) : null;
   return [
     {
       reason: "seat_headroom_free",
@@ -615,20 +630,49 @@ function seatHeadroomStep(ctx: TenantContext, snap: NextStepsSnapshot, owedCount
       why:
         `You are billed for a ${MINIMUM_BILLABLE_MAILBOXES}-mailbox minimum and ${billable} ` +
         `${billable === 1 ? "is" : "are"} provisioned, so ${free} more ` +
-        `${free === 1 ? "mailbox costs" : "mailboxes cost"} nothing — your bill is unchanged. ` +
+        `${free === 1 ? "mailbox is" : "mailboxes are"} within the capacity you already pay for. ` +
+        // THE BILL CLAIM IS READ OFF THE PROJECTION IT CLAIMS (non-blocking
+        // N-B-1, build gate r2). The docstring above promises
+        // `effect.projectedMonthlyCents` PROVES the $0 rather than prose
+        // asserting it — but the sentence was unconditional, so on
+        // `unpriceable` (effect null) it asserted "your bill is unchanged" and
+        // then, one clause later, that the platform will not project a price;
+        // and on a priced plan whose `provisionedAfter` exceeds the floor
+        // (reachable when live mailboxes sit at slot indexes the target
+        // distribution does not reach — `fillDistribution` -> `planFor`) it
+        // contradicted the number travelling beside it. Now the prose is
+        // derived from `effect`, so it cannot disagree with it.
+        billClaimSentence(effect) +
         `Nothing is blocked and nothing is required; this is only worth doing if you want the extra sending capacity.` +
         consentSentence(snap, action) +
-        // The $0 claim is floor arithmetic and stays true; what an unknown
-        // persona costs is the IN-PAYLOAD proof of it (§7.18.4's 3960 -> 3960),
-        // so the step says the number is missing instead of implying none exists.
         (planned.status === "unpriceable" ? PERSONA_UNKNOWN_SENTENCE : ""),
       action,
       waitingOn: null,
       notBeforeMs: 0,
-      effect: planned.status === "planned" ? billingEffect(ctx, planned.provisionedAfter) : null,
+      effect,
       sinceMs: null,
     },
   ];
+}
+
+/**
+ * What the step may say about the bill, read from the projection that would
+ * PROVE it — never asserted independently of it (N-B-1).
+ *
+ * Three answers, because the platform is in three genuinely different states:
+ * it can prove the fill is free, it can prove the fill is NOT free, or it has
+ * no projection at all and must say nothing about the bill.
+ */
+function billClaimSentence(effect: MailboxBilling | null): string {
+  if (effect === null) return "";
+  if (effect.provisionedAfter <= MINIMUM_BILLABLE_MAILBOXES) {
+    return `Filling them costs nothing — \`effect\` projects ${effect.provisionedAfter} mailboxes at the same monthly total you already pay. `;
+  }
+  return (
+    `This particular call would take you to ${effect.provisionedAfter} mailboxes, past the ` +
+    `${MINIMUM_BILLABLE_MAILBOXES} the minimum covers, so it DOES change your bill — \`effect\` carries the projected ` +
+    `monthly total. Ask for fewer to stay inside the minimum. `
+  );
 }
 
 /** The one sentence that explains a consent decision, appended only when there is one to make. */
@@ -715,6 +759,115 @@ function ordinalIncompleteSteps(snap: NextStepsSnapshot): NextStep[] {
   ];
 }
 
+/**
+ * THE TWELFTH REASON — a LIVE ordinal short of the slots it asked for
+ * (BLOCKING, build gate r2 2026-08-19).
+ *
+ * WHAT IT COVERS, and why nothing else could. `provisionMailboxesForDomain`
+ * runs a domain's slots through `forEachIsolated` and rethrows only after every
+ * one has had its chance (engine/mailbox-provisioning.ts) — the SLOT-level twin
+ * of the per-ordinal isolation `ordinal_incomplete` exists for. So a retryable
+ * vendor failure on one slot leaves the intent 'committed', the `domains` row
+ * written, DNS 'ready' and the surviving slots persisted: a state in which the
+ * account is genuinely short, `retry_setup` has been emitted about it, and no
+ * other reason in the union fires. The auto-expiry then read that silence as
+ * "resolved" and destroyed the message.
+ *
+ * DERIVED FROM THE ORDINAL'S OWN PERSISTED ASK, against the SAME coordinates
+ * `planFor` uses: `domain_intents.inboxes_each` slots, addressed by
+ * `managedMailboxAddress(persona, domain, ordinal, slot)`, checked against the
+ * live mailbox set. Counting the domain's mailbox ROWS instead would report a
+ * domain re-provisioned under a different persona as complete while a retry
+ * would still buy every slot — the direction a spend-adjacent claim must not be
+ * wrong in, and the one `planFor` itself already refuses.
+ *
+ * THREE ABSTENTIONS, each one the posture an existing sibling already takes:
+ *
+ *   - NO LIVE DOMAIN — `ordinal_incomplete`'s territory, which ages against the
+ *     orphan grace. Nothing is short until something landed.
+ *   - DNS NOT READY (or a BYO domain) — `domain_dns_incomplete`'s territory,
+ *     scoped by the same `source === "provisioned" && dnsStatus === "ready"`
+ *     test that reason uses. A domain whose nameservers are not up cannot carry
+ *     mailboxes yet, so naming the slots would name the wrong blocker; and a
+ *     BYO domain's mailboxes come from `configure_byo_domain`, never from the
+ *     managed setup call this step recommends.
+ *   - NO SPEC ON RECORD — `inboxes_each`/`persona_slug` are INSERT-only and
+ *     NULL for every intent that predates them, so the ask is genuinely
+ *     unknown. `provisioning-reconcile.ts`'s `skippedNoSpec` abstains on
+ *     exactly this row for exactly this reason; inventing a count here would
+ *     tell a customer they are short of something they never asked for.
+ *
+ * NO GRACE WINDOW, unlike `ordinal_incomplete`. That grace exists because an
+ * intent legitimately sits pre-commit for the seconds a saga needs. Here the
+ * ordinal is already COMMITTED and DNS-ready, so the honest answer during a
+ * live provision is still "these slots are not there yet" — and erring toward
+ * owed is the safe direction for a reason whose ABSENCE silences a customer's
+ * action item.
+ */
+function ordinalSlotShortfallSteps(snap: NextStepsSnapshot): NextStep[] {
+  // The same "a managed domain that can carry mailboxes today" test
+  // `domainDnsSteps` uses, inverted. Keyed by name because that is what an
+  // intent resolves through (`readProvisioningSnapshot`'s liveDomainsByName).
+  const readyManagedDomains = new Set(
+    snap.domains.filter((d) => d.source === "provisioned" && d.dnsStatus === "ready").map((d) => d.domain),
+  );
+  const short: { ordinal: number; missing: number }[] = [];
+  let oldest: number | null = null;
+  for (const [ordinal, intent] of snap.provisioning.intentsByOrdinal) {
+    const live = intent.live;
+    if (live === null) continue;
+    if (!readyManagedDomains.has(live.domain)) continue;
+    if (intent.personaSlug === null || intent.inboxesEach === null) continue;
+    let missing = 0;
+    for (let slot = 0; slot < intent.inboxesEach; slot++) {
+      if (!snap.provisioning.liveMailboxAddresses.has(managedMailboxAddress(intent.personaSlug, live.domain, ordinal, slot))) {
+        missing++;
+      }
+    }
+    if (missing === 0) continue;
+    short.push({ ordinal, missing });
+    // §7.19 — `domain_intents.updated_at`, the same anchor `ordinal_incomplete`
+    // ages from and read through the same clamp, for the same reason: it is
+    // stamped from `ctx.clock` and is not in the clock migration's shift list.
+    const age = clampedAge(intent.updatedAt, snap.realNow);
+    if (age !== null && (oldest === null || age > oldest)) oldest = age;
+  }
+  if (short.length === 0) return [];
+
+  const missingTotal = short.reduce((a, s) => a + s.missing, 0);
+  const distribution = fillDistribution(
+    snap.provisioning,
+    Math.max(snap.profile.billedQuantity, MINIMUM_BILLABLE_MAILBOXES),
+  );
+  const { params, paramsToSupply } = setupParamsFor(snap, distribution, true);
+  const action: NextStepAction = {
+    via: "mcp_tool",
+    tool: "setup_infrastructure",
+    params,
+    paramsToSupply,
+    idempotencyKey: null,
+  };
+  return [
+    {
+      reason: "ordinal_slot_shortfall",
+      kind: "owed",
+      why:
+        `${missingTotal} mailbox${missingTotal === 1 ? "" : "es"} requested on ` +
+        `${short.length === 1 ? "domain slot" : "domain slots"} ${short.map((s) => s.ordinal).join(", ")} ` +
+        `${missingTotal === 1 ? "was" : "were"} never created — ` +
+        `${short.length === 1 ? "that domain is live and its" : "those domains are live and their"} mail DNS is up, ` +
+        `so only the mailboxes are missing. Mailbox slots complete independently, so ` +
+        `repeating the setup call creates exactly the missing ones and buys nothing twice.` +
+        consentSentence(snap, action),
+      action,
+      waitingOn: null,
+      notBeforeMs: 0,
+      effect: null,
+      sinceMs: oldest,
+    },
+  ];
+}
+
 function domainDnsSteps(ctx: TenantContext, snap: NextStepsSnapshot): NextStep[] {
   const pending = snap.domains.filter((d) => d.source === "provisioned" && d.dnsStatus !== "ready");
   if (pending.length === 0) return [];
@@ -782,8 +935,22 @@ function capacitySteps(snap: NextStepsSnapshot): NextStep[] {
  * exists, so it stops counting — and its id is returned so a WRITE-capable
  * caller can expire it durably. This function stays PURE (invariant 3): it
  * decides, it does not write.
+ *
+ * TWO SETS, NOT ONE (build gate r2, 2026-08-19). Ceasing to COUNT is cheap and
+ * reverses itself on the next derivation; stamping `expires_at` is durable, and
+ * `pruneTenantMessages` eventually acts on it. Only the second one is gated on
+ * the row being older than the provisioning orphan grace — because a
+ * `dangling` ordinal is not covered by `ordinal_incomplete` until that same
+ * grace elapses, and the ops fan-out re-derives every 5 minutes. Without the
+ * gate the sweep expired the message six times over before the reason that
+ * justifies it could ever fire, and when the grace finally opened the row was
+ * gone. The bound is the orphan grace itself, read from the snapshot, never a
+ * second constant: it is the exact race being lost.
  */
-function messageSteps(snap: NextStepsSnapshot, setupFamilyOwed: boolean): { steps: NextStep[]; resolvedIds: string[] } {
+function messageSteps(
+  snap: NextStepsSnapshot,
+  setupFamilyOwed: boolean,
+): { steps: NextStep[]; expirableIds: string[] } {
   const steps: NextStep[] = [];
   const candidates = snap.messages.filter((m) => m.severity === "operator_pending" || m.severity === "action_required");
   // SCOPED TO `action_required`, deliberately. An `operator_pending` row is the
@@ -797,6 +964,16 @@ function messageSteps(snap: NextStepsSnapshot, setupFamilyOwed: boolean): { step
     : candidates.filter((m) => m.severity === "action_required" && RE_DERIVABLE_SETUP_MESSAGE_KINDS.has(m.kind));
   const resolvedIds = new Set(resolved.map((m) => m.id));
   const blocking = candidates.filter((m) => !resolvedIds.has(m.id));
+  // The durable half, gated on age. `clampedAge` (§7.19) rather than a raw
+  // subtraction: `created_at` is stamped from `ctx.clock`, so a VirtualClock
+  // tenant's row can be future-dated — which clamps to age 0 and simply defers
+  // the expiry, the safe direction for a destructive write.
+  const expirableIds = resolved
+    .filter((m) => {
+      const age = clampedAge(m.createdAt, snap.realNow);
+      return age !== null && age >= snap.orphanGraceMs;
+    })
+    .map((m) => m.id);
 
   const operatorPending = blocking.filter((m) => m.severity === "operator_pending");
   if (operatorPending.length > 0) {
@@ -856,7 +1033,7 @@ function messageSteps(snap: NextStepsSnapshot, setupFamilyOwed: boolean): { step
     });
   }
 
-  return { steps, resolvedIds: [...resolvedIds] };
+  return { steps, expirableIds };
 }
 
 function credentialSteps(snap: NextStepsSnapshot): NextStep[] {
@@ -923,16 +1100,22 @@ function finish(steps: NextStep[], computedAt: number): NextSteps {
 
 /**
  * What one derivation produced: the contract shape, plus the `tenant_messages`
- * rows this pass found RESOLVED (BLOCKING-2).
+ * rows this pass found RESOLVED **and old enough to bank** (BLOCKING-2, and its
+ * r2 min-age gate).
  *
  * The ids never leave the DO — §7.10.3 keeps the cross-DO projection minimized
  * to reasons and counts. They exist so the ONE caller that is already
  * re-deriving on a per-tenant cadence can bank the decision durably without a
  * second derivation or a second cross-DO RPC (§7.17.7's subrequest bound).
+ *
+ * Named for what the caller may DO with them, not for what the pass concluded:
+ * "resolved" is a strictly larger set (see `messageSteps`), and a caller reading
+ * this field as "everything resolved" would re-open the grace race by writing
+ * the difference.
  */
 export interface DerivedNextSteps {
   next: NextSteps;
-  resolvedSystemMessageIds: string[];
+  expirableSystemMessageIds: string[];
 }
 
 export function deriveNextSteps(ctx: TenantContext): NextSteps {
@@ -999,6 +1182,7 @@ export function deriveNextStepsWithResolved(ctx: TenantContext): DerivedNextStep
   const fromState: NextStep[] = [
     ...seatSteps(ctx, snap),
     ...ordinalIncompleteSteps(snap),
+    ...ordinalSlotShortfallSteps(snap),
     ...domainDnsSteps(ctx, snap),
     ...capacitySteps(snap),
   ];
@@ -1008,13 +1192,13 @@ export function deriveNextStepsWithResolved(ctx: TenantContext): DerivedNextStep
   const owedCount = owedFirst.filter((s) => s.kind === "owed").length;
   return {
     next: finish([...owedFirst, ...seatHeadroomStep(ctx, snap, owedCount)], snap.realNow),
-    resolvedSystemMessageIds: messages.resolvedIds,
+    expirableSystemMessageIds: messages.expirableIds,
   };
 }
 
 /** A derivation that reached a terminal gate: a result, and nothing to expire. */
 function unresolved(next: NextSteps): DerivedNextSteps {
-  return { next, resolvedSystemMessageIds: [] };
+  return { next, expirableSystemMessageIds: [] };
 }
 
 /**

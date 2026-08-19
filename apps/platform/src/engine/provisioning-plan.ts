@@ -61,6 +61,21 @@ export interface OrdinalSnapshot {
    * it — the lossy-snapshot half of that finding.
    */
   live: { id: string; domain: string } | null;
+  /**
+   * THIS ORDINAL'S OWN persisted spec — the persona its addresses were derived
+   * from and the mailbox count the call that created it asked for (C3 part d,
+   * `recordDomainIntent`'s INSERT-only write). Both NULL together on a row that
+   * predates the columns.
+   *
+   * PER-ORDINAL, deliberately, and not the same thing as the snapshot's
+   * tenant-level `personaSlug` below: that one is the LATEST persona, for the
+   * recommendation to echo, while these two are the record of what was actually
+   * asked for HERE — which is what `provisioning-reconcile.ts` re-drives from
+   * and what `ordinal_slot_shortfall` (build gate r2, 2026-08-19) measures the
+   * live slots against.
+   */
+  personaSlug: string | null;
+  inboxesEach: number | null;
 }
 
 export interface ProvisioningSnapshot {
@@ -125,8 +140,15 @@ export function readProvisioningSnapshot(ctx: TenantContext): ProvisioningSnapsh
   let personaSlug: string | null = null;
   let personaUpdatedAt = -Infinity;
   for (const row of ctx.sql
-    .exec<{ key: string; candidate_domain: string; status: string; persona_slug: string | null; updated_at: number }>(
-      `SELECT key, candidate_domain, status, persona_slug, updated_at FROM domain_intents WHERE tenant_id = ? ORDER BY key`,
+    .exec<{
+      key: string;
+      candidate_domain: string;
+      status: string;
+      persona_slug: string | null;
+      inboxes_each: number | null;
+      updated_at: number;
+    }>(
+      `SELECT key, candidate_domain, status, persona_slug, inboxes_each, updated_at FROM domain_intents WHERE tenant_id = ? ORDER BY key`,
       ctx.tenantId,
     )
     .toArray()) {
@@ -144,6 +166,8 @@ export function readProvisioningSnapshot(ctx: TenantContext): ProvisioningSnapsh
       // buy was never confirmed and 'dangling' means it threw, and neither is
       // evidence this ordinal is done.
       live: row.status === "committed" ? (liveDomainsByName.get(row.candidate_domain) ?? null) : null,
+      personaSlug: row.persona_slug,
+      inboxesEach: row.inboxes_each,
     });
     if (row.persona_slug !== null && row.updated_at >= personaUpdatedAt) {
       personaSlug = row.persona_slug;

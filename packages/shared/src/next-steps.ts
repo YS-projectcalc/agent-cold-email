@@ -30,6 +30,8 @@ export const NEXT_STEP_REASONS = [
   "domain_dns_incomplete",
   /** An ordinal was REQUESTED and never completed — an intent with no live domain, past grace. */
   "ordinal_incomplete",
+  /** A LIVE, DNS-ready ordinal holds fewer mailboxes than the call that created it asked for. */
+  "ordinal_slot_shortfall",
   /** The platform stopped and only an operator can restart it. */
   "setup_operator_blocked",
   /** A spend-ceiling / plan-slot hold. Distinct from operator-blocked: nothing failed. */

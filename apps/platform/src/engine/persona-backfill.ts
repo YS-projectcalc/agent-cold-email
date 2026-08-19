@@ -55,6 +55,18 @@ export interface PersonaBackfillResult {
   recovered: number;
   /** NULL-persona ordinal intents this pass could not recover unambiguously. */
   abstained: number;
+  /**
+   * Recoverable intents this pass left for the NEXT construction because the
+   * batch was full (non-blocking N-B-7, build gate r2, 2026-08-19).
+   *
+   * Counted rather than silently dropped: it is neither `recovered` (nothing
+   * was written) nor `abstained` (the persona IS recoverable), so folding it
+   * into either would make the log line say something false about a tenant
+   * whose backfill has not finished. Unreachable today — 32 exceeds the
+   * ordinal ceiling — which is exactly why a silent drop would never be noticed
+   * if that stopped being true.
+   */
+  deferred: number;
 }
 
 /**
@@ -94,7 +106,7 @@ export function backfillPersonaSlugs(storage: DurableObjectStorage, tenantId: st
       tenantId,
     )
     .toArray();
-  if (orphans.length === 0) return { recovered: 0, abstained: 0 };
+  if (orphans.length === 0) return { recovered: 0, abstained: 0, deferred: 0 };
 
   // ONE read of the live mailboxes, bucketed by domain in memory. `released_at
   // IS NULL` is the same "live" predicate every other reader of this table
@@ -114,6 +126,7 @@ export function backfillPersonaSlugs(storage: DurableObjectStorage, tenantId: st
 
   const recovered: { key: string; personaSlug: string }[] = [];
   let abstained = 0;
+  let deferred = 0;
   for (const orphan of orphans) {
     // A key the current derivation never writes belongs to the burn-replacement
     // writer (`replacementDomainIntentKey`) and names no ordinal of the managed
@@ -127,8 +140,9 @@ export function backfillPersonaSlugs(storage: DurableObjectStorage, tenantId: st
       continue;
     }
     if (recovered.length < PERSONA_BACKFILL_BATCH) recovered.push({ key: orphan.key, personaSlug: slug });
+    else deferred++;
   }
-  if (recovered.length === 0) return { recovered: 0, abstained };
+  if (recovered.length === 0) return { recovered: 0, abstained, deferred };
 
   // ONE statement. `persona_slug IS NULL` is re-asserted in the WHERE so a
   // concurrent write (a real provisioning call landing between the read and
@@ -142,5 +156,5 @@ export function backfillPersonaSlugs(storage: DurableObjectStorage, tenantId: st
     tenantId,
     ...recovered.map((r) => r.key),
   );
-  return { recovered: result.rowsWritten, abstained };
+  return { recovered: result.rowsWritten, abstained, deferred };
 }

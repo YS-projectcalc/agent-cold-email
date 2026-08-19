@@ -4,6 +4,7 @@ import type { NextSteps } from "@coldstart/shared";
 import { realNowMs } from "../src/engine/clamped-age.js";
 import { deriveNextSteps, owedSignals } from "../src/engine/next-steps.js";
 import { managedMailboxAddress } from "../src/engine/mailbox-provisioning.js";
+import { DEFAULT_PROVISIONING_ORPHAN_GRACE_MS } from "../src/engine/ops-summary.js";
 import { domainIntentKey } from "../src/engine/provision-intents.js";
 import { emitTenantMessage } from "../src/engine/tenant-messages.js";
 import { activatePaidPlan, mintTenant, seedBenignSdnList, tenantStub, withTenantContext } from "./helpers.js";
@@ -26,8 +27,21 @@ import { activatePaidPlan, mintTenant, seedBenignSdnList, tenantStub, withTenant
 let seq = 0;
 
 interface Seed {
-  /** Live domain ordinals: `dnsReady: false` leaves a genuine `domain_dns_incomplete` owed. */
-  ordinals: { domain: string; liveMailboxes: number; dnsReady?: boolean }[];
+  /**
+   * Live domain ordinals. `dnsReady: false` leaves a genuine
+   * `domain_dns_incomplete` owed; `requestedSlots` is the ordinal's own
+   * persisted ask (`domain_intents.inboxes_each`) and defaults to
+   * `liveMailboxes`, i.e. an ordinal that FINISHED.
+   *
+   * STATED RATHER THAN IMPLIED (build gate r2, 2026-08-19). The r2 gate read
+   * the old fixture — 2+2 mailboxes at `billedQuantity: 5` — as "byte-identical
+   * to one slot failed and the customer must retry", and under the pre-r2 code
+   * it was: nothing read `inboxes_each`, so a finished ordinal and a
+   * slot-failed one derived the same steps. `ordinal_slot_shortfall` makes that
+   * coordinate load-bearing, and this field is it. The two fleets below are now
+   * distinguishable by exactly the value that distinguishes them in production.
+   */
+  ordinals: { domain: string; liveMailboxes: number; requestedSlots?: number; dnsReady?: boolean }[];
   billedQuantity?: number;
 }
 
@@ -56,7 +70,7 @@ async function seedTenant(seed: Seed): Promise<string> {
         tenantId,
         ord.domain,
         persona,
-        Math.max(1, ord.liveMailboxes),
+        ord.requestedSlots ?? Math.max(1, ord.liveMailboxes),
         1000,
         1000 + ordinal,
       );
@@ -103,6 +117,17 @@ function derive(tenantId: string): Promise<NextSteps> {
   return withTenantContext(tenantId, (ctx) => deriveNextSteps(ctx));
 }
 
+/** Backdates every message so the durable-expiry min-age gate is satisfied without waiting 30 minutes. */
+function ageMessagesPastOrphanGrace(tenantId: string): Promise<void> {
+  return withTenantContext(tenantId, (ctx) => {
+    ctx.sql.exec(
+      `UPDATE tenant_messages SET created_at = ? WHERE tenant_id = ?`,
+      ctx.clock.now() - DEFAULT_PROVISIONING_ORPHAN_GRACE_MS * 2,
+      ctx.tenantId,
+    );
+  });
+}
+
 function messageRows(tenantId: string): Promise<{ kind: string; read_at: number | null; expires_at: number | null }[]> {
   return withTenantContext(tenantId, (ctx) =>
     ctx.sql
@@ -114,10 +139,29 @@ function messageRows(tenantId: string): Promise<{ kind: string; read_at: number 
   );
 }
 
+/**
+ * A GENUINELY FINISHED fleet: every ordinal holds exactly the slots it asked
+ * for (2 of 2, twice). It sits one under the paid floor, which is
+ * `seat_headroom_free`'s band — free capacity is not unfinished work, and
+ * nothing here is owed.
+ */
 const HEALTHY_FLEET: Seed = {
   ordinals: [
-    { domain: "theauthorpitchdesk.com", liveMailboxes: 2 },
-    { domain: "goauthorpitchdesk.com", liveMailboxes: 2 },
+    { domain: "theauthorpitchdesk.com", liveMailboxes: 2, requestedSlots: 2 },
+    { domain: "goauthorpitchdesk.com", liveMailboxes: 2, requestedSlots: 2 },
+  ],
+  billedQuantity: 5,
+};
+
+/**
+ * The SAME mailbox counts, one coordinate apart: ordinal 0 asked for 3 and
+ * holds 2 — the state a rethrowing `forEachIsolated` slot leaves behind. It is
+ * the fleet the r2 gate said was indistinguishable from the one above.
+ */
+const SLOT_SHORTFALL_FLEET: Seed = {
+  ordinals: [
+    { domain: "theauthorpitchdesk.com", liveMailboxes: 2, requestedSlots: 3 },
+    { domain: "goauthorpitchdesk.com", liveMailboxes: 2, requestedSlots: 2 },
   ],
   billedQuantity: 5,
 };
@@ -135,6 +179,17 @@ describe("B-2 — a re-derivable system message stops being owed once its condit
     expect(derived.status).toBe("none_owed");
     expect(derived.steps.find((s) => s.reason === "message_action_required")).toBeUndefined();
     expect(derived.steps.find((s) => s.reason === "seat_headroom_free")).toBeDefined();
+  });
+
+  it("the SAME mailbox counts with one slot still owed do NOT resolve it — the fixtures differ where production differs", async () => {
+    const tenantId = await seedTenant(SLOT_SHORTFALL_FLEET);
+    await emitRetrySetup(tenantId);
+
+    const derived = await derive(tenantId);
+    expect(derived.status).toBe("owed");
+    expect(owedSignals(derived).owedReasons).toContain("ordinal_slot_shortfall");
+    expect(owedSignals(derived).owedReasons).toContain("message_action_required");
+    expect(derived.steps.find((s) => s.reason === "seat_headroom_free")).toBeUndefined();
   });
 
   it("STILL counts while the condition it describes genuinely holds", async () => {
@@ -199,6 +254,13 @@ describe("B-2 — the exclusion is banked durably, so operator surfaces stop sho
     );
 
     expect((await messageRows(tenantId)).map((r) => r.expires_at)).toEqual([null, null]);
+    // PAST THE MIN-AGE GATE (build gate r2). The durable expiry is withheld
+    // while a row is younger than the provisioning orphan grace — a
+    // freshly-emitted row is exactly the case the 5-minute sweep used to win
+    // against a 30-minute grace, and test/next-steps-slot-shortfall.test.ts
+    // owns that assertion. Here the row is aged so this test keeps asserting
+    // what it was written to assert: that a genuinely resolved row IS banked.
+    await ageMessagesPastOrphanGrace(tenantId);
     await tenantStub(tenantId).opsSummary(realNowMs());
 
     const rows = await messageRows(tenantId);

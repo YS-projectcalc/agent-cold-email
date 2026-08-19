@@ -1699,14 +1699,18 @@ components:
 
     NextStepReason:
       type: string
-      enum: [paid_seats_unprovisioned, seat_headroom_free, domain_dns_incomplete, ordinal_incomplete, setup_operator_blocked, setup_capacity_held, billed_quantity_drift, account_frozen, message_action_required, mailbox_credentials_pending, ready_to_launch]
+      enum: [paid_seats_unprovisioned, seat_headroom_free, domain_dns_incomplete, ordinal_incomplete, ordinal_slot_shortfall, setup_operator_blocked, setup_capacity_held, billed_quantity_drift, account_frozen, message_action_required, mailbox_credentials_pending, ready_to_launch]
       description: >
         Closed union (design §7.2). paid_seats_unprovisioned = paying,
         nothing provisioned (owed). seat_headroom_free = at the 5-mailbox
         floor with 1-4 provisioned, the remainder cost $0 (NEVER owed).
         domain_dns_incomplete = a live domain's mail DNS has not come up
         yet. ordinal_incomplete = a requested domain ordinal never
-        completed. setup_operator_blocked = the platform stopped; only an
+        completed. ordinal_slot_shortfall = the domain landed and its mail
+        DNS is up, but it holds fewer mailboxes than the call that created
+        it asked for — mailbox slots complete independently, so repeating
+        the setup call creates exactly the missing ones.
+        setup_operator_blocked = the platform stopped; only an
         operator can restart it. setup_capacity_held = a spend/plan-slot
         hold — nothing failed. billed_quantity_drift = our Stripe push did
         not land, ours to fix. account_frozen = lifecycle freeze;

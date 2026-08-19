@@ -38,12 +38,12 @@ import { IK_API_KEY, IK_WORKSPACE_ID } from "./fixtures/inboxkit.js";
 //
 // ── A DEVIATION FROM §7.6(a), STATED RATHER THAN TAKEN QUIETLY ───────────────
 // §7.6(a) reads "the owed set did not GROW". Taken as cardinality it is
-// unsatisfiable on EVERY partial path §7.6 itself requires to pass: under the
-// eleven-reason list, a spend/slot hold introduces `setup_capacity_held`, a
-// per-ordinal failure introduces `ordinal_incomplete`, and a propagation wait
-// introduces `domain_dns_incomplete`. Each is genuine NEW owed work created by
-// making progress, so (a) and "partials must pass" contradict each other as
-// written.
+// unsatisfiable on EVERY partial path §7.6 itself requires to pass: a spend/slot
+// hold introduces `setup_capacity_held`, a per-ordinal failure introduces
+// `ordinal_incomplete`, a per-SLOT failure introduces `ordinal_slot_shortfall`,
+// and a propagation wait introduces `domain_dns_incomplete`. Each is genuine NEW
+// owed work created by making progress, so (a) and "partials must pass"
+// contradict each other as written.
 //
 // Resolution implemented here, and reported to the orchestrator rather than
 // decided silently: (a) is measured over reasons the executed action did NOT
@@ -56,6 +56,7 @@ const PROGRESS_INTRODUCED_REASONS: NextStepReason[] = [
   "domain_dns_incomplete",
   "setup_capacity_held",
   "ordinal_incomplete",
+  "ordinal_slot_shortfall",
 ];
 
 /** Reasons whose source is a row THIS WAVE writes — §7.6(d)'s structural guard against self-re-arm. */
@@ -180,10 +181,37 @@ async function shortfall(tenantId: string): Promise<number> {
 // the treatment `NEXT_STEP_REASONS` already gets — so WIDENING it is a
 // deliberate edit to this line rather than a silent one three functions down.
 // Each member maps to a documented partial-success mechanism the platform
-// really has: `capacity_pending` state, per-ordinal isolation, DNS propagation.
+// really has: `capacity_pending` state, per-ordinal isolation, per-slot
+// isolation, DNS propagation.
+//
+// ── WHY `ordinal_slot_shortfall` IS A MEMBER (build gate r2, 2026-08-19) ─────
+// The widening is deliberate and the reasoning is J1's, applied to the new
+// member rather than assumed from the old ones.
+//
+// (i) IT MAPS TO A REAL MECHANISM, the same one `ordinal_incomplete` maps to,
+//     one level down: `provisionMailboxesForDomain` runs a domain's slots
+//     through `forEachIsolated` and rethrows only after every slot has had its
+//     chance (engine/mailbox-provisioning.ts). An execution that buys the
+//     domain, completes DNS and lands 2 of 3 mailboxes has made genuine
+//     progress AND genuinely owes the third — exactly the shape §7.6 rebuilt
+//     (a) to tolerate.
+// (ii) IT DOES NOT WEAKEN THE GUARD, because (a) is not the conjunct that binds
+//     a failed execution — (b) is (`!stillOwed || shortfall < beforeShortfall`).
+//     Exempting a reason mutes only "this newly APPEARED"; if it is the executed
+//     step's own reason, (b) still reddens on a call that converged on nothing.
+//     (c) pins `effect.provisionedAfter` as an upper bound and (d) is asserted
+//     separately with a planted row. Neither is touched by this line.
+// (iii) THE ALTERNATIVE IS WORSE. Leaving it out would redden G5 on a correct
+//     partial — a builder facing that would weaken an assertion or drop the
+//     partial fixture, which is the failure mode this rebuild exists to prevent.
 describe("NB-1 — the G5(a) exemption set is pinned, not open-ended", () => {
-  it("PROGRESS_INTRODUCED_REASONS is exactly these three", () => {
-    expect(PROGRESS_INTRODUCED_REASONS).toEqual(["domain_dns_incomplete", "setup_capacity_held", "ordinal_incomplete"]);
+  it("PROGRESS_INTRODUCED_REASONS is exactly these four", () => {
+    expect(PROGRESS_INTRODUCED_REASONS).toEqual([
+      "domain_dns_incomplete",
+      "setup_capacity_held",
+      "ordinal_incomplete",
+      "ordinal_slot_shortfall",
+    ]);
   });
 
   it("every member is a real NextStepReason, and the set is a strict subset of them", () => {

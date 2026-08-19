@@ -269,9 +269,12 @@ export class TenantDO extends DurableObject<Env> {
    */
   private backfillPersonaSlugs(tenantId: string): void {
     try {
-      const { recovered, abstained } = backfillPersonaSlugs(this.ctx.storage, tenantId);
-      if (recovered > 0 || abstained > 0) {
-        console.log(`persona_slug backfill for ${tenantId}: ${recovered} recovered, ${abstained} left NULL (not recoverable)`);
+      const { recovered, abstained, deferred } = backfillPersonaSlugs(this.ctx.storage, tenantId);
+      if (recovered > 0 || abstained > 0 || deferred > 0) {
+        console.log(
+          `persona_slug backfill for ${tenantId}: ${recovered} recovered, ${abstained} left NULL (not recoverable), ` +
+            `${deferred} deferred to the next construction (batch full)`,
+        );
       }
     } catch (err) {
       console.error(`persona_slug backfill FAILED for ${tenantId}; state unchanged, will retry on next construction`, err);

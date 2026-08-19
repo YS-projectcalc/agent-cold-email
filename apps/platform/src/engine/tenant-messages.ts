@@ -388,6 +388,9 @@ export function ackMessage(ctx: TenantContext, id: string): AckMessageResult {
   return { acked: true, alreadyAcked: false };
 }
 
+/** Rows expired per pass — see the bind-ceiling note inside `expireResolvedSystemMessages`. */
+const SYSTEM_MESSAGE_EXPIRY_BATCH = 32;
+
 /**
  * Expires system messages whose condition the platform has RE-DERIVED as
  * resolved (BLOCKING-2, build gate 2026-08-19). The ids come from
@@ -409,15 +412,27 @@ export function ackMessage(ctx: TenantContext, id: string): AckMessageResult {
  * intended effect. Re-asserts `read_at IS NULL AND expires_at IS NULL` so a
  * customer ack or an operator's own expiry that landed in between always wins.
  * ONE statement, no loop (test/loop-isolation-coverage.test.ts).
+ *
+ * The caller decides WHICH rows (engine/next-steps.ts owns that, including the
+ * min-age gate that keeps this write from outrunning the provisioning orphan
+ * grace); this owns only the write.
  */
 export function expireResolvedSystemMessages(ctx: TenantContext, ids: readonly string[]): number {
-  if (ids.length === 0) return 0;
+  // BOUNDED BIND LIST (non-blocking N-B-3, build gate r2). The statement binds
+  // `2 + ids.length` parameters and this codebase's SqlStorage ceiling is 100
+  // (admin/db.ts's chunk-boundary note), so an unbounded id list would throw
+  // inside an unwrapped call on the ops fan-out. CAPPED rather than chunked, the
+  // shape engine/persona-backfill.ts already uses for the same ceiling: a chunk
+  // LOOP would be a new unisolated write loop, and this runs on a 5-minute
+  // cadence, so an overflow converges on the next tick instead.
+  const batch = ids.slice(0, SYSTEM_MESSAGE_EXPIRY_BATCH);
+  if (batch.length === 0) return 0;
   const result = ctx.sql.exec(
     `UPDATE tenant_messages SET expires_at = ?
-      WHERE tenant_id = ? AND read_at IS NULL AND expires_at IS NULL AND id IN (${ids.map(() => "?").join(", ")})`,
+      WHERE tenant_id = ? AND read_at IS NULL AND expires_at IS NULL AND id IN (${batch.map(() => "?").join(", ")})`,
     realNowMs(),
     ctx.tenantId,
-    ...ids,
+    ...batch,
   );
   return result.rowsWritten;
 }
@@ -526,16 +541,28 @@ export function listMessagesForOperator(
  * READ_RETENTION_MS. Reuses the existing per-tenant deliverability-sweep cron
  * leg (TenantDO.deliverabilitySweep, called by runDeliverabilitySweepAllTenants
  * in scheduled.ts) rather than a new cron.
+ *
+ * BOTH LEGS CARRY THE SAME RETENTION (build gate r2, 2026-08-19). The expired
+ * leg used to delete on the instant of expiry while the read leg kept a row for
+ * 30 days — so an ACK, which the customer performed deliberately, was
+ * recoverable for a month, and an EXPIRY, which the platform now decides on its
+ * own from re-derived state (`expireResolvedSystemMessages`), destroyed the
+ * only durable record of the action item within one sweep. The half that can be
+ * WRONG was the half with no grace: an expiry mistake took the audit trail with
+ * it, and the operator surface that would have shown the mistake reads this
+ * table. A row stays hidden from every agent-facing surface the moment
+ * `expires_at` passes — the retention changes what is RECOVERABLE, never what
+ * is SHOWN.
  */
 export function pruneTenantMessages(ctx: TenantContext): { deleted: number } {
-  const now = ctx.clock.now();
+  const cutoff = ctx.clock.now() - READ_RETENTION_MS;
   const result = ctx.sql.exec(
     `DELETE FROM tenant_messages
      WHERE tenant_id = ?
        AND ((expires_at IS NOT NULL AND expires_at <= ?) OR (read_at IS NOT NULL AND read_at <= ?))`,
     ctx.tenantId,
-    now,
-    now - READ_RETENTION_MS,
+    cutoff,
+    cutoff,
   );
   return { deleted: result.rowsWritten };
 }

@@ -602,7 +602,7 @@ function readSendPipelineSignals(ctx: TenantContext): SendPipelineSignals {
   // pure (§7.16 invariant 3). The ids stay inside the DO — the cross-DO
   // projection below is unchanged (§7.10.3).
   const derived = deriveNextStepsWithResolved(ctx);
-  expireResolvedSystemMessages(ctx, derived.resolvedSystemMessageIds);
+  expireResolvedSystemMessages(ctx, derived.expirableSystemMessageIds);
   const owed = owedSignals(derived.next);
 
   const lastAgentActivityAt = ctx.sql
