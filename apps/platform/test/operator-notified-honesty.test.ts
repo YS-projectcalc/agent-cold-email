@@ -95,7 +95,7 @@ describe("error bodies with no notifier behind them do not claim one", () => {
   });
 
   it("RegistrarUnarmedError — its notifier is wired at only three of its producers", () => {
-    const body = toErrorResponse(new RegistrarUnarmedError("domain.buy is blocked: set REGISTRAR_PROVIDER")).body as {
+    const body = toErrorResponse(new RegistrarUnarmedError("buy", "env")).body as {
       error: string;
     };
     expect(body.error).not.toContain(OPERATOR_NOTIFIED);

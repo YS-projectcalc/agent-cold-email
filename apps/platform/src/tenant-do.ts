@@ -728,7 +728,7 @@ export class TenantDO extends DurableObject<Env> {
     // selects a domain port (REPLACE_DOMAIN etc.) keeps reading persisted state.
     const ctx: TenantContext = {
       ...base,
-      adapters: { ...base.adapters, domain: this.selectSetupDomainPort(base.adapters, input) },
+      adapters: { ...base.adapters, domain: this.selectSetupDomainPort(base, input) },
     };
     return withRequestIdempotency(
       ctx,
@@ -772,7 +772,8 @@ export class TenantDO extends DurableObject<Env> {
   // the just-persisted row (deriveInboxKitRegistrant — organization falls back
   // to brand), so the port's baked registrant and provisionDomainWithMailboxes's
   // post-UPDATE completeness pre-flight can never disagree.
-  private selectSetupDomainPort(bundle: VendorAdapterBundle, input: SetupInfrastructureInput): DomainPort {
+  private selectSetupDomainPort(base: TenantContext, input: SetupInfrastructureInput): DomainPort {
+    const bundle = base.adapters;
     if (bundle.kind !== "real") return bundle.domain;
     // H8b does NOT change this. Two adversary rulings meet here and they are
     // about different things:
@@ -788,12 +789,23 @@ export class TenantDO extends DurableObject<Env> {
     return selectRealDomainPort(this.inboxKitConfig(), {
       armed: isInboxKitRegistrarArmed(this.env),
       optIn: input.registerDomains ?? false,
-      registrant: deriveInboxKitRegistrant({
-        brand: input.brand,
-        physicalAddress: input.physicalAddress,
-        senderIdentity: input.senderIdentity,
-        registrantJson: input.registrant ? JSON.stringify(input.registrant) : null,
-      }),
+      // THE REGISTRANT, from THIS call when it sent one and from the persisted
+      // profile when it did not (the §7.8 relaxation). `registrant` is optional
+      // even alongside `registerDomains: true` now, and the port's baked
+      // registrant is what `buy()` actually files — so deriving it from the
+      // input ALONE would have filed the brand/physicalAddress-derived PARTIAL
+      // for exactly the call this wave recommends, while
+      // `provisionDomainWithMailboxes`'s pre-flight validated the COMPLETE
+      // persisted one and waved it through. The two must agree; they agree by
+      // reading the same source when this call names none.
+      registrant: input.registrant
+        ? deriveInboxKitRegistrant({
+            brand: input.brand,
+            physicalAddress: input.physicalAddress,
+            senderIdentity: input.senderIdentity,
+            registrantJson: JSON.stringify(input.registrant),
+          })
+        : readRegistrarOptInState(base.sql, base.tenantId).registrant,
     });
   }
 

@@ -6,12 +6,13 @@
  * belonged in one file. No behaviour moved with it.
  */
 
-import type { MailboxHealth } from "@coldstart/shared";
+import type { MailboxHealth, NextSteps } from "@coldstart/shared";
 import type { TenantContext } from "../tenant-context.js";
 import { customerSafeVendorDetail, logVendorFailure } from "../vendor-failure.js";
 import { gatherMailboxHealth } from "./deliverability.js";
 import { logAction } from "./deliverability-actions.js";
 import { computeMailboxWarmupSnapshot } from "./mailbox-state.js";
+import { deriveNextSteps } from "./next-steps.js";
 import { listSurfacedTenantMessages, type TenantMessage } from "./tenant-messages.js";
 
 // The one sentence a customer surface says when a mailbox's health lookup fails.
@@ -84,6 +85,13 @@ export interface InfrastructureStatus {
   // without a human relay. Unread-first, newest-first, capped at 5, expired
   // rows filtered out.
   messages: TenantMessage[];
+  /**
+   * What this account should do next, derived (design §7.2). THE poll surface —
+   * the one endpoint the tool description tells an agent to hit repeatedly — so
+   * it is where a stalled account is most likely to be told, by the response
+   * alone, what unblocks it.
+   */
+  nextSteps: NextSteps;
 }
 
 export async function getInfrastructureStatus(ctx: TenantContext): Promise<InfrastructureStatus> {
@@ -187,5 +195,6 @@ export async function getInfrastructureStatus(ctx: TenantContext): Promise<Infra
     sendReady: mailboxHealth.length > 0 && mailboxHealth.every((m) => m.sendReady),
     // Pure SELECT (GUARDRAIL: never inserts) — see listSurfacedTenantMessages.
     messages: listSurfacedTenantMessages(ctx),
+    nextSteps: deriveNextSteps(ctx),
   };
 }

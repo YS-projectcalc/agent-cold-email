@@ -377,16 +377,20 @@ describe("SetupInfrastructureInput — registrant capture at the intent boundary
     senderIdentity: "Sales Team",
   };
 
-  // (a) registerDomains:true with NO registrant → rejected at the intent
-  // boundary, naming `registrant`. RED-proven below (registrant-capture-red-
-  // green.test.ts) by stashing the SetupInfrastructureInput refinement.
-  it("(a) registerDomains:true with no registrant is rejected, naming 'registrant'", () => {
+  // (a) RETIRED AND INVERTED (design §7.8, gate L1(i) — deliberate contract
+  // change #1 of §7.9's three). `registerDomains: true` with NO registrant used
+  // to be rejected here, which made the one call this platform must be able to
+  // RECOMMEND impossible to emit without echoing legal PII into a status
+  // response. It is accepted now; the safety property moved one seam later, to
+  // `assertCompleteRegistrant` at the actual buy call site, which still 400s
+  // naming the missing fields before any purchase.
+  //
+  // The relaxation's own coverage — including that the buy files the PERSISTED
+  // registrant and that an absent one is not a revocation — is
+  // test/registrant-relaxation.test.ts.
+  it("(a) registerDomains:true with no registrant is ACCEPTED at the boundary", () => {
     const result = SetupInfrastructureInput.safeParse({ ...VALID_BASE, registerDomains: true });
-    expect(result.success).toBe(false);
-    if (result.success) return;
-    const issue = result.error.issues.find((i) => i.path.join(".") === "registrant");
-    expect(issue).toBeDefined();
-    expect(issue?.message).toContain("registrant is required when registerDomains is true");
+    expect(result.success).toBe(true);
   });
 
   it("(a) registerDomains:true WITH a complete registrant parses through cleanly", () => {
@@ -560,10 +564,18 @@ describe("registrant capture — a stale persisted register_domains=1 no longer 
   // domain port and fell into assertCompleteRegistrant → 400 incomplete_registrant.
   // Under the fix, THIS call's (absent) opt-in is authoritative: the port is the
   // RegistrarUnarmed hard-block, so no buy is attempted and no incomplete
-  // registrant is ever sent — the graceful registrar_unarmed 503 instead. (The
-  // incomplete_registrant → 400 mapping stays as defensive code, reachable now
-  // only via the persisted-state flows like REPLACE_DOMAIN, not a fresh setup
-  // call — see the assertCompleteRegistrant unit test above for its data shape.)
+  // registrant is ever sent. (The incomplete_registrant → 400 mapping stays as
+  // defensive code, reachable now only via the persisted-state flows like
+  // REPLACE_DOMAIN, not a fresh setup call — see the assertCompleteRegistrant
+  // unit test above for its data shape.)
+  //
+  // THE REFUSAL'S GRADE MOVED (design §7.8, gate L2 — deliberate contract
+  // change #3 of §7.9's three). The hard-block and the zero buys below are the
+  // load-bearing assertions and are unchanged; what changed is that this leg no
+  // longer answers 503 "not enabled for this ACCOUNT", which is the sentence
+  // that sent a real customer's unattended agent to file a ticket instead of
+  // resending one field (sup_dce385a8 / sup_9d2c9a3a). The opt-in leg is now a
+  // 400 naming the field — test/registrar-two-leg-split.test.ts owns the split.
   it("a stale register_domains=1 row does NOT drive a real buy for a call that omits registerDomains — hard-blocks, zero buys, never incomplete_registrant", async () => {
     Object.assign(env, { REGISTRAR_PROVIDER: "inboxkit", INBOXKIT_API_KEY: "k", INBOXKIT_WORKSPACE_ID: "w" });
     const { token, tenantId } = await mintTenant("Stale Registrant Co", "managed");
@@ -588,8 +600,8 @@ describe("registrant capture — a stale persisted register_domains=1 no longer 
       }),
     });
 
-    expect(res.status).toBe(503);
-    expect(res.body.code).toBe("registrar_unarmed");
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("registrar_optin_missing");
     expect(res.body.code).not.toBe("incomplete_registrant");
     // The hard-block port throws on searchLookalikes before any vendor round
     // trip — no domain buy, no partial InboxKit registration on the stale

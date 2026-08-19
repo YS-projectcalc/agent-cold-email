@@ -12,7 +12,7 @@ import { buildMailboxBilling, syncMailboxQuantity, type MailboxBilling } from ".
 import { assertNotLifecycleFrozen } from "./billing-state.js";
 import { requireByoDomainRow } from "./byo-intake.js";
 import { provisionMailboxesForDomain } from "./mailbox-provisioning.js";
-import { slugify } from "./provisioning.js";
+import { slugify } from "./provisioning-plan.js";
 import { ONE_DAY_MS, warmupDailyCap } from "./warmup.js";
 
 export interface ManagedMailboxesResult {

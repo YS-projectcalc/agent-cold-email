@@ -92,6 +92,29 @@ export function toErrorResponse(err: unknown): ErrorResponse {
   // domain.release out of POST /cancel), holds no notification result to cite.
   // A customer told a human is already on it stops escalating.
   if (name === "RegistrarUnarmedError") {
+    // TWO LEGS, TWO ANSWERS (design §7.8, gate L2). Read as a FIELD, never via
+    // instanceof: an error crossing the DO->Worker RPC boundary arrives with
+    // its own properties and NO prototype.
+    //
+    // The OPT-IN leg is the caller's own request, and its own next call fixes
+    // it — so it is a 400 that names the field, modelled on
+    // IncompleteRegistrantError's naming precedent, and carries NO notification
+    // clause at all: nobody needs to be told, and an agent told a human is
+    // involved stops trying. Wording follows the customer's own retraction —
+    // "'registerDomains was not set on this request' would self-correct"
+    // (sup_9d2c9a3a). The ENV leg keeps today's 503 verbatim.
+    if (error?.reason === "opt_in") {
+      return {
+        status: 400,
+        body: {
+          error:
+            "Domain registration was not authorized for this request: it did not set `registerDomains: true`. " +
+            "No purchase was attempted and nothing about your account changed. Resend the same call with " +
+            "`registerDomains: true` to authorize it.",
+          code: "registrar_optin_missing",
+        },
+      };
+    }
     return {
       status: 503,
       body: {

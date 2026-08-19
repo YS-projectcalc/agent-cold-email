@@ -154,7 +154,8 @@ export interface SendPipelineSignals {
  * in-flight window (mirrors AGING_CRED_PUSH_MS's own reasoning above). */
 export const DEFAULT_PROVISIONING_ORPHAN_GRACE_MS = 30 * 60 * 1000;
 
-function provisioningOrphanGraceMs(ctx: TenantContext): number {
+/** Exported so `engine/next-steps.ts`'s `ordinal_incomplete` ages against the SAME bound the orphan checks use, rather than inventing a second one. */
+export function provisioningOrphanGraceMs(ctx: TenantContext): number {
   const raw = ctx.env.PROVISIONING_ORPHAN_GRACE_MS;
   const n = raw ? Number(raw) : NaN;
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_PROVISIONING_ORPHAN_GRACE_MS;

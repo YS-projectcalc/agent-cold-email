@@ -24,19 +24,19 @@ import { signup, tenantStub } from "./helpers.js";
 function alwaysRegistrarUnarmed(): DomainPort {
   return {
     async searchLookalikes(): Promise<LookalikeCandidate[]> {
-      throw new RegistrarUnarmedError("searchLookalikes");
+      throw new RegistrarUnarmedError("searchLookalikes", "env");
     },
     async listOwnedDomains(): Promise<OwnedDomain[]> {
-      throw new RegistrarUnarmedError("listOwnedDomains");
+      throw new RegistrarUnarmedError("listOwnedDomains", "env");
     },
     async buy(): Promise<PurchasedDomain> {
-      throw new RegistrarUnarmedError("buy");
+      throw new RegistrarUnarmedError("buy", "env");
     },
     async setDns(): Promise<DomainDnsResult> {
-      throw new RegistrarUnarmedError("setDns");
+      throw new RegistrarUnarmedError("setDns", "env");
     },
     async release(): Promise<ReleaseResult> {
-      throw new RegistrarUnarmedError("release");
+      throw new RegistrarUnarmedError("release", "env");
     },
   };
 }

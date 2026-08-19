@@ -2,11 +2,13 @@ import {
   CapacityPendingError,
   isPaidPlan,
   RegistrarUnarmedError,
+  resolveDistribution,
   ValidationError,
   VendorError,
   type LookalikeCandidate,
   type OwnedDomain,
   type PurchasedDomain,
+  type NextSteps,
   type SetupInfrastructureInput,
 } from "@coldstart/shared";
 import { newId } from "../schema.js";
@@ -19,8 +21,10 @@ import { assertNotLifecycleFrozen } from "./billing-state.js";
 import { assertBrandOwnership } from "./brand-guard.js";
 import { DomainPropagationPendingError, setDnsWithRetry } from "./domain-dns.js";
 import { forEachIsolated } from "../isolated-loop.js";
-import { managedMailboxAddress, provisionMailboxesForDomain } from "./mailbox-provisioning.js";
-import { domainIntentKey, markDomainIntent, readDomainIntent, recordDomainIntent, type DomainIntentRow } from "./provision-intents.js";
+import { provisionMailboxesForDomain } from "./mailbox-provisioning.js";
+import { deriveNextSteps } from "./next-steps.js";
+import { planFor, readProvisioningSnapshot, slugify } from "./provisioning-plan.js";
+import { domainIntentKey, markDomainIntent, recordDomainIntent, type DomainIntentRow } from "./provision-intents.js";
 import { assertWithinProvisioningCap } from "./quota.js";
 import { screenTenant } from "../ofac/screening.js";
 import { alertRegistrarUnarmed } from "./registrar-alert.js";
@@ -45,11 +49,14 @@ function ownedDomainNames(ctx: TenantContext): Set<string> {
   );
 }
 
-export function slugify(input: string): string {
-  return input.toLowerCase().replace(/[^a-z0-9]+/g, "").slice(0, 20) || "hello";
-}
-
-/** The live domain a COMMITTED intent already resolved to, or undefined. */
+/**
+ * The live domain a COMMITTED intent already resolved to, or undefined.
+ *
+ * The SAGA's own resume check, deliberately not the planner's: it needs
+ * `dns_status` to decide whether the resume still owes a nameserver re-drive,
+ * which is a per-ordinal fact about work in flight rather than part of the
+ * read-once planning snapshot (engine/provisioning-plan.ts).
+ */
 function liveDomainForIntent(
   ctx: TenantContext,
   intent: DomainIntentRow,
@@ -62,65 +69,6 @@ function liveDomainForIntent(
       intent.candidate_domain,
     )
     .toArray()[0];
-}
-
-/** What a setup_infrastructure call would actually acquire, given what exists. */
-interface ProvisioningPlan {
-  /** Ordinal -> the live domain a prior attempt already committed there. */
-  satisfied: Map<number, { id: string; domain: string }>;
-  /** Domains this call still has to BUY. */
-  newDomains: number;
-  /** Mailbox slots in the request that no live mailbox fills yet. */
-  newMailboxes: number;
-}
-
-/**
- * Reconciles the request against what the tenant already has (BLOCKING-1).
- *
- * `domains`/`inboxesEach` are a TARGET, not a delta: the ordinals a prior call
- * committed resume, and only the shortfall is bought. Everything downstream that
- * needs to know "how much will THIS call add" reads it from here — the plan cap,
- * the quote, the candidate requirement — so a pure retry, which adds nothing,
- * cannot be rejected by a guard sized against the whole ask. Before this, a
- * retry at the plan ceiling failed the cap check (existing + the full request),
- * and a retry that needed no new domain still failed if no FRESH lookalike
- * happened to be available. Both were convergence failures dressed as 400s.
- *
- * Pure reads — safe to run before the lifecycle/brand guards have spent anything.
- */
-function planProvisioning(ctx: TenantContext, input: SetupInfrastructureInput): ProvisioningPlan {
-  const personaSlug = slugify(input.persona);
-  const satisfied = new Map<number, { id: string; domain: string }>();
-  let newDomains = 0;
-  let newMailboxes = 0;
-
-  for (let domainIndex = 0; domainIndex < input.domains; domainIndex++) {
-    const intent = readDomainIntent(ctx, domainIntentKey(ctx.tenantId, domainIndex));
-    const live = intent ? liveDomainForIntent(ctx, intent) : undefined;
-    if (!live) {
-      newDomains++;
-      newMailboxes += input.inboxesEach;
-      continue;
-    }
-    satisfied.set(domainIndex, { id: live.id, domain: live.domain });
-    // Count the SLOTS, by their deterministic addresses — not the domain's live
-    // mailbox count. A call that changes `persona` targets different addresses,
-    // and counting rows would understate what it is about to buy, which is the
-    // one direction a spend guard must never be wrong in.
-    for (let mailboxIndex = 0; mailboxIndex < input.inboxesEach; mailboxIndex++) {
-      const email = managedMailboxAddress(personaSlug, live.domain, domainIndex, mailboxIndex);
-      const exists = ctx.sql
-        .exec<{ n: number }>(
-          `SELECT COUNT(*) as n FROM mailboxes WHERE tenant_id = ? AND email = ? AND released_at IS NULL`,
-          ctx.tenantId,
-          email,
-        )
-        .one().n;
-      if (exists === 0) newMailboxes++;
-    }
-  }
-
-  return { satisfied, newDomains, newMailboxes };
 }
 
 /**
@@ -404,8 +352,21 @@ export async function provisionDomainWithMailboxes(
  * the replay layer could tell a held provision from a completed one.
  */
 export type SetupInfrastructureRunResult =
-  | { jobId: string; billing: MailboxBilling; provisioning?: "pending" | "capacity_pending"; pendingDomain?: string }
-  | { quoteOnly: true; billing: MailboxBilling };
+  | {
+      jobId: string;
+      billing: MailboxBilling;
+      provisioning?: "pending" | "capacity_pending";
+      pendingDomain?: string;
+      /**
+       * ORTHOGONAL METADATA, present on terminal and non-terminal outcomes
+       * alike, and deliberately NOT spelled into the `provisioning` union above:
+       * `isSetupProvisioningIncomplete` tests that field's PRESENCE, so a
+       * terminal response carrying `nextSteps` must still classify complete
+       * (test/next-steps-surfaces.test.ts pins it).
+       */
+      nextSteps?: NextSteps;
+    }
+  | { quoteOnly: true; billing: MailboxBilling; nextSteps?: NextSteps };
 
 /**
  * Does a RECORDED `runSetupInfrastructure` outcome still owe work?
@@ -461,8 +422,11 @@ export async function runSetupInfrastructure(
 
   // What this call would actually acquire, given the ordinals already committed.
   // Every guard below is sized against THIS, not the raw ask, so a retry — which
-  // acquires nothing — passes them all.
-  const plan = planProvisioning(ctx, input);
+  // acquires nothing — passes them all. The SAME planner the recommendation
+  // dry-runs (engine/provisioning-plan.ts), so a suggested call and the call
+  // that executes it can never disagree about what it buys.
+  const distribution = resolveDistribution(input);
+  const plan = planFor(readProvisioningSnapshot(ctx), { persona: input.persona, distribution });
 
   // Plan quota / provisioning-cap guard (B1 brief) — BEFORE any spend.
   assertWithinProvisioningCap(ctx, { domains: plan.newDomains, mailboxes: plan.newMailboxes });
@@ -476,7 +440,11 @@ export async function runSetupInfrastructure(
   // monthly WITHOUT provisioning or mutating the profile — the request is fully
   // validated above so the projection reflects a genuinely-acceptable request.
   if (input.quoteOnly) {
-    return { quoteOnly: true, billing: buildMailboxBilling(ctx, liveProvisioned() + plan.newMailboxes) };
+    return {
+      quoteOnly: true,
+      billing: buildMailboxBilling(ctx, liveProvisioned() + plan.newMailboxes),
+      nextSteps: deriveNextSteps(ctx),
+    };
   }
 
   // H8, asymmetric by risk. Deferring the whole profile write past the reads
@@ -522,7 +490,7 @@ export async function runSetupInfrastructure(
     }
     // H3b (pipeline F1+F3) — ask for enough candidates to survive BOTH filters
     // below. The generator is stateless and deterministic, so requesting exactly
-    // `input.domains` guaranteed that a second call regenerated the domain the
+    // the domain count guaranteed that a second call regenerated the domain the
     // first call already bought (Mordy's call 2, a certain failure). Same
     // over-request the burn-replacement picker already does
     // (deliverability-actions.ts's pickReplacementDomain) — this path simply
@@ -530,7 +498,7 @@ export async function runSetupInfrastructure(
     candidates = await ctx.adapters.domain.searchLookalikes(
       input.brand,
       input.primaryDomain,
-      input.domains + ownedDomainNames(ctx).size + CANDIDATE_BUFFER,
+      distribution.length + ownedDomainNames(ctx).size + CANDIDATE_BUFFER,
     );
   } catch (err) {
     if (err instanceof RegistrarUnarmedError) {
@@ -555,21 +523,31 @@ export async function runSetupInfrastructure(
   // it was captured with UNTOUCHED — the F2 fix. The previous unconditional
   // write zeroed both columns for any caller that merely omitted the fields.
   if (input.registerDomains !== undefined) {
-    ctx.sql.exec(
-      `UPDATE tenant_profile SET register_domains = ?, registrant_json = ? WHERE id = ?`,
-      // G5 gate (a) follow-up — the tenant's PER-TENANT, PERSISTED consent to
-      // real domain purchases (founder ruling 2026-07-21: "per-tenant opt-in
-      // only, never a default"). Governs the deliverability control loop's
-      // REPLACE_DOMAIN burn-replacement buys too (vendors/registrar-arming.ts).
-      input.registerDomains ? 1 : 0,
-      // Registrar-arming follow-up (2026-07-28) — the structured registrant-of-
-      // record. zod (SetupInfrastructureInput's refinement) guarantees
-      // `input.registrant` is present + complete whenever `registerDomains` is
-      // true, so this write is never partial for a call that opts in THIS time.
-      // Written alongside register_domains so the two can never drift apart.
-      input.registrant ? JSON.stringify(input.registrant) : null,
-      ctx.tenantId,
-    );
+    if (input.registerDomains && input.registrant === undefined) {
+      // OPTING IN WITHOUT RE-SENDING THE REGISTRANT (the §7.8 relaxation). The
+      // call expressed an opinion about CONSENT and none about the registrant,
+      // so only consent moves — H8b's own reasoning, one field over. Writing
+      // NULL here would erase the registrant this call is relying on the engine
+      // to re-derive, and the very next `assertCompleteRegistrant` would 400 on
+      // a tenant whose registrant is on file. The pairing invariant survives:
+      // the two columns can only drift apart in the direction "consent given,
+      // registrant already on file", which is exactly the state the buy-site
+      // completeness check exists to validate.
+      ctx.sql.exec(`UPDATE tenant_profile SET register_domains = 1 WHERE id = ?`, ctx.tenantId);
+    } else {
+      ctx.sql.exec(
+        `UPDATE tenant_profile SET register_domains = ?, registrant_json = ? WHERE id = ?`,
+        // G5 gate (a) follow-up — the tenant's PER-TENANT, PERSISTED consent to
+        // real domain purchases (founder ruling 2026-07-21: "per-tenant opt-in
+        // only, never a default"). Governs the deliverability control loop's
+        // REPLACE_DOMAIN burn-replacement buys too (vendors/registrar-arming.ts).
+        input.registerDomains ? 1 : 0,
+        // The structured registrant-of-record, written alongside the consent it
+        // was captured with. A revocation still clears it, unchanged.
+        input.registrant ? JSON.stringify(input.registrant) : null,
+        ctx.tenantId,
+      );
+    }
   }
 
   // H3b — the usable set: not already ours, and the vendor says it can be
@@ -650,9 +628,15 @@ export async function runSetupInfrastructure(
   // Resolved out here, not inside the isolated body below, because running out
   // of candidates is a condition of the CALL (nothing left to hand any ordinal),
   // not a failure of one ordinal — so it propagates exactly as it always did.
-  const ordinals: { domainIndex: number; domain: string }[] = [];
-  for (let domainIndex = 0; domainIndex < input.domains; domainIndex++) {
-    ordinals.push({ domainIndex, domain: plan.satisfied.get(domainIndex)?.domain ?? fresh.shift() ?? noCandidates() });
+  const ordinals: { domainIndex: number; domain: string; inboxesEach: number }[] = [];
+  for (let domainIndex = 0; domainIndex < distribution.length; domainIndex++) {
+    ordinals.push({
+      domainIndex,
+      domain: plan.satisfied.get(domainIndex)?.domain ?? fresh.shift() ?? noCandidates(),
+      // Per-ordinal, from the resolved distribution — a uniform `inboxesEach`
+      // is simply the distribution every element of which is equal.
+      inboxesEach: distribution[domainIndex] as number,
+    });
   }
 
   // Wire point A (system->agent message channel, increment 1) + N2 (gate
@@ -675,13 +659,13 @@ export async function runSetupInfrastructure(
   // them together.
   const outcome = await forEachIsolated(
     ordinals,
-    async ({ domainIndex, domain }) => {
+    async ({ domainIndex, domain, inboxesEach }) => {
       inFlightByOrdinal.set(domainIndex, domain);
       await provisionDomainWithMailboxes(ctx, {
         domain,
         domainIndex,
         personaSlug,
-        inboxesEach: input.inboxesEach,
+        inboxesEach,
         // The intent key — tenant + ordinal, never the caller's key and never
         // the candidate name: a retry has to resolve to the same intent row even
         // if candidate generation changes, which is the whole point of recording
@@ -759,7 +743,12 @@ export async function runSetupInfrastructure(
       // docblock asserted the opposite ("a retry after the founder raises the
       // ceiling re-runs cleanly") — true for the inner per-mailbox wrapper it
       // was written about, false for this outer one, which caught the throw.
-      return { jobId: newId("job"), billing: buildMailboxBilling(ctx, liveProvisioned()), provisioning: "capacity_pending" };
+      return {
+        jobId: newId("job"),
+        billing: buildMailboxBilling(ctx, liveProvisioned()),
+        provisioning: "capacity_pending",
+        nextSteps: deriveNextSteps(ctx),
+      };
     }
     if (err instanceof RegistrarUnarmedError) {
       await alertRegistrarUnarmed(ctx, input.primaryDomain, err, mailer);
@@ -811,6 +800,7 @@ export async function runSetupInfrastructure(
         billing: buildMailboxBilling(ctx, liveProvisioned()),
         provisioning: "pending",
         pendingDomain: inFlightDomain ?? "",
+        nextSteps: deriveNextSteps(ctx),
       };
     }
     // Wire point A — a RETRYABLE VendorError here is H2's exact shape
@@ -897,5 +887,5 @@ export async function runSetupInfrastructure(
   // capacity addition); computed from the REAL post-provision count. The Stripe
   // mailbox quantity was already mirrored to it above (design §2/§9 — a provision
   // raises the count, increases prorate).
-  return { jobId: newId("job"), billing: buildMailboxBilling(ctx, liveProvisioned()) };
+  return { jobId: newId("job"), billing: buildMailboxBilling(ctx, liveProvisioned()), nextSteps: deriveNextSteps(ctx) };
 }
