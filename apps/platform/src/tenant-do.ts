@@ -31,6 +31,7 @@ import { DelegatingClock, RealClock, requireVirtualClock, VirtualClock } from ".
 import { realNowMs } from "./engine/clamped-age.js";
 import { migrateTenantClockToReal } from "./engine/clock-migration.js";
 import { reconcileLegacyDomainIntentKeys } from "./engine/legacy-domain-intent-keys.js";
+import { backfillPersonaSlugs } from "./engine/persona-backfill.js";
 import type { StripeEventInput } from "./billing/stripe-webhook.js";
 import type { Env } from "./env.js";
 import {
@@ -127,7 +128,7 @@ import { clearScreeningStatus, LIST_UNAVAILABLE_VERSION, screenTenant } from "./
 import { createVendorAdapters, selectRealDomainPort, type VendorAdapterBundle } from "./vendors/factory.js";
 import type { EngineClientConfig } from "./vendors/real/email-port.js";
 import type { InboxKitClientConfig } from "./vendors/real/inboxkit-client.js";
-import { deriveInboxKitRegistrant, isInboxKitRegistrarArmed, readRegistrarArming, readRegistrarOptInState } from "./vendors/registrar-arming.js";
+import { deriveInboxKitRegistrant, isInboxKitRegistrarArmed, readPersistedRegistrantJson, readRegistrarArming } from "./vendors/registrar-arming.js";
 
 export interface InitTenantInput {
   tenantId: string;
@@ -223,6 +224,9 @@ export class TenantDO extends DurableObject<Env> {
       // tenant's own time base, and for a paid tenant that base is only correct
       // once the migration above has run.
       this.reconcileLegacyDomainIntents(row.id, clock.now());
+      // AFTER the rebind, which is what puts a legacy intent back on an ORDINAL
+      // key — and the ordinal is exactly what the persona inversion needs.
+      this.backfillPersonaSlugs(row.id);
     }
   }
 
@@ -249,6 +253,28 @@ export class TenantDO extends DurableObject<Env> {
       }
     } catch (err) {
       console.error(`legacy domain-intent key reconciliation FAILED for ${tenantId}; state unchanged, will retry on next construction`, err);
+    }
+  }
+
+  /**
+   * BLOCKING-1 (docs/adversarial/customer-continuity-build-gate-2026-08-19.md)
+   * — recovers `domain_intents.persona_slug` for the pre-column population by
+   * INVERTING the deterministic mailbox address (engine/persona-backfill.ts
+   * carries the mechanism and the abstention rules).
+   *
+   * Same failure posture as the rebind above: a throw here would brick the
+   * tenant's DO permanently, and a persona left NULL is a state the derivation
+   * already handles honestly (it abstains from pricing), so this logs and
+   * carries on rather than propagating.
+   */
+  private backfillPersonaSlugs(tenantId: string): void {
+    try {
+      const { recovered, abstained } = backfillPersonaSlugs(this.ctx.storage, tenantId);
+      if (recovered > 0 || abstained > 0) {
+        console.log(`persona_slug backfill for ${tenantId}: ${recovered} recovered, ${abstained} left NULL (not recoverable)`);
+      }
+    } catch (err) {
+      console.error(`persona_slug backfill FAILED for ${tenantId}; state unchanged, will retry on next construction`, err);
     }
   }
 
@@ -834,10 +860,12 @@ export class TenantDO extends DurableObject<Env> {
   // real-eligible tenant re-runs the factory's two-leg gate via
   // selectRealDomainPort (the decouple guard stays inviolable: env leg absent →
   // hard-block regardless of what the call says). The registrant is derived
-  // from this call's input exactly as readRegistrarOptInState derives it from
-  // the just-persisted row (deriveInboxKitRegistrant — organization falls back
-  // to brand), so the port's baked registrant and provisionDomainWithMailboxes's
-  // post-UPDATE completeness pre-flight can never disagree.
+  // from this call's OWN contact fields — the ones this call is about to
+  // persist — over the structured registrant it supplied or, failing that, the
+  // one on file. That is the same pair `provisionDomainWithMailboxes`'s
+  // post-UPDATE completeness pre-flight reads, so the port's baked registrant
+  // and that pre-flight cannot disagree (non-blocking 7 corrected the version
+  // of this sentence that was an argument rather than a construction).
   private selectSetupDomainPort(base: TenantContext, input: SetupInfrastructureInput): DomainPort {
     const bundle = base.adapters;
     if (bundle.kind !== "real") return bundle.domain;
@@ -862,16 +890,26 @@ export class TenantDO extends DurableObject<Env> {
       // input ALONE would have filed the brand/physicalAddress-derived PARTIAL
       // for exactly the call this wave recommends, while
       // `provisionDomainWithMailboxes`'s pre-flight validated the COMPLETE
-      // persisted one and waved it through. The two must agree; they agree by
-      // reading the same source when this call names none.
-      registrant: input.registrant
-        ? deriveInboxKitRegistrant({
-            brand: input.brand,
-            physicalAddress: input.physicalAddress,
-            senderIdentity: input.senderIdentity,
-            registrantJson: JSON.stringify(input.registrant),
-          })
-        : readRegistrarOptInState(base.sql, base.tenantId).registrant,
+      // persisted one and waved it through.
+      //
+      // ONE derivation over both branches, differing only in where the
+      // structured registrant comes from (non-blocking 7). The CONTACT FIELDS
+      // are always THIS call's — `runSetupInfrastructure` is about to write
+      // exactly these into `tenant_profile`, and the buy-site pre-flight
+      // (`assertCompleteRegistrant`) reads the row AFTER that write. Deriving
+      // the fallback against the pre-update row instead made the port bake
+      // `organization` from the brand this call is REPLACING: both checks
+      // passed and the registrar filing — a real legal document — carried the
+      // previous brand. "They can never disagree" is now true by construction
+      // rather than by argument.
+      registrant: deriveInboxKitRegistrant({
+        brand: input.brand,
+        physicalAddress: input.physicalAddress,
+        senderIdentity: input.senderIdentity,
+        registrantJson: input.registrant
+          ? JSON.stringify(input.registrant)
+          : readPersistedRegistrantJson(base.sql, base.tenantId),
+      }),
     });
   }
 
@@ -887,12 +925,21 @@ export class TenantDO extends DurableObject<Env> {
    * BLOCKING adversarial finding that once caught this exact tool lying
    * about being read-only) asserts it issues ZERO writes on every invoke —
    * folding this stamp into it would reintroduce precisely the defect that
-   * test exists to prevent. Callers that resolved a BEARER credential
-   * (`routes/infrastructure.ts`'s HTTP route, `mcp/tools.ts`'s
-   * `infrastructure_status` — the hosted MCP endpoint is bearer-only,
-   * `mcp/handler.ts`'s `resolveTenantFromToken`) invoke this ALONGSIDE the
-   * read, never inside it; a cookie-authed dashboard caller never calls it
-   * at all, which is what keeps a single open browser tab from stamping.
+   * test exists to prevent. Callers that resolved a BEARER credential invoke
+   * this ALONGSIDE their work, never inside it; a cookie-authed dashboard
+   * caller never calls it at all, which is what keeps a single open browser
+   * tab from stamping.
+   *
+   * TWO CALL SITES, and between them they are what "agent activity" MEANS
+   * (non-blocking 4, build gate 2026-08-19):
+   *   - `mcp/handler.ts`'s `tools/call` — EVERY tool, once per call. That
+   *     endpoint resolves the tenant from the Authorization/X-API-Key header
+   *     only (`resolveTenantFromToken`), so it is bearer-only by construction.
+   *   - `routes/infrastructure.ts`'s status route, gated on
+   *     `authVia === "bearer"` because that one shares its path with the
+   *     cookie-authed dashboard.
+   * It used to be ONE tool (`infrastructure_status`), so an agent driving
+   * setup/launch/ack for a day without polling status was scored stalled.
    *
    * 5-minute-throttled, real-wall-clock, SYNCHRONOUS (no `await` — §7.16
    * invariant 1): a single read + at most one write, both plain SqlStorage

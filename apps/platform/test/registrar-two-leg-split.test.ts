@@ -1,11 +1,11 @@
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RegistrarUnarmedError } from "@coldstart/shared";
 import { toErrorResponse } from "../src/error-response.js";
 import { selectRealDomainPort } from "../src/vendors/factory.js";
 import { RegistrarUnarmedDomainPort } from "../src/vendors/real/domain-port.js";
 import { RealInboxKitDomainPort } from "../src/vendors/real/inboxkit-domain-port.js";
-import { activatePaidPlan, api, mintTenant, seedBenignSdnList } from "./helpers.js";
+import { activatePaidPlan, api, mintTenant, seedBenignSdnList, tenantStub } from "./helpers.js";
 import { fakeInboxKit, REGISTRANT } from "./fixtures/inboxkit-workspace.js";
 import { IK_API_KEY, IK_WORKSPACE_ID } from "./fixtures/inboxkit.js";
 
@@ -177,6 +177,40 @@ describe("I3 — end to end: the live incident's call", () => {
     expect(res.body?.code).toBe("registrar_optin_missing");
     expect(res.body?.error).toContain("registerDomains");
     expect(fixture.countOf("/domains/register")).toBe(0);
+  });
+
+  // NON-BLOCKING-7 (build gate 2026-08-19) — `tenant-do.ts` asserted that the
+  // port's baked registrant and the buy-site pre-flight "can never disagree".
+  // They could. `selectSetupDomainPort` reads `base.sql` BEFORE
+  // `runSetupInfrastructure`'s UPDATE, so with `registrant` omitted and a
+  // persisted registrant carrying no `organization`, the port baked
+  // `organization <- the PRE-update brand` while `assertCompleteRegistrant`
+  // validated the POST-update one. Both passed; the registrar filing — a real
+  // legal document — carried the previous brand.
+  it("bakes the registrant's organization from THIS call's brand, not the one it is replacing", async () => {
+    Object.assign(env, { REGISTRAR_PROVIDER: "inboxkit", INBOXKIT_API_KEY: IK_API_KEY, INBOXKIT_WORKSPACE_ID: IK_WORKSPACE_ID });
+    const { token, tenantId } = await mintTenant("Previous Brand LLC", "managed");
+    await activatePaidPlan(tenantId, "managed");
+    // Consent and a COMPLETE registrant already on file — except `organization`,
+    // the one field that falls back to the brand. This is the §7.8 relaxation's
+    // own population: a call that opts in and sends no registrant.
+    const { organization: _dropped, ...withoutOrganization } = COMPLETE_REGISTRANT;
+    await runInDurableObject(tenantStub(tenantId), (_instance, state) => {
+      state.storage.sql.exec(
+        `UPDATE tenant_profile SET register_domains = 1, registrant_json = ? WHERE id = ?`,
+        JSON.stringify(withoutOrganization),
+        tenantId,
+      );
+    });
+
+    const fixture = fakeInboxKit({ domains: [], mailboxesReadyOnBuy: true });
+    const res = await api("/setup-infrastructure", { method: "POST", token, body: setupBody({ registerDomains: true }) });
+    expect(res.status).toBe(202);
+
+    const register = fixture.calls.find((c) => c.path === "/domains/register");
+    expect(register, "the call must actually reach the registrar for this to prove anything").toBeDefined();
+    const contact = (register?.body as { contact_details: { organization: string } }).contact_details;
+    expect(contact.organization).toBe("Two Leg Co");
   });
 
   it("the env leg still 503s — the decouple guard holds and its wording is unchanged", async () => {

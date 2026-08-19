@@ -47,13 +47,26 @@ export const NEXT_STEP_REASONS = [
 ] as const;
 export type NextStepReason = (typeof NEXT_STEP_REASONS)[number];
 
-/** The MCP tools a step can name. Every member must be a real tool in `mcp/tools.ts` (guard G3). */
-export type NextStepTool =
-  | "setup_infrastructure"
-  | "launch_campaign"
-  | "contact_operator"
-  | "ack_message"
-  | "configure_byo_domain";
+/**
+ * The MCP tools a step can name. Every member must be a real tool in
+ * `mcp/tools.ts` (guard G3).
+ *
+ * RUNTIME ARRAY FIRST, type derived from it — the `NEXT_STEP_REASONS` shape,
+ * and for the same reason (non-blocking 5, build gate 2026-08-19). As a
+ * type-only union this was erased at runtime, so G3's guard had to hand-copy
+ * the members into a literal: a RENAME failed loud (the annotation rejected
+ * it), but a sixth member ADDED to the union and emitted in a step was never
+ * checked — and "a tool value that isn't a real tool" is the direction that
+ * guard exists for.
+ */
+export const NEXT_STEP_TOOLS = [
+  "setup_infrastructure",
+  "launch_campaign",
+  "contact_operator",
+  "ack_message",
+  "configure_byo_domain",
+] as const;
+export type NextStepTool = (typeof NEXT_STEP_TOOLS)[number];
 
 /**
  * How the caller acts.

@@ -5,6 +5,9 @@
 - [wall-clock-rotation-makes-order-assertions-periodic-flakes](wall-clock-rotation-makes-order-assertions-periodic-flakes.md) — `rotationOffset(clock.now(),…)` flips list order every cron period; fixed-order assertions are wall-clock flakes — pin the clock and assert coverage + rotation, not order.
 
 ## Failure mechanisms (check before diagnosing a hard case)
+- [insert-only-column-null-for-pre-column-population](insert-only-column-null-for-pre-column-population.md) — ⚠️ CUSTOMER P0 08-19: `addColumnIfMissing` + an INSERT-only writer = permanently NULL for the whole existing paying population; `slugify("")→"hello"` priced +$16/mo as "unchanged". Invert the deterministic address to recover it.
+- [bookkeeping-write-outside-try-fails-the-call](bookkeeping-write-outside-try-fails-the-call.md) — ⚠️ (I shipped it, the full net caught it): a liveness stamp added bare to the MCP handler makes bookkeeping a precondition of all 28 tools; wrap best-effort, then sweep the sibling site.
+- [staleness-exclusion-needs-severity-scope-not-just-kind](staleness-exclusion-needs-severity-scope-not-just-kind.md) — "re-derivable" is a property of (kind × severity): the same kind's `operator_pending` form means a LIVE operator blocker; expire with `expires_at`, never `read_at`.
 - [two-valued-grade-for-a-three-valued-refusal](two-valued-grade-for-a-three-valued-refusal.md) — ⚠️ THE 08-18 CLASS: a boolean `retryable` cannot say "an operator clears this, then the SAME retry works", so every such refusal is emitted as "check your inputs"; widest member is 401/402/403 at the ROOT grader.
 - [vendor-prepaid-wallet-exhaustion-reads-as-permanent](vendor-prepaid-wallet-exhaustion-reads-as-permanent.md) — ⚠️ CUSTOMER P0 08-18: an empty InboxKit CREDIT WALLET 4xx's every money-out call; status-only grading calls it permanent and the agent is told "never retry" for a top-up. Probe `GET /billing/wallet`.
 - [fixture-born-with-the-code-restates-its-premise](fixture-born-with-the-code-restates-its-premise.md) — ⚠️ a fixture authored in the SAME commit as its parser tests the code's premise, not the vendor's; `getHealth` shipped NaN for a month, green. Demand `capturedFrom`/`capturedAt`.
@@ -58,6 +61,7 @@
 - [vitest-pool-workers-ambient-devvars-leak](vitest-pool-workers-ambient-devvars-leak.md) — the pool auto-loads `apps/*/.dev.vars` and injects every key, so a dev's ambient real secret flips a behavior gate; construct bindings from an allowlist.
 
 ## Build techniques
+- [revert-proof-must-revert-the-importer-too](revert-proof-must-revert-the-importer-too.md) — ⚠️ reverting only the fix file deletes an export its still-modified consumer imports → the RED leg dies at MODULE LOAD and proves nothing; revert the importers too, back up with `cp`, prove the restore by `git diff | shasum`.
 - [failing-by-construction-env-coverage-guard](failing-by-construction-env-coverage-guard.md) — enforce "a new env binding must wire into isRealSpendArmed" with a test that `?raw`-parses env.ts source, so the NEXT binding trips RED.
 - [coldstart-engine-crash-injection-idiom](coldstart-engine-crash-injection-idiom.md) — deterministic engine crash tests via a faulty SendLog + discard-and-rebuild-from-disk; engine vitest's ~30s ESM transform is not a hang.
 - [declared-content-length-cap-is-opt-out](declared-content-length-cap-is-opt-out.md) — ⚠️ a body cap reading DECLARED Content-Length is opt-out (chunked → NaN → skipped); fix at ONE reader, strip comments in the tripwire.

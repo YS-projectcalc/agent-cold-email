@@ -73,6 +73,48 @@ const DNS_RETRY_CADENCE_MS = 5 * 60 * 1000;
  */
 const SELF_WRITTEN_MESSAGE_KINDS = new Set(["continuity_nudge"]);
 
+/**
+ * The message kinds this platform writes ABOUT PROVISIONING STATE, and can
+ * therefore RE-DERIVE (BLOCKING-2, build gate 2026-08-19).
+ *
+ * `read_at` has exactly one writer — `ackMessage`, the CUSTOMER's call — so a
+ * `retry_setup` row about a domain whose setup later FINISHED had no path to
+ * stop being owed. On the one live paying tenant that made `status: "owed"`
+ * permanent, suppressed `seat_headroom_free` through the E1 predicate, took the
+ * stuck-customer check unhealthy on the 48h owed-age bound, and pointed the
+ * one-shot nudge at a customer to say their account "has not progressed in over
+ * a day" — about work that completed.
+ *
+ * These two kinds are the ones whose condition this same derivation ALREADY
+ * computes from state, in the setup family below. Nothing else is re-derivable
+ * here: an operator's reply, a credential notice or a `send_blocked` notice are
+ * not things `deriveNextSteps` can check, so they keep counting until acked.
+ *
+ * `setup_failed` is listed for the family, not because it is reachable today:
+ * `provisioning.ts` writes it at `operator_pending` or `terminal`, and the rule
+ * below deliberately applies to `action_required` ONLY. It takes effect only if
+ * that kind is ever written at that severity.
+ */
+const RE_DERIVABLE_SETUP_MESSAGE_KINDS = new Set(["retry_setup", "setup_failed"]);
+
+/**
+ * The reasons that ARE the condition those messages describe: "this account's
+ * provisioning is not finished". Read off the steps the derivation already
+ * built rather than re-deriving the predicate a second way — a second copy is
+ * how the two come to disagree, and this file exists because that keeps
+ * happening (§7.17.2).
+ *
+ * `billed_quantity_drift` is deliberately NOT a member: it is a Stripe push
+ * that did not land, not unfinished provisioning, and a retry_setup row says
+ * nothing about it.
+ */
+const SETUP_FAMILY_REASONS = new Set<NextStep["reason"]>([
+  "paid_seats_unprovisioned",
+  "ordinal_incomplete",
+  "domain_dns_incomplete",
+  "setup_capacity_held",
+]);
+
 /** The profile fields a `setup_infrastructure` call needs, and where each comes from. */
 interface ProfileSnapshot {
   brand: string;
@@ -126,6 +168,7 @@ interface NextStepsSnapshot {
 }
 
 function readNextStepsSnapshot(ctx: TenantContext): NextStepsSnapshot {
+  const realNow = realNowMs();
   const profileRow = ctx.sql
     .exec<{
       brand: string;
@@ -171,9 +214,17 @@ function readNextStepsSnapshot(ctx: TenantContext): NextStepsSnapshot {
 
   const messages = ctx.sql
     .exec<{ id: string; kind: string; severity: string; created_at: number }>(
+      // EXPIRY IS PART OF "UNREAD" EVERYWHERE ELSE — listSurfacedTenantMessages,
+      // listMessagesPage and emitTenantMessage's dedup all carry this clause.
+      // Without it here, `owedCount` counted a row no agent-facing surface
+      // shows, so an operator expiring a resolved message (the gate's own
+      // "cheap resolution") changed nothing about owed-ness, and the durable
+      // expiry below would have been inert.
       `SELECT id, kind, severity, created_at FROM tenant_messages
-       WHERE tenant_id = ? AND read_at IS NULL ORDER BY created_at DESC, rowid DESC`,
+       WHERE tenant_id = ? AND read_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
+       ORDER BY created_at DESC, rowid DESC`,
       ctx.tenantId,
+      realNow,
     )
     .toArray()
     .map((r) => ({ id: r.id, kind: r.kind, severity: r.severity, createdAt: r.created_at }))
@@ -211,7 +262,7 @@ function readNextStepsSnapshot(ctx: TenantContext): NextStepsSnapshot {
       )
       .one().n,
     campaigns: ctx.sql.exec<{ n: number }>(`SELECT COUNT(*) as n FROM campaigns WHERE tenant_id = ?`, ctx.tenantId).one().n,
-    realNow: realNowMs(),
+    realNow,
     orphanGraceMs: provisioningOrphanGraceMs(ctx),
     composition: {
       managedDomains: managedDomains.length,
@@ -275,8 +326,16 @@ function setupParamsFor(snap: NextStepsSnapshot, distribution: number[], include
   params.distribution = distribution;
   // Persona has no column of its own — `domain_intents.persona_slug` is the
   // only persistence anywhere in the schema, and it holds the SLUGIFIED form,
-  // which is address-equivalent. Absent for a tenant that has never
-  // provisioned, and then it is genuinely unknown.
+  // which is address-equivalent.
+  //
+  // It is absent in exactly two cases, and the difference is the whole of
+  // BLOCKING-1. A tenant that has never provisioned genuinely never had one.
+  // A tenant that provisioned BEFORE the column existed has one in every
+  // mailbox address it owns — and `engine/persona-backfill.ts` recovers that at
+  // DO construction, by inverting the address. So by the time this reads NULL,
+  // the platform has already tried and failed to know: what is left is
+  // genuinely unknowable, and asking for it is honest rather than the mirror-
+  // image defect of §7.17.6.
   field("persona", snap.provisioning.personaSlug ?? "");
   field("physicalAddress", snap.profile.physicalAddress);
   field("senderIdentity", snap.profile.senderIdentity);
@@ -298,31 +357,84 @@ function setupParamsFor(snap: NextStepsSnapshot, distribution: number[], include
   return { params, paramsToSupply };
 }
 
-/** Would this recommendation actually acquire anything, and does it fit the plan cap? */
-function planRecommendation(
-  snap: NextStepsSnapshot,
-  distribution: number[],
-): { newMailboxes: number; provisionedAfter: number } | null {
-  if (distribution.length === 0) return null;
-  if (distribution.length > Math.ceil(MAX_SELF_SERVE_MAILBOXES / MAILBOXES_PER_DOMAIN)) return null;
+/**
+ * What the dry run can say about one candidate distribution.
+ *
+ * THREE-VALUED, because two of the three used to be one `null` and the third
+ * did not exist. `buys_nothing` suppresses the recommendation (a call the
+ * planner says acquires nothing is not worth emitting); `unpriceable` still
+ * emits the step, because the WORK is real even when the platform cannot put a
+ * number on it — it only withholds the `effect`. Collapsing them would either
+ * hide an owed step or price it dishonestly, and this wave has now been bitten
+ * by the second.
+ */
+type Recommendation =
+  | { status: "planned"; newMailboxes: number; provisionedAfter: number }
+  | { status: "buys_nothing" }
+  | { status: "unpriceable" };
+
+/**
+ * Does this target reach an ordinal that already holds a live domain?
+ *
+ * That is exactly the condition under which `planFor` derives ADDRESSES
+ * (`managedMailboxAddress(personaSlug, …)`) to decide which slots are already
+ * filled. An ordinal with no live domain contributes `slots` new mailboxes
+ * whatever the persona is, so a target that reaches none of them has a
+ * persona-INDEPENDENT answer and stays priced.
+ */
+function targetsLiveOrdinal(snap: ProvisioningSnapshot, distribution: number[]): boolean {
+  for (let ordinal = 0; ordinal < distribution.length; ordinal++) {
+    if (snap.intentsByOrdinal.get(ordinal)?.live) return true;
+  }
+  return false;
+}
+
+/** Would this recommendation actually acquire anything, does it fit the plan cap, and can it be priced honestly? */
+function planRecommendation(snap: NextStepsSnapshot, distribution: number[]): Recommendation {
+  if (distribution.length === 0) return { status: "buys_nothing" };
+  if (distribution.length > Math.ceil(MAX_SELF_SERVE_MAILBOXES / MAILBOXES_PER_DOMAIN)) return { status: "buys_nothing" };
   const total = distribution.reduce((a, b) => a + b, 0);
+  // BLOCKING-1's second half — ABSTAIN rather than plan against a persona the
+  // platform does not have. `slugify` ends `|| "hello"`, so passing `""` here
+  // does not fail: it silently plans against `hello11@…`, matches none of the
+  // tenant's real mailboxes, counts every slot as NEW, and prices a bill
+  // increase inside a step whose prose says the bill is unchanged.
+  //
+  // Scoped to the case where the answer actually DEPENDS on the persona (a
+  // targeted ordinal is live), which is also what makes the `?? ""` below
+  // safe rather than merely lucky: past this guard, `planFor` provably never
+  // constructs an address. The reconciler reached the same posture for the
+  // same NULL — "not safely completable, abstain"
+  // (provisioning-reconcile.ts's `skippedNoSpec`) — and this is the
+  // customer-facing reader of it.
+  if (snap.provisioning.personaSlug === null && targetsLiveOrdinal(snap.provisioning, distribution)) {
+    return { status: "unpriceable" };
+  }
   // Cap-checked IN MEMORY before emitting (non-blocking 6), so "the planner
   // says this call succeeds as written" is proven near the ceiling rather than
   // assumed. `assertWithinProvisioningCap` sizes against the SHORTFALL, so this
   // mirrors it: existing live + what the call adds.
   const plan = planFor(snap.provisioning, {
     // The persona the recommendation ECHOES is the one the addresses were
-    // derived from, so the plan counts the same filled slots the saga would. A
-    // tenant with no persisted persona has provisioned nothing under a managed
-    // address, so every slot is genuinely new whatever string is used here.
+    // derived from, so the plan counts the same filled slots the saga would.
     persona: snap.provisioning.personaSlug ?? "",
     distribution,
   });
-  if (plan.newMailboxes === 0) return null;
-  if (snap.billableMailboxes + plan.newMailboxes > MAX_SELF_SERVE_MAILBOXES) return null;
-  if (total > MAX_SELF_SERVE_MAILBOXES) return null;
-  return { newMailboxes: plan.newMailboxes, provisionedAfter: snap.billableMailboxes + plan.newMailboxes };
+  if (plan.newMailboxes === 0) return { status: "buys_nothing" };
+  if (snap.billableMailboxes + plan.newMailboxes > MAX_SELF_SERVE_MAILBOXES) return { status: "buys_nothing" };
+  if (total > MAX_SELF_SERVE_MAILBOXES) return { status: "buys_nothing" };
+  return { status: "planned", newMailboxes: plan.newMailboxes, provisionedAfter: snap.billableMailboxes + plan.newMailboxes };
 }
+
+/**
+ * The one sentence a step appends when the platform cannot price its own
+ * recommendation. Said out loud rather than left as a bare `effect: null`,
+ * which an agent cannot tell from "this step changes no billable count".
+ */
+const PERSONA_UNKNOWN_SENTENCE =
+  " The mailbox naming persona this account provisioned under is not on record and cannot be recovered from the mailboxes it " +
+  "currently has, so the platform will not project a mailbox count or a price for this call — supply `persona` and the next " +
+  "response carries both.";
 
 function billingEffect(ctx: TenantContext, provisionedAfter: number): MailboxBilling {
   // The SAME projection the response's own `billing` field carries, so a step's
@@ -384,8 +496,10 @@ function seatSteps(ctx: TenantContext, snap: NextStepsSnapshot): NextStep[] {
   if (billable === 0 && billed > 0) {
     // The recommendation must buy something to be worth emitting. A BYO-only
     // tenant has no managed plan to run, so the dry run is not the gate for
-    // them — the FACT still holds and the action is theirs.
-    if (!planned && !byoOnly) return [];
+    // them — the FACT still holds and the action is theirs. An UNPRICEABLE plan
+    // is not the same as one that buys nothing: the work is real, so the step
+    // is emitted and only its `effect` is withheld.
+    if (planned.status === "buys_nothing" && !byoOnly) return [];
     const action = seatFillAction(snap, distribution, MINIMUM_BILLABLE_MAILBOXES);
     return [
       {
@@ -397,11 +511,12 @@ function seatSteps(ctx: TenantContext, snap: NextStepsSnapshot): NextStep[] {
             ? `Your domains are your own, so the fill runs through configure_byo_domain rather than a managed domain purchase.`
             : `This call buys the domains and creates the mailboxes; \`domains\` and \`distribution\` are the ` +
               `infrastructure you want to HAVE, not an amount to add, so repeating it never buys twice.` +
-              consentSentence(snap, action)),
+              consentSentence(snap, action)) +
+          (planned.status === "unpriceable" ? PERSONA_UNKNOWN_SENTENCE : ""),
         action,
         waitingOn: null,
         notBeforeMs: 0,
-        effect: planned ? billingEffect(ctx, planned.provisionedAfter) : null,
+        effect: planned.status === "planned" ? billingEffect(ctx, planned.provisionedAfter) : null,
         // §7.17.4 — `first_paid_at` is the money-event stamp, clamped at
         // write time; NULL only for a tenant this backfill/go-forward pair
         // has not reached yet (unreachable here in practice — this branch
@@ -489,7 +604,7 @@ function seatHeadroomStep(ctx: TenantContext, snap: NextStepsSnapshot, owedCount
   );
   const planned = planRecommendation(snap, distribution);
   const byoOnly = snap.composition.byoDomains > 0 && snap.composition.managedDomains === 0;
-  if (!planned && !byoOnly) return [];
+  if (planned.status === "buys_nothing" && !byoOnly) return [];
 
   const free = MINIMUM_BILLABLE_MAILBOXES - billable;
   const action = seatFillAction(snap, distribution, free);
@@ -502,11 +617,15 @@ function seatHeadroomStep(ctx: TenantContext, snap: NextStepsSnapshot, owedCount
         `${billable === 1 ? "is" : "are"} provisioned, so ${free} more ` +
         `${free === 1 ? "mailbox costs" : "mailboxes cost"} nothing — your bill is unchanged. ` +
         `Nothing is blocked and nothing is required; this is only worth doing if you want the extra sending capacity.` +
-        consentSentence(snap, action),
+        consentSentence(snap, action) +
+        // The $0 claim is floor arithmetic and stays true; what an unknown
+        // persona costs is the IN-PAYLOAD proof of it (§7.18.4's 3960 -> 3960),
+        // so the step says the number is missing instead of implying none exists.
+        (planned.status === "unpriceable" ? PERSONA_UNKNOWN_SENTENCE : ""),
       action,
       waitingOn: null,
       notBeforeMs: 0,
-      effect: planned ? billingEffect(ctx, planned.provisionedAfter) : null,
+      effect: planned.status === "planned" ? billingEffect(ctx, planned.provisionedAfter) : null,
       sinceMs: null,
     },
   ];
@@ -653,9 +772,31 @@ function capacitySteps(snap: NextStepsSnapshot): NextStep[] {
   ];
 }
 
-function messageSteps(snap: NextStepsSnapshot): NextStep[] {
+/**
+ * The owed steps that come from `tenant_messages`, plus the rows this pass
+ * decided are RESOLVED (BLOCKING-2).
+ *
+ * `setupFamilyOwed` is computed by the caller from the steps it already built,
+ * never re-derived here: when nothing in the setup family is owed, a
+ * `retry_setup` / `setup_failed` row is describing a condition that no longer
+ * exists, so it stops counting — and its id is returned so a WRITE-capable
+ * caller can expire it durably. This function stays PURE (invariant 3): it
+ * decides, it does not write.
+ */
+function messageSteps(snap: NextStepsSnapshot, setupFamilyOwed: boolean): { steps: NextStep[]; resolvedIds: string[] } {
   const steps: NextStep[] = [];
-  const blocking = snap.messages.filter((m) => m.severity === "operator_pending" || m.severity === "action_required");
+  const candidates = snap.messages.filter((m) => m.severity === "operator_pending" || m.severity === "action_required");
+  // SCOPED TO `action_required`, deliberately. An `operator_pending` row is the
+  // platform saying it has STOPPED on something only an operator can clear — a
+  // held vendor wallet, say — and no state this derivation reads records that,
+  // so it is NOT re-derivable and must keep counting until the operator clears
+  // it. Widening this to every blocking severity silenced a live operator
+  // blocker on a fleet whose domains happened to be complete.
+  const resolved = setupFamilyOwed
+    ? []
+    : candidates.filter((m) => m.severity === "action_required" && RE_DERIVABLE_SETUP_MESSAGE_KINDS.has(m.kind));
+  const resolvedIds = new Set(resolved.map((m) => m.id));
+  const blocking = candidates.filter((m) => !resolvedIds.has(m.id));
 
   const operatorPending = blocking.filter((m) => m.severity === "operator_pending");
   if (operatorPending.length > 0) {
@@ -715,7 +856,7 @@ function messageSteps(snap: NextStepsSnapshot): NextStep[] {
     });
   }
 
-  return steps;
+  return { steps, resolvedIds: [...resolvedIds] };
 }
 
 function credentialSteps(snap: NextStepsSnapshot): NextStep[] {
@@ -780,7 +921,25 @@ function finish(steps: NextStep[], computedAt: number): NextSteps {
   };
 }
 
+/**
+ * What one derivation produced: the contract shape, plus the `tenant_messages`
+ * rows this pass found RESOLVED (BLOCKING-2).
+ *
+ * The ids never leave the DO — §7.10.3 keeps the cross-DO projection minimized
+ * to reasons and counts. They exist so the ONE caller that is already
+ * re-deriving on a per-tenant cadence can bank the decision durably without a
+ * second derivation or a second cross-DO RPC (§7.17.7's subrequest bound).
+ */
+export interface DerivedNextSteps {
+  next: NextSteps;
+  resolvedSystemMessageIds: string[];
+}
+
 export function deriveNextSteps(ctx: TenantContext): NextSteps {
+  return deriveNextStepsWithResolved(ctx).next;
+}
+
+export function deriveNextStepsWithResolved(ctx: TenantContext): DerivedNextSteps {
   const snap = readNextStepsSnapshot(ctx);
 
   // ── GATE 1: LIFECYCLE FREEZE ───────────────────────────────────────────────
@@ -793,7 +952,7 @@ export function deriveNextSteps(ctx: TenantContext): NextSteps {
   // A frozen tenant is told the ONE thing that unfreezes them and nothing else.
   // Every other reason would be a call the lifecycle guard refuses anyway.
   if (isLifecycleFrozen(snap.profile.status, snap.profile.billingState)) {
-    return finish(
+    return unresolved(finish(
       [
         {
           reason: "account_frozen",
@@ -817,28 +976,45 @@ export function deriveNextSteps(ctx: TenantContext): NextSteps {
         },
       ],
       snap.realNow,
-    );
+    ));
   }
 
   // ── GATE 2: THE TENANT PAYS NOTHING ────────────────────────────────────────
   // Demo, free, and simulated-checkout tenants have `mailbox_qty_synced = 0`.
   // Without this gate the seat arithmetic reads `max(5, 0) - 0 = 5` and tells
   // someone who pays nothing that they are billed for five mailboxes.
-  if (snap.profile.billedQuantity === 0) return finish([], snap.realNow);
+  //
+  // A tenant behind either gate reports NO resolved messages: neither gate
+  // evaluated the setup family, so "the condition no longer holds" was never
+  // established and nothing may be expired on the strength of it.
+  if (snap.profile.billedQuantity === 0) return unresolved(finish([], snap.realNow));
 
   // Everything owed, computed BEFORE the one reason whose predicate is
   // "nothing is owed" (E1). The ordering is load-bearing, not stylistic.
-  const owedFirst: NextStep[] = [
+  //
+  // The state-derived families come first for a second reason now: whether the
+  // SETUP family is owed is exactly the condition a `retry_setup` /
+  // `setup_failed` message asserts, and `messageSteps` reads it off these steps
+  // rather than computing it a second way (BLOCKING-2).
+  const fromState: NextStep[] = [
     ...seatSteps(ctx, snap),
     ...ordinalIncompleteSteps(snap),
     ...domainDnsSteps(ctx, snap),
     ...capacitySteps(snap),
-    ...messageSteps(snap),
-    ...credentialSteps(snap),
-    ...launchSteps(snap),
   ];
+  const setupFamilyOwed = fromState.some((s) => s.kind === "owed" && SETUP_FAMILY_REASONS.has(s.reason));
+  const messages = messageSteps(snap, setupFamilyOwed);
+  const owedFirst: NextStep[] = [...fromState, ...messages.steps, ...credentialSteps(snap), ...launchSteps(snap)];
   const owedCount = owedFirst.filter((s) => s.kind === "owed").length;
-  return finish([...owedFirst, ...seatHeadroomStep(ctx, snap, owedCount)], snap.realNow);
+  return {
+    next: finish([...owedFirst, ...seatHeadroomStep(ctx, snap, owedCount)], snap.realNow),
+    resolvedSystemMessageIds: messages.resolvedIds,
+  };
+}
+
+/** A derivation that reached a terminal gate: a result, and nothing to expire. */
+function unresolved(next: NextSteps): DerivedNextSteps {
+  return { next, resolvedSystemMessageIds: [] };
 }
 
 /**

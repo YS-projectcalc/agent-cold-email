@@ -14,6 +14,7 @@
 import { NotFoundError } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
+import { realNowMs } from "./clamped-age.js";
 
 /**
  * What an agent may branch on (F11, docs/adversarial/
@@ -385,6 +386,40 @@ export function ackMessage(ctx: TenantContext, id: string): AckMessageResult {
 
   ctx.sql.exec(`UPDATE tenant_messages SET read_at = ? WHERE id = ? AND tenant_id = ?`, ctx.clock.now(), id, ctx.tenantId);
   return { acked: true, alreadyAcked: false };
+}
+
+/**
+ * Expires system messages whose condition the platform has RE-DERIVED as
+ * resolved (BLOCKING-2, build gate 2026-08-19). The ids come from
+ * `deriveNextSteps`, which owns that decision; this owns the write.
+ *
+ * `expires_at`, NEVER `read_at`. `read_at` has exactly one writer — the
+ * customer's own `ackMessage` — and the operator surface renames it `ackedAt`
+ * precisely so the field means "the tenant acknowledged this". A system sweep
+ * stamping it would make every operator view report an ack that never
+ * happened. `expires_at` already means "no longer live", is already honoured by
+ * `listSurfacedTenantMessages`, `listMessagesPage` and `emitTenantMessage`'s
+ * dedup (so a genuine RECURRENCE of the condition writes a fresh row rather
+ * than reviving this one), and is already returned to the operator surface as
+ * `expiresAt`.
+ *
+ * REAL wall-clock, per this wave's rule (§7.19), and the one direction it can
+ * differ from `ctx.clock` is safe: only a VirtualClock tenant differs, that
+ * clock runs AHEAD, and a stamp in its past hides the row — which is the
+ * intended effect. Re-asserts `read_at IS NULL AND expires_at IS NULL` so a
+ * customer ack or an operator's own expiry that landed in between always wins.
+ * ONE statement, no loop (test/loop-isolation-coverage.test.ts).
+ */
+export function expireResolvedSystemMessages(ctx: TenantContext, ids: readonly string[]): number {
+  if (ids.length === 0) return 0;
+  const result = ctx.sql.exec(
+    `UPDATE tenant_messages SET expires_at = ?
+      WHERE tenant_id = ? AND read_at IS NULL AND expires_at IS NULL AND id IN (${ids.map(() => "?").join(", ")})`,
+    realNowMs(),
+    ctx.tenantId,
+    ...ids,
+  );
+  return result.rowsWritten;
 }
 
 // `actionHint` is `object | null` here, NOT `Record<string, unknown> | null`

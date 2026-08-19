@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { NextStep, NextStepReason, NextSteps } from "@coldstart/shared";
+import { NEXT_STEP_REASONS, type NextStep, type NextStepReason, type NextSteps } from "@coldstart/shared";
 import { deriveNextSteps, owedSignals } from "../src/engine/next-steps.js";
 import { managedMailboxAddress } from "../src/engine/mailbox-provisioning.js";
 import { domainIntentKey } from "../src/engine/provision-intents.js";
@@ -173,6 +173,24 @@ async function shortfall(tenantId: string): Promise<number> {
   );
   return Math.max(0, billed - (await billableCount(tenantId)));
 }
+
+// NON-BLOCKING-1 (build gate 2026-08-19, the J1 residual). The exempt set is a
+// hand-maintained allowlist living in the same file as the assertions it
+// relaxes, and nothing reddened when it grew. Pinned to its exact contents —
+// the treatment `NEXT_STEP_REASONS` already gets — so WIDENING it is a
+// deliberate edit to this line rather than a silent one three functions down.
+// Each member maps to a documented partial-success mechanism the platform
+// really has: `capacity_pending` state, per-ordinal isolation, DNS propagation.
+describe("NB-1 — the G5(a) exemption set is pinned, not open-ended", () => {
+  it("PROGRESS_INTRODUCED_REASONS is exactly these three", () => {
+    expect(PROGRESS_INTRODUCED_REASONS).toEqual(["domain_dns_incomplete", "setup_capacity_held", "ordinal_incomplete"]);
+  });
+
+  it("every member is a real NextStepReason, and the set is a strict subset of them", () => {
+    for (const reason of PROGRESS_INTRODUCED_REASONS) expect(NEXT_STEP_REASONS).toContain(reason);
+    expect(PROGRESS_INTRODUCED_REASONS.length).toBeLessThan(NEXT_STEP_REASONS.length);
+  });
+});
 
 describe("G5 — an emitted step, executed, moves the account toward done", () => {
   const saved = {

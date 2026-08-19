@@ -14,7 +14,8 @@ import { readActivationState } from "./activation.js";
 import { clampedAge, realNowMs } from "./clamped-age.js";
 import { DNS_PENDING_MAX_MS, dnsUnreadyForMs } from "./domain-dns.js";
 import { countSendEligibleMailboxes } from "./mailbox-eligibility.js";
-import { deriveNextSteps, owedSignals } from "./next-steps.js";
+import { deriveNextStepsWithResolved, owedSignals } from "./next-steps.js";
+import { expireResolvedSystemMessages } from "./tenant-messages.js";
 import { getDeliverabilitySummary } from "./reporting.js";
 
 export interface TenantOpsSummary {
@@ -590,7 +591,19 @@ function readSendPipelineSignals(ctx: TenantContext): SendPipelineSignals {
 
   // §7.11/§7.10.3 — the one derivation, read here (never re-derived): the
   // stuck-customer checks ride this SAME opsSummary fan-out, no new RPC.
-  const owed = owedSignals(deriveNextSteps(ctx));
+  //
+  // BLOCKING-2 — and the same derivation BANKS its own conclusion. A
+  // `retry_setup`/`setup_failed` row whose condition no longer derives owed is
+  // expired here, so operator surfaces stop showing a dead action item instead
+  // of waiting on a customer ack that will never come. This is the site
+  // because it is the only per-tenant path that already re-derives on a
+  // cadence: a dedicated sweep RPC would add a subrequest per tenant per tick
+  // and break §7.17.7's `8.0N + 29` bound, and the derivation itself must stay
+  // pure (§7.16 invariant 3). The ids stay inside the DO — the cross-DO
+  // projection below is unchanged (§7.10.3).
+  const derived = deriveNextStepsWithResolved(ctx);
+  expireResolvedSystemMessages(ctx, derived.resolvedSystemMessageIds);
+  const owed = owedSignals(derived.next);
 
   const lastAgentActivityAt = ctx.sql
     .exec<{ last_agent_activity_at: number | null }>(`SELECT last_agent_activity_at FROM tenant_profile WHERE id = ?`, ctx.tenantId)

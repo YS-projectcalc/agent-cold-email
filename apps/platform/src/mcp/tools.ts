@@ -86,16 +86,10 @@ export const MCP_TOOLS: McpTool<any>[] = [
     "Warmup + provisioning progress per mailbox. New mailboxes are ramp-limited server-side: 5 sends/day week 1 rising to 40/day after 4 weeks; current dailyCap for each mailbox is in the response below — ramp caps permit CAPPED sending from day 1, never zero until fully warmed. Returns { domains, mailboxes, sendReady, mailboxHealth[], messages[], nextSteps }; each mailbox: warmupDay, dailyCap, sentToday, sendReady, delivStatus (healthy/throttled/paused), complaint/bounce/softBounce rates (first-party measured), vendorReputationScore + vendorPlacementRate (VENDOR-REPORTED, not first-party measurements — the control loop uses local signals only; BOTH ARE null whenever the provider does not report them, which is the normal case today, so treat null as 'not measured' and never as zero), lastPolledAt. Per-mailbox `sendReady` is a FULLY-RAMPED flag, NOT a send gate — a mailbox below full ramp still sends, capped at its own `dailyCap`; `sendReady` only says warmup has finished, so read `dailyCap`/`sentToday` for actual send capacity, never `sendReady` alone. The top-level `sendReady` is the AND across ALL mailboxes (true only once every one has finished ramping) — for whether THIS mailbox can send right now, the per-mailbox flag next to it is the one that matters, not the top-level one. Vendor-pool warmup (the underlying reputation-building the provider runs) is FEED-INVISIBLE by design: nothing in this response surfaces the vendor's own warmup internals — dailyCap/warmupDay/sendReady here are this platform's own ramp schedule, computed independently of whatever the vendor is doing in its pool, so do not expect a vendor-side warmup event to show up here. `messages[]` surfaces system notices this account should act on (e.g. a setup step that needs a retry, a mailbox credential that just went live) — each has kind, severity ('info' = resolves on its own | 'action_required' = nothing progresses until you act, and acting works | 'operator_pending' = the platform has stopped and nothing you change will restart it, but an operator can clear the blocker and then retrying the SAME call with the SAME idempotency key completes it — keep your inputs as they are and do not give up | 'terminal' = the platform has STOPPED, retrying will never help and only a human can move it — the actionHint names contact_operator), body, actionHint (structured — e.g. which tool + idempotencyKey to retry with), createdAt; poll this alongside the mailbox fields so you never miss one. Reading them here does NOT mark them read — only an explicit ack_message call sets readAt. Unacked operator messages sort first here, then system notices newest-first, so a human reply is never pushed out of the 5 by system churn; list_messages is the full paginated surface. `nextSteps` names what this account should do next — see setup_infrastructure's description for the discriminated shape. Use account/metrics for account-wide rollups.",
     EmptyInput,
     { title: "Infrastructure Status", readOnlyHint: true },
-    // The hosted MCP endpoint resolves the tenant from the Authorization
-    // header ONLY (mcp/handler.ts's resolveTenantFromToken) — never a cookie
-    // — so this call is always the agent (§7.10.2). recordAgentActivity is a
-    // SEPARATE RPC call, deliberately outside infrastructureStatus itself
-    // (readOnlyHint:true — see its doc comment in tenant-do.ts).
-    async (stub) => {
-      const result = await stub.infrastructureStatus();
-      await stub.recordAgentActivity();
-      return result;
-    },
+    // A PLAIN READ. The §7.10.2 liveness stamp used to live here, which made
+    // it one tool's behaviour; it now sits in `mcp/handler.ts`'s `tools/call`
+    // and covers every tool on this bearer-only endpoint (non-blocking 4).
+    (stub) => stub.infrastructureStatus(),
   ),
   tool(
     "launch_campaign",

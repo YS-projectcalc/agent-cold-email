@@ -21,6 +21,16 @@ export const infrastructureRoute = new Hono<{ Bindings: Env; Variables: AuthedVa
     // itself (which is readOnlyHint:true and must stay genuinely write-free —
     // see recordAgentActivity's doc comment). Bearer = the agent; a cookie is
     // a human in the dashboard and must never stamp.
-    if (c.get("authVia") === "bearer") await stub.recordAgentActivity();
+    //
+    // BEST-EFFORT (in-class with mcp/handler.ts's stamp): the read has already
+    // succeeded, and a failure to record liveness must not turn an answered
+    // status call into a 500. Bookkeeping never fails the call it observes.
+    if (c.get("authVia") === "bearer") {
+      try {
+        await stub.recordAgentActivity();
+      } catch (err) {
+        console.error(`infrastructure-status: liveness stamp failed for tenant ${c.get("tenantId")} (non-fatal)`, err);
+      }
+    }
     return c.json(result);
   });

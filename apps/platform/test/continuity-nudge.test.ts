@@ -1,5 +1,6 @@
 import { env, runInDurableObject } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { emitTenantMessage } from "../src/engine/tenant-messages.js";
 import { deriveNextSteps, owedSignals } from "../src/engine/next-steps.js";
 import { maybeEmitContinuityNudge, CONTINUITY_NUDGE_KIND } from "../src/engine/continuity-nudge.js";
 import { managedMailboxAddress } from "../src/engine/mailbox-provisioning.js";
@@ -277,5 +278,99 @@ describe("END-TO-END — the real watchtower wiring (sendPipelineChecks + reconc
 
     const owed = await withTenantContext(tenantId, (ctx) => owedSignals(deriveNextSteps(ctx)));
     expect(owed.owedReasons).not.toContain("message_action_required");
+  });
+});
+
+// NON-BLOCKING-2 and -3 (build gate 2026-08-19) — the two deviations from
+// "EXACTLY ONE per stall episode, ONE DAY after onset" that survived the J3
+// attack. Both are about WHEN and about WHICH EPISODE, never about how many
+// per episode: the DO-side guard owns that and is untouched.
+describe("NB-2/NB-3 — the nudge fires at the DELAY, and a blame flip is the SAME episode", () => {
+  const T0 = 1_900_000_000_000;
+  const savedDelay = env.CONTINUITY_NUDGE_DELAY_MS;
+
+  beforeEach(async () => {
+    await env.DB.prepare("DELETE FROM watchtower_state").run();
+    await env.DB.prepare("DELETE FROM watchtower_cursor").run();
+    // A 1-hour delay makes the realert grid and the delay observably
+    // different: the first re-alert is 6h out, so any tick between 1h and 6h
+    // is `suppressed` — precisely the tick the old gate could not sample.
+    Object.assign(env, { CONTINUITY_NUDGE_DELAY_MS: String(HOUR) });
+  });
+  afterEach(() => {
+    Object.assign(env, { CONTINUITY_NUDGE_DELAY_MS: savedDelay });
+  });
+
+  const nudgeCount = (tenantId: string): Promise<number> =>
+    withTenantContext(tenantId, (ctx) =>
+      ctx.sql
+        .exec<{ n: number }>(
+          `SELECT COUNT(*) as n FROM tenant_messages WHERE tenant_id = ? AND kind = ?`,
+          ctx.tenantId,
+          CONTINUITY_NUDGE_KIND,
+        )
+        .one().n,
+    );
+
+  async function sweep(tenantId: string, mailer: SandboxOpsMailer, nowMs: number) {
+    const summary = await tenantStub(tenantId).opsSummary(0);
+    return reconcileAlerts(env, mailer, sendPipelineChecks(tenantId, summary, await readReportedCheckNames(env)), nowMs);
+  }
+
+  it("NB-2 — delivers on a SUPPRESSED tick once the delay has passed, not on the realert grid", async () => {
+    const tenantId = await seedStalledDomainTenant();
+    const checkName = customerProgressAgentCheckName(tenantId);
+    const mailer = new SandboxOpsMailer();
+
+    await sweep(tenantId, mailer, T0); // pending, age 0
+    expect(await nudgeCount(tenantId)).toBe(0);
+
+    const alertedAt = T0 + 5 * 60_000;
+    const second = await sweep(tenantId, mailer, alertedAt); // alerted, age 5m < 1h
+    expect(second.find((o) => o.name === checkName)?.action).toBe("alerted");
+    expect(await nudgeCount(tenantId)).toBe(0);
+
+    // 1h past ONSET, and only ~55m past the alert — inside the 6h backoff, so
+    // this transition is `suppressed`. Under the old gate the delay was
+    // sampled only at alerted/realerted, so the first passing sample was the
+    // 24h realert rung: ~30h, whatever CONTINUITY_NUDGE_DELAY_MS said.
+    const pastDelay = T0 + HOUR + 1_000;
+    const third = await sweep(tenantId, mailer, pastDelay);
+    expect(third.find((o) => o.name === checkName)?.action).toBe("suppressed");
+    expect(await nudgeCount(tenantId)).toBe(1);
+  });
+
+  it("NB-3 — a blame flip mid-stall continues the SAME episode and never nudges twice", async () => {
+    const tenantId = await seedStalledDomainTenant();
+    const mailer = new SandboxOpsMailer();
+
+    await sweep(tenantId, mailer, T0);
+    await sweep(tenantId, mailer, T0 + 5 * 60_000);
+    const nudgedAt = T0 + HOUR + 1_000;
+    await sweep(tenantId, mailer, nudgedAt);
+    expect(await nudgeCount(tenantId)).toBe(1);
+
+    // THE FLIP. An operator_pending message adds an owed step with
+    // `waitingOn: "operator"`, so `anyOwedWaitingOnOperator` turns true and the
+    // blamed NAME switches. Blame really does oscillate in production — it
+    // tracks a vendor wallet that dips and refills — so this is the ordinary
+    // case, not a corner.
+    await withTenantContext(tenantId, (ctx) =>
+      emitTenantMessage(ctx, {
+        kind: "setup_failed",
+        severity: "operator_pending",
+        body: "The platform stopped on a step only an operator can clear.",
+      }),
+    );
+
+    const flippedAt = nudgedAt + 5 * 60_000;
+    await sweep(tenantId, mailer, flippedAt);
+    expect(await nudgeCount(tenantId), "the flip tick itself must not nudge").toBe(1);
+
+    // A FULL DELAY after the flip. The new name's own AlertState was born at
+    // `flippedAt`, so keying the episode on it would pass `sinceTs > stored`
+    // here and deliver a second nudge for one continuous stall.
+    await sweep(tenantId, mailer, flippedAt + HOUR + 1_000);
+    expect(await nudgeCount(tenantId), "one stall, one nudge — across the blame flip").toBe(1);
   });
 });

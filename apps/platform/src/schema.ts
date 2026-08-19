@@ -98,8 +98,12 @@ CREATE TABLE IF NOT EXISTS tenant_profile (
   -- Registrar-arming follow-up (2026-07-28) — the tenant's structured
   -- registrant-of-record (SetupInfrastructureInput.registrant), persisted
   -- verbatim as JSON alongside register_domains above. NULL until a tenant
-  -- calls setup_infrastructure with registerDomains:true (zod requires
-  -- 'registrant' on that call -- packages/shared/src/intents.ts). Read back by
+  -- calls setup_infrastructure WITH a registrant. That is no longer implied
+  -- by registerDomains:true — the §7.8 relaxation REMOVED the zod refinement
+  -- that required the pair (non-blocking 6, build gate 2026-08-19), so an
+  -- opt-in whose registrant is already on file writes consent alone and leaves
+  -- this column untouched — a request with neither fails at the buy site
+  -- instead (assertCompleteRegistrant). Read back by
   -- vendors/registrar-arming.ts's deriveInboxKitRegistrant, which PREFERS this
   -- structured capture over the old brand/physical_address-derived partial.
   registrant_json TEXT,

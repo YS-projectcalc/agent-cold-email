@@ -160,6 +160,26 @@ export function readRegistrarOptInState(sql: SqlStorage, tenantId: string): Regi
   };
 }
 
+/**
+ * The RAW persisted `registrant_json`, undecorated.
+ *
+ * `readRegistrarOptInState` above derives a registrant against the profile row
+ * it just read, which is the right thing for every caller that is NOT in the
+ * middle of rewriting that row. `selectSetupDomainPort` is: it runs BEFORE
+ * `runSetupInfrastructure`'s UPDATE, so it must combine the persisted
+ * registrant with THIS call's brand/address rather than the ones it is about to
+ * replace (non-blocking 7, build gate 2026-08-19) — otherwise the port bakes an
+ * `organization` from the PRE-update brand while the buy-site pre-flight
+ * validates the POST-update one, both pass, and the registrar filing carries
+ * the previous brand.
+ */
+export function readPersistedRegistrantJson(sql: SqlStorage, tenantId: string): string | null {
+  const row = sql
+    .exec<{ registrant_json: string | null }>(`SELECT registrant_json FROM tenant_profile WHERE id = ?`, tenantId)
+    .toArray()[0];
+  return row?.registrant_json ?? null;
+}
+
 export interface RegistrarArmingInput {
   readonly armed: boolean;
   readonly optIn: boolean;

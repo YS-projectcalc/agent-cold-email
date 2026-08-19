@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { NEXT_STEP_REASONS, type NextStepTool } from "@coldstart/shared";
+import { NEXT_STEP_REASONS, NEXT_STEP_TOOLS } from "@coldstart/shared";
 import { MCP_TOOLS } from "../src/mcp/tools.js";
 import { TENANT_MESSAGE_SEVERITIES } from "../src/engine/tenant-messages.js";
 import openapiYaml from "../../../site/openapi.yaml?raw";
@@ -54,13 +54,17 @@ describe("G2 — next-step reason vocabulary lockstep", () => {
 });
 
 describe("G3 — every NextStepAction.tool value is a REAL MCP tool name", () => {
-  it("every NextStepTool union member is in MCP_TOOLS", () => {
-    // The literal list mirrors the shared type union — a stale/renamed member
-    // here fails LOUD rather than silently type-checking against itself.
-    const NEXT_STEP_TOOLS: NextStepTool[] = ["setup_infrastructure", "launch_campaign", "contact_operator", "ack_message", "configure_byo_domain"];
+  it("every NextStepTool member is in MCP_TOOLS", () => {
+    // ITERATES THE RUNTIME ARRAY, never a hand-copied literal (non-blocking 5,
+    // build gate 2026-08-19). The literal version was green-by-construction for
+    // ADDITIONS — a sixth union member emitted in a step was never checked,
+    // which is precisely the direction this guard exists for. `NextStepTool` is
+    // now derived FROM this array, so the two cannot disagree.
     const realNames = new Set(MCP_TOOLS.map((t) => t.name));
     const missing = NEXT_STEP_TOOLS.filter((t) => !realNames.has(t));
     expect(missing).toEqual([]);
+    // Non-vacuous: the scan must actually be looking at something.
+    expect(NEXT_STEP_TOOLS.length).toBeGreaterThan(0);
   });
 });
 

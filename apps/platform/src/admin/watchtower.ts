@@ -52,7 +52,7 @@ import {
   type AlertOutcome,
   type CheckResult,
 } from "./watchtower-alerts.js";
-import { decideAlert, withheldAlertState, type AlertState } from "./watchtower-policy.js";
+import { decideAlert, normalizeAlertState, withheldAlertState, type AlertState } from "./watchtower-policy.js";
 import { FAILURE_SIGNAL_WINDOW_MS, gradeFailureSignals } from "./watchtower-grading.js";
 import { reconcileD1Alert, recordWatchtowerCompleted } from "./watchtower-infra.js";
 import { evaluateVendorChecks } from "./watchtower-vendor.js";
@@ -560,7 +560,11 @@ export function sendPipelineChecks(
       detail:
         `Tenant ${tenantId} (${summary.brand}) has ${owedCount} owed next-step(s) — ${owedReasons.join(", ")} — ` +
         `blamed on ${anyOwedWaitingOnOperator ? "the operator" : "the agent"}. ` +
-        (stallHours !== null ? `No bearer-authed activity in over ${stallHours}h. ` : "") +
+        // WHAT IS ACTUALLY MEASURED (non-blocking 4): `last_agent_activity_at`
+        // is stamped by any bearer-authed MCP tool call and by a bearer-authed
+        // status poll — not by a cookie-authed dashboard tab, and not by any
+        // other REST route.
+        (stallHours !== null ? `No MCP tool call or bearer-authed status poll in over ${stallHours}h. ` : "") +
         (owedHours !== null ? `Its oldest owed step has stood for over ${owedHours}h. ` : "") +
         `See infrastructure_status.nextSteps for the account's own next action.`,
     });
@@ -692,29 +696,65 @@ export async function reconcileAlerts(
       // the same conflation member 5 is about, one level down.
       const notified: Notified | null = email ? await trySend(mailer, email) : null;
       const withheld = notified !== null && !notified.delivered;
-      const state = withheld ? withheldAlertState(prev, transition) : transition.next;
+      const decided = withheld ? withheldAlertState(prev, transition) : transition.next;
+
+      // NON-BLOCKING-3 — THE EPISODE IS THE STALL, NOT THE NAME.
+      // `continuity_nudge_episode_ts` is per-TENANT while an `AlertState` is
+      // per-check-NAME, so a blame flip mid-stall opened a fresh state with a
+      // later `sinceTs`, `sinceTs > stored` passed again, and one continuous
+      // stall produced a second nudge — one per blame regime. Blame genuinely
+      // oscillates (it tracks a vendor wallet that dips and refills), so this
+      // is not a corner case.
+      //
+      // The fix is to ADOPT the sibling's onset when this name is being blamed
+      // and the sibling was already carrying the stall — and to PERSIST it, so
+      // the currently-blamed name always holds the true onset and the next flip
+      // reads it back from here. `stateByName` is the pre-pass read, so on the
+      // flip tick the abandoned name is still `unhealthy` with the original
+      // `sinceTs`, which is exactly the value that must survive.
+      //
+      // Safe against the alert ladder: the debounce counts OBSERVATIONS, and
+      // the backoff compares against `lastAlertTs`, which is always set once
+      // `alertCount > 0`. An earlier `sinceTs` therefore accelerates no email —
+      // it only makes "unhealthy since" report the truth about the stall.
+      const siblingState = sibling !== null ? normalizeAlertState(stateByName.get(sibling) ?? null) : null;
+      const stallOnsetTs =
+        !result.healthy && siblingState !== null && siblingState.status === "unhealthy"
+          ? Math.min(decided.sinceTs, siblingState.sinceTs)
+          : decided.sinceTs;
+      const state = stallOnsetTs < decided.sinceTs ? { ...decided, sinceTs: stallOnsetTs } : decided;
       await upsertWatchtowerState(env, { name: result.name, state, detail: result.detail, nowMs });
 
-      // I15 (§7.12) — the one-shot continuity nudge. Gated on an
-      // alert-WORTHY transition (alerted/realerted) rather than every
-      // 5-minute tick, so this cross-DO RPC stays roughly at the alert
-      // cadence for the episode's lifetime instead of firing continuously
-      // for a long-stalled tenant; the DO-side `continuity_nudge_episode_ts`
-      // guard (engine/continuity-nudge.ts) is what makes "exactly once per
-      // episode" EXACT regardless of how many times this fires.
+      // I15 (§7.12) — the one-shot continuity nudge.
+      //
+      // NON-BLOCKING-2 — FIRED ON ANY UNHEALTHY TICK PAST THE DELAY, not only
+      // on an alert-WORTHY transition. Gating on `alerted|realerted` sampled
+      // the delay on the REALERT GRID: `alerted` at ~onset (fails a 24h test),
+      // the first `realerted` at WATCHTOWER_COOLDOWN_MS = 6h (fails), the next
+      // at +WATCHTOWER_STEADY_REALERT_MS = 24h — so the first passing sample
+      // was ~30h and `CONTINUITY_NUDGE_DELAY_MS` did nothing at all below 6h.
+      // The founder ruled ONE nudge per episode, ONE DAY after onset; this
+      // makes the tunable mean what its name says.
+      //
+      // COST, STATED: a stalled tenant now costs one cross-DO RPC per 5-minute
+      // tick for the rest of its episode instead of one per alert rung. The
+      // per-tick worst case is unchanged — §7.17.7 already bounds this sweep at
+      // `9.0N + 29` for the all-transition tick — but that worst case is now
+      // reached whenever N tenants are stalled rather than only on a correlated
+      // onset. Every one of those calls after the first is a genuine no-op:
+      // `sinceTs > continuity_nudge_episode_ts` is monotone, so the DO-side
+      // guard (engine/continuity-nudge.ts) keeps "exactly once per episode"
+      // EXACT no matter how often this fires.
       if (
         !result.healthy &&
-        (transition.action === "alerted" || transition.action === "realerted") &&
-        (result.name.startsWith(CUSTOMER_PROGRESS_OPERATOR_CHECK) || result.name.startsWith(CUSTOMER_PROGRESS_AGENT_CHECK))
+        (result.name.startsWith(CUSTOMER_PROGRESS_OPERATOR_CHECK) || result.name.startsWith(CUSTOMER_PROGRESS_AGENT_CHECK)) &&
+        nowMs - stallOnsetTs >= continuityNudgeDelayMs(env)
       ) {
-        const episodeSinceTs = transition.next.sinceTs;
-        if (nowMs - episodeSinceTs >= continuityNudgeDelayMs(env)) {
-          const tenantId = result.name.slice(result.name.indexOf(":") + 1);
-          try {
-            await env.TENANT.get(env.TENANT.idFromName(tenantId)).maybeEmitContinuityNudge(episodeSinceTs);
-          } catch (err) {
-            console.error(`watchtower: continuity nudge RPC failed for tenant ${tenantId}`, err);
-          }
+        const tenantId = result.name.slice(result.name.indexOf(":") + 1);
+        try {
+          await env.TENANT.get(env.TENANT.idFromName(tenantId)).maybeEmitContinuityNudge(stallOnsetTs);
+        } catch (err) {
+          console.error(`watchtower: continuity nudge RPC failed for tenant ${tenantId}`, err);
         }
       }
 

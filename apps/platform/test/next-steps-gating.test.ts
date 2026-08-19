@@ -246,7 +246,12 @@ describe("I6 — N2: the continuity_nudge exclusion lives HERE", () => {
         { domain: "n2d.com", liveMailboxes: 2 },
       ],
       billedQuantity: 5,
-      messages: [{ kind: "retry_setup", severity: "action_required" }],
+      // `send_blocked`, not `retry_setup`: this assertion is about the KIND
+      // exclusion not being a blanket mute, and `retry_setup` acquired its own
+      // re-derivation rule (BLOCKING-2, build gate 2026-08-19) — on a fleet
+      // whose setup family is empty it is a RESOLVED row by construction, so it
+      // would no longer be a fair stand-in for "any other action item".
+      messages: [{ kind: "send_blocked", severity: "action_required" }],
     });
     const derived = await derive(tenantId);
     expect(owedSignals(derived).owedCount).toBeGreaterThan(0);
@@ -262,7 +267,9 @@ describe("I6 — N2: the continuity_nudge exclusion lives HERE", () => {
       billedQuantity: 5,
       messages: [
         { kind: "continuity_nudge", severity: "action_required" },
-        { kind: "retry_setup", severity: "action_required" },
+        // See the note above: a kind with no re-derivation rule of its own, so
+        // this stays a test of the nudge exclusion and nothing else.
+        { kind: "send_blocked", severity: "action_required" },
       ],
     });
     const derived = await derive(tenantId);
