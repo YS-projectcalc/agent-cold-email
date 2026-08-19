@@ -19,6 +19,7 @@ import { OpsMailNotConfiguredError, type OpsMailer } from "../ops-mail/ops-maile
 import {
   DEAD_MAN_ALERT_POLICY,
   DEBOUNCED_ALERT_POLICY,
+  DEBOUNCED_DIGEST_ALERT_POLICY,
   IMMEDIATE_ALERT_POLICY,
   type AlertAction,
   type AlertPolicy,
@@ -114,6 +115,13 @@ export const DOMAIN_DNS_AGING_CHECK = "domain_dns_aging:";
 // Own prefixes, same reasoning as DOMAIN_DNS_AGING_CHECK above.
 export const MAILBOX_ORPHAN_CHECK = "mailbox_orphan:";
 export const DOMAIN_ORPHAN_CHECK = "domain_orphan:";
+// I14 (design §7.11) — the stuck-customer check, split into TWO names so
+// blame can carry a different channel: our own blocker (email, founder acts)
+// vs the customer sitting still while paying (digest, "if they're paying,
+// who cares" — founder ruling Q3). Own prefixes for the same reason every
+// other pair above has one.
+export const CUSTOMER_PROGRESS_OPERATOR_CHECK = "customer_progress_operator:";
+export const CUSTOMER_PROGRESS_AGENT_CHECK = "customer_progress_agent:";
 
 /**
  * The three checks whose names cross a module boundary, as constants rather
@@ -152,7 +160,25 @@ export function labelFor(name: string): string {
   if (name.startsWith(DOMAIN_ORPHAN_CHECK)) {
     return `Domain intent orphaned ${name.slice(DOMAIN_ORPHAN_CHECK.length)}`;
   }
+  if (name.startsWith(CUSTOMER_PROGRESS_OPERATOR_CHECK)) {
+    return `Customer progress (operator-blocked) ${name.slice(CUSTOMER_PROGRESS_OPERATOR_CHECK.length)}`;
+  }
+  if (name.startsWith(CUSTOMER_PROGRESS_AGENT_CHECK)) {
+    return `Customer progress (agent-side stall) ${name.slice(CUSTOMER_PROGRESS_AGENT_CHECK.length)}`;
+  }
   return CHECK_LABELS[name] ?? name;
+}
+
+/** The watchtower check tracking whether ONE tenant is stalled with an
+ *  operator-blamed owed step (§7.11) — email channel, our blocker. */
+export function customerProgressOperatorCheckName(tenantId: string): string {
+  return `${CUSTOMER_PROGRESS_OPERATOR_CHECK}${tenantId}`;
+}
+
+/** The sibling: a tenant stalled with no operator-blamed step — digest
+ *  channel, the customer's own inaction while still paying. */
+export function customerProgressAgentCheckName(tenantId: string): string {
+  return `${CUSTOMER_PROGRESS_AGENT_CHECK}${tenantId}`;
 }
 
 /**
@@ -190,6 +216,10 @@ export function policyFor(checkName: string): AlertPolicy {
     return IMMEDIATE_ALERT_POLICY;
   }
 
+  // §7.11 (Q3) — the ONE place the blame-split channel routing happens.
+  // Same cadence as every other re-observed check; only the channel differs.
+  if (checkName.startsWith(CUSTOMER_PROGRESS_AGENT_CHECK)) return DEBOUNCED_DIGEST_ALERT_POLICY;
+
   return DEBOUNCED_ALERT_POLICY;
 }
 
@@ -214,7 +244,12 @@ export function alertEmailFor(
   transition: AlertTransition,
   prevSinceTs: number | null,
   nowMs: number,
+  policy: AlertPolicy,
 ): OutgoingAlert | null {
+  // §7.11 (Q3) — a digest-channel check never owes an email, whatever the
+  // transition. The caller (`reconcileAlerts`) is responsible for recording
+  // `why: "digest_only"` when this returns null for that reason.
+  if (policy.channel === "digest") return null;
   switch (transition.action) {
     case "alerted":
       return unhealthyEmail(env, result, nowMs, false);

@@ -36,6 +36,7 @@ import { newId } from "../schema.js";
 import { screenTenant } from "../ofac/screening.js";
 import type { TenantContext } from "../tenant-context.js";
 import { assertNotLifecycleFrozen, readLifecycleState } from "./billing-state.js";
+import { realNowMs } from "./clamped-age.js";
 import { billableMailboxCount, clearTeardownRecord, releaseMailboxes } from "./lifecycle.js";
 import { reactivateFromDunning } from "./ops-summary.js";
 import { deriveNextSteps } from "./next-steps.js";
@@ -664,6 +665,19 @@ async function applyStripeEventEffects(ctx: TenantContext, event: StripeEventInp
         // Frozen by an open dispute — checkout did not apply (plan unchanged).
         return { applied: false, duplicate: false };
       }
+      // §7.17.4 — go-forward `first_paid_at` stamp, guarded on NULL so a
+      // second/later checkout (a plan change) never moves the FIRST-paid
+      // anchor. CLAMPED per §7.19: `now` here is `ctx.clock.now()`, and this
+      // event is processed while `plan` is still demo/free for a
+      // never-before-paid tenant — under a VirtualClock running up to 1440x
+      // ahead of real time (the clock only flips at the NEXT DO
+      // construction). The backfill above covers the already-paying
+      // population; this covers everyone from here forward.
+      ctx.sql.exec(
+        `UPDATE tenant_profile SET first_paid_at = ? WHERE id = ? AND first_paid_at IS NULL`,
+        Math.min(now, realNowMs()),
+        ctx.tenantId,
+      );
       // Quantity-billing (design §9): store the captured discount % (from the
       // session totals) + resolve/store the subscription-item ids + confirmed
       // mailbox quantity so syncMailboxQuantity can set-to-N without re-resolving.

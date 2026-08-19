@@ -162,6 +162,11 @@ describe("failing-by-construction — a new check cannot inherit an unchosen pol
     warmup_duplicates: 2,
     "mailbox_orphan:": 2,
     "domain_orphan:": 2,
+    // I14 (design §7.11) — both blame-split names, same debounce cadence as
+    // every other re-observed check; only the CHANNEL differs (I13,
+    // `watchtower-channel-routing.test.ts`).
+    "customer_progress_operator:": 2,
+    "customer_progress_agent:": 2,
   };
 
   function declaredCheckNames(source: string): string[] {

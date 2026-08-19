@@ -74,6 +74,16 @@ export type Collapsed<T> = T & { deduplicated: boolean };
  * - `no_notifier` — this path notified nobody: either nothing anywhere notifies
  *   for the condition, or the code composing the claim holds no result to cite.
  * - `nothing_owed` — no notification was due (a steady state, not a decision).
+ * - `digest_only` (design §7.11, Q3) — the check's `AlertPolicy.channel` is
+ *   `"digest"`: an email was never owed for ANY transition on this check,
+ *   whatever `AlertAction` fired. Distinct from `dark_channel` (no channel
+ *   configured at all) — this channel exists, it is simply not email.
+ * - `reclassified` (design §7.17.3, N3) — a blame flip between the two
+ *   `customer_progress_*` names: the abandoned name's state genuinely clears
+ *   (so it cannot re-alert on the 24h step) but its RECOVERY email is
+ *   withheld, because the tenant it was reporting on is still stalled, just
+ *   under a different blamed name. Scoped to that flip pair — every other
+ *   `no_longer_applicable` clear on the platform still emails.
  *
  * `nothing_owed` is separate from the withholding reasons on purpose: folding
  * "there was nothing to say" into "we chose not to say it" is how a delivery
@@ -86,7 +96,9 @@ export type DeliveryReason =
   | "pending_debounce"
   | "send_failed"
   | "no_notifier"
-  | "nothing_owed";
+  | "nothing_owed"
+  | "digest_only"
+  | "reclassified";
 
 export interface Notified {
   delivered: boolean;

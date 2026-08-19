@@ -29,6 +29,19 @@ export interface AlertPolicy {
   firstRealertMs: number;
   /** Gap between every re-alert after that one. */
   steadyRealertMs: number;
+  /**
+   * §7.11 (Q3's blame-split ruling) — which channel this check's transitions
+   * render to. `"email"` is every check that existed before this wave, byte-
+   * identical. `"digest"` means an email is NEVER owed for this check,
+   * whatever `AlertAction` fires — `alertEmailFor` returns `null`
+   * unconditionally and `AlertOutcome.why` reports `"digest_only"`. The
+   * cadence dials above are UNCHANGED by the channel — a digest check still
+   * debounces and backs off exactly like an email one; only where the result
+   * goes differs. (No digest RENDERER exists yet — the digest itself is a
+   * separate deliverable; today `"digest"` means "silently observed", which
+   * is still strictly more honest than emailing about it.)
+   */
+  channel: "email" | "digest";
 }
 
 /**
@@ -58,6 +71,21 @@ export const DEBOUNCED_ALERT_POLICY: AlertPolicy = {
   confirmAfterObservations: WATCHTOWER_CONFIRM_OBSERVATIONS,
   firstRealertMs: WATCHTOWER_COOLDOWN_MS,
   steadyRealertMs: WATCHTOWER_STEADY_REALERT_MS,
+  channel: "email",
+};
+
+/**
+ * §7.11 (Q3) — the digest-only twin of `DEBOUNCED_ALERT_POLICY`: identical
+ * cadence, `channel: "digest"`. `customer_progress_agent:<tenantId>` is the
+ * one check this wave routes here — a customer-side stall while the tenant
+ * keeps paying is real, but not a founder-inbox event ("if they're paying,
+ * who cares" — founder ruling Q3).
+ */
+export const DEBOUNCED_DIGEST_ALERT_POLICY: AlertPolicy = {
+  confirmAfterObservations: WATCHTOWER_CONFIRM_OBSERVATIONS,
+  firstRealertMs: WATCHTOWER_COOLDOWN_MS,
+  steadyRealertMs: WATCHTOWER_STEADY_REALERT_MS,
+  channel: "digest",
 };
 
 /**
@@ -71,6 +99,7 @@ export const IMMEDIATE_ALERT_POLICY: AlertPolicy = {
   confirmAfterObservations: 1,
   firstRealertMs: WATCHTOWER_COOLDOWN_MS,
   steadyRealertMs: WATCHTOWER_STEADY_REALERT_MS,
+  channel: "email",
 };
 
 /**
@@ -88,6 +117,7 @@ export const DEAD_MAN_ALERT_POLICY: AlertPolicy = {
   confirmAfterObservations: 1,
   firstRealertMs: WATCHTOWER_COOLDOWN_MS,
   steadyRealertMs: WATCHTOWER_COOLDOWN_MS,
+  channel: "email",
 };
 
 /** What the state machine did for one check this observation — returned for

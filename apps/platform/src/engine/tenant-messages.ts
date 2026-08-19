@@ -55,7 +55,14 @@ import type { TenantContext } from "../tenant-context.js";
  * therefore needed NO migration (verified against schema.ts: `severity` is a
  * bare `TEXT NOT NULL`).
  */
-export type TenantMessageSeverity = "info" | "action_required" | "operator_pending" | "terminal";
+/**
+ * Runtime array, so the doc-coverage guard (design §2.6/I9, G1) can see a
+ * rung the moment it is added — a fifth rung reddens the guard before it can
+ * ship undocumented, the way the vendor-truth wave's `operator_pending` had
+ * to be hand-added to four descriptions with nothing to catch a miss.
+ */
+export const TENANT_MESSAGE_SEVERITIES = ["info", "action_required", "operator_pending", "terminal"] as const;
+export type TenantMessageSeverity = (typeof TENANT_MESSAGE_SEVERITIES)[number];
 
 export interface TenantMessage {
   id: string;

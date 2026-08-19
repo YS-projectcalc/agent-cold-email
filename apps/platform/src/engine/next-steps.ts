@@ -84,6 +84,10 @@ interface ProfileSnapshot {
   provisioningState: string;
   status: string;
   billingState: string;
+  /** §7.17.4 — the money-event stamp, clamped at write time (tenant-do.ts's
+   *  `backfillFirstPaidAt` / billing.ts's go-forward write). NULL for a
+   *  tenant that has never paid. */
+  firstPaidAt: number | null;
 }
 
 interface DomainRow {
@@ -133,9 +137,10 @@ function readNextStepsSnapshot(ctx: TenantContext): NextStepsSnapshot {
       provisioning_state: string;
       status: string;
       billing_state: string;
+      first_paid_at: number | null;
     }>(
       `SELECT brand, primary_domain, physical_address, sender_identity, register_domains, mailbox_qty_synced,
-              provisioning_state, status, billing_state
+              provisioning_state, status, billing_state, first_paid_at
        FROM tenant_profile WHERE id = ?`,
       ctx.tenantId,
     )
@@ -189,6 +194,7 @@ function readNextStepsSnapshot(ctx: TenantContext): NextStepsSnapshot {
       provisioningState: profileRow.provisioning_state,
       status: profileRow.status,
       billingState: profileRow.billing_state,
+      firstPaidAt: profileRow.first_paid_at,
     },
     provisioning: readProvisioningSnapshot(ctx),
     domains,
@@ -396,9 +402,11 @@ function seatSteps(ctx: TenantContext, snap: NextStepsSnapshot): NextStep[] {
         waitingOn: null,
         notBeforeMs: 0,
         effect: planned ? billingEffect(ctx, planned.provisionedAfter) : null,
-        // No honest anchor yet: `first_paid_at` is the money-event stamp that
-        // gives this reason an age, and it is not part of this phase.
-        sinceMs: null,
+        // §7.17.4 — `first_paid_at` is the money-event stamp, clamped at
+        // write time; NULL only for a tenant this backfill/go-forward pair
+        // has not reached yet (unreachable here in practice — this branch
+        // requires `billed > 0`, which implies a real checkout occurred).
+        sinceMs: clampedAge(snap.profile.firstPaidAt, snap.realNow),
       },
     ];
   }
@@ -844,11 +852,25 @@ export function owedSignals(next: NextSteps): {
   owedReasons: NextStep["reason"][];
   owedCount: number;
   oldestOwedSinceMs: number | null;
+  /**
+   * §7.11 — whether ANY owed step blames the operator, read from the real
+   * `NextStep.waitingOn` field (never a reason-name classification table
+   * re-deriving what this function already has in hand). The one signal the
+   * stuck-customer check's blame-in-the-name rule needs, kept as a single
+   * boolean rather than the per-step field — still the minimized projection
+   * (§7.10.3): never `NextStep[]`.
+   */
+  anyOwedWaitingOnOperator: boolean;
 } {
   const owed = next.steps.filter((s) => s.kind === "owed");
   const oldest = owed.reduce<number | null>((acc, s) => {
     if (s.sinceMs === null) return acc;
     return acc === null || s.sinceMs > acc ? s.sinceMs : acc;
   }, null);
-  return { owedReasons: owed.map((s) => s.reason), owedCount: owed.length, oldestOwedSinceMs: oldest };
+  return {
+    owedReasons: owed.map((s) => s.reason),
+    owedCount: owed.length,
+    oldestOwedSinceMs: oldest,
+    anyOwedWaitingOnOperator: owed.some((s) => s.waitingOn === "operator"),
+  };
 }

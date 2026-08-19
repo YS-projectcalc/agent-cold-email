@@ -257,7 +257,7 @@ export interface ProvisioningReconcileSweepSummary {
  * disabling word gets what they meant instead of the "any-non-empty-value"
  * footgun. Shipped default (unset) is dark.
  */
-function provisioningReconcileArmed(env: Env): boolean {
+export function provisioningReconcileArmed(env: { PROVISIONING_RECONCILE_ENABLED?: string }): boolean {
   const raw = (env.PROVISIONING_RECONCILE_ENABLED ?? "").trim().toLowerCase();
   return raw !== "" && raw !== "0" && raw !== "false" && raw !== "off";
 }

@@ -521,7 +521,7 @@ describe("I6 — owedSignals is the projection the RPC payload carries", () => {
     expect(signals.owedCount).toBeGreaterThan(0);
     expect(signals.owedReasons).toContain("ordinal_incomplete");
     expect(signals.oldestOwedSinceMs).toBeGreaterThan(0);
-    expect(Object.keys(signals).sort()).toEqual(["oldestOwedSinceMs", "owedCount", "owedReasons"]);
+    expect(Object.keys(signals).sort()).toEqual(["anyOwedWaitingOnOperator", "oldestOwedSinceMs", "owedCount", "owedReasons"]);
   });
 
   it("a tenant with nothing owed reports a null oldest anchor, not a zero", async () => {

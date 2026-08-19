@@ -174,7 +174,7 @@ export class WatchtowerDO extends DurableObject<Env> {
     // RPC — but it owes the same guarantee: `trySend` never throws, so the bank
     // step always runs, and it records an announcement only if one happened.
     const { prev, decision } = await this.readAndDecide(DEAD_MAN_ALERT_KEY, result.name, result.healthy, nowMs);
-    const email = alertEmailFor(this.env, result, decision.transition, decision.prevSinceTs, nowMs);
+    const email = alertEmailFor(this.env, result, decision.transition, decision.prevSinceTs, nowMs, policyFor(result.name));
     const notified = email ? await trySend(this.mailer, email) : null;
     await this.bankAlert(DEAD_MAN_ALERT_KEY, prev, decision.transition, notified);
   }

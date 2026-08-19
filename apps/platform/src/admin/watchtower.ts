@@ -17,17 +17,30 @@
 // before returning it, so the one check named for a D1 outage was structurally
 // incapable of reporting one.
 
-import type { Notified } from "@coldstart/shared";
+import type { Notified, RecoveryBasis } from "@coldstart/shared";
+import { isLifecycleFrozen } from "../engine/billing-state.js";
 import { listAllTenantIds } from "./db.js";
 import type { Env } from "../env.js";
-import type { TenantOpsSummary } from "../engine/ops-summary.js";
+import { isPaidPlan } from "@coldstart/shared";
+import {
+  continuityNudgeDelayMs,
+  customerProgressOwedMaxMs,
+  customerProgressStallMs,
+  DEFAULT_CUSTOMER_PROGRESS_OWED_MAX_MS,
+  DEFAULT_CUSTOMER_PROGRESS_STALL_MS,
+  type TenantOpsSummary,
+} from "../engine/ops-summary.js";
 import type { OpsMailer } from "../ops-mail/ops-mailer.js";
 import {
   alertEmailFor,
+  customerProgressAgentCheckName,
+  customerProgressOperatorCheckName,
   policyFor,
   reasonForNoEmail,
   trySend,
   CRED_PUSH_AGING_CHECK,
+  CUSTOMER_PROGRESS_AGENT_CHECK,
+  CUSTOMER_PROGRESS_OPERATOR_CHECK,
   D1_CHECK,
   DOMAIN_DNS_AGING_CHECK,
   DOMAIN_ORPHAN_CHECK,
@@ -215,7 +228,12 @@ async function scanTenants(env: Env, nowMs: number): Promise<CheckResult[]> {
       const s = await env.TENANT.get(env.TENANT.idFromName(tenantId)).opsSummary(sinceMs);
       failed += s.failureSignalsInWindow.failed;
       complaints += s.failureSignalsInWindow.complaints;
-      results.push(...sendPipelineChecks(tenantId, s, reported));
+      results.push(
+        ...sendPipelineChecks(tenantId, s, reported, {
+          stallMs: customerProgressStallMs(env),
+          owedMaxMs: customerProgressOwedMaxMs(env),
+        }),
+      );
       if (reported.has(wedgedName)) {
         // reobserved: this line is inside the try where the opsSummary RPC
         // actually returned, so the positive claim was just proven.
@@ -269,6 +287,10 @@ export function sendPipelineChecks(
   tenantId: string,
   summary: TenantOpsSummary,
   reported: ReadonlySet<string>,
+  customerProgressBounds: { stallMs: number; owedMaxMs: number } = {
+    stallMs: DEFAULT_CUSTOMER_PROGRESS_STALL_MS,
+    owedMaxMs: DEFAULT_CUSTOMER_PROGRESS_OWED_MAX_MS,
+  },
 ): CheckResult[] {
   const results: CheckResult[] = [];
   const {
@@ -501,6 +523,80 @@ export function sendPipelineChecks(
     );
   }
 
+  // §7.11 — the two stuck-customer checks: BLAME IN THE NAME, CHANNEL IN THE
+  // POLICY. Signals ride this same opsSummary fan-out (§7.10.3's minimized
+  // `owedReasons`/`owedCount`/`oldestOwedSinceMs`/`anyOwedWaitingOnOperator`
+  // + `lastAgentActivityAgeMs`) — no new RPC. Destructured with defaults
+  // (the `mailboxOrphans = []` precedent above): fixtures in sibling test
+  // files predate these fields.
+  const {
+    owedReasons = [],
+    owedCount = 0,
+    oldestOwedSinceMs = null,
+    anyOwedWaitingOnOperator = false,
+    lastAgentActivityAgeMs = null,
+  } = summary.sendPipeline;
+
+  const inScope = activated && isPaidPlan(summary.plan) && !isLifecycleFrozen(summary.status, summary.billingState);
+  // NULL (never a bearer-authed call, or a tenant predating the column) is
+  // NOT "silent since the epoch" — the disjunct is simply never satisfied by
+  // a null anchor, so nothing pages on deploy day; the owed-age disjunct
+  // alone still catches a genuinely stalled tenant.
+  const agentStalled = lastAgentActivityAgeMs !== null && lastAgentActivityAgeMs > customerProgressBounds.stallMs;
+  const owedTooOld = oldestOwedSinceMs !== null && oldestOwedSinceMs > customerProgressBounds.owedMaxMs;
+  const stalled = inScope && owedCount > 0 && (agentStalled || owedTooOld);
+
+  const operatorName = customerProgressOperatorCheckName(tenantId);
+  const agentName = customerProgressAgentCheckName(tenantId);
+  const blamedName = anyOwedWaitingOnOperator ? operatorName : agentName;
+  const abandonedName = blamedName === operatorName ? agentName : operatorName;
+
+  if (stalled) {
+    const stallHours = agentStalled ? Math.round((lastAgentActivityAgeMs as number) / 3_600_000) : null;
+    const owedHours = owedTooOld ? Math.round((oldestOwedSinceMs as number) / 3_600_000) : null;
+    results.push({
+      name: blamedName,
+      healthy: false,
+      detail:
+        `Tenant ${tenantId} (${summary.brand}) has ${owedCount} owed next-step(s) — ${owedReasons.join(", ")} — ` +
+        `blamed on ${anyOwedWaitingOnOperator ? "the operator" : "the agent"}. ` +
+        (stallHours !== null ? `No bearer-authed activity in over ${stallHours}h. ` : "") +
+        (owedHours !== null ? `Its oldest owed step has stood for over ${owedHours}h. ` : "") +
+        `See infrastructure_status.nextSteps for the account's own next action.`,
+    });
+    // The MANDATORY cross-clear (§7.17.3, N3): the abandoned name, in the
+    // SAME pass, so `reconcileAlerts` sees the sibling unhealthy here and
+    // treats this as a RE-CLASSIFICATION — the state clears (so it cannot
+    // re-alert on its own 24h step) but the recovery email is withheld,
+    // because this tenant is still stalled, just under the other name now.
+    if (reported.has(abandonedName)) {
+      results.push({
+        name: abandonedName,
+        healthy: true,
+        basis: "no_longer_applicable",
+        detail: `Tenant ${tenantId} (${summary.brand}) is still stalled, but blame moved to ${anyOwedWaitingOnOperator ? "the operator" : "the agent"}.`,
+      });
+    }
+  } else {
+    // Neither name is unhealthy this tick — clear whichever was previously
+    // reported. `owedCount === 0` is a genuine resolution (reobserved);
+    // leaving scope (deactivated / unpaid / lifecycle-frozen) is the entity
+    // departing the population this check watches (no_longer_applicable) —
+    // the same distinction every other clear in this file makes.
+    const basis: RecoveryBasis = inScope ? "reobserved" : "no_longer_applicable";
+    for (const name of [operatorName, agentName]) {
+      if (!reported.has(name)) continue;
+      results.push({
+        name,
+        healthy: true,
+        basis,
+        detail: inScope
+          ? `Tenant ${tenantId} (${summary.brand}) has ${owedCount} owed next-step(s) and is no longer stalled.`
+          : `Tenant ${tenantId} (${summary.brand}) is no longer in scope for this check (deactivated, unpaid, or lifecycle-frozen).`,
+      });
+    }
+  }
+
   return results;
 }
 
@@ -530,6 +626,24 @@ export function sendPipelineChecks(
  * `cron_legs`, which is damped over consecutive ticks before it ever gets
  * here) cannot be silently swept into the default by this loop.
  */
+/**
+ * The other `customer_progress_*` name for the SAME tenant id, or `null` for
+ * any other check. §7.17.3 (N3) — a blame flip is detected by looking up
+ * whether THIS name's sibling is unhealthy in the SAME pass, never by
+ * inferring it from `basis` alone (that would silence every other
+ * `no_longer_applicable` clear on the platform too — declined, see the
+ * `reclassified` DeliveryReason doc).
+ */
+function customerProgressSiblingName(name: string): string | null {
+  if (name.startsWith(CUSTOMER_PROGRESS_OPERATOR_CHECK)) {
+    return CUSTOMER_PROGRESS_AGENT_CHECK + name.slice(CUSTOMER_PROGRESS_OPERATOR_CHECK.length);
+  }
+  if (name.startsWith(CUSTOMER_PROGRESS_AGENT_CHECK)) {
+    return CUSTOMER_PROGRESS_OPERATOR_CHECK + name.slice(CUSTOMER_PROGRESS_AGENT_CHECK.length);
+  }
+  return null;
+}
+
 export async function reconcileAlerts(
   env: Env,
   mailer: OpsMailer,
@@ -539,25 +653,76 @@ export async function reconcileAlerts(
   const stateByName = await readWatchtowerState(env);
   const outcomes: AlertOutcome[] = [];
 
+  // §7.17.3 (N3) — computed ONCE over this pass's own results, so a genuine
+  // full recovery (no unhealthy sibling anywhere in this batch) still emails
+  // normally; only a same-tick blame flip is reclassified.
+  const unhealthyProgressNames = new Set(
+    results
+      .filter(
+        (r) => !r.healthy && (r.name.startsWith(CUSTOMER_PROGRESS_OPERATOR_CHECK) || r.name.startsWith(CUSTOMER_PROGRESS_AGENT_CHECK)),
+      )
+      .map((r) => r.name),
+  );
+
   for (const result of results) {
     try {
       const prev = stateByName.get(result.name) ?? null;
-      const transition = decideAlert(prev, result.healthy, nowMs, policyFor(result.name));
-      const email = alertEmailFor(env, result, transition, prev?.sinceTs ?? null, nowMs);
-      // `null` = no email was OWED (suppressed / pending / steady-healthy).
-      // That is not a delivery, and it is not a failure either — it must not
-      // withhold the transition, and it must not be recorded as "sent". The
-      // two used to be one boolean, which is the same conflation member 5 is
-      // about, one level down.
+      const policy = policyFor(result.name);
+      const transition = decideAlert(prev, result.healthy, nowMs, policy);
+
+      // A blame flip is a RE-CLASSIFICATION, not a recovery: suppress the
+      // SEND, never the state transition. `transition.next` (the ordinary
+      // clear-to-healthy state) still persists — this tenant is still
+      // stalled, just under the sibling's name now, and the abandoned name
+      // must not re-alert on its own 24h step.
+      const sibling = customerProgressSiblingName(result.name);
+      const reclassified = result.healthy && sibling !== null && unhealthyProgressNames.has(sibling);
+      // An email was genuinely OWED (would have rendered on the email
+      // channel) but this check's channel is not email — distinct from
+      // "nothing was owed yet" (pending/suppressed/steady-healthy), which
+      // keeps its ordinary `reasonForNoEmail`.
+      const wouldEmail = transition.action === "alerted" || transition.action === "realerted" || transition.action === "recovered";
+      const digestSuppressed = !reclassified && policy.channel === "digest" && wouldEmail;
+
+      const email = reclassified ? null : alertEmailFor(env, result, transition, prev?.sinceTs ?? null, nowMs, policy);
+      // `null` = no email was OWED (suppressed / pending / steady-healthy /
+      // digest channel / reclassified). That is not a delivery, and it is not
+      // a failure either — it must not withhold the transition, and it must
+      // not be recorded as "sent". The two used to be one boolean, which is
+      // the same conflation member 5 is about, one level down.
       const notified: Notified | null = email ? await trySend(mailer, email) : null;
       const withheld = notified !== null && !notified.delivered;
       const state = withheld ? withheldAlertState(prev, transition) : transition.next;
       await upsertWatchtowerState(env, { name: result.name, state, detail: result.detail, nowMs });
+
+      // I15 (§7.12) — the one-shot continuity nudge. Gated on an
+      // alert-WORTHY transition (alerted/realerted) rather than every
+      // 5-minute tick, so this cross-DO RPC stays roughly at the alert
+      // cadence for the episode's lifetime instead of firing continuously
+      // for a long-stalled tenant; the DO-side `continuity_nudge_episode_ts`
+      // guard (engine/continuity-nudge.ts) is what makes "exactly once per
+      // episode" EXACT regardless of how many times this fires.
+      if (
+        !result.healthy &&
+        (transition.action === "alerted" || transition.action === "realerted") &&
+        (result.name.startsWith(CUSTOMER_PROGRESS_OPERATOR_CHECK) || result.name.startsWith(CUSTOMER_PROGRESS_AGENT_CHECK))
+      ) {
+        const episodeSinceTs = transition.next.sinceTs;
+        if (nowMs - episodeSinceTs >= continuityNudgeDelayMs(env)) {
+          const tenantId = result.name.slice(result.name.indexOf(":") + 1);
+          try {
+            await env.TENANT.get(env.TENANT.idFromName(tenantId)).maybeEmitContinuityNudge(episodeSinceTs);
+          } catch (err) {
+            console.error(`watchtower: continuity nudge RPC failed for tenant ${tenantId}`, err);
+          }
+        }
+      }
+
       outcomes.push({
         name: result.name,
         action: transition.action,
         emailSent: notified?.delivered ?? false,
-        why: notified?.why ?? reasonForNoEmail(transition.action),
+        why: notified?.why ?? (reclassified ? "reclassified" : digestSuppressed ? "digest_only" : reasonForNoEmail(transition.action)),
       });
     } catch (err) {
       console.error(`watchtower: check "${result.name}" could not be reconciled — it is UNREPORTED this tick`, err);
