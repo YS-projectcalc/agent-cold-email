@@ -1220,11 +1220,13 @@ function domainDnsSteps(ctx: TenantContext, snap: NextStepsSnapshot): NextStep[]
   //
   // THE ACTION IS UNCHANGED, deliberately. `executeSetupCall` builds the same
   // params from the same distribution, so this is a pricing fix, not a remedy
-  // change. The shortfall's exactness-withhold gate is NOT imposed here and
-  // would be wrong if it were: that gate exists because a wider call re-creates
-  // addresses a customer released ON PURPOSE, while this reason recommends the
-  // ordinary fill-to-the-billed-quantity call its seat-family siblings also
-  // emit, on a domain whose slots nobody has released.
+  // change. The shortfall's exactness-withhold gate is NOT imposed here; the
+  // trade is that the fill prefix CAN reach a slot index whose address the
+  // customer deliberately released (r5 gate proved it: a released slot inside
+  // the fill prefix gets re-bought by this call — pre-existing remedy behavior,
+  // tracked on the ROADMAP re-buy item alongside ordinal_incomplete). Imposing
+  // the gate here would withhold the DNS remedy from ordinary fill shapes; the
+  // priced `effect` now states the cost either way.
   const executed = executeSetupCall(
     snap,
     fillDistribution(snap.provisioning, Math.max(snap.profile.billedQuantity, MINIMUM_BILLABLE_MAILBOXES)),

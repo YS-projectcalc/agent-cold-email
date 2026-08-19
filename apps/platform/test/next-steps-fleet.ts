@@ -45,7 +45,7 @@ export interface Seed {
   billedQuantity?: number;
 }
 
-export const PERSONA = "mordytee";
+const PERSONA = "mordytee";
 
 let seq = 0;
 
