@@ -17,4 +17,8 @@ metadata:
 - Type the port so it can say "the vendor does not report this" (`number | null`). A shape that cannot express *unknown* forces every implementation to invent a value — and then a `?? 0` at the consumer quietly re-invents it one layer out.
 - A non-finite guard belongs where the division happens, returning null — not a clamp.
 
+**ADJACENT CLASS — the STALE example (cost the vendor-truth wave a gate round; hit again in the continuity design 2026-08-18):** a fixture or worked example pinned to a LIVE tenant's *current* state rots the moment production moves. The continuity design's flagship example was `billable = 2` / owed; Mordy's fleet completed mid-design and he became `billable = 4` / nothing-owed, inverting which reason the example demonstrates.
+
+**How to apply:** a doc example and a test fixture have DIFFERENT jobs and must not share a state. Date the doc example in place and say what it illustrates. Make the test fixture **synthetic — a state production has never passed through and no real sequence produces** (e.g. 3 domains at `[2,2,1]` with 6 paid seats), so it is hermetic and cannot go stale. Pinning a test to a real customer's shape guarantees a future false red.
+
 Siblings: [[fixture-decorates-vendor-owned-object]] (our field on a vendor-minted object), [[sandbox-port-masks-real-server-contract]], [[sandbox-fallback-masks-a-missing-activation-gate]].

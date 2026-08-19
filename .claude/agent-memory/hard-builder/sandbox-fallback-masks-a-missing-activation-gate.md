@@ -37,5 +37,16 @@ calls measures the vendor boundary; the customer-visible lie lives in the databa
   ungated one back to back on the same fixture (`runScheduledTick()` -> `{ran:false}` vs
   `tick()` -> `{sent:1}`).
 
+**SECOND FACE OF THE SAME BRANCH (2026-08-18, continuity design gate B2):** the sandbox
+branch does not only mask a missing gate, it makes whole INPUT FIELDS inert.
+`selectSetupDomainPort` early-returns `if (bundle.kind !== "real")` (`tenant-do.ts:776`), so
+on any sandbox fixture `registerDomains` has NO effect at all. A convergence guard built to
+prove "the recommended call actually works" was therefore structurally blind to the ONE field
+whose omission made that call 503 in production. **How to apply:** before trusting a guard that
+executes a real code path on sandbox adapters, list the fields the sandbox short-circuit
+discards, and add a NEGATIVE fixture on the real branch (strip the field → the guard must FAIL)
+to prove the guard can see it at all.
+
 Related: [[code-with-no-production-driver-passes-every-test]] (same family — green tests
-over a path production never exercises), [[polling-check-error-is-indistinguishable-from-negative]].
+over a path production never exercises), [[polling-check-error-is-indistinguishable-from-negative]],
+[[absent-field-means-opposite-things-on-read-and-write]] (the field B2 could not see).
