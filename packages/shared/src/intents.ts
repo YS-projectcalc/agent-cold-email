@@ -5,6 +5,7 @@
 
 import { z } from "zod";
 import { ValidationError } from "./errors.js";
+import { MAX_MAILBOXES_PER_ORDINAL } from "./pricing.js";
 
 export const SignupInput = z.object({
   brand: z.string().min(1).max(200),
@@ -45,7 +46,7 @@ export const SetupInfrastructureInput = z
     // invent a uniform number that nothing reads — and the recommendation this
     // wave emits carries `distribution` alone, so a required `inboxesEach`
     // would make the platform's own recommended call fail at its own boundary.
-    inboxesEach: z.number().int().min(1).max(10).optional(),
+    inboxesEach: z.number().int().min(1).max(MAX_MAILBOXES_PER_ORDINAL).optional(),
     persona: z.string().min(1).max(200),
     physicalAddress: z.string().min(1).max(500),
     senderIdentity: z.string().min(1).max(200),
@@ -113,7 +114,7 @@ export const SetupInfrastructureInput = z
     // (`inboxesEach`) and at most 20 ordinals (`domains`). The SUM is checked
     // against the plan ceiling by `assertWithinProvisioningCap`, against the
     // SHORTFALL rather than the raw ask, so a pure retry still passes.
-    distribution: z.array(z.number().int().min(1).max(10)).min(1).max(20).optional(),
+    distribution: z.array(z.number().int().min(1).max(MAX_MAILBOXES_PER_ORDINAL)).min(1).max(20).optional(),
   })
   .superRefine((data, ctx) => {
     if (data.distribution && data.distribution.length !== data.domains) {

@@ -553,16 +553,27 @@ export function listMessagesForOperator(
  * table. A row stays hidden from every agent-facing surface the moment
  * `expires_at` passes — the retention changes what is RECOVERABLE, never what
  * is SHOWN.
+ *
+ * EACH LEG IS AGED ON ITS OWN COLUMN'S CLOCK (NB-2, build gate r3
+ * 2026-08-19). `read_at` has one writer, `ackMessage`, which stamps
+ * `ctx.clock.now()`; `expires_at` is stamped `realNowMs()` by
+ * `expireResolvedSystemMessages`. One shared `ctx.clock` cutoff made the
+ * expired leg cross-domain: a demo/free tenant's VirtualClock is advanced
+ * arbitrarily (clock.ts's `advanceVirtual`, used to resolve a 28-day warmup
+ * ramp), so once it leads real time by more than the retention every
+ * just-expired row was deleted on the next sweep — the exact destruction this
+ * retention exists to prevent, inert for that population.
  */
 export function pruneTenantMessages(ctx: TenantContext): { deleted: number } {
-  const cutoff = ctx.clock.now() - READ_RETENTION_MS;
+  const expiredCutoff = realNowMs() - READ_RETENTION_MS;
+  const readCutoff = ctx.clock.now() - READ_RETENTION_MS;
   const result = ctx.sql.exec(
     `DELETE FROM tenant_messages
      WHERE tenant_id = ?
        AND ((expires_at IS NOT NULL AND expires_at <= ?) OR (read_at IS NOT NULL AND read_at <= ?))`,
     ctx.tenantId,
-    cutoff,
-    cutoff,
+    expiredCutoff,
+    readCutoff,
   );
   return { deleted: result.rowsWritten };
 }
