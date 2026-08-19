@@ -20,3 +20,5 @@
 - 2026-08-16: prior-HANDOFF.md — pre-handoff snapshot (visibility + alert-policy session)
 - 2026-08-18-trains-1-2-ship/prior-HANDOFF.md — HANDOFF.md as of `018dc65`/`c6b658c4` (msgread ship), before the trains-1+2 ship rewrite (`2cef30d`, Worker `3c549e5e`).
 - 2026-08-18-vendor-truth-ship/prior-HANDOFF.md — HANDOFF.md as of `2cef30d`/Worker `3c549e5e` (trains-1+2 ship), before the vendor-truth-wave + Mordy-incident-resolution rewrite (`a0fd314`/gate `629a20e`, Worker `54b00702`, site Pages `62115561`).
+- 2026-08-19-continuity-ship/prior-HANDOFF.md — HANDOFF.md as of `0cc9feb` (customer-continuity wave shipped, Worker `54b00702`-era text still resident), before the customer-continuity-ship rewrite (Worker `319e15c4-1de7-4690-be8b-61a68082a226`, site Pages `40fe9f0c`).
+- 2026-08-19: ROADMAP-done.md — drained 1 stale checked line (2026-08-16 alert-policy tune, `[x]` since 2026-08-16, never previously drained) at the customer-continuity-ship bookkeeping pass.
