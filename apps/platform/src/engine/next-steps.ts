@@ -35,6 +35,7 @@
  */
 
 import {
+  billableMailboxes,
   MAILBOXES_PER_DOMAIN,
   MAX_MAILBOXES_PER_ORDINAL,
   MAX_SELF_SERVE_MAILBOXES,
@@ -175,15 +176,23 @@ interface DomainRow {
  * WHY THE MAILBOX ROW AND NOT THE IDEMPOTENCY CLAIM. A `mailboxes` row is
  * inserted ONLY after the vendor reports the mailbox ready
  * (mailbox-provisioning.ts's invariant 2, "A LOCAL ROW MEANS A REAL
- * MAILBOX"), and no production path deletes one — `releaseMailboxes` marks
- * `released_at` and every remover goes through it (downgrade, deliverability
- * burn, teardown). The two alternatives both fail the durability test at
- * exactly the moment they would be needed: `request_idempotency`'s
- * `provision:mbx:` claim is DELETED on every release by
- * `markMailboxIntentsReleased`, dropped wholesale by teardown and evicted at
- * 30 days; and a `mailbox_intents` row is written BEFORE the purchase, so it
- * exists for a slot that failed and would mute the one case this reason is
- * for.
+ * MAILBOX"), and NO PRODUCTION PATH DELETES ONE — which is the property this
+ * discriminator actually rests on. Removal marks `released_at`: three removers
+ * go through `releaseMailboxes` (downgrade, deliverability burn, teardown) and
+ * a FOURTH writes the column directly — clock-migration.ts's sandbox
+ * retirement, `UPDATE mailboxes SET released_at = ?, deliv_status = 'paused'
+ * WHERE provider = 'sandbox'` (build gate r4 2026-08-19; the funnel claim as
+ * written was the kind a later edit relies on). It leaves `everAddresses`
+ * intact like the others, and the same migration retires those ordinals'
+ * `domains` rows to 'retired', which discriminator 1 excludes — so the
+ * direction is safe and the reason correctly stays quiet.
+ *
+ * The two alternatives both fail the durability test at exactly the moment
+ * they would be needed: `request_idempotency`'s `provision:mbx:` claim is
+ * DELETED on every release by `markMailboxIntentsReleased`, dropped wholesale
+ * by teardown and evicted at 30 days; and a `mailbox_intents` row is written
+ * BEFORE the purchase, so it exists for a slot that failed and would mute the
+ * one case this reason is for.
  */
 interface MailboxHistory {
   /** Every address this tenant EVER held, live or released. */
@@ -787,6 +796,48 @@ function billClaimSentence(effect: MailboxBilling | null): string {
   );
 }
 
+/**
+ * What an OWED provisioning step may say about the bill — the same
+ * read-it-off-the-projection rule as `billClaimSentence`, for the steps where
+ * the mailboxes are owed rather than optional (NEW-1, build gate r4
+ * 2026-08-19).
+ *
+ * A SEPARATE SENTENCE, not a shared one, because the ADVICE differs and the
+ * advice is the point: `seat_headroom_free` can honestly say "ask for fewer to
+ * stay inside the minimum", and telling a customer that about mailboxes they
+ * have already paid for and never received is the opposite of true.
+ *
+ * THE COMPARISON IS AGAINST WHAT THE SUBSCRIPTION BILLS TODAY, not against the
+ * five-seat minimum. "Past the minimum" is the right anchor for
+ * `seat_headroom_free`, whose whole predicate is `billable < 5` — but these
+ * reasons fire at any size, and on an account already billing 6 a call landing
+ * at 6 would have been announced as a bill change because it cleared the floor.
+ * `mailbox_qty_synced` is the quantity Stripe charges on (the same number
+ * `billed_quantity_drift` reports), and both sides go through the same discount,
+ * so comparing the FLOORED COUNTS is exactly comparing the cents.
+ *
+ * IT ALSO TAKES `newMailboxes`, because a call that acquires nothing must not be
+ * described as moving the bill: an under-synced account can sit below its own
+ * live count, where the projection legitimately exceeds the billed quantity for
+ * reasons this call has nothing to do with.
+ */
+function billMoveSentence(effect: MailboxBilling | null, newMailboxes: number, billedQuantity: number): string {
+  if (effect === null) return "";
+  if (newMailboxes === 0) {
+    return ` This call buys nothing, so your monthly total is unchanged — \`effect\` projects the ${effect.provisionedAfter} mailboxes already provisioned.`;
+  }
+  if (billableMailboxes(effect.provisionedAfter) > billableMailboxes(billedQuantity)) {
+    return (
+      ` This call DOES change your bill: \`effect\` projects ${effect.provisionedAfter} mailboxes, above the ` +
+      `${billedQuantity} your subscription bills for today, and carries the projected monthly total.`
+    );
+  }
+  return (
+    ` \`effect\` projects ${effect.provisionedAfter} mailboxes at the same monthly total your subscription already ` +
+    `bills, so this call does not add to it.`
+  );
+}
+
 /** The one sentence that explains a consent decision, appended only when there is one to make. */
 function consentSentence(snap: NextStepsSnapshot, action: NextStepAction): string {
   if (action.via !== "mcp_tool" || action.tool !== "setup_infrastructure") return "";
@@ -821,7 +872,7 @@ function consentSentence(snap: NextStepsSnapshot, action: NextStepAction): strin
  * `domain_orphan:` covers `status='committed'` with no `domains` row, and this
  * covers the two EARLIER statuses, which nothing reads today.
  */
-function ordinalIncompleteSteps(snap: NextStepsSnapshot): NextStep[] {
+function ordinalIncompleteSteps(ctx: TenantContext, snap: NextStepsSnapshot): NextStep[] {
   const stalled: number[] = [];
   let oldest: number | null = null;
   for (const [ordinal, intent] of snap.provisioning.intentsByOrdinal) {
@@ -850,6 +901,14 @@ function ordinalIncompleteSteps(snap: NextStepsSnapshot): NextStep[] {
     snap,
     fillDistribution(snap.provisioning, Math.max(snap.profile.billedQuantity, MINIMUM_BILLABLE_MAILBOXES)),
   );
+  // AND THE MONEY FIELD RIDES THE SAME PLAN (NEW-1, build gate r4). The action
+  // this step emits is always runnable, and the plan above says it creates real
+  // mailboxes — each one a `mailboxes` row with `released_at IS NULL`, which is
+  // the billing meter itself. `effect: null` is the contract's affirmative claim
+  // that the step "changes no billable count" (@coldstart/shared's
+  // `NextStep.effect`), so shipping it beside a bill-raising call states the
+  // opposite of what the call does, to an agent executing it verbatim.
+  const effect = executed.plan === null ? null : billingEffect(ctx, snap.billableMailboxes + executed.plan.newMailboxes);
   return [
     {
       reason: "ordinal_incomplete",
@@ -859,14 +918,18 @@ function ordinalIncompleteSteps(snap: NextStepsSnapshot): NextStep[] {
         `(${stalled.join(", ")}) ${stalled.length === 1 ? "was" : "were"} requested and never completed — the ` +
         `request is recorded but no live domain landed there. Ordinals complete independently, so repeating the ` +
         `setup call resumes exactly the unfinished ${stalled.length === 1 ? "one" : "ones"} and buys nothing twice.` +
+        // The bill statement is DERIVED FROM `effect`, never asserted beside it
+        // (the N-B-1 pattern): "buys nothing twice" is a claim about idempotency,
+        // and next to an acquisition clause it reads as a claim about cost.
         (executed.plan === null
-          ? ""
-          : ` The call below ${acquisitionClause(executed.plan)} — the ordinals already committed are resumed, not re-bought.`) +
+          ? PERSONA_UNKNOWN_SENTENCE
+          : ` The call below ${acquisitionClause(executed.plan)} — the ordinals already committed are resumed, not re-bought.` +
+            billMoveSentence(effect, executed.plan.newMailboxes, snap.profile.billedQuantity)) +
         consentSentence(snap, executed.action),
       action: executed.action,
       waitingOn: null,
       notBeforeMs: 0,
-      effect: null,
+      effect,
       sinceMs: oldest,
     },
   ];
@@ -949,7 +1012,7 @@ function ordinalIncompleteSteps(snap: NextStepsSnapshot): NextStep[] {
  * live, active, DNS-ready ordinal under its ask, whose missing addresses this
  * platform has never once created.
  */
-function ordinalSlotShortfallSteps(snap: NextStepsSnapshot, paidSeatsUnprovisioned: boolean): NextStep[] {
+function ordinalSlotShortfallSteps(ctx: TenantContext, snap: NextStepsSnapshot, paidSeatsUnprovisioned: boolean): NextStep[] {
   // NB-5 — YIELD to `paid_seats_unprovisioned`. When nothing at all is
   // provisioned both reasons describe the same condition, so the account was
   // owed twice for one problem and handed two identical calls for it. The same
@@ -1013,7 +1076,7 @@ function ordinalSlotShortfallSteps(snap: NextStepsSnapshot, paidSeatsUnprovision
   if (short.length === 0) return [];
 
   const missingTotal = short.reduce((a, s) => a + s.missing, 0);
-  const executed = shortfallRemedy(snap, short, missingTotal);
+  const executed = shortfallRemedy(ctx, snap, short, missingTotal);
   const fact =
     `${missingTotal} mailbox${missingTotal === 1 ? "" : "es"} requested on ` +
     `${short.length === 1 ? "domain slot" : "domain slots"} ${short.map((s) => s.ordinal).join(", ")} ` +
@@ -1033,7 +1096,12 @@ function ordinalSlotShortfallSteps(snap: NextStepsSnapshot, paidSeatsUnprovision
       // (§7.11's blame-in-the-name rule reads this field).
       waitingOn: executed.action.via === "none" ? "operator" : null,
       notBeforeMs: 0,
-      effect: null,
+      // READ OFF THE PLAN THE ACTION WAS BUILT FROM, for the same reason
+      // `waitingOn` is read off the action: the withheld branch buys nothing, so
+      // its null is TRUE, and the runnable branch buys the missing mailboxes, so
+      // a null there would be the contract's "changes no billable count" stated
+      // over a call that raises the meter by exactly `missingTotal`.
+      effect: executed.effect,
       sinceMs: oldest,
     },
   ];
@@ -1067,11 +1135,12 @@ function ordinalSlotShortfallSteps(snap: NextStepsSnapshot, paidSeatsUnprovision
  * `seatFillAction` takes for a BYO-only tenant.
  */
 function shortfallRemedy(
+  ctx: TenantContext,
   snap: NextStepsSnapshot,
   short: { ordinal: number; missing: number }[],
   missingTotal: number,
-): { action: NextStepAction; claim: string } {
-  const withheld = (why: string): { action: NextStepAction; claim: string } => ({
+): { action: NextStepAction; claim: string; effect: MailboxBilling | null } {
+  const withheld = (why: string): { action: NextStepAction; claim: string; effect: MailboxBilling | null } => ({
     action: {
       via: "none",
       note:
@@ -1080,6 +1149,10 @@ function shortfallRemedy(
         "have the missing slots filled.",
     },
     claim: `The platform will not recommend a call for this: ${why}`,
+    // NOTHING IS BOUGHT ON THIS BRANCH, which is the one case where the
+    // contract's `effect: null` — "the step changes no billable count" — is a
+    // true statement rather than an unstated absence.
+    effect: null,
   });
 
   const distribution = shortfallDistribution(snap, Math.max(...short.map((s) => s.ordinal)));
@@ -1089,12 +1162,21 @@ function shortfallRemedy(
   if (executed.plan.newDomains !== 0 || executed.plan.newMailboxes !== missingTotal) {
     return withheld(`the closest call it can construct ${acquisitionClause(executed.plan)}, which is not what is missing here.`);
   }
+  // The plan is exactly the shortfall past the guard above (`newDomains === 0`
+  // and `newMailboxes === missingTotal`), so the projection is the meter plus
+  // the mailboxes this call creates.
+  const effect = billingEffect(ctx, snap.billableMailboxes + executed.plan.newMailboxes);
   return {
     action: executed.action,
     claim:
       `Mailbox slots complete independently, so repeating the setup call creates exactly the ${missingTotal} ` +
       `missing ${missingTotal === 1 ? "one" : "ones"} and buys nothing twice.` +
+      // "Buys nothing twice" is an IDEMPOTENCY claim, and beside a count of
+      // mailboxes it reads as a claim about cost — so what the bill does is
+      // stated here, derived from the same `effect` the step ships (N-B-1).
+      billMoveSentence(effect, executed.plan.newMailboxes, snap.profile.billedQuantity) +
       consentSentence(snap, executed.action),
+    effect,
   };
 }
 
@@ -1463,8 +1545,8 @@ export function deriveNextStepsWithResolved(ctx: TenantContext): DerivedNextStep
   const paidSeatsUnprovisioned = seat.some((s) => s.reason === "paid_seats_unprovisioned");
   const fromState: NextStep[] = [
     ...seat,
-    ...ordinalIncompleteSteps(snap),
-    ...ordinalSlotShortfallSteps(snap, paidSeatsUnprovisioned),
+    ...ordinalIncompleteSteps(ctx, snap),
+    ...ordinalSlotShortfallSteps(ctx, snap, paidSeatsUnprovisioned),
     ...domainDnsSteps(ctx, snap),
     ...capacitySteps(snap),
   ];
