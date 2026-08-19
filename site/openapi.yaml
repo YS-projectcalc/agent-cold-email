@@ -85,13 +85,16 @@ paths:
         provisioning occurs.
 
 
-        `domains` and `inboxesEach` describe the infrastructure you want to
-        HAVE, not an amount to add. Each call reconciles: domains already
-        provisioned for this account are kept and resumed, and only the
-        shortfall is bought. So provisioning MORE means asking for a larger
-        number — `domains: 2` after a call that provisioned one buys the
-        second; raising `inboxesEach` tops each domain up to the new
-        per-domain count.
+        `domains` covers ordinals 0..domains-1; each ordinal fills to its own
+        mailbox count via `inboxesEach` (uniform) or `distribution`
+        (per-ordinal). This is the infrastructure you want to HAVE, not an
+        amount to add — a repeat call at the same `domains` provisions
+        nothing new once every ordinal is satisfied, so reaching ordinal 1
+        needs `domains: 2`, not a second `domains: 1` call; raising
+        `inboxesEach`/`distribution` tops existing domains up to the new
+        per-domain count. Mailbox addresses are DETERMINISTIC — derived from
+        `persona` + ordinal + slot — so keep `persona` unchanged across
+        resumes and retries.
 
 
         Retry contract: repeating a call NEVER buys a second time, whatever
@@ -107,8 +110,14 @@ paths:
         `registerDomains` (real domain purchases on the platform's own
         account — the customer's bill is unchanged, mailbox-count-based
         only): omitting it leaves any previously-given consent UNCHANGED;
-        `true` opts in and requires `registrant`; an explicit `false`
-        revokes it. There is no default.
+        `true` opts in (`registrant` required only when none is already on
+        file — see `Registrant`); an explicit `false` revokes it. There is no
+        default. A buy-bearing call that omits it (or sends `false`) is
+        refused before any spend: 400 `registrar_optin_missing` once this
+        account has consented before ("registerDomains was not set on this
+        request" — resend with it set to self-correct, never an operator
+        escalation), or 503 `registrar_unarmed` if domain registration is not
+        enabled for the platform at all.
 
 
         If fewer available, not-already-owned lookalike domains exist than
@@ -123,7 +132,8 @@ paths:
         autonomous background retry: completing it is the caller's job.
         Repeat the same call to converge onto that domain and finish its DNS
         setup. There is no per-domain DNS field to poll: GET
-        /infrastructure-status reports a domain count, not per-domain detail.
+        /infrastructure-status reports a domain count, not per-domain detail,
+        but its `nextSteps` names the account's own next action.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -149,11 +159,17 @@ paths:
             carrying `provisioning`, and a quoteOnly preview, are NOT recorded
             against your Idempotency-Key — retrying with the same key re-runs
             the call rather than replaying the unfinished answer.
+
+
+            `nextSteps` (design §7.2) names what this account should do
+            next — the SAME derivation `GET /infrastructure-status` embeds.
           content:
             application/json:
               schema:
                 type: object
                 additionalProperties: true
+                properties:
+                  nextSteps: { $ref: '#/components/schemas/NextSteps' }
         '400':
           $ref: '#/components/responses/ValidationError'
         '401':
@@ -172,12 +188,16 @@ paths:
       summary: Provisioning + warmup progress, per-mailbox health, send-readiness.
       responses:
         '200':
-          description: Current infrastructure status.
+          description: >
+            Current infrastructure status. `nextSteps` (design §7.2) names
+            what this account should do next, derived fresh on every call.
           content:
             application/json:
               schema:
                 type: object
                 additionalProperties: true
+                properties:
+                  nextSteps: { $ref: '#/components/schemas/NextSteps' }
         '401':
           $ref: '#/components/responses/Unauthorized'
 
@@ -1583,12 +1603,34 @@ components:
 
     SetupInfrastructureInput:
       type: object
-      required: [brand, primaryDomain, domains, inboxesEach, persona, physicalAddress, senderIdentity]
+      required: [brand, primaryDomain, domains, persona, physicalAddress, senderIdentity]
+      description: >
+        Exactly one of `inboxesEach` (uniform per-domain count) or
+        `distribution` (per-ordinal counts) is required — supplying neither
+        is rejected naming `inboxesEach`, and `distribution`'s length must
+        equal `domains`.
       properties:
         brand: { type: string, minLength: 1, maxLength: 200 }
         primaryDomain: { type: string, minLength: 3, maxLength: 253, example: "acme.com" }
         domains: { type: integer, minimum: 1, maximum: 20, description: "Number of lookalike domains to provision." }
-        inboxesEach: { type: integer, minimum: 1, maximum: 10, description: "Mailboxes to provision per domain." }
+        inboxesEach:
+          type: integer
+          minimum: 1
+          maximum: 10
+          description: >
+            Mailboxes to provision per domain, UNIFORM across every ordinal.
+            Optional only when `distribution` is supplied.
+        distribution:
+          type: array
+          items: { type: integer, minimum: 1, maximum: 10 }
+          minItems: 1
+          maxItems: 20
+          description: >
+            The per-ordinal mailbox count directly — one entry per domain
+            ordinal (e.g. `[3, 2]` for 3 mailboxes on domain 0 and 2 on
+            domain 1), for a shape `inboxesEach`'s single uniform number
+            cannot express. Its length must equal `domains`. Alternative to
+            `inboxesEach`, not additive with it.
         persona: { type: string, minLength: 1, maxLength: 200 }
         physicalAddress:
           type: string
@@ -1613,21 +1655,31 @@ components:
             This tenant's opt-in consent to real domain purchases made on
             the platform's own account (COGS — the customer's bill is
             unchanged, mailbox-count-based only). Omitting this field
-            entirely leaves any previously-given consent UNCHANGED; `true`
-            opts in and requires `registrant`; an explicit `false` revokes
-            it. There is no default — an absent field is never treated as
-            `false`.
+            entirely leaves any previously-given consent UNCHANGED; an
+            explicit `false` revokes it. There is no default — an absent
+            field is never treated as `false`. `true` opts in; `registrant`
+            is required only when no complete registrant is already on file
+            from a prior call (see `Registrant`) — a call omitting
+            `registerDomains` (or sending `false`) on a request that needs to
+            buy a domain is refused before any spend: 400
+            `registrar_optin_missing` once this account has consented at
+            least once, or 503 `registrar_unarmed` if domain registration is
+            not enabled for the platform at all. Both fixes are the same:
+            resend with `registerDomains: true`.
         registrant:
           $ref: '#/components/schemas/Registrant'
 
     Registrant:
       type: object
       description: >
-        The domain registrant-of-record. Required whenever `registerDomains`
-        is true — this platform never invents a domain registrant's legal
-        identity, so a `registerDomains:true` call without a complete
-        `registrant` is rejected at the boundary (400) naming the missing
-        fields.
+        The domain registrant-of-record. Optional even when `registerDomains`
+        is true, whenever a complete registrant is already on file from a
+        prior call — supplying one makes it authoritative for THIS call;
+        omitting it re-uses the persisted one. This platform never invents a
+        domain registrant's legal identity, so a `registerDomains:true` call
+        with no registrant anywhere (neither supplied nor persisted) is
+        rejected (400 `incomplete_registrant`) naming the missing fields,
+        before any purchase.
       required: [firstName, lastName, email, phone, addressLine1, city, state, country, postalCode]
       properties:
         firstName: { type: string, minLength: 1, maxLength: 200 }
@@ -1644,6 +1696,97 @@ components:
           minLength: 1
           maxLength: 200
           description: Optional; defaults to the tenant's own brand if omitted.
+
+    NextStepReason:
+      type: string
+      enum: [paid_seats_unprovisioned, seat_headroom_free, domain_dns_incomplete, ordinal_incomplete, ordinal_slot_shortfall, setup_operator_blocked, setup_capacity_held, billed_quantity_drift, account_frozen, message_action_required, mailbox_credentials_pending, ready_to_launch]
+      description: >
+        Closed union (design §7.2). paid_seats_unprovisioned = paying,
+        nothing provisioned (owed). seat_headroom_free = at the 5-mailbox
+        floor with 1-4 provisioned, the remainder cost $0 (NEVER owed).
+        domain_dns_incomplete = a live domain's mail DNS has not come up
+        yet. ordinal_incomplete = a requested domain ordinal never
+        completed. ordinal_slot_shortfall = the domain landed and its mail
+        DNS is up, but it holds fewer mailboxes than the call that created
+        it asked for — mailbox slots complete independently, so repeating
+        the setup call creates exactly the missing ones.
+        setup_operator_blocked = the platform stopped; only an
+        operator can restart it. setup_capacity_held = a spend/plan-slot
+        hold — nothing failed. billed_quantity_drift = our Stripe push did
+        not land, ours to fix. account_frozen = lifecycle freeze;
+        re-checkout is the way out. message_action_required = an unacked
+        message the account will not progress past. mailbox_credentials_pending
+        = a provisioned mailbox's credentials have not reached the sending
+        engine yet. ready_to_launch = infrastructure is up, no campaign
+        exists yet.
+
+    NextStepAction:
+      type: object
+      description: >
+        A DISCRIMINATED UNION on `via` — always present, so "no action is
+        possible" is a stated value rather than an empty object.
+      required: [via]
+      properties:
+        via: { type: string, enum: [mcp_tool, http, none] }
+        tool:
+          type: string
+          description: Present when via=mcp_tool. A real MCP tool name.
+          enum: [setup_infrastructure, launch_campaign, contact_operator, ack_message, configure_byo_domain]
+        params:
+          type: object
+          additionalProperties: true
+          description: Present when via=mcp_tool. Literal call arguments, complete EXCEPT the names listed in paramsToSupply.
+        paramsToSupply:
+          type: array
+          items: { type: string }
+          description: Present when via=mcp_tool. Fields the platform cannot know; the caller must add them. Empty = send params verbatim.
+        idempotencyKey:
+          type: [string, "null"]
+          description: Present when via=mcp_tool. The key to REUSE, or null to mint a fresh one.
+        method: { type: string, description: "Present when via=http." }
+        path: { type: string, description: "Present when via=http." }
+        note: { type: string, description: "Present when via=http or via=none — who acts / what unblocks it." }
+
+    NextStep:
+      type: object
+      required: [reason, kind, why, action, waitingOn, notBeforeMs, effect, sinceMs]
+      properties:
+        reason: { $ref: '#/components/schemas/NextStepReason' }
+        kind:
+          type: string
+          enum: [owed, available]
+          description: "owed = the account will not progress until this happens. available = nothing is blocked; this is the next thing worth doing."
+        why: { type: string, description: "One customer-safe sentence. Vendor-blind: composed prose, never a raw error message." }
+        action: { $ref: '#/components/schemas/NextStepAction' }
+        waitingOn: { type: [string, "null"], enum: [operator, customer_billing, null], description: "Who must act before this can succeed. null = the agent can act right now." }
+        notBeforeMs: { type: integer, description: "Do not repeat this call before notBeforeMs from now — the retry cadence as a machine field. 0 = now." }
+        effect:
+          oneOf:
+            - $ref: '#/components/schemas/MailboxBilling'
+            - type: "null"
+          description: The billing consequence of this step, or null when it changes no billable count.
+        sinceMs: { type: [integer, "null"], description: "How long this condition has existed, when an honest anchor exists; null when none does." }
+
+    NextSteps:
+      type: object
+      required: [status, steps, computedAt]
+      description: >
+        What this account should do next, derived fresh on every response
+        that carries it (design §7.2) — the one endpoint-agnostic
+        self-guiding contract shared by setup_infrastructure and
+        infrastructure_status.
+      properties:
+        status:
+          type: string
+          enum: [owed, none_owed]
+          description: >
+            EXPLICIT discriminator — never inferred from `steps` being
+            empty. `none_owed` is routinely emitted WITH a non-empty
+            `steps` array (an `available` step is not owed).
+        steps:
+          type: array
+          items: { $ref: '#/components/schemas/NextStep' }
+        computedAt: { type: integer }
 
     SequenceStepInput:
       type: object

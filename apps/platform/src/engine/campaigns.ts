@@ -1,9 +1,10 @@
-import type { LaunchCampaignInput } from "@coldstart/shared";
+import type { LaunchCampaignInput, NextSteps } from "@coldstart/shared";
 import { DuplicateCampaignError, NotFoundError } from "@coldstart/shared";
 import { RealClock } from "../clock.js";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
 import { assertNotLifecycleFrozen } from "./billing-state.js";
+import { deriveNextSteps } from "./next-steps.js";
 import { type EventCounts, emptyEventCounts } from "./reporting.js";
 import { ONE_DAY_MS } from "./warmup.js";
 
@@ -73,7 +74,7 @@ export function launchCampaign(
   ctx: TenantContext,
   input: LaunchCampaignInput,
   opts: { isDemo?: boolean } = {},
-): { campaignId: string } {
+): { campaignId: string; nextSteps: NextSteps } {
   // Lifecycle freeze — a suspended/disputed/canceled tenant must not launch new
   // sends (adversarial panel-03 finding #5). Demo/free tenants are never frozen,
   // so the sandbox /demo/run path is unaffected.
@@ -167,7 +168,8 @@ export function launchCampaign(
     }
   }
 
-  return { campaignId };
+  // `available` steps only — a launch response never nags (design §7.4).
+  return { campaignId, nextSteps: deriveNextSteps(ctx) };
 }
 
 export function pauseCampaign(ctx: TenantContext, campaignId: string): void {

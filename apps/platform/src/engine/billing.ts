@@ -15,6 +15,8 @@ import {
   NotFoundError,
   ValidationError,
   type CheckoutInput,
+  type MailboxBilling,
+  type NextSteps,
   type RemoveMailboxesInput,
   type TenantPlan,
 } from "@coldstart/shared";
@@ -34,8 +36,10 @@ import { newId } from "../schema.js";
 import { screenTenant } from "../ofac/screening.js";
 import type { TenantContext } from "../tenant-context.js";
 import { assertNotLifecycleFrozen, readLifecycleState } from "./billing-state.js";
+import { realNowMs } from "./clamped-age.js";
 import { billableMailboxCount, clearTeardownRecord, releaseMailboxes } from "./lifecycle.js";
 import { reactivateFromDunning } from "./ops-summary.js";
+import { deriveNextSteps } from "./next-steps.js";
 import { recordRemoveIntent, resolveRemoveTargets, stillLiveTargets } from "./remove-intents.js";
 
 /**
@@ -661,6 +665,19 @@ async function applyStripeEventEffects(ctx: TenantContext, event: StripeEventInp
         // Frozen by an open dispute — checkout did not apply (plan unchanged).
         return { applied: false, duplicate: false };
       }
+      // §7.17.4 — go-forward `first_paid_at` stamp, guarded on NULL so a
+      // second/later checkout (a plan change) never moves the FIRST-paid
+      // anchor. CLAMPED per §7.19: `now` here is `ctx.clock.now()`, and this
+      // event is processed while `plan` is still demo/free for a
+      // never-before-paid tenant — under a VirtualClock running up to 1440x
+      // ahead of real time (the clock only flips at the NEXT DO
+      // construction). The backfill above covers the already-paying
+      // population; this covers everyone from here forward.
+      ctx.sql.exec(
+        `UPDATE tenant_profile SET first_paid_at = ? WHERE id = ? AND first_paid_at IS NULL`,
+        Math.min(now, realNowMs()),
+        ctx.tenantId,
+      );
       // Quantity-billing (design §9): store the captured discount % (from the
       // session totals) + resolve/store the subscription-item ids + confirmed
       // mailbox quantity so syncMailboxQuantity can set-to-N without re-resolving.
@@ -951,20 +968,11 @@ async function captureSubscriptionState(ctx: TenantContext, secretKey: string, s
   );
 }
 
-export interface MailboxBilling {
-  /**
-   * The mailbox count this projection is for — REALITY, not the ask (SPEC §18
-   * "the proposed new count"). On an actual add/remove it is the live provisioned
-   * count AFTER the operation (so a capacity_pending partial reflects only what
-   * landed); on a quoteOnly preview it is the projected count (current + delta).
-   */
-  provisionedAfter: number;
-  /** Projected monthly price for that count on the curve, folding any stored
-   *  checkout discount, integer cents. Floors at the 5-mailbox / $99 minimum. */
-  projectedMonthlyCents: number;
-  /** Human-readable pricing formula (SPEC §18) so no add is a silent bill surprise. */
-  formula: string;
-}
+// MOVED TO @coldstart/shared (packages/shared/src/next-steps.ts). `NextStep.effect`
+// is this exact projection and is part of the published contract, so the type
+// has to live where a shared contract can name it; re-exported here because
+// this file still owns the only BUILDER of one.
+export type { MailboxBilling };
 
 /**
  * The billing projection returned on EVERY mailbox add/remove response (SPEC
@@ -1011,6 +1019,12 @@ export interface RemoveMailboxesResult {
   unreleased: string[];
   /** The projected bill after the release (the lower count, floored at $99). */
   billing: MailboxBilling;
+  /**
+   * What this account should do next, derived AFTER the release lands (design
+   * §7.4). A non-terminal `failedCount > 0` therefore carries the retry as a
+   * machine-readable step rather than only in prose.
+   */
+  nextSteps?: NextSteps;
 }
 
 /**
@@ -1053,5 +1067,6 @@ export async function removeMailboxes(
     failedCount: unreleased.length,
     unreleased: unreleased.map((t) => t.email),
     billing: buildMailboxBilling(ctx, provisionedMailboxCount(ctx)),
+    nextSteps: deriveNextSteps(ctx),
   };
 }

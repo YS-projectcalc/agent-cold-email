@@ -196,7 +196,14 @@ export function selectRealDomainPort(
   registrarArming: RegistrarArmingInput | undefined,
 ): DomainPort {
   const useInboxKitRegistrar = Boolean(registrarArming?.armed && registrarArming?.optIn);
-  return useInboxKitRegistrar
-    ? new RealInboxKitDomainPort(inboxKitConfig, registrarArming!.registrant as InboxKitDomainRegistrant)
-    : new RegistrarUnarmedDomainPort();
+  if (useInboxKitRegistrar) {
+    return new RealInboxKitDomainPort(inboxKitConfig, registrarArming!.registrant as InboxKitDomainRegistrant);
+  }
+  // WHICH leg refused (design §7.8, gate L2). Both booleans were thrown away
+  // here, so one message served two conditions the caller must act on
+  // differently. The ENV leg wins when both are absent: it is the operator's
+  // outer gate, and while it is off nothing the tenant sends can help — telling
+  // them to resend `registerDomains` would be the same misdirection in the
+  // other direction.
+  return new RegistrarUnarmedDomainPort(registrarArming?.armed ? "opt_in" : "env");
 }

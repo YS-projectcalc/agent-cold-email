@@ -143,6 +143,31 @@ export async function handleMcpRequest(
         return rpcError(id, -32602, `invalid params for '${toolName}': ${details}`);
       }
 
+      // §7.10.2 — THE LIVENESS STAMP, once per bearer MCP tool call
+      // (non-blocking 4, build gate 2026-08-19). It used to live inside ONE
+      // tool's `call` (`infrastructure_status`), so an agent actively driving
+      // `setup_infrastructure`, `launch_campaign` or `ack_message` for a day
+      // without polling status scored as `agentStalled` — a false stall on the
+      // most active agents there are. This endpoint resolves the tenant from
+      // the Authorization/X-API-Key header ONLY, so reaching here is
+      // bearer-authed BY CONSTRUCTION and a cookie-authed dashboard tab can
+      // never stamp; `recordAgentActivity` is 5-minute-throttled, so a tight
+      // tool loop is still at most one write per five minutes.
+      //
+      // Placed AFTER the tool and args validate, so a malformed probe is not
+      // scored as an agent doing work, and OUTSIDE `matched.call`, which is
+      // what keeps `infrastructureStatus()` genuinely write-free for the
+      // readOnlyHint write-spy (test/mcp-tool-annotations.test.ts).
+      //
+      // BEST-EFFORT, and that is load-bearing: bookkeeping must never fail the
+      // call it is observing. Unguarded, a wedged DO or a transient RPC error
+      // on the stamp would take down every MCP tool call — the same posture
+      // `alertRegistrarUnarmed` states for its own side channel.
+      try {
+        await resolved.tenant.tenantStub.recordAgentActivity();
+      } catch (err) {
+        console.error(`mcp: liveness stamp failed for tenant ${resolved.tenant.tenantId} (non-fatal)`, err);
+      }
       try {
         const toolResult = await matched.call(resolved.tenant.tenantStub, parsedArgs.data);
         return result(id, { content: [{ type: "text", text: JSON.stringify(toolResult) }] });

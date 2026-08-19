@@ -21,22 +21,22 @@ import { signup, tenantStub } from "./helpers.js";
  * this test isolates runSetupInfrastructure's error-handling/alert wiring
  * from the factory's port-selection logic (already covered by
  * inboxkit-adapter-dark-gating.test.ts's gate (a) guard). */
-function alwaysRegistrarUnarmed(): DomainPort {
+function alwaysRegistrarUnarmed(reason: "env" | "opt_in" = "env"): DomainPort {
   return {
     async searchLookalikes(): Promise<LookalikeCandidate[]> {
-      throw new RegistrarUnarmedError("searchLookalikes");
+      throw new RegistrarUnarmedError("searchLookalikes", reason);
     },
     async listOwnedDomains(): Promise<OwnedDomain[]> {
-      throw new RegistrarUnarmedError("listOwnedDomains");
+      throw new RegistrarUnarmedError("listOwnedDomains", reason);
     },
     async buy(): Promise<PurchasedDomain> {
-      throw new RegistrarUnarmedError("buy");
+      throw new RegistrarUnarmedError("buy", reason);
     },
     async setDns(): Promise<DomainDnsResult> {
-      throw new RegistrarUnarmedError("setDns");
+      throw new RegistrarUnarmedError("setDns", reason);
     },
     async release(): Promise<ReleaseResult> {
-      throw new RegistrarUnarmedError("release");
+      throw new RegistrarUnarmedError("release", reason);
     },
   };
 }
@@ -90,6 +90,43 @@ describe("G5 gate (a) — runSetupInfrastructure's registrar-unarmed handling", 
     expect(mailer.sent[0]?.subject).toContain("registrar not armed");
     expect(mailer.sent[0]?.subject).toContain(tenantId);
     expect(mailer.sent[0]?.text).toContain(SETUP_INPUT.primaryDomain);
+  });
+
+  // J4 (build gate 2026-08-19) — THE ALERT IS THE ENV LEG'S, AND ONLY THE ENV
+  // LEG'S. The two-leg split (§7.8) made the opt-in refusal TENANT-fixable and
+  // set `operatorActionable: reason === "env"` on the error itself; paging the
+  // founder for the leg the same wave declared not operator-actionable is the
+  // contradiction. Three further reasons, each independently sufficient: the
+  // alert body says "the registrar is not armed", which is FALSE on that leg
+  // (it IS armed — the request simply did not consent); the 400 the wave added
+  // is fully self-describing, so nothing is lost; and `searchLookalikes` runs
+  // unconditionally BEFORE any shortfall branch, so an agent retry loop that
+  // omits `registerDomains` pages the founder on EVERY attempt through a direct
+  // `mailer.send`, with none of the watchtower's debounce or backoff.
+  it("does NOT page the founder on the tenant-fixable OPT-IN leg — the 400 is self-describing", async () => {
+    const { tenantId } = await signup("Registrar Optin Co", "founder@registraroptin.test");
+    const mailer = new SandboxOpsMailer();
+
+    await expect(
+      withInjectedDomain(tenantId, alwaysRegistrarUnarmed("opt_in"), (ctx) => runSetupInfrastructure(ctx, SETUP_INPUT, mailer)),
+    ).rejects.toBeInstanceOf(RegistrarUnarmedError);
+
+    expect(mailer.sent).toHaveLength(0);
+  });
+
+  it("the env-leg alert body names the ENV leg rather than the pre-split 'gate (a)' wording alone", async () => {
+    const { tenantId } = await signup("Registrar Wording Co", "founder@registrarwording.test");
+    const mailer = new SandboxOpsMailer();
+
+    await expect(
+      withInjectedDomain(tenantId, alwaysRegistrarUnarmed("env"), (ctx) => runSetupInfrastructure(ctx, SETUP_INPUT, mailer)),
+    ).rejects.toBeInstanceOf(RegistrarUnarmedError);
+
+    const text = mailer.sent[0]?.text ?? "";
+    // The operator's actual lever, named — and the leg this alert is NOT about,
+    // so a founder reading it never goes looking for a tenant's consent field.
+    expect(text).toMatch(/REGISTRAR_PROVIDER/);
+    expect(text).toMatch(/opt-in/i);
   });
 
   it("never sends an alert on the ordinary (non-registrar) success path — the hook only fires on RegistrarUnarmedError", async () => {

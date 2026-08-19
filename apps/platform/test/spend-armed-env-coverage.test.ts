@@ -49,6 +49,9 @@ const KNOWN_NON_SPEND_ARMING = new Set([
   "PROVISIONING_RECONCILE_ENABLED", // C3 part d — a cron LEG on/off switch, not a vendor credential; the spend it drives is gated by INBOXKIT_*/isRealSpendArmed exactly as the on-demand setup path is
   "WALLET_FLOOR_CREDITS", // watchtower vendor_wallet check floor — a spend BOUND like SPEND_CEILING_CENTS, not an enabler
   "PROVISIONING_ORPHAN_GRACE_MS", // watchtower mailbox_orphan:/domain_orphan: detection-timing bound, not a vendor credential
+  "CUSTOMER_PROGRESS_STALL_MS", // customer_progress_* unhealthy-predicate bound (§7.11) — detection-timing, not a vendor credential
+  "CUSTOMER_PROGRESS_OWED_MAX_MS", // customer_progress_* unhealthy-predicate bound (§7.11) — detection-timing, not a vendor credential
+  "CONTINUITY_NUDGE_DELAY_MS", // the one-shot nudge's delay-from-onset (§7.12) — detection-timing, not a vendor credential
 ]);
 
 function parseEnvFields(source: string): { all: Set<string>; spendArming: Set<string> } {

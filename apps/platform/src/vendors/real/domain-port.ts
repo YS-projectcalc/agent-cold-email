@@ -1,4 +1,5 @@
 import { RegistrarUnarmedError } from "@coldstart/shared";
+import type { RegistrarUnarmedReason } from "@coldstart/shared";
 import type {
   DomainConnectionType,
   DomainDnsResult,
@@ -35,10 +36,17 @@ import type {
  * supports NEW-domain purchase, vs. transfers/settings only, is unverified —
  * this codebase does not build dark adapters against an unverified wire
  * shape) — see vendors/factory.ts for the full selection logic.
+ *
+ * WHICH leg was absent is carried in, because the two refusals are not the same
+ * one and must not read alike to the caller (design §7.8): an unarmed env needs
+ * an operator, a missing per-request opt-in needs one more field on the very
+ * next call. `selectRealDomainPort` decides it — this port only reports it.
  */
 export class RegistrarUnarmedDomainPort implements DomainPort {
+  constructor(private readonly reason: RegistrarUnarmedReason) {}
+
   private fail(op: string): never {
-    throw new RegistrarUnarmedError(op);
+    throw new RegistrarUnarmedError(op, this.reason);
   }
 
   async searchLookalikes(_brand: string, _primaryDomain: string, _count: number): Promise<LookalikeCandidate[]> {

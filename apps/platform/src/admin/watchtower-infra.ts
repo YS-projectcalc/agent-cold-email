@@ -23,7 +23,7 @@
 
 import type { Env } from "../env.js";
 import type { OpsMailer } from "../ops-mail/ops-mailer.js";
-import { alertEmailFor, reasonForNoEmail, trySend, type AlertOutcome, type CheckResult } from "./watchtower-alerts.js";
+import { alertEmailFor, policyFor, reasonForNoEmail, trySend, type AlertOutcome, type CheckResult } from "./watchtower-alerts.js";
 import { SWEEP_STALE_MS } from "./watchtower-grading.js";
 
 /** One instance, platform-wide — this is control state, not per-tenant state. */
@@ -62,7 +62,7 @@ export async function reconcileD1Alert(env: Env, mailer: OpsMailer, result: Chec
   try {
     const stub = watchtowerStub(env);
     const decision = await stub.decideD1Alert(result.healthy, nowMs);
-    const email = alertEmailFor(env, result, decision.transition, decision.prevSinceTs, nowMs);
+    const email = alertEmailFor(env, result, decision.transition, decision.prevSinceTs, nowMs, policyFor(result.name));
     const notified = email ? await trySend(mailer, email) : null;
     try {
       await stub.commitD1Alert(result.healthy, nowMs, notified);

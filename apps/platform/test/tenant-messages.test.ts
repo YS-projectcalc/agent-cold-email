@@ -233,9 +233,16 @@ describe("InfrastructureStatus.messages — the field is live on the real GET /i
 });
 
 describe("pruneTenantMessages — bounded, tenant-scoped cleanup", () => {
-  it("deletes expired rows", async () => {
+  // BOTH LEGS NOW CARRY THE SAME RETENTION (build gate r2, 2026-08-19). The
+  // expired leg used to delete on the instant of expiry, so the platform's own
+  // re-derived expiry (expireResolvedSystemMessages) destroyed a customer's
+  // action item within one sweep and took the audit trail with it. The
+  // deletion property is unchanged — it is the AGE that moved — so these
+  // fixtures expire past the retention window rather than one second ago, and
+  // the survivor below is the new half.
+  it("deletes rows expired past the retention window", async () => {
     const { tenantId } = await signup("Prune Expired Co", "founder@pruneexp.test");
-    const past = await withTenantContext(tenantId, (ctx) => ctx.clock.now() - 1000);
+    const past = await withTenantContext(tenantId, (ctx) => ctx.clock.now() - READ_RETENTION_MS - 1000);
     await withTenantContext(tenantId, (ctx) => emitTenantMessage(ctx, { kind: "k", severity: "info", body: "expired", expiresAt: past }));
     await withTenantContext(tenantId, (ctx) => emitTenantMessage(ctx, { kind: "k", severity: "info", body: "live" }));
     await withTenantContext(tenantId, (ctx) => pruneTenantMessages(ctx));
@@ -243,6 +250,19 @@ describe("pruneTenantMessages — bounded, tenant-scoped cleanup", () => {
       ctx.sql.exec<{ body: string }>(`SELECT body FROM tenant_messages WHERE tenant_id = ?`, tenantId).toArray(),
     );
     expect(remaining.map((r) => r.body)).toEqual(["live"]);
+  });
+
+  it("KEEPS a recently-expired row — an expiry decision stays recoverable for as long as an ack does", async () => {
+    const { tenantId } = await signup("Prune Expired Recent Co", "founder@pruneexprecent.test");
+    const past = await withTenantContext(tenantId, (ctx) => ctx.clock.now() - 1000);
+    await withTenantContext(tenantId, (ctx) =>
+      emitTenantMessage(ctx, { kind: "k", severity: "info", body: "expired-just-now", expiresAt: past }),
+    );
+    await withTenantContext(tenantId, (ctx) => pruneTenantMessages(ctx));
+    const remaining = await withTenantContext(tenantId, (ctx) =>
+      ctx.sql.exec<{ body: string }>(`SELECT body FROM tenant_messages WHERE tenant_id = ?`, tenantId).toArray(),
+    );
+    expect(remaining.map((r) => r.body)).toEqual(["expired-just-now"]);
   });
 
   it("deletes READ rows older than the retention window, but keeps a recently-read row", async () => {
@@ -272,7 +292,7 @@ describe("pruneTenantMessages — bounded, tenant-scoped cleanup", () => {
   it("never touches another tenant's rows (tenant-scoped)", async () => {
     const { tenantId: a } = await signup("Prune Iso A", "founder@pruneisoa.test");
     const { tenantId: b } = await signup("Prune Iso B", "founder@pruneisob.test");
-    const past = await withTenantContext(a, (ctx) => ctx.clock.now() - 1000);
+    const past = await withTenantContext(a, (ctx) => ctx.clock.now() - READ_RETENTION_MS - 1000);
     await withTenantContext(a, (ctx) => emitTenantMessage(ctx, { kind: "k", severity: "info", body: "a-expired", expiresAt: past }));
     await withTenantContext(b, (ctx) => emitTenantMessage(ctx, { kind: "k", severity: "info", body: "b-expired", expiresAt: past }));
     await withTenantContext(a, (ctx) => pruneTenantMessages(ctx));

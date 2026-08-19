@@ -45,9 +45,18 @@ function draftBillingAnswer(): string {
 function draftHowToAnswer(): string {
   return (
     "This platform is driven by your coding agent, not a dashboard: point it at the hosted MCP endpoint with your bearer token " +
-    "(or the CLI twin) and it gets ~12 tools — setup_infrastructure, infrastructure_status, launch_campaign, campaign_results, " +
-    "metrics, inbox, thread, reply, mark, pause, pause_all, account. `npx agent-cold-email demo` runs the full pipeline " +
-    "against the live sandbox with no signup if you want to see it work first."
+    "(or the CLI twin) and it gets 28 tools — setup_infrastructure, infrastructure_status, launch_campaign, campaign_results, " +
+    "metrics, inbox, thread, reply, mark, pause, pause_all, account, and more. `npx agent-cold-email demo` runs the full pipeline " +
+    "against the live sandbox with no signup if you want to see it work first. " +
+    "setup_infrastructure's `domains` covers ordinals 0..domains-1 — a repeat call at the same `domains` provisions nothing new " +
+    "once every ordinal is satisfied, so reaching ordinal 1 needs domains:2, not a second domains:1 call; mailbox addresses are " +
+    "deterministic from persona+ordinal+slot, so keep persona unchanged across resumes. Omitting registerDomains, or sending it " +
+    "false, leaves prior consent unchanged and blocks any NEW domain purchase — the agent's own next call just needs to set " +
+    "registerDomains: true to self-correct (a 400 registrar_optin_missing, never an operator escalation). Warmup quartet: the " +
+    "vendor's own pool warmup is feed-invisible (nothing in infrastructure_status surfaces the vendor's internal warmup); " +
+    "per-mailbox sendReady is a fully-ramped flag, NOT a send gate — a mailbox below full ramp still sends, capped at its own " +
+    "dailyCap; ramp caps permit CAPPED sending from day 1, never zero; the TOP-LEVEL sendReady is the AND across every mailbox, " +
+    "so for one mailbox's own capacity read its own flag, not the top-level one."
   );
 }
 

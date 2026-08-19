@@ -28,8 +28,10 @@ import { DemoRunInput } from "@coldstart/shared";
 import { isPaidPlan, RateLimitError, RequestInProgressError, TenantIsolationError, type Clock } from "@coldstart/shared";
 import { terminal } from "@coldstart/shared";
 import { DelegatingClock, RealClock, requireVirtualClock, VirtualClock } from "./clock.js";
+import { realNowMs } from "./engine/clamped-age.js";
 import { migrateTenantClockToReal } from "./engine/clock-migration.js";
 import { reconcileLegacyDomainIntentKeys } from "./engine/legacy-domain-intent-keys.js";
+import { backfillPersonaSlugs } from "./engine/persona-backfill.js";
 import type { StripeEventInput } from "./billing/stripe-webhook.js";
 import type { Env } from "./env.js";
 import {
@@ -68,6 +70,7 @@ import {
   type MessageListPage,
   type OperatorMessageListResult,
 } from "./engine/tenant-messages.js";
+import { maybeEmitContinuityNudge } from "./engine/continuity-nudge.js";
 import { getProvisioningStateForOperator, type ProvisioningState, type ProvisioningStateOptions } from "./engine/provisioning-state.js";
 import { contactOperator, type ContactOperatorResult } from "./engine/contact-operator.js";
 import { reconcileOrphanedAdmissions } from "./engine/contact-operator-reconcile.js";
@@ -125,7 +128,7 @@ import { clearScreeningStatus, LIST_UNAVAILABLE_VERSION, screenTenant } from "./
 import { createVendorAdapters, selectRealDomainPort, type VendorAdapterBundle } from "./vendors/factory.js";
 import type { EngineClientConfig } from "./vendors/real/email-port.js";
 import type { InboxKitClientConfig } from "./vendors/real/inboxkit-client.js";
-import { deriveInboxKitRegistrant, isInboxKitRegistrarArmed, readRegistrarArming, readRegistrarOptInState } from "./vendors/registrar-arming.js";
+import { deriveInboxKitRegistrant, isInboxKitRegistrarArmed, readPersistedRegistrantJson, readRegistrarArming } from "./vendors/registrar-arming.js";
 
 export interface InitTenantInput {
   tenantId: string;
@@ -204,6 +207,7 @@ export class TenantDO extends DurableObject<Env> {
     this.ctx.storage.sql.exec(TENANT_DO_SCHEMA);
     this.ensureColumnMigrations();
     this.grandfatherActiveScreening();
+    this.backfillFirstPaidAt();
 
     const row = this.ctx.storage.sql
       .exec<{ id: string; plan: TenantPlan; clock_base: number; clock_offset: number; clock_multiplier: number; clock_mode: string }>(
@@ -220,6 +224,9 @@ export class TenantDO extends DurableObject<Env> {
       // tenant's own time base, and for a paid tenant that base is only correct
       // once the migration above has run.
       this.reconcileLegacyDomainIntents(row.id, clock.now());
+      // AFTER the rebind, which is what puts a legacy intent back on an ORDINAL
+      // key — and the ordinal is exactly what the persona inversion needs.
+      this.backfillPersonaSlugs(row.id);
     }
   }
 
@@ -246,6 +253,31 @@ export class TenantDO extends DurableObject<Env> {
       }
     } catch (err) {
       console.error(`legacy domain-intent key reconciliation FAILED for ${tenantId}; state unchanged, will retry on next construction`, err);
+    }
+  }
+
+  /**
+   * BLOCKING-1 (docs/adversarial/customer-continuity-build-gate-2026-08-19.md)
+   * — recovers `domain_intents.persona_slug` for the pre-column population by
+   * INVERTING the deterministic mailbox address (engine/persona-backfill.ts
+   * carries the mechanism and the abstention rules).
+   *
+   * Same failure posture as the rebind above: a throw here would brick the
+   * tenant's DO permanently, and a persona left NULL is a state the derivation
+   * already handles honestly (it abstains from pricing), so this logs and
+   * carries on rather than propagating.
+   */
+  private backfillPersonaSlugs(tenantId: string): void {
+    try {
+      const { recovered, abstained, deferred } = backfillPersonaSlugs(this.ctx.storage, tenantId);
+      if (recovered > 0 || abstained > 0 || deferred > 0) {
+        console.log(
+          `persona_slug backfill for ${tenantId}: ${recovered} recovered, ${abstained} left NULL (not recoverable), ` +
+            `${deferred} deferred to the next construction (batch full)`,
+        );
+      }
+    } catch (err) {
+      console.error(`persona_slug backfill FAILED for ${tenantId}; state unchanged, will retry on next construction`, err);
     }
   }
 
@@ -444,6 +476,19 @@ export class TenantDO extends DurableObject<Env> {
     // Registrar-arming follow-up (2026-07-28) — the tenant's structured
     // registrant-of-record, persisted as JSON (see schema.ts).
     this.addColumnIfMissing("tenant_profile", "registrant_json", "TEXT");
+    // §7.17.4 — the money-event stamp `paid_seats_unprovisioned` ages from.
+    // NULL for every tenant until `backfillFirstPaidAt()` (below) or the
+    // go-forward stamp in engine/billing.ts's checkout.session.completed
+    // handler sets it; both are clamped per §7.19.
+    this.addColumnIfMissing("tenant_profile", "first_paid_at", "INTEGER");
+    // §7.10.2 — the liveness anchor, stamped ONLY for a bearer-authed
+    // (agent) caller; a cookie-authed dashboard poll must never advance it.
+    this.addColumnIfMissing("tenant_profile", "last_agent_activity_at", "INTEGER");
+    // §7.12 — which stall EPISODE (a `customer_progress_*` check's own
+    // `AlertState.sinceTs`) this tenant was last nudged for. `sinceTs >`
+    // this column is the whole one-shot mechanism — see
+    // engine/continuity-nudge.ts.
+    this.addColumnIfMissing("tenant_profile", "continuity_nudge_episode_ts", "INTEGER");
     // CREDSTORE F1 (wave2-design §"CREDSTORE F1") — Worker-owned monotonic
     // push claim sequence (see schema.ts's mailbox_cred_pushes comment).
     // DEFAULT 0 so an existing row's first claim under the new code reads 1.
@@ -492,6 +537,10 @@ export class TenantDO extends DurableObject<Env> {
   // the moment G1 ships, so screening can never retroactively strand them.
   private static readonly SCREENING_GRANDFATHER_VERSION = "grandfathered-2026-07-23";
 
+  // §7.10.2 — throttles `last_agent_activity_at` writes so a tight bearer
+  // polling loop does not turn every RPC into a write.
+  private static readonly AGENT_ACTIVITY_RESOLUTION_MS = 5 * 60 * 1000;
+
   private grandfatherActiveScreening(): void {
     const row = this.ctx.storage.sql
       .exec<{ id: string; billing_state: string; screening_list_version: string | null }>(
@@ -506,6 +555,52 @@ export class TenantDO extends DurableObject<Env> {
       `UPDATE tenant_profile SET screening_status = 'clear', screening_list_version = ?, screened_at = ? WHERE id = ?`,
       TenantDO.SCREENING_GRANDFATHER_VERSION,
       new RealClock().now(),
+      row.id,
+    );
+  }
+
+  /**
+   * §7.17.4 — backfills `first_paid_at` for every tenant that already paid
+   * before this column existed. `addColumnIfMissing` is a literal
+   * `ALTER TABLE ADD COLUMN` (it cannot compute), so without this the column
+   * lands NULL for the entire existing paying population and B4 (the stall
+   * check's ageable anchor) reopens for exactly the tenants the incident is
+   * about.
+   *
+   * Self-applying on the `grandfatherActiveScreening` precedent: runs on
+   * every DO construction, guarded by "already set -> return" so it is a
+   * no-op after the first successful stamp.
+   *
+   * The source is the money event itself — `MIN(ts)` over
+   * `webhook_events` rows of type `checkout.session.completed`
+   * (`billing.ts` writes one `INSERT OR IGNORE` per processed Stripe event,
+   * and that table has zero DELETE sites in `src`) — never read time.
+   *
+   * CLAMPED (§7.19): `webhook_events.ts` is stamped from `ctx.clock`, which
+   * is NOT in `clock-migration.ts`'s shift list, and the
+   * `checkout.session.completed` that makes a tenant paid is processed while
+   * `plan` is still demo/free — i.e. under a VirtualClock running up to
+   * 1440x ahead of real time. The derived value can therefore sit in the
+   * real future; clamping to `MIN(derivedTs, realNow)` understates the age,
+   * which is the safe direction (delays an alert, never fires one early).
+   */
+  private backfillFirstPaidAt(): void {
+    const row = this.ctx.storage.sql
+      .exec<{ id: string; first_paid_at: number | null }>(`SELECT id, first_paid_at FROM tenant_profile LIMIT 1`)
+      .toArray()[0];
+    if (!row) return; // fresh DO, no tenant_profile row yet
+    if (row.first_paid_at !== null) return; // already stamped — never re-derive
+
+    const derived = this.ctx.storage.sql
+      .exec<{ ts: number | null }>(
+        `SELECT MIN(ts) as ts FROM webhook_events WHERE type = 'checkout.session.completed'`,
+      )
+      .toArray()[0];
+    if (!derived || derived.ts === null) return; // never paid — correctly stays NULL
+
+    this.ctx.storage.sql.exec(
+      `UPDATE tenant_profile SET first_paid_at = ? WHERE id = ? AND first_paid_at IS NULL`,
+      Math.min(derived.ts, realNowMs()),
       row.id,
     );
   }
@@ -728,7 +823,7 @@ export class TenantDO extends DurableObject<Env> {
     // selects a domain port (REPLACE_DOMAIN etc.) keeps reading persisted state.
     const ctx: TenantContext = {
       ...base,
-      adapters: { ...base.adapters, domain: this.selectSetupDomainPort(base.adapters, input) },
+      adapters: { ...base.adapters, domain: this.selectSetupDomainPort(base, input) },
     };
     return withRequestIdempotency(
       ctx,
@@ -768,11 +863,14 @@ export class TenantDO extends DurableObject<Env> {
   // real-eligible tenant re-runs the factory's two-leg gate via
   // selectRealDomainPort (the decouple guard stays inviolable: env leg absent →
   // hard-block regardless of what the call says). The registrant is derived
-  // from this call's input exactly as readRegistrarOptInState derives it from
-  // the just-persisted row (deriveInboxKitRegistrant — organization falls back
-  // to brand), so the port's baked registrant and provisionDomainWithMailboxes's
-  // post-UPDATE completeness pre-flight can never disagree.
-  private selectSetupDomainPort(bundle: VendorAdapterBundle, input: SetupInfrastructureInput): DomainPort {
+  // from this call's OWN contact fields — the ones this call is about to
+  // persist — over the structured registrant it supplied or, failing that, the
+  // one on file. That is the same pair `provisionDomainWithMailboxes`'s
+  // post-UPDATE completeness pre-flight reads, so the port's baked registrant
+  // and that pre-flight cannot disagree (non-blocking 7 corrected the version
+  // of this sentence that was an argument rather than a construction).
+  private selectSetupDomainPort(base: TenantContext, input: SetupInfrastructureInput): DomainPort {
+    const bundle = base.adapters;
     if (bundle.kind !== "real") return bundle.domain;
     // H8b does NOT change this. Two adversary rulings meet here and they are
     // about different things:
@@ -788,17 +886,76 @@ export class TenantDO extends DurableObject<Env> {
     return selectRealDomainPort(this.inboxKitConfig(), {
       armed: isInboxKitRegistrarArmed(this.env),
       optIn: input.registerDomains ?? false,
+      // THE REGISTRANT, from THIS call when it sent one and from the persisted
+      // profile when it did not (the §7.8 relaxation). `registrant` is optional
+      // even alongside `registerDomains: true` now, and the port's baked
+      // registrant is what `buy()` actually files — so deriving it from the
+      // input ALONE would have filed the brand/physicalAddress-derived PARTIAL
+      // for exactly the call this wave recommends, while
+      // `provisionDomainWithMailboxes`'s pre-flight validated the COMPLETE
+      // persisted one and waved it through.
+      //
+      // ONE derivation over both branches, differing only in where the
+      // structured registrant comes from (non-blocking 7). The CONTACT FIELDS
+      // are always THIS call's — `runSetupInfrastructure` is about to write
+      // exactly these into `tenant_profile`, and the buy-site pre-flight
+      // (`assertCompleteRegistrant`) reads the row AFTER that write. Deriving
+      // the fallback against the pre-update row instead made the port bake
+      // `organization` from the brand this call is REPLACING: both checks
+      // passed and the registrar filing — a real legal document — carried the
+      // previous brand. "They can never disagree" is now true by construction
+      // rather than by argument.
       registrant: deriveInboxKitRegistrant({
         brand: input.brand,
         physicalAddress: input.physicalAddress,
         senderIdentity: input.senderIdentity,
-        registrantJson: input.registrant ? JSON.stringify(input.registrant) : null,
+        registrantJson: input.registrant
+          ? JSON.stringify(input.registrant)
+          : readPersistedRegistrantJson(base.sql, base.tenantId),
       }),
     });
   }
 
   infrastructureStatus() {
     return getInfrastructureStatus(this.requireContext());
+  }
+
+  /**
+   * §7.10.2 — the liveness stamp, deliberately a SEPARATE named RPC method
+   * from `infrastructureStatus()` rather than folded into it. That method is
+   * `readOnlyHint: true` (MCP annotation) and a dedicated ground-truth
+   * write-spy (`test/mcp-tool-annotations.test.ts`, itself born from a
+   * BLOCKING adversarial finding that once caught this exact tool lying
+   * about being read-only) asserts it issues ZERO writes on every invoke —
+   * folding this stamp into it would reintroduce precisely the defect that
+   * test exists to prevent. Callers that resolved a BEARER credential invoke
+   * this ALONGSIDE their work, never inside it; a cookie-authed dashboard
+   * caller never calls it at all, which is what keeps a single open browser
+   * tab from stamping.
+   *
+   * TWO CALL SITES, and between them they are what "agent activity" MEANS
+   * (non-blocking 4, build gate 2026-08-19):
+   *   - `mcp/handler.ts`'s `tools/call` — EVERY tool, once per call. That
+   *     endpoint resolves the tenant from the Authorization/X-API-Key header
+   *     only (`resolveTenantFromToken`), so it is bearer-only by construction.
+   *   - `routes/infrastructure.ts`'s status route, gated on
+   *     `authVia === "bearer"` because that one shares its path with the
+   *     cookie-authed dashboard.
+   * It used to be ONE tool (`infrastructure_status`), so an agent driving
+   * setup/launch/ack for a day without polling status was scored stalled.
+   *
+   * 5-minute-throttled, real-wall-clock, SYNCHRONOUS (no `await` — §7.16
+   * invariant 1): a single read + at most one write, both plain SqlStorage
+   * calls.
+   */
+  recordAgentActivity(): void {
+    const row = this.ctx.storage.sql
+      .exec<{ last_agent_activity_at: number | null }>(`SELECT last_agent_activity_at FROM tenant_profile LIMIT 1`)
+      .toArray()[0];
+    if (!row) return; // fresh DO, no tenant_profile row yet
+    const now = realNowMs();
+    if (row.last_agent_activity_at !== null && now - row.last_agent_activity_at < TenantDO.AGENT_ACTIVITY_RESOLUTION_MS) return;
+    this.ctx.storage.sql.exec(`UPDATE tenant_profile SET last_agent_activity_at = ?`, now);
   }
 
   async launchCampaign(input: LaunchCampaignInput, idempotencyKey?: string) {
@@ -1138,6 +1295,15 @@ export class TenantDO extends DurableObject<Env> {
 
   ackMessage(id: string): AckMessageResult {
     return ackMessage(this.requireContext(), id);
+  }
+
+  /**
+   * I15 (§7.12) — the one cross-DO RPC the continuity nudge adds. Idempotent
+   * per episode (see engine/continuity-nudge.ts) — safe to call more than
+   * once for the same `episodeSinceTs`.
+   */
+  maybeEmitContinuityNudge(episodeSinceTs: number): void {
+    maybeEmitContinuityNudge(this.requireContext(), episodeSinceTs);
   }
 
   /**

@@ -99,16 +99,37 @@ export class NotActivatedError extends VendorError {
  * new-domain-purchase coverage is unverified — this codebase does not build
  * dark adapters against an unverified wire shape). So this error fires
  * either way: registrar unarmed, or armed-but-not-yet-implemented. Always
- * `retryable: false` (VendorError) — retrying can't fix either case. The
- * Worker's onError maps it to HTTP 503 with a `registrar_unarmed` code
- * (index.ts) so a caller can tell "try again once armed" apart from a
- * generic internal error, never a silent sandbox/InboxKit fallthrough.
+ * `retryable: false` (VendorError) — retrying can't fix either case.
+ *
+ * WHICH LEG FAILED IS CARRIED, because the two are not the same refusal
+ * (design §7.8, gate L2). `selectRealDomainPort` holds both booleans and used
+ * to throw both away, so one message served both — and for the `opt_in` leg it
+ * was wrong twice: it said *account* when the truth was *this request*, and its
+ * "no human has been notified" clause routed an unattended agent to escalate
+ * over something its own next call fixes. That is the vendor-truth wave's class
+ * A one seam over, and it cost a real customer a support round trip
+ * (sup_dce385a8 / sup_9d2c9a3a, 2026-08-18). `error-response.ts` branches on it:
+ * `env` keeps today's 503 `registrar_unarmed`, `opt_in` becomes a 400
+ * `registrar_optin_missing` naming the field.
+ *
+ * `reason` is an OWN enumerable property, like `retryable` and `step`: an error
+ * crossing the DO->Worker RPC boundary arrives with its own properties but NO
+ * prototype, so the mapper reads the field, never the class.
  */
+export type RegistrarUnarmedReason = "env" | "opt_in";
+
 export class RegistrarUnarmedError extends VendorError {
-  constructor(op: string) {
+  constructor(op: string, public readonly reason: RegistrarUnarmedReason) {
     super(
-      `domain.${op} is blocked: the registrar is not armed (set REGISTRAR_PROVIDER + CLOUDFLARE_REGISTRAR_API_TOKEN and complete the registrar arming step, ACTIVATION.md gate (a)) or its purchase adapter is not yet built — real domain purchase never happens via the mailbox vendor credential alone.`,
+      reason === "opt_in"
+        ? `domain.${op} is blocked: this request did not set registerDomains: true, so the per-tenant registrar opt-in leg is not satisfied for it — real domain purchase requires the tenant's consent on the request that spends.`
+        : `domain.${op} is blocked: the registrar is not armed (set REGISTRAR_PROVIDER + CLOUDFLARE_REGISTRAR_API_TOKEN and complete the registrar arming step, ACTIVATION.md gate (a)) or its purchase adapter is not yet built — real domain purchase never happens via the mailbox vendor credential alone.`,
       false,
+      // Honest per leg (non-blocking 9). An operator arming the env IS the
+      // clearer of the `env` leg; the TENANT clears its own opt-in by resending
+      // one field, and telling its agent to go find a human would be the same
+      // misdirection this split exists to end.
+      { operatorActionable: reason === "env" },
     );
     this.name = "RegistrarUnarmedError";
   }

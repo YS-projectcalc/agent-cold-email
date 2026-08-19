@@ -853,7 +853,7 @@ describe("guard D — EVERY port implementation can express a terminal vendor st
   });
 
   it("RegistrarUnarmedDomainPort is the documented exemption — it fails LOUD on every method", async () => {
-    await expect(new RegistrarUnarmedDomainPort().setDns("x0.com", "k", "purchased")).rejects.toThrow(/registrar is not armed/);
+    await expect(new RegistrarUnarmedDomainPort("env").setDns("x0.com", "k", "purchased")).rejects.toThrow(/registrar is not armed/);
   });
 
   it("a test-fake DomainPort typechecks only by returning a verdict (the compile-level gate)", async () => {

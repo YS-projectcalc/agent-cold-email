@@ -127,6 +127,16 @@ declare global {
       // — a detection-timing bound, not a vendor credential. Unset/blank/
       // non-positive falls back to the built-in default (30 minutes).
       PROVISIONING_ORPHAN_GRACE_MS?: string;
+      // §7.11 — the two bounds the customer_progress_* checks' unhealthy
+      // predicate uses. Same non-arming, detection-timing-bound reasoning as
+      // PROVISIONING_ORPHAN_GRACE_MS above. Unset/blank/non-positive falls
+      // back to the built-in defaults (24h / 48h).
+      CUSTOMER_PROGRESS_STALL_MS?: string;
+      CUSTOMER_PROGRESS_OWED_MAX_MS?: string;
+      // §7.12 (founder ruling Q1) — the one-shot nudge's delay-from-onset.
+      // Same non-arming reasoning. Unset/blank/non-positive falls back to
+      // the built-in default (24h).
+      CONTINUITY_NUDGE_DELAY_MS?: string;
       // Self-serve I3 — operator-supplied gmail_api OAuth grants for the MANUAL
       // mint path (the proven 2026-07-19 pilot path), a JSON secret
       // {email:{clientId,clientSecret,refreshToken}}. NOT spend-arming: holding

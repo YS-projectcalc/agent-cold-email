@@ -25,6 +25,14 @@ export const PLANNING_SENDING_DAYS_MONTH = 22;
 // / 3)); the flat self-serve mailbox ceiling (60) implies the domain ceiling.
 export const MAILBOXES_PER_DOMAIN = 3;
 
+// The per-ORDINAL mailbox ceiling one `setup_infrastructure` call may ask for:
+// `distribution`'s per-element bound and the `inboxesEach` shorthand's, which
+// are the same number by construction. Named because engine/next-steps.ts has
+// to know it to refuse recommending a call the request boundary would reject
+// (build gate r3 2026-08-19), and a second literal 10 is how the two come to
+// disagree. NOT the fleet ceiling — that is MAX_SELF_SERVE_MAILBOXES.
+export const MAX_MAILBOXES_PER_ORDINAL = 10;
+
 export interface MailboxQuote {
   readonly mailboxes: number;
   readonly monthlyCents: number;

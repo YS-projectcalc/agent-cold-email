@@ -4,6 +4,8 @@
 // rest are bearer-token-authed and tenant-scoped.
 
 import { z } from "zod";
+import { ValidationError } from "./errors.js";
+import { MAX_MAILBOXES_PER_ORDINAL } from "./pricing.js";
 
 export const SignupInput = z.object({
   brand: z.string().min(1).max(200),
@@ -34,28 +36,17 @@ export const Registrant = z.object({
 });
 export type Registrant = z.infer<typeof Registrant>;
 
-// The Registrant fields this platform has no fallback source for — used to
-// compose the boundary error message below when `registrant` is omitted
-// entirely. Kept in one place so the message and the schema's required set
-// can't drift apart.
-const REGISTRANT_REQUIRED_FIELD_NAMES = [
-  "firstName",
-  "lastName",
-  "email",
-  "phone",
-  "addressLine1",
-  "city",
-  "state",
-  "country",
-  "postalCode",
-] as const;
-
 export const SetupInfrastructureInput = z
   .object({
     brand: z.string().min(1).max(200),
     primaryDomain: z.string().min(3).max(253),
     domains: z.number().int().min(1).max(20),
-    inboxesEach: z.number().int().min(1).max(10),
+    // OPTIONAL ONLY WHEN `distribution` is supplied (see the refinement below).
+    // A caller that expresses a per-ordinal shape should not also have to
+    // invent a uniform number that nothing reads — and the recommendation this
+    // wave emits carries `distribution` alone, so a required `inboxesEach`
+    // would make the platform's own recommended call fail at its own boundary.
+    inboxesEach: z.number().int().min(1).max(MAX_MAILBOXES_PER_ORDINAL).optional(),
     persona: z.string().min(1).max(200),
     physicalAddress: z.string().min(1).max(500),
     senderIdentity: z.string().min(1).max(200),
@@ -83,23 +74,85 @@ export const SetupInfrastructureInput = z
     // cause. Three distinct meanings now survive to the engine: `true` opts in,
     // `false` opts OUT, absent leaves the persisted value alone.
     registerDomains: z.boolean().optional(),
-    // The structured registrant-of-record — REQUIRED (see the refinement
-    // below) whenever `registerDomains` is true, since that's the tenant's
-    // consent to a REAL domain purchase InboxKit will file real contact
-    // details for. Optional here only so a `registerDomains: false` call
-    // (the default, and every pre-existing caller) stays byte-identical.
+    // The structured registrant-of-record InboxKit files for a real purchase.
+    //
+    // OPTIONAL EVEN WHEN `registerDomains` IS TRUE (design §7.8, gate L1(i)).
+    // It used to be required alongside it, by a refinement here. That made the
+    // one call this platform must be able to RECOMMEND — `registerDomains:true`
+    // on a tenant whose consent and registrant are already on file — impossible
+    // to emit without echoing legal PII into a status response an unattended
+    // agent replays verbatim.
+    //
+    // Relaxing it costs nothing in safety and is strictly widening: the engine
+    // re-derives the registrant from `tenant_profile.registrant_json`
+    // (vendors/registrar-arming.ts's readRegistrarOptInState) and
+    // `assertCompleteRegistrant` still fails loud at the ACTUAL buy call site
+    // (engine/provisioning.ts's provisionDomainWithMailboxes), naming the
+    // missing fields in a 400 — BEFORE any purchase. The honest cost, stated
+    // rather than buried: a call with no registrant anywhere used to fail here,
+    // before any vendor touch; it now fails after `searchLookalikes`, a vendor
+    // READ. No spend, one wasted round trip.
+    //
+    // Supplying one still makes it authoritative for THIS call (B1); OMITTING
+    // it leaves the persisted one untouched, exactly as omitting
+    // `registerDomains` leaves the persisted consent untouched.
     registrant: Registrant.optional(),
+    // PER-DOMAIN MAILBOX COUNTS (founder ruling Q2, design §7.3). `inboxesEach`
+    // is uniform across ordinals, so "5 mailboxes over 2 domains" was not
+    // expressible: the closest ask provisions SIX and bills for six. An
+    // overshoot the customer is told about is a product limitation; one
+    // discovered on the invoice is a defect — and a recommendation that cannot
+    // fit exactly is recommending a bill increase.
+    //
+    // ADDITIVE and OPTIONAL: `inboxesEach` is unchanged and every existing
+    // caller is byte-identical. When both are present this is the target and
+    // `inboxesEach` is the shorthand it would have widened from —
+    // `resolveDistribution` is the single place that decides, so nothing
+    // downstream carries a second opinion.
+    //
+    // Bounds mirror the pair they replace exactly: each element 1..10
+    // (`inboxesEach`) and at most 20 ordinals (`domains`). The SUM is checked
+    // against the plan ceiling by `assertWithinProvisioningCap`, against the
+    // SHORTFALL rather than the raw ask, so a pure retry still passes.
+    distribution: z.array(z.number().int().min(1).max(MAX_MAILBOXES_PER_ORDINAL)).min(1).max(20).optional(),
   })
   .superRefine((data, ctx) => {
-    if (data.registerDomains && !data.registrant) {
+    if (data.distribution && data.distribution.length !== data.domains) {
       ctx.addIssue({
         code: "custom",
-        path: ["registrant"],
-        message: `registrant is required when registerDomains is true (missing: ${REGISTRANT_REQUIRED_FIELD_NAMES.join(", ")})`,
+        path: ["distribution"],
+        message: `distribution must have exactly one entry per domain ordinal (domains is ${data.domains}, distribution has ${data.distribution.length})`,
+      });
+    }
+    if (!data.distribution && data.inboxesEach === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["inboxesEach"],
+        message: "inboxesEach is required unless distribution is supplied (one of the two names how many mailboxes each domain gets)",
       });
     }
   });
 export type SetupInfrastructureInput = z.infer<typeof SetupInfrastructureInput>;
+
+/**
+ * THE ONE TARGET TYPE (design §7.3). The engine plans, buys and quotes against a
+ * per-ordinal mailbox distribution and nothing else; the legacy uniform
+ * `{domains, inboxesEach}` pair is widened to one HERE, at the request boundary,
+ * so no code downstream has to decide what a call sending both would mean.
+ */
+export function resolveDistribution(
+  input: Pick<SetupInfrastructureInput, "domains" | "inboxesEach"> & { distribution?: readonly number[] },
+): number[] {
+  if (input.distribution) return [...input.distribution];
+  if (input.inboxesEach === undefined) {
+    // Unreachable through the schema (the refinement above requires one of the
+    // two). A LOUD throw rather than an invented default: guessing a mailbox
+    // count is guessing how much money to spend.
+    throw new ValidationError("setup_infrastructure needs either `inboxesEach` or `distribution` — neither was supplied");
+  }
+  const each = input.inboxesEach;
+  return Array.from({ length: input.domains }, () => each);
+}
 
 export const SequenceStepInput = z.object({
   step: z.number().int().min(1),

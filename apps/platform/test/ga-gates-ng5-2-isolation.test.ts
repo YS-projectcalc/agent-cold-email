@@ -97,7 +97,7 @@ describe("N-G5-2 — a RegistrarUnarmedError in the REPLACE_DOMAIN path is isola
       // Force the real registrar seam (hard-block) — searchLookalikes throws
       // RegistrarUnarmedError inside the replacement, exactly the post-arming shape.
       const mailer = new SandboxOpsMailer();
-      const ctx = { ...baseCtx, adapters: { ...baseCtx.adapters, kind: "real" as const, domain: new RegistrarUnarmedDomainPort() } };
+      const ctx = { ...baseCtx, adapters: { ...baseCtx.adapters, kind: "real" as const, domain: new RegistrarUnarmedDomainPort("env") } };
 
       // MUST resolve, not throw — the isolation is the whole point.
       const sweep = await runDeliverabilitySweep(ctx, DEFAULT_THRESHOLDS, mailer);

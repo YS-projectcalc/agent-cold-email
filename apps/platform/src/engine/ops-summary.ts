@@ -8,11 +8,14 @@
 // (possibly stale — see db.ts's insertTenantIndex, never updated post-signup)
 // mirror of plan/status.
 
-import { isPaidPlan, monthlyRevenueCents } from "@coldstart/shared";
+import { isPaidPlan, monthlyRevenueCents, type NextStepReason } from "@coldstart/shared";
 import type { TenantContext } from "../tenant-context.js";
 import { readActivationState } from "./activation.js";
+import { clampedAge, realNowMs } from "./clamped-age.js";
 import { DNS_PENDING_MAX_MS, dnsUnreadyForMs } from "./domain-dns.js";
 import { countSendEligibleMailboxes } from "./mailbox-eligibility.js";
+import { deriveNextStepsWithResolved, owedSignals } from "./next-steps.js";
+import { expireResolvedSystemMessages } from "./tenant-messages.js";
 import { getDeliverabilitySummary } from "./reporting.js";
 
 export interface TenantOpsSummary {
@@ -144,6 +147,28 @@ export interface SendPipelineSignals {
   domainOrphans: { domain: string; pendingForMs: number }[];
   /** The domain twin of `mailboxIntentEmails`. */
   domainIntentCandidates: string[];
+  /**
+   * §7.10.3 — the MINIMIZED `nextSteps` projection this RPC carries. Sourced
+   * from `deriveNextSteps` + `owedSignals` — the SAME primitive responses
+   * embed and the nudge renders from (one derivation, three consumers).
+   * Never `NextStep[]`: full `why` prose and profile fields must not enter
+   * this RPC, which feeds alert bodies and `buildOpsDigest`.
+   */
+  owedReasons: NextStepReason[];
+  owedCount: number;
+  oldestOwedSinceMs: number | null;
+  /** §7.11 — whether any owed step blames the operator; decides which of the
+   *  two `customer_progress_*` names (and therefore which channel) a stall
+   *  reports under. */
+  anyOwedWaitingOnOperator: boolean;
+  /**
+   * §7.10.2 — the liveness anchor's AGE at this read, already clamped to
+   * real wall-clock (`clampedAge`, §7.19) — never a raw timestamp, so no
+   * consumer of this RPC can reach for `now - lastAgentActivityAt` and
+   * reintroduce the exact hazard the clamp exists to close. Null when this
+   * tenant has never had a bearer-authed call.
+   */
+  lastAgentActivityAgeMs: number | null;
 }
 
 /** How long a post-purchase mailbox/domain intent may sit with no matching
@@ -154,10 +179,40 @@ export interface SendPipelineSignals {
  * in-flight window (mirrors AGING_CRED_PUSH_MS's own reasoning above). */
 export const DEFAULT_PROVISIONING_ORPHAN_GRACE_MS = 30 * 60 * 1000;
 
-function provisioningOrphanGraceMs(ctx: TenantContext): number {
+/** Exported so `engine/next-steps.ts`'s `ordinal_incomplete` ages against the SAME bound the orphan checks use, rather than inventing a second one. */
+export function provisioningOrphanGraceMs(ctx: TenantContext): number {
   const raw = ctx.env.PROVISIONING_ORPHAN_GRACE_MS;
   const n = raw ? Number(raw) : NaN;
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_PROVISIONING_ORPHAN_GRACE_MS;
+}
+
+/** §7.11 — the two bounds the `customer_progress_*` unhealthy predicate uses:
+ *  the agent silence bound and the oldest-owed-step bound. Read from the
+ *  Worker `env` (not a `TenantContext`) since `admin/watchtower.ts`'s
+ *  per-tenant check derivation runs outside any one tenant's DO. */
+export const DEFAULT_CUSTOMER_PROGRESS_STALL_MS = 24 * 60 * 60 * 1000;
+export const DEFAULT_CUSTOMER_PROGRESS_OWED_MAX_MS = 48 * 60 * 60 * 1000;
+
+function envMsOrDefault(raw: string | undefined, fallback: number): number {
+  const n = raw ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+export function customerProgressStallMs(env: { CUSTOMER_PROGRESS_STALL_MS?: string }): number {
+  return envMsOrDefault(env.CUSTOMER_PROGRESS_STALL_MS, DEFAULT_CUSTOMER_PROGRESS_STALL_MS);
+}
+
+export function customerProgressOwedMaxMs(env: { CUSTOMER_PROGRESS_OWED_MAX_MS?: string }): number {
+  return envMsOrDefault(env.CUSTOMER_PROGRESS_OWED_MAX_MS, DEFAULT_CUSTOMER_PROGRESS_OWED_MAX_MS);
+}
+
+/** §7.12 (founder ruling Q1) — the one-shot continuity nudge fires one day
+ *  after a stall episode's onset. Same non-arming, detection-timing-bound
+ *  reasoning as the two bounds above. */
+export const DEFAULT_CONTINUITY_NUDGE_DELAY_MS = 24 * 60 * 60 * 1000;
+
+export function continuityNudgeDelayMs(env: { CONTINUITY_NUDGE_DELAY_MS?: string }): number {
+  return envMsOrDefault(env.CONTINUITY_NUDGE_DELAY_MS, DEFAULT_CONTINUITY_NUDGE_DELAY_MS);
 }
 
 export interface MailboxProvenanceRow {
@@ -534,6 +589,26 @@ function readSendPipelineSignals(ctx: TenantContext): SendPipelineSignals {
     .toArray()
     .map((row) => row.candidate_domain);
 
+  // §7.11/§7.10.3 — the one derivation, read here (never re-derived): the
+  // stuck-customer checks ride this SAME opsSummary fan-out, no new RPC.
+  //
+  // BLOCKING-2 — and the same derivation BANKS its own conclusion. A
+  // `retry_setup`/`setup_failed` row whose condition no longer derives owed is
+  // expired here, so operator surfaces stop showing a dead action item instead
+  // of waiting on a customer ack that will never come. This is the site
+  // because it is the only per-tenant path that already re-derives on a
+  // cadence: a dedicated sweep RPC would add a subrequest per tenant per tick
+  // and break §7.17.7's `8.0N + 29` bound, and the derivation itself must stay
+  // pure (§7.16 invariant 3). The ids stay inside the DO — the cross-DO
+  // projection below is unchanged (§7.10.3).
+  const derived = deriveNextStepsWithResolved(ctx);
+  expireResolvedSystemMessages(ctx, derived.expirableSystemMessageIds);
+  const owed = owedSignals(derived.next);
+
+  const lastAgentActivityAt = ctx.sql
+    .exec<{ last_agent_activity_at: number | null }>(`SELECT last_agent_activity_at FROM tenant_profile WHERE id = ?`, ctx.tenantId)
+    .one().last_agent_activity_at;
+
   return {
     activated,
     dueNonDemoPendingSends,
@@ -546,5 +621,12 @@ function readSendPipelineSignals(ctx: TenantContext): SendPipelineSignals {
     mailboxIntentEmails,
     domainOrphans,
     domainIntentCandidates,
+    owedReasons: owed.owedReasons,
+    owedCount: owed.owedCount,
+    oldestOwedSinceMs: owed.oldestOwedSinceMs,
+    anyOwedWaitingOnOperator: owed.anyOwedWaitingOnOperator,
+    // §7.19 — clamped at READ time (real wall-clock), the same timing
+    // precedent this file already uses for `pendingForMs` above.
+    lastAgentActivityAgeMs: clampedAge(lastAgentActivityAt, realNowMs()),
   };
 }

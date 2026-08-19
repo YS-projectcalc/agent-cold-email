@@ -115,6 +115,37 @@ export function managedMailboxAddress(
 }
 
 /**
+ * The EXACT inverse of `managedMailboxAddress` — the persona that address was
+ * derived from, or `undefined` when this platform could not have derived it.
+ *
+ * Kept adjacent to its forward function so the pair cannot drift, the same way
+ * `domainIntentOrdinal` sits beside `domainIntentKey`. It exists because the
+ * address is the ONLY place a pre-`persona_slug` tenant's persona survives:
+ * that column was added by `addColumnIfMissing` and is written INSERT-only, so
+ * it is permanently NULL for every intent row that predates it, while every
+ * mailbox those intents produced still spells the persona out
+ * (docs/adversarial/customer-continuity-build-gate-2026-08-19.md BLOCKING-1).
+ *
+ * VERIFIED BY ROUND TRIP, never by parsing: the candidate is accepted only if
+ * feeding it back through `managedMailboxAddress` reproduces the address
+ * byte-for-byte. A parse would have to reason about multi-digit ordinals and
+ * personas that themselves end in digits; the round trip cannot be wrong about
+ * either, and it stays correct for free if the forward format ever changes.
+ */
+export function personaSlugFromManagedAddress(
+  email: string,
+  domain: string,
+  domainOrdinal: number,
+  mailboxIndex: number,
+): string | undefined {
+  const suffix = `${domainOrdinal + 1}${mailboxIndex + 1}@${domain}`;
+  if (!email.endsWith(suffix)) return undefined;
+  const candidate = email.slice(0, email.length - suffix.length);
+  if (candidate.length === 0) return undefined;
+  return managedMailboxAddress(candidate, domain, domainOrdinal, mailboxIndex) === email ? candidate : undefined;
+}
+
+/**
  * Provisions `inboxesEach` PLATFORM-OWNED mailboxes on an ALREADY-OWNED domain
  * row. `domainOrdinal` only affects the generated local-part numbering
  * (uniqueness only requires the local part be unique WITHIN this one domain,

@@ -289,7 +289,7 @@ describe("retryable laundering — a permanent DNS failure must not read as 'ret
   it("a NAMED error class survives the wrapper with its own mapping intact", async () => {
     const { tenantId } = await mintTenant("Dns Gate Co", "managed");
     await activatePaidPlan(tenantId, "managed");
-    const { port } = domainPort({ dns: { throw: new RegistrarUnarmedError("setDns") } });
+    const { port } = domainPort({ dns: { throw: new RegistrarUnarmedError("setDns", "env") } });
 
     const err = await runSetup(tenantId, port, "namederror.com", "gate-7");
 
