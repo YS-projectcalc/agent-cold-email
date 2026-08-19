@@ -11,12 +11,17 @@ import { type Seed, seedTenant } from "./next-steps-fleet.js";
 // THE DEFECT, and why a per-reason test could not have caught it.
 // `packages/shared/src/next-steps.ts:154` defines `effect: null` as "the step
 // changes no billable count" — an AFFIRMATIVE claim, not "unknown" (the same
-// file refuses a bare null elsewhere for exactly that reason). Two reasons
+// file refuses a bare null elsewhere for exactly that reason). THREE reasons
 // emitted a runnable `setup_infrastructure` call whose executed plan buys real
 // mailboxes and shipped `effect: null` beside it: at/above the five-seat floor
 // each mailbox moves the invoice $10/mo, and the consumer is an unattended agent
 // executing the emitted params verbatim. Every per-reason test was green,
 // because each one asserted the reason it was about.
+//
+// The gate named two of the three. The third, `domain_dns_incomplete`, PREDATES
+// the diff the gate was scoped to and was found by this guard on its first run —
+// and it was the only one of the three reachable in production, which is the
+// argument for writing the guard this way rather than per-reason.
 //
 // SO THE GUARD IS OVER THE DERIVATION, NOT OVER A REASON. It walks every step
 // the derivation produces across the fleet fixtures the suite already exercises,
@@ -36,11 +41,15 @@ import { type Seed, seedTenant } from "./next-steps-fleet.js";
 // whose PLAN disagrees is still caught.
 
 /**
- * The reason whose members this commit reports but does not repair — see the
- * pinned assertion at the bottom of the first test for why, and for the shape
- * that stops the exemption from outliving the defect.
+ * The three reasons that state what the bill does through `billMoveSentence`,
+ * and are therefore held to prose that agrees with their own `effect`.
+ *
+ * `seat_headroom_free` and `paid_seats_unprovisioned` are absent on purpose:
+ * they compose theirs from `billClaimSentence`, which anchors on the five-seat
+ * minimum instead of on the billed quantity — correct for a reason whose own
+ * predicate is `billable < 5`, and not this guard's to re-litigate.
  */
-const UNFIXED_MEMBER = "domain_dns_incomplete";
+const BILL_MOVE_REASONS = ["ordinal_slot_shortfall", "ordinal_incomplete", "domain_dns_incomplete"];
 
 /** The fleets the per-reason suites already run on — the guard adds no private state of its own. */
 const FLEETS: { name: string; seed: Seed }[] = [
@@ -278,8 +287,7 @@ describe("NEW-1 class guard — a runnable provisioning call that buys mailboxes
     // EVERY bill-raising step is in exactly one of two states, and the
     // violations of both are collected into one list so a failure names every
     // offender rather than the first.
-    const violations: { reason: string; text: string }[] = [];
-    const violation = (reason: string, text: string): void => void violations.push({ reason, text });
+    const violations: string[] = [];
     for (const a of buying) {
       const at = `${a.fleet}/${a.step.reason}`;
       // (1) THE PLATFORM CANNOT PLAN THIS CALL. `persona` is the caller's to
@@ -290,9 +298,9 @@ describe("NEW-1 class guard — a runnable provisioning call that buys mailboxes
       // abstention has to be visible in the prose, which is what stops this
       // branch from becoming the hiding place for an unpriced call.
       if (!a.emitsPersona && !a.personaIndependent) {
-        if (a.step.effect !== null) violation(a.step.reason, `${at}: priced a call whose persona the platform does not hold`);
+        if (a.step.effect !== null) violations.push(`${at}: priced a call whose persona the platform does not hold`);
         if (!a.step.why.includes("will not project a mailbox count or a price")) {
-          violation(a.step.reason, `${at}: withheld the price without saying so`);
+          violations.push(`${at}: withheld the price without saying so`);
         }
         continue;
       }
@@ -303,12 +311,11 @@ describe("NEW-1 class guard — a runnable provisioning call that buys mailboxes
       // one, not merely present: `provisionedAfter` is the live count AFTER the
       // call — today's meter plus what the plan adds.
       if (a.step.effect === null) {
-        violation(a.step.reason, `${at}: plan buys ${a.newMailboxes} mailboxes, effect: null`);
+        violations.push(`${at}: plan buys ${a.newMailboxes} mailboxes, effect: null`);
         continue;
       }
       if (a.step.effect.provisionedAfter !== a.billable + a.newMailboxes) {
-        violation(
-          a.step.reason,
+        violations.push(
           `${at}: effect projects ${a.step.effect.provisionedAfter}, plan says ${a.billable} + ${a.newMailboxes}`,
         );
       }
@@ -318,55 +325,17 @@ describe("NEW-1 class guard — a runnable provisioning call that buys mailboxes
       // other hat. The bill moves iff the FLOORED projection exceeds the floored
       // quantity the subscription charges on — both sides of that comparison
       // fold the same discount, so the counts decide the cents.
-      //
-      // Scoped to the reasons whose sentence this rule owns (`billMoveSentence`).
-      // `seat_headroom_free` and `paid_seats_unprovisioned` compose theirs from
-      // `billClaimSentence`, which anchors on the five-seat minimum instead —
-      // correct for a reason whose own predicate is `billable < 5`, and not this
-      // guard's to re-litigate.
-      if (a.step.reason === "ordinal_slot_shortfall" || a.step.reason === "ordinal_incomplete") {
+      if (BILL_MOVE_REASONS.includes(a.step.reason)) {
         const raises = billableMailboxes(a.step.effect.provisionedAfter) > billableMailboxes(a.billed);
         if (raises !== a.step.why.includes("DOES change your bill")) {
-          violation(
-            a.step.reason,
+          violations.push(
             `${at}: effect ${raises ? "raises" : "does not raise"} the bill (${a.step.effect.provisionedAfter} vs billed ${a.billed}) and the prose says otherwise`,
           );
         }
       }
     }
 
-    expect(
-      violations.filter((v) => v.reason !== UNFIXED_MEMBER).map((v) => v.text),
-      "a step whose executed plan buys mailboxes must carry that call's price",
-    ).toEqual([]);
-
-    // THE ONE MEMBER THIS COMMIT DOES NOT FIX, PINNED RATHER THAN SKIPPED.
-    //
-    // `domain_dns_incomplete` builds its params with `setupParamsFor` directly
-    // instead of through `executeSetupCall`, and ships `effect: null` over a plan
-    // that buys. It is a full member of NEW-1, not a technicality: the middle
-    // fixture below is an account holding 5 live mailboxes against an ask of 5
-    // with a second domain mid-registration, where `fillDistribution`'s [3,2]
-    // reaches slots the live mailboxes do not occupy — the plan buys 2 more, the
-    // projection lands at 7, and the invoice goes $99 -> $119 under a field
-    // claiming the bill does not move.
-    //
-    // IT PREDATES THIS WAVE, which is why the r4 gate — scoped to the diff —
-    // could not see it, and why it is recorded here rather than fixed under a
-    // brief that did not name it. Scope is the orchestrator's call, not a
-    // builder's (CLAUDE.md's Bug Response step 3).
-    //
-    // PINNED, NOT SKIPPED, so the exemption cannot outlive the defect: this
-    // asserts the violation at its exact sites. Fixing the reason empties the
-    // list and REDDENS this block, which is the signal to delete it.
-    expect(
-      violations.filter((v) => v.reason === UNFIXED_MEMBER).map((v) => v.text),
-      "if this list is now EMPTY the defect is fixed — delete UNFIXED_MEMBER and this assertion",
-    ).toEqual([
-      "a domain whose mail DNS has not come up/domain_dns_incomplete: plan buys 5 mailboxes, effect: null",
-      "a mid-registration domain on an account already at the floor/domain_dns_incomplete: plan buys 2 mailboxes, effect: null",
-      "a second domain mid-registration behind a finished one/domain_dns_incomplete: plan buys 2 mailboxes, effect: null",
-    ]);
+    expect(violations, "a step whose executed plan buys mailboxes must carry that call's price").toEqual([]);
   });
 
   // The gate's own worked example, pinned as an example rather than an

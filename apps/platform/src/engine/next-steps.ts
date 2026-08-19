@@ -1208,8 +1208,28 @@ function domainDnsSteps(ctx: TenantContext, snap: NextStepsSnapshot): NextStep[]
     if (age === null) return acc;
     return acc === null || age > acc ? age : acc;
   }, null);
-  const distribution = fillDistribution(snap.provisioning, Math.max(snap.profile.billedQuantity, MINIMUM_BILLABLE_MAILBOXES));
-  const { params, paramsToSupply } = setupParamsFor(snap, distribution, true);
+  // THE THIRD MEMBER OF NEW-1 (build gate r4 2026-08-19). This reason built its
+  // params with `setupParamsFor` directly rather than through the seam, so it
+  // named a call it had never planned and priced it `null`. That is the same
+  // false claim as its two siblings and the only one of the three reachable in
+  // production today: on an account holding five live mailboxes with a second
+  // domain mid-registration, `fillDistribution`'s [3,2] reaches slots the live
+  // mailboxes do not occupy, so the plan buys two more, the projection lands at
+  // seven, and the invoice goes $99 to $119 under a field saying it does not
+  // move.
+  //
+  // THE ACTION IS UNCHANGED, deliberately. `executeSetupCall` builds the same
+  // params from the same distribution, so this is a pricing fix, not a remedy
+  // change. The shortfall's exactness-withhold gate is NOT imposed here and
+  // would be wrong if it were: that gate exists because a wider call re-creates
+  // addresses a customer released ON PURPOSE, while this reason recommends the
+  // ordinary fill-to-the-billed-quantity call its seat-family siblings also
+  // emit, on a domain whose slots nobody has released.
+  const executed = executeSetupCall(
+    snap,
+    fillDistribution(snap.provisioning, Math.max(snap.profile.billedQuantity, MINIMUM_BILLABLE_MAILBOXES)),
+  );
+  const effect = executed.plan === null ? null : billingEffect(ctx, snap.billableMailboxes + executed.plan.newMailboxes);
   return [
     {
       reason: "domain_dns_incomplete",
@@ -1218,11 +1238,14 @@ function domainDnsSteps(ctx: TenantContext, snap: NextStepsSnapshot): NextStep[]
         `${pending.length} of your domains ${pending.length === 1 ? "has" : "have"} not finished mail DNS setup, so ` +
         `${pending.length === 1 ? "it cannot" : "they cannot"} carry mailboxes yet. Registration is asynchronous at ` +
         `the registrar; repeating the same setup call finishes it once the nameservers have propagated. The platform ` +
-        `does not retry this for you — completing it is the caller's job.`,
-      action: { via: "mcp_tool", tool: "setup_infrastructure", params, paramsToSupply, idempotencyKey: null },
+        `does not retry this for you — completing it is the caller's job.` +
+        (executed.plan === null
+          ? PERSONA_UNKNOWN_SENTENCE
+          : billMoveSentence(effect, executed.plan.newMailboxes, snap.profile.billedQuantity)),
+      action: executed.action,
       waitingOn: null,
       notBeforeMs: DNS_RETRY_CADENCE_MS,
-      effect: null,
+      effect,
       sinceMs: oldest,
     },
   ];
