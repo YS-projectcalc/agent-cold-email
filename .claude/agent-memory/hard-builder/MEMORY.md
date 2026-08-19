@@ -5,6 +5,7 @@
 - [wall-clock-rotation-makes-order-assertions-periodic-flakes](wall-clock-rotation-makes-order-assertions-periodic-flakes.md) — `rotationOffset(clock.now(),…)` flips list order every cron period; fixed-order assertions are wall-clock flakes — pin the clock and assert coverage + rotation, not order.
 
 ## Failure mechanisms (check before diagnosing a hard case)
+- [seam-carries-the-claim-and-drops-the-money-field](seam-carries-the-claim-and-drops-the-money-field.md) — ⚠️ a seam built so params+prose cannot disagree left `effect: null` on both callers, over calls that BUY; write the guard over the DERIVATION and it names the members the diff-scoped adversary can't see.
 - [two-valued-grade-for-a-three-valued-refusal](two-valued-grade-for-a-three-valued-refusal.md) — ⚠️ THE 08-18 CLASS: a boolean `retryable` cannot say "an operator clears this, then the SAME retry works", so every such refusal is emitted as "check your inputs"; widest member is 401/402/403 at the ROOT grader.
 - [vendor-prepaid-wallet-exhaustion-reads-as-permanent](vendor-prepaid-wallet-exhaustion-reads-as-permanent.md) — ⚠️ CUSTOMER P0 08-18: an empty InboxKit CREDIT WALLET 4xx's every money-out call; status-only grading calls it permanent and the agent is told "never retry" for a top-up. Probe `GET /billing/wallet`.
 - [fixture-born-with-the-code-restates-its-premise](fixture-born-with-the-code-restates-its-premise.md) — ⚠️ a fixture authored in the SAME commit as its parser tests the code's premise, not the vendor's; `getHealth` shipped NaN for a month, green. Demand `capturedFrom`/`capturedAt`.
@@ -65,6 +66,7 @@
 - [vitest-pool-workers-ambient-devvars-leak](vitest-pool-workers-ambient-devvars-leak.md) — the pool auto-loads `apps/*/.dev.vars` and injects every key, so a dev's ambient real secret flips a behavior gate; construct bindings from an allowlist.
 
 ## Build techniques
+- [pinned-exemption-beats-a-skip-when-scope-is-not-yours](pinned-exemption-beats-a-skip-when-scope-is-not-yours.md) — a guard reddening on an out-of-brief member: ASSERT the violation at its exact sites so the fix reddens the pin; ask once with executed evidence and honour your stated default.
 - [failing-by-construction-env-coverage-guard](failing-by-construction-env-coverage-guard.md) — enforce "a new env binding must wire into isRealSpendArmed" with a test that `?raw`-parses env.ts source, so the NEXT binding trips RED.
 - [coldstart-engine-crash-injection-idiom](coldstart-engine-crash-injection-idiom.md) — deterministic engine crash tests via a faulty SendLog + discard-and-rebuild-from-disk; engine vitest's ~30s ESM transform is not a hang.
 - [declared-content-length-cap-is-opt-out](declared-content-length-cap-is-opt-out.md) — ⚠️ a body cap reading DECLARED Content-Length is opt-out (chunked → NaN → skipped); fix at ONE reader, strip comments in the tripwire.
