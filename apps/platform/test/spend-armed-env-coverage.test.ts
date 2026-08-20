@@ -39,6 +39,7 @@ const KNOWN_NON_SPEND_ARMING = new Set([
   // slot-cap with no armed vendor spends $0 (see env.ts's comment on why these
   // are deliberately NOT `// spend-arming`). isRealSpendArmed must NOT read them.
   "SPEND_CEILING_CENTS",
+  "PAYING_TENANT_COUNT", // drives the ceiling's per-tenant formula — a BOUND on spend, like the ceiling itself
   "COST_MAILBOX_CENTS",
   "COST_DOMAIN_CENTS",
   "COST_PREWARM_MAILBOX_CENTS",

@@ -5,8 +5,10 @@ import {
   periodKey,
   reapStaleReservations,
   releaseMailboxSlots,
+  spendCeilingCents,
   withSpendCeiling,
 } from "../src/engine/spend-ceiling.js";
+import type { Env } from "../src/env.js";
 import type { TenantContext } from "../src/tenant-context.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
 import { mintTenant, withTenantContext } from "./helpers.js";
@@ -73,9 +75,15 @@ describe("withSpendCeiling — sandbox tenants never touch the ceiling", () => {
 describe("G2 — two concurrent reserves that jointly exceed the ceiling: exactly one succeeds", () => {
   it("the atomic conditional UPDATE serializes — one commits, one lands capacity_pending", async () => {
     const { tenantId } = await mintTenant("Ceiling Race Co", "managed");
-    const { successes, rejections, committed, reserved, slots } = await realCtx(tenantId, async (ctx) => {
-      const pk = periodKey(ctx.clock.now());
-      // Pre-seed a ceiling that admits ONE mailbox (690) but not two (1380).
+    const { successes, rejections, committed, reserved, slots } = await realCtx(tenantId, async (baseCtx) => {
+      const pk = periodKey(baseCtx.clock.now());
+      // A ceiling that admits ONE mailbox (690) but not two (1380), declared in
+      // BOTH places that now define it: the configured knob and the stored row.
+      // The row alone is no longer sufficient — withSpendCeiling reconciles a
+      // stored ceiling UP to the configured one so a mid-month raise takes
+      // effect (see the raise-only UPDATE), which would lift a lone stale 1000
+      // to the default bound and let both reserves through.
+      const ctx = { ...baseCtx, env: { ...baseCtx.env, SPEND_CEILING_CENTS: "1000" } };
       await ctx.env.DB.prepare(
         `INSERT OR REPLACE INTO vendor_spend_ledger (period_key, reserved_cents, committed_cents, ceiling_cents, updated_at) VALUES (?, 0, 0, ?, ?)`,
       )
@@ -312,6 +320,85 @@ describe("reapStaleReservations — reclaims reservations orphaned by a crash (d
     expect(healthy?.status).toBe("released"); // reaped
 
     expect((await ledgerRow(pk))?.reserved_cents).toBe(690); // only the healthy row's 690 released, wedged's 690 stays reserved
+  });
+});
+
+// S-remedy (founder ruling 2026-08-18, ROADMAP.md ## Open): the ceiling is the
+// deliberate pilot blast-radius bound, and its remedy is to SCALE IT WITH
+// PAYING-TENANT COUNT rather than leave a flat pilot dollar figure that caps the
+// whole platform at ~21 mailboxes/month (scale-readiness-audit-2026-08-17.md S2).
+//
+// The concrete cents below are asserted deliberately rather than re-derived from
+// the constants: this is a money guard, so a change to the blast-radius bound
+// SHOULD redden a test and be read by a human, not silently track a refactor.
+describe("spendCeilingCents — the blast-radius bound scales with paying tenants", () => {
+  function envWith(overrides: Partial<Env>): Env {
+    return overrides as Env;
+  }
+
+  it("defaults to the one-paying-tenant pilot bound", () => {
+    expect(spendCeilingCents(envWith({}))).toBe(18000); // $60 platform base + 1 x $120
+  });
+
+  it("scales linearly with PAYING_TENANT_COUNT", () => {
+    expect(spendCeilingCents(envWith({ PAYING_TENANT_COUNT: "10" }))).toBe(126000); // $60 + 10 x $120
+    expect(spendCeilingCents(envWith({ PAYING_TENANT_COUNT: "100" }))).toBe(1206000);
+  });
+
+  it("still honors SPEND_CEILING_CENTS as an absolute override, whatever the count says", () => {
+    expect(spendCeilingCents(envWith({ SPEND_CEILING_CENTS: "5000", PAYING_TENANT_COUNT: "100" }))).toBe(5000);
+  });
+
+  it("falls back to the pilot bound on an unparseable or absent count (never to an unbounded one)", () => {
+    expect(spendCeilingCents(envWith({ PAYING_TENANT_COUNT: "" }))).toBe(18000);
+    expect(spendCeilingCents(envWith({ PAYING_TENANT_COUNT: "not-a-number" }))).toBe(18000);
+  });
+});
+
+// The reserve gates on the LEDGER ROW's ceiling_cents, which is seeded at the
+// first spend of a calendar month — so raising the configured ceiling did
+// nothing until the 1st. That made the ops alert's own instruction false:
+// alertCapacityPending says "raise SPEND_CEILING_CENTS ... a retry will succeed
+// once the limit is raised", and the retry hit the same stale stored number.
+describe("a raised ceiling takes effect within the SAME calendar month", () => {
+  it("lifts a stored ceiling that is BELOW the configured one, so the instructed retry succeeds", async () => {
+    const { tenantId } = await mintTenant("Mid Month Raise Co", "managed");
+    await realCtx(tenantId, async (ctx) => {
+      const pk = periodKey(ctx.clock.now());
+      // A row seeded earlier in the month, under a far lower configured ceiling:
+      // admits ONE mailbox (690) but not two (1380).
+      await ctx.env.DB.prepare(
+        `INSERT OR REPLACE INTO vendor_spend_ledger (period_key, reserved_cents, committed_cents, ceiling_cents, updated_at) VALUES (?, 0, 0, ?, ?)`,
+      )
+        .bind(pk, 1000, ctx.clock.now())
+        .run();
+
+      await withSpendCeiling(ctx, "mailbox", async () => "bought");
+      // The second one is what the stale stored ceiling used to refuse forever.
+      await withSpendCeiling(ctx, "mailbox", async () => "bought");
+
+      const row = await ledgerRow(pk);
+      expect(row?.ceiling_cents).toBe(18000); // raised to the configured bound
+      expect(row?.committed_cents).toBe(1380); // both spends landed
+      expect(readProvisioningState(ctx)).toBe("ok");
+    });
+  });
+
+  it("NEVER lowers a stored ceiling — a mid-month reduction must not strand live reserves", async () => {
+    const { tenantId } = await mintTenant("No Lower Co", "managed");
+    await realCtx(tenantId, async (ctx) => {
+      const pk = periodKey(ctx.clock.now());
+      await ctx.env.DB.prepare(
+        `INSERT OR REPLACE INTO vendor_spend_ledger (period_key, reserved_cents, committed_cents, ceiling_cents, updated_at) VALUES (?, 0, 0, ?, ?)`,
+      )
+        .bind(pk, 50000, ctx.clock.now())
+        .run();
+
+      await withSpendCeiling(ctx, "mailbox", async () => "bought");
+
+      const row = await ledgerRow(pk);
+      expect(row?.ceiling_cents).toBe(50000); // the higher stored bound stands
+    });
   });
 });
 
