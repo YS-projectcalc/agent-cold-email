@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 import { env } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { CapacityPendingError, NotActivatedError, OPERATOR_NOTIFIED, RegistrarUnarmedError } from "@coldstart/shared";
 import { toErrorResponse } from "../src/error-response.js";
 import { periodKey, withSpendCeiling } from "../src/engine/spend-ceiling.js";
@@ -27,7 +27,13 @@ import { strippedSource } from "./source-text.js";
 // re-introduced as a literal by the next surface that wants it).
 
 describe("the notification claim is chosen by what happened", () => {
+  // A low ceiling has to be declared in BOTH places that now define one.
+  // withSpendCeiling reconciles a stored ceiling UP to the configured one, so
+  // that a raise lands inside the month the founder is told to raise it in
+  // (engine/spend-ceiling.ts) — seeding a lone low row would simply be lifted
+  // back to the configured bound and nothing would be rejected.
   async function seedCeiling(cents: number): Promise<void> {
+    env.SPEND_CEILING_CENTS = String(cents);
     await env.DB.prepare(
       `INSERT OR REPLACE INTO vendor_spend_ledger (period_key, reserved_cents, committed_cents, ceiling_cents, updated_at)
        VALUES (?, 0, 0, ?, ?)`,
@@ -35,6 +41,10 @@ describe("the notification claim is chosen by what happened", () => {
       .bind(periodKey(Date.now()), cents, Date.now())
       .run();
   }
+
+  afterEach(() => {
+    delete env.SPEND_CEILING_CENTS; // never leak a test's ceiling into the next one
+  });
 
   /** Forces the 'real' bundle so the money choke-point actually engages. */
   function realCtx<T>(tenantId: string, fn: (ctx: TenantContext) => Promise<T>): Promise<T> {

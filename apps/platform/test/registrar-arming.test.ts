@@ -287,11 +287,15 @@ describe("withSpendCeiling — 'domain' kind meters against the SAME ceiling as 
 
   it("(d) a domain buy that would exceed the ceiling is blocked with CapacityPendingError, no charge", async () => {
     const { tenantId } = await mintTenant("Domain Ceiling Co", "managed");
-    await realCtx(tenantId, async (ctx) => {
-      const now = ctx.clock.now();
+    await realCtx(tenantId, async (baseCtx) => {
+      const now = baseCtx.clock.now();
       const pk = new Date(now).toISOString().slice(0, 7);
-      // Pre-seed a ceiling far below the domain cost (1500¢ default) so the
-      // very first domain buy attempt is rejected.
+      // A ceiling far below the domain cost (1500¢ default) so the very first
+      // domain buy attempt is rejected — declared in BOTH places that define
+      // one. withSpendCeiling reconciles a stored ceiling UP to the configured
+      // one so a mid-month raise takes effect (engine/spend-ceiling.ts), which
+      // would lift a lone seeded 500 straight back to the configured bound.
+      const ctx = { ...baseCtx, env: { ...baseCtx.env, SPEND_CEILING_CENTS: "500" } };
       await env.DB.prepare(
         `INSERT INTO vendor_spend_ledger (period_key, reserved_cents, committed_cents, ceiling_cents, updated_at)
          VALUES (?, 0, 0, ?, ?)`,
