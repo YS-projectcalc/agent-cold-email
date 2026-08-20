@@ -1,6 +1,9 @@
 # hard-builder memory index
 
 > One line per memory. The fix recipes, repro shapes and revert-proofs live in the linked files — open the file before acting on a hook.
+- [dedup-key-is-also-spent-at-the-vendor](dedup-key-is-also-spent-at-the-vendor.md) — ⚠️ shrinking a LOCAL dedup window is a no-op when the vendor caches the key; fix the KEY (durable epoch, not a clock bucket).
+- [sweep-prescribed-key-needs-component-provenance-check](sweep-prescribed-key-needs-component-provenance-check.md) — ⚠️ `receivedAt` is POLL time; provenance-check every component of a prescribed key.
+- [two-waves-fight-over-one-column-split-it](two-waves-fight-over-one-column-split-it.md) — a sweep-vs-design clash usually means one column carries two facts; split it.
 - [total-count-assertion-proxies-per-resource-invariant](total-count-assertion-proxies-per-resource-invariant.md) — ⚠️ a TOTAL-call-count guard as PER-RESOURCE proxy reads P0 once isolation stops the early abort.
 - [wall-clock-rotation-makes-order-assertions-periodic-flakes](wall-clock-rotation-makes-order-assertions-periodic-flakes.md) — `rotationOffset` flips list order every cron period — fixed-order asserts are wall-clock flakes.
 
@@ -8,10 +11,10 @@
 - [seam-carries-the-claim-and-drops-the-money-field](seam-carries-the-claim-and-drops-the-money-field.md) — ⚠️ a params/prose no-disagree seam still shipped `effect: null` on bill-raising calls; guard the DERIVATION, not the seam.
 - [resolution-predicate-inherits-its-reason-sets-coverage](resolution-predicate-inherits-its-reason-sets-coverage.md) — ⚠️ "no reason in S is owed" used as "RESOLVED" silences every emit-state S doesn't cover.
 - [destructive-rederivation-outruns-the-grace-it-races](destructive-rederivation-outruns-the-grace-it-races.md) — ⚠️ a 5-min re-derivation sweep destroys a record 6x before a 30-min grace can contradict it.
-- [insert-only-column-null-for-pre-column-population](insert-only-column-null-for-pre-column-population.md) — ⚠️ CUSTOMER P0 08-19: `addColumnIfMissing` + INSERT-only writer = permanently NULL for the pre-column population. Sibling: [[insert-only-ask-vs-shrinking-live-set]].
+- [insert-only-column-null-for-pre-column-population](insert-only-column-null-for-pre-column-population.md) — ⚠️ CUSTOMER P0 08-19: `addColumnIfMissing` + INSERT-only writer = permanently NULL for pre-column rows.
 - [bookkeeping-write-outside-try-fails-the-call](bookkeeping-write-outside-try-fails-the-call.md) — ⚠️ (shipped-then-caught): a bare MCP-handler liveness stamp makes bookkeeping a precondition of all 28 tools.
 - [staleness-exclusion-needs-severity-scope-not-just-kind](staleness-exclusion-needs-severity-scope-not-just-kind.md) — "re-derivable" is (kind × severity) — the same kind's `operator_pending` form is a LIVE blocker.
-- [two-valued-grade-for-a-three-valued-refusal](two-valued-grade-for-a-three-valued-refusal.md) — ⚠️ THE 08-18 CLASS: a boolean `retryable` can't say "operator clears it, retry then works"; widest member = 401/402/403.
+- [two-valued-grade-for-a-three-valued-refusal](two-valued-grade-for-a-three-valued-refusal.md) — ⚠️ THE 08-18 CLASS: a boolean `retryable` can't say "operator clears it, then retry works".
 - [vendor-prepaid-wallet-exhaustion-reads-as-permanent](vendor-prepaid-wallet-exhaustion-reads-as-permanent.md) — ⚠️ CUSTOMER P0 08-18: an empty InboxKit CREDIT WALLET 4xx's every money-out call, graded permanent.
 - [fixture-born-with-the-code-restates-its-premise](fixture-born-with-the-code-restates-its-premise.md) — ⚠️ a fixture authored in the SAME commit as its parser tests the code's premise, not the vendor's.
 - [operator-read-scoped-by-key-prefix-reports-empty-as-truth](operator-read-scoped-by-key-prefix-reports-empty-as-truth.md) — `provisioning-state.ts`'s key-prefix filter means `requestIdempotency:[]` never meant "no claim."
@@ -38,7 +41,7 @@
 - [false-recovery-disarms-cooldown-dedup](false-recovery-disarms-cooldown-dedup.md) — clearing an incident on the vendor ACCEPTING a remedy lies and disarms the cooldown dedup; clear only where the goal state is proven.
 - [fixture-decorates-vendor-owned-object](fixture-decorates-vendor-owned-object.md) — ⚠️ a fixture putting OUR field on a VENDOR-MINTED object restates the parser's premise; 1271 green, two billing lanes dead in prod.
 - [guard-scoped-wider-than-the-state-it-protects](guard-scoped-wider-than-the-state-it-protects.md) — ⚠️ (I shipped it): a dedup guard keyed globally over independent state machines silences them all.
-- [completion-pass-must-recheck-ordering](completion-pass-must-recheck-ordering.md) — a reconcile pass that "finishes crashed work" is a SECOND write path bypassing the primary's guards; re-apply every pre-effect guard.
+- [completion-pass-must-recheck-ordering](completion-pass-must-recheck-ordering.md) — a "finish crashed work" pass is a SECOND write path; re-apply every pre-effect guard.
 - [sandbox-fallback-masks-a-missing-activation-gate](sandbox-fallback-masks-a-missing-activation-gate.md) — ⚠️ a missing gate degrading to a SANDBOX adapter makes "no vendor call" true on the broken code too.
 - [polling-check-error-is-indistinguishable-from-negative](polling-check-error-is-indistinguishable-from-negative.md) — a poll whose ERROR looks like its NEGATIVE reports "all clear" while broken.
 - [fail-loud-throw-after-billed-vendor-call](fail-loud-throw-after-billed-vendor-call.md) — a new throw AFTER a billed vendor call but BEFORE its durable marker becomes a deterministic re-charge loop if graded retryable.
@@ -51,7 +54,7 @@
 - [classifier-cannot-see-an-undiscriminated-return](classifier-cannot-see-an-undiscriminated-return.md) — ⚠️ a result-SHAPE classifier is blind to any branch returning the success shape.
 - [deleted-mechanism-leaves-its-prose-and-its-sentinel](deleted-mechanism-leaves-its-prose-and-its-sentinel.md) — replacing a mechanism leaves the customer sentence describing it AND a sentinel re-committing the original sin.
 - [vendor-200-with-error-true-reads-as-absent](vendor-200-with-error-true-reads-as-absent.md) — InboxKitClient rejects only on non-2xx, so a 200 `{error:true}` reads as "vendor holds nothing."
-- [error-isolation-refactor-voids-throw-dependent-invariants](error-isolation-refactor-voids-throw-dependent-invariants.md) — ⚠️ CLASS: fail-fast→per-item isolation voids every caller invariant the throw justified.
+- [error-isolation-refactor-voids-throw-dependent-invariants](error-isolation-refactor-voids-throw-dependent-invariants.md) — ⚠️ fail-fast→per-item isolation voids every invariant the throw justified.
 - [fix-shape-differs-when-decider-and-sender-split-across-rpc](fix-shape-differs-when-decider-and-sender-split-across-rpc.md) — ⚠️ a sweep row naming 3 sites got closed at 1; DO-decides/Worker-sends needs two-phase decide/commit.
 - [nonterminal-retry-drives-a-relative-destructive-op](nonterminal-retry-drives-a-relative-destructive-op.md) — ⚠️ a correct NON-TERMINAL verdict hands an unbounded retry to a RELATIVE destructive op.
 - [orphan-detection-blind-to-the-row-never-created](orphan-detection-blind-to-the-row-never-created.md) — ⚠️ stuck-row orphan checks can't see the row NEVER created; detect via paid-commitment-vs-state.
