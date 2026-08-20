@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/env.js";
+import { runSendPipelineAllTenants } from "../src/admin/ops-sweep.js";
 import {
   CRON_PERIOD_MS,
-  runSendPipelineAllTenants,
   SEND_PIPELINE_LEG_DEADLINE_MS,
   SEND_PIPELINE_TENANT_BUDGET_MS,
-} from "../src/admin/ops-sweep.js";
+} from "../src/admin/sweep-budget.js";
 import { SEND_CLAIM_TTL_MS } from "../src/engine/tick.js";
 import { ENGINE_REQUEST_TIMEOUT_MS } from "../src/vendors/real/email-port.js";
 
@@ -55,7 +55,15 @@ function fakeEnv(
   };
   const env = {
     DB: {
-      prepare: () => ({ all: async () => ({ results: tenantIds.map((id) => ({ id })) }) }),
+      // `.bind(...)` is part of the shape now: the tenant read is
+      // `SELECT id FROM tenants_index ORDER BY id LIMIT ?` (scale audit S1/S8 —
+      // the cross-tenant read used to have no bound at all). This fake is
+      // reached through `as unknown as Env`, so tsc cannot see the drift; a
+      // missing method surfaces only as a TypeError at run time.
+      prepare: () => {
+        const result = { all: async () => ({ results: tenantIds.map((id) => ({ id })) }) };
+        return { ...result, bind: () => result };
+      },
     },
     TENANT: {
       idFromName: (name: string) => name,

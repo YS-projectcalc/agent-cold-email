@@ -3,10 +3,12 @@ import { TerminateInput } from "@coldstart/shared";
 import { getTenantIndexById } from "../admin/db.js";
 import { buildOpsDigest, runDunningSweep } from "../admin/ops-sweep.js";
 import { terminateTenantForAbuse } from "../admin/terminate.js";
-import { readAllCheckRows } from "../admin/watchtower.js";
+import { CHECK_RETENTION_MS, readAllCheckRows } from "../admin/watchtower.js";
+import { expectedCheckRoster } from "../admin/watchtower-roster.js";
+import { readSweepFreshness } from "../admin/watchtower-infra.js";
 import { CRON_SWEEP_CHECK, D1_CHECK } from "../admin/watchtower-alerts.js";
 import { RealClock } from "../clock.js";
-import { listWaitlistEmails } from "../db.js";
+import { countWaitlistEmails, listWaitlistEmails } from "../db.js";
 import type { Env } from "../env.js";
 import { parseJsonBody } from "../validate.js";
 
@@ -67,27 +69,60 @@ export const adminOpsRoute = new Hono<{ Bindings: Env }>()
   // this route keeps serving a frozen, healthy-looking snapshot rather than
   // ever going empty or erroring.
   //
-  // No cap/truncation today (YAGNI, CLAUDE.md rule i): at real scale the
-  // table holds hundreds of rows. Growth is monotonic (rows are flipped
-  // healthy, never DELETEd) — that's the already-open `watchtower_state`
-  // unbounded-growth ledger item (ROADMAP.md ## Open, 2026-08-09 wave-3 gate
-  // NB-2); when that item is closed, this endpoint inherits whatever bound
-  // it lands on.
+  // ROWS ARE RETIRED NOW, not accumulated (scale audit S5): a check that has
+  // been healthy for `CHECK_RETENTION_MS` is DELETEd by the sweep, so this
+  // table no longer grows with the platform's lifetime count of entities that
+  // ever alerted. That closes the unbounded-growth ledger item for this
+  // endpoint and is why it still needs no cap — but it also means a row you saw
+  // last month may be gone, so `retentionMs` rides on the wire.
+  //
+  // THE ROSTER IS THE DENOMINATOR (docs/adversarial/
+  // class-sweep-watch-completeness-2026-08-17.md). Two of the always-on checks
+  // are skip-dark — `engine` when ENGINE_BASE_URL is unset, the two InboxKit
+  // ones when the vendor is unarmed — and a check that is SKIPPED writes no row
+  // at all. Absence then reads as health on every downstream surface, so an env
+  // var lost in a deploy silently deletes a check from the monitored set.
+  // `expected` says what should be here and `missing` names what is not.
+  //
+  // `sweepAgeSeconds` is the DEAD-CRON TELL, published rather than inferred.
+  // Consumers used to derive it from per-row `updatedAt` freshness, which was
+  // only ever true because SOME row happened to be re-written every tick; the
+  // sweep now skips a write for a check whose state and detail are unchanged
+  // (S5), so that inference is gone. This number comes from
+  // `watchtower_cursor`, which every completed sweep stamps unconditionally.
   .get("/admin/ops/checks", async (c) => {
     const onlyUnhealthy = c.req.query("unhealthy") === "1";
-    const rows = await readAllCheckRows(c.env);
+    const [rows, freshness] = await Promise.all([readAllCheckRows(c.env), readSweepFreshness(c.env, new RealClock().now())]);
     const unhealthyCount = rows.filter((r) => !r.healthy).length;
     const checks = (onlyUnhealthy ? rows.filter((r) => !r.healthy) : rows)
       // Stable sort (V8/ES2019+): unhealthy first, healthy after, each group
       // keeping the D1 read's own order.
       .sort((a, b) => Number(a.healthy) - Number(b.healthy));
-    return c.json({ checks, unhealthyCount, excludesDoStoreChecks: DO_STORE_ONLY_CHECKS });
+    const present = new Set(rows.map((r) => r.name));
+    const expected = expectedCheckRoster(c.env);
+    return c.json({
+      checks,
+      unhealthyCount,
+      expected,
+      missing: expected.filter((name) => !present.has(name)),
+      excludesDoStoreChecks: DO_STORE_ONLY_CHECKS,
+      sweepAgeSeconds: freshness.ageSeconds,
+      sweepStale: freshness.stale,
+      retentionMs: CHECK_RETENTION_MS,
+    });
   })
   // C6 — the owner's durable waitlist export (adversarial panel-03 finding #9:
   // the funnel had no owner-retrieval path). Ordered newest-first.
+  //
+  // `count` USED TO BE `entries.length` — a page relabelled as a total. The
+  // page is capped at 1000 (db.ts's listWaitlistEmails), so past 1000 leads it
+  // reported `count: 1000` as the platform's waitlist size with no truncation
+  // signal, while the real total sat one function away in `countWaitlistEmails`
+  // (the digest already used it). Now `count` is the total, `entries` is the
+  // page, and `truncated` says whether they differ.
   .get("/admin/ops/waitlist", async (c) => {
-    const entries = await listWaitlistEmails(c.env);
-    return c.json({ count: entries.length, entries });
+    const [entries, count] = await Promise.all([listWaitlistEmails(c.env), countWaitlistEmails(c.env)]);
+    return c.json({ count, returned: entries.length, truncated: entries.length < count, entries });
   })
   // D5 — abuse offboarding: the terminal rung of the AUP consequence ladder
   // (site/aup.html §7). Immediately suspends + reclaims the tenant's infra (the

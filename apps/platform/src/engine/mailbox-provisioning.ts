@@ -36,8 +36,10 @@ import type { OpsMailer } from "../ops-mail/ops-mailer.js";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
 import { customerSafeVendorDetail, logVendorFailure, VENDOR_STEP } from "../vendor-failure.js";
+import { mailboxSlotFailedCheckName } from "../admin/watchtower.js";
 import { logAction } from "./deliverability-actions.js";
 import { withRequestIdempotency } from "./idempotency.js";
+import { alertIsolatedFailures } from "./isolated-failure-alerts.js";
 import { forEachIsolated } from "../isolated-loop.js";
 import {
   abandonedPurchaseError,
@@ -220,6 +222,19 @@ export async function provisionMailboxesForDomain(
   // chance — throwing rather than returning a partial list is deliberate: the
   // mailbox count is what the customer is billed on, so a short domain must
   // never read to the agent as a completed one.
+  // THE OPS-SIDE PATH (wave-1-2 integration gate §6). Only ONE of these
+  // failures reaches the caller — `reportedFailure` below throws exactly one —
+  // so every other failed slot in this batch was previously visible in nothing
+  // but the customer's own activity feed. Each is a paid vendor unit with no
+  // working mailbox behind it. Raised BEFORE the throw so a batch that ends in
+  // a rethrow still reports the slots it isolated.
+  await alertIsolatedFailures(ctx, outcome, {
+    checkName: (slot) => mailboxSlotFailedCheckName(managedMailboxAddress(opts.personaSlug, opts.domain, opts.domainOrdinal, slot)),
+    detail: (slot) =>
+      `mailbox ${managedMailboxAddress(opts.personaSlug, opts.domain, opts.domainOrdinal, slot)} could not be provisioned. ` +
+      `The remaining slots on this domain were still attempted; this address may have consumed a purchase with nothing usable behind it.`,
+  });
+
   const reportedFailure = outcome.abortedAt ?? outcome.failures[0];
   if (reportedFailure) throw reportedFailure.error;
 

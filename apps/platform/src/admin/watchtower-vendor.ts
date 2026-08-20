@@ -38,6 +38,19 @@ function inboxKitConfig(env: Env): InboxKitClientConfig | undefined {
   return apiKey && workspaceId ? { apiKey, workspaceId } : undefined;
 }
 
+/**
+ * Are the two account-wide vendor checks EXPECTED to run in this environment?
+ *
+ * The one predicate, exported so `admin/watchtower-roster.ts` asks THIS file
+ * rather than re-deriving "armed" from env vars. A roster that decides
+ * separately whether a check should exist is a second source of truth, and the
+ * gap between the two is where a check goes missing without anything saying so
+ * — which is the exact defect the roster exists to close.
+ */
+export function vendorChecksArmed(env: Env): boolean {
+  return inboxKitConfig(env) !== undefined;
+}
+
 // GET /billing/wallet's LIVE response (class-sweep Finding 6, live-probed
 // 2026-08-18) — snake_case, like every other InboxKit payload. The sweep's
 // own fix sketch guessed `{creditsRemaining, autoTopupEnabled}`; shipping

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { runInDurableObject } from "cloudflare:test";
 import { VendorError } from "@coldstart/shared";
 import type { Clock, PollResult } from "@coldstart/shared";
-import { CRON_PERIOD_MS } from "../src/admin/ops-sweep.js";
+import { CRON_PERIOD_MS } from "../src/admin/sweep-budget.js";
 import { runPollInbox } from "../src/engine/reply-processor.js";
 import { activatePaidPlan, api, mintTenant, seedBenignSdnList, tenantStub, withTenantContext } from "./helpers.js";
 

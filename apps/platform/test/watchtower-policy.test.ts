@@ -167,6 +167,28 @@ describe("failing-by-construction — a new check cannot inherit an unchosen pol
     // `watchtower-channel-routing.test.ts`).
     "customer_progress_operator:": 2,
     "customer_progress_agent:": 2,
+    // Scale audit S4/S11 + sweep-completeness W-M1/W-M4 — all three are
+    // re-observed on EVERY cron tick, so the debounced default is the right
+    // one, and each is stated here rather than inherited. Note that
+    // `sweep_coverage` and `alert_delivery` are ALSO streak-damped upstream
+    // (sweep-signals.ts) like `cron_legs` — but unlike `cron_legs` neither is
+    // on the founder's 10-15 minute paging ceiling (one describes coverage
+    // latency, the other a channel that is already known to be one-way), so
+    // the extra confirming observation costs nothing that matters.
+    sweep_coverage: 2,
+    alert_delivery: 2,
+    // Wave-1-2 integration gate §6 — the three isolated-loop failures that
+    // reached no watchtower check. ONE-SHOT, exactly like the two mailbox
+    // event reports above: they are raised once by the loop that gave up, and
+    // nothing ever re-observes them, so a debounce would be permanent silence
+    // on money that keeps being spent.
+    "mailbox_release_failed:": 1,
+    "domain_ordinal_failed:": 1,
+    "mailbox_slot_failed:": 1,
+    // Reported by scheduled.ts from OUTSIDE the leg, once per tick, undamped —
+    // so the debounce is the only thing standing between a single flaky
+    // WatchtowerDO RPC and an email.
+    sweep_signals: 2,
   };
 
   function declaredCheckNames(source: string): string[] {
