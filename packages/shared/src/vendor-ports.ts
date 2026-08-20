@@ -356,6 +356,28 @@ export interface PolledReply {
   kind: "reply";
   mailboxEmail: string;
   threadId: string;
+  /**
+   * The reply's dedup anchor — the inbound message's own RFC 5322 Message-ID
+   * (`<local@domain>`) when it has one, else a SYNTHESIZED `synthetic:<sha256>`
+   * key derived from the message bytes.
+   *
+   * IN-22/IN-23, docs/adversarial/class-sweep-dedup-semantics-2026-08-17.md.
+   * RFC 5322 makes Message-ID a SHOULD, not a MUST. This field being
+   * non-nullable used to mean the engine had no way to emit a reply it could
+   * not key, so `classifyReply` returned null for a message it had ALREADY
+   * attributed to a known thread — and the poll loop drops a null with no
+   * counter while the cursor advances regardless, so a genuine prospect reply
+   * from such a client was destroyed outright: no event row, no inbox thread,
+   * no stop-on-reply, no webhook.
+   *
+   * The synthesized form keeps this field's ONE guarantee — that equal values
+   * mean the same inbound message — which is all any consumer here relies on
+   * (the Worker's `(tenant_id, type, message_id)` dedup). It deliberately does
+   * NOT hold `SendEmailResult.messageId`'s stronger "real, wire-resolvable id"
+   * contract: nothing matches an INBOUND reply's id back against a header, so
+   * there is no reconstruction path to break. The `synthetic:` prefix (never a
+   * legal `<...>` msg-id) keeps the two populations disjoint by construction.
+   */
   messageId: string;
   fromEmail: string;
   body: string;
