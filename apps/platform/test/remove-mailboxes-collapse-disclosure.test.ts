@@ -189,10 +189,15 @@ describe("B1 — a retry that actually released something is never reported as a
     // The ageout is REQUIRED to reach it, and that is worth stating. Call 2
     // finished with `failedCount: 0`, so it is terminal and its response is
     // recorded — a third same-key call inside the 30-day window REPLAYS that
-    // stored response and never re-enters `removeMailboxes` at all. It therefore
-    // returns call 2's `deduplicated: false`, which is a true statement about
-    // the call being replayed. Only once the claim ages out does `fn` re-run and
-    // find there is nothing left to do.
+    // stored response and never re-enters `removeMailboxes` at all. The flag
+    // sees the INTENT layer only; the idempotency layer collapses ABOVE it,
+    // invisibly, handing back the recording's own `deduplicated: false`
+    // (per provenance.ts the field is defined on the RESPONSE, so a replayed
+    // response carrying the original flag is a known gap — benign here because
+    // the counts are absolute and accurate; the generic fix is stamping
+    // `deduplicated: true` at the single replay site in engine/idempotency.ts,
+    // routed to the Wave B alert-state increment). Only once the claim ages
+    // out does `fn` re-run and find there is nothing left to do.
     await ageOutRequestClaims(tenantId);
     const attemptsBeforeThird = attempts.length;
     const third = await removeN(token, 3, "downgrade-straggler");
