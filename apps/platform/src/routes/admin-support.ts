@@ -50,10 +50,23 @@ export const adminSupportRoute = new Hono<{ Bindings: Env }>()
     };
     return c.json(body, 201);
   })
+  // THE DIGEST PUBLISHES ITS DENOMINATOR (docs/adversarial/
+  // class-sweep-watch-completeness-2026-08-17.md). `tickets` is a status
+  // ALLOWLIST (`status IN ('open','escalated')`, no LIMIT) and `counts` used to
+  // hardcode the SAME two statuses — so a consumer cross-checking one against
+  // the other got agreement while both were blind, and the list was complete
+  // only because nothing in src has ever written `'closed'`.
+  //
+  // `counts.total` is an unfiltered `COUNT(*)` and `unaccounted` is the
+  // arithmetic the watch is told to execute: anything other than zero means a
+  // status was added that this endpoint does not list and does not count. That
+  // makes the narrowing an assertion failure on the operator's side rather than
+  // an absence nobody can see.
   .get("/admin/support/digest", async (c) => {
     const [tickets, counts] = await Promise.all([
       listOpenAndEscalatedSupportTickets(c.env),
       countSupportTicketsByStatus(c.env),
     ]);
-    return c.json({ counts, tickets });
+    const unaccounted = counts.total - (counts.open + counts.escalated + counts.closed);
+    return c.json({ counts: { ...counts, unaccounted }, tickets });
   });

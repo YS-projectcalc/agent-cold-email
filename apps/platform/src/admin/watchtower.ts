@@ -19,7 +19,7 @@
 
 import type { Notified, RecoveryBasis } from "@coldstart/shared";
 import { isLifecycleFrozen } from "../engine/billing-state.js";
-import { listAllTenantIds } from "./db.js";
+import { countTenants, resolveSweepTenants, sweepTenants, type SweepScope } from "./tenant-slice.js";
 import type { Env } from "../env.js";
 import { isPaidPlan } from "@coldstart/shared";
 import {
@@ -43,10 +43,13 @@ import {
   CUSTOMER_PROGRESS_OPERATOR_CHECK,
   D1_CHECK,
   DOMAIN_DNS_AGING_CHECK,
+  DOMAIN_ORDINAL_FAILED_CHECK,
   DOMAIN_ORPHAN_CHECK,
   MAILBOX_ORPHAN_CHECK,
   MAILBOX_PROVISIONING_CHECK,
   MAILBOX_REBUY_CHECK,
+  MAILBOX_RELEASE_FAILED_CHECK,
+  MAILBOX_SLOT_FAILED_CHECK,
   SEND_STARVED_CHECK,
   TENANT_DO_WEDGED_CHECK,
   type AlertOutcome,
@@ -107,6 +110,21 @@ export function domainDnsAgingCheckName(domain: string): string {
   return `${DOMAIN_DNS_AGING_CHECK}${domain}`;
 }
 
+/** ONE mailbox the vendor would not release — still live, still billing. */
+export function mailboxReleaseFailedCheckName(email: string): string {
+  return `${MAILBOX_RELEASE_FAILED_CHECK}${email}`;
+}
+
+/** ONE domain ordinal whose setup could not be completed. */
+export function domainOrdinalFailedCheckName(domain: string): string {
+  return `${DOMAIN_ORDINAL_FAILED_CHECK}${domain}`;
+}
+
+/** ONE mailbox slot whose provision could not be completed. */
+export function mailboxSlotFailedCheckName(email: string): string {
+  return `${MAILBOX_SLOT_FAILED_CHECK}${email}`;
+}
+
 // --- Health probes -------------------------------------------------------
 
 /**
@@ -118,7 +136,7 @@ export function domainDnsAgingCheckName(domain: string): string {
  * else could still be probed, and the D1-backed scans are skipped. Its caller
  * routes the `d1` result through a store that does not depend on D1.
  */
-export async function evaluateHealthChecks(env: Env, nowMs: number): Promise<CheckResult[]> {
+export async function evaluateHealthChecks(env: Env, nowMs: number, scope: SweepScope = {}): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
 
   // D1 reachable (the same SELECT 1 the public /status route uses).
@@ -160,7 +178,7 @@ export async function evaluateHealthChecks(env: Env, nowMs: number): Promise<Che
   // `d1` result above is the honest, complete report of that state.
   if (!d1Healthy) return results;
 
-  results.push(...(await scanTenants(env, nowMs)));
+  results.push(...(await scanTenants(env, nowMs, scope)));
   return results;
 }
 
@@ -207,13 +225,14 @@ async function probeDurableObjectStorage(env: Env): Promise<CheckResult> {
  * signals, its credential-push checks and its starvation check in a single
  * pass, leaving the only paying customer unmonitored and unmentioned.
  */
-async function scanTenants(env: Env, nowMs: number): Promise<CheckResult[]> {
+async function scanTenants(env: Env, nowMs: number, scope: SweepScope): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   const sinceMs = nowMs - FAILURE_SIGNAL_WINDOW_MS;
   let failed = 0;
   let complaints = 0;
 
-  const tenantIds = await listAllTenantIds(env);
+  const tenantTotal = await countTenants(env);
+  const tenantIds = await resolveSweepTenants(env, scope);
   // One read of every check name the state machine has ever recorded. The
   // per-entity checks below use it to stay SILENT about entities they never
   // alerted on (a "healthy" row per mailbox per tenant would bury the handful
@@ -222,9 +241,10 @@ async function scanTenants(env: Env, nowMs: number): Promise<CheckResult[]> {
   // RECOVERY email for one they did.
   const reported = await readReportedCheckNames(env);
 
-  for (const tenantId of tenantIds) {
-    const wedgedName = tenantDoWedgedCheckName(tenantId);
-    try {
+  const swept = await sweepTenants(
+    tenantIds,
+    scope.fanout,
+    async (tenantId) => {
       const s = await env.TENANT.get(env.TENANT.idFromName(tenantId)).opsSummary(sinceMs);
       failed += s.failureSignalsInWindow.failed;
       complaints += s.failureSignalsInWindow.complaints;
@@ -234,14 +254,20 @@ async function scanTenants(env: Env, nowMs: number): Promise<CheckResult[]> {
           owedMaxMs: customerProgressOwedMaxMs(env),
         }),
       );
-      if (reported.has(wedgedName)) {
-        // reobserved: this line is inside the try where the opsSummary RPC
+      if (reported.has(tenantDoWedgedCheckName(tenantId))) {
+        // reobserved: this line is inside the callback where the opsSummary RPC
         // actually returned, so the positive claim was just proven.
-        results.push({ name: wedgedName, healthy: true, detail: `Tenant ${tenantId} (${s.brand}) is answering again.`, basis: "reobserved" });
+        results.push({
+          name: tenantDoWedgedCheckName(tenantId),
+          healthy: true,
+          detail: `Tenant ${tenantId} (${s.brand}) is answering again.`,
+          basis: "reobserved",
+        });
       }
-    } catch (err) {
+    },
+    (tenantId, err) => {
       results.push({
-        name: wedgedName,
+        name: tenantDoWedgedCheckName(tenantId),
         healthy: false,
         detail:
           `Tenant ${tenantId}'s Durable Object threw instead of answering opsSummary: ${errMsg(err)}. ` +
@@ -249,17 +275,28 @@ async function scanTenants(env: Env, nowMs: number): Promise<CheckResult[]> {
           `starvation) and is skipped by the dunning, deliverability, digest and send-pipeline sweeps as well — it is not sending, ` +
           `and nothing else will say so.`,
       });
-    }
-  }
+    },
+  );
 
   // Global failure-signal roll-up. `null` = inside the dead band: report
   // nothing, which leaves the check's state (and its cooldown) untouched.
-  const grade = gradeFailureSignals(failed, complaints);
+  //
+  // A PARTIAL SCAN MAY NOT CLEAR IT (scale audit S1 x the watch-completeness
+  // class). `gradeFailureSignals` answers `true` only on a genuinely clean
+  // window — but "clean" is now clean ACROSS THE TENANTS THIS TICK REACHED,
+  // and the cron reaches a bounded slice. A `true` from a partial scan would
+  // send a RECOVERED email for failures still sitting in the un-scanned
+  // remainder. The UNHEALTHY direction is unaffected: a failure seen anywhere
+  // is a failure platform-wide, whatever else went unread.
+  const scanComplete = swept.visited >= tenantTotal;
+  const observed = gradeFailureSignals(failed, complaints);
+  const grade = scanComplete || observed === false ? observed : null;
   if (grade !== null) {
     const windowMin = Math.round(FAILURE_SIGNAL_WINDOW_MS / 60000);
+    const scanScope = scanComplete ? `all ${tenantTotal} tenant(s)` : `${swept.visited} of ${tenantTotal} tenant(s) scanned this cycle`;
     const failureDetail = grade
-      ? `no failed sends or complaints in the last ${windowMin} min`
-      : `${failed} terminal-failed send(s) + ${complaints} complaint(s) in the last ${windowMin} min, across all tenants`;
+      ? `no failed sends or complaints in the last ${windowMin} min, across ${scanScope}`
+      : `${failed} terminal-failed send(s) + ${complaints} complaint(s) in the last ${windowMin} min, across ${scanScope}`;
     results.push({
       name: "failure_signals",
       // reobserved: the healthy claim is a freshly counted window, not an
@@ -670,7 +707,8 @@ export async function reconcileAlerts(
 
   for (const result of results) {
     try {
-      const prev = stateByName.get(result.name) ?? null;
+      const persisted = stateByName.get(result.name);
+      const prev = persisted?.state ?? null;
       const policy = policyFor(result.name);
       const transition = decideAlert(prev, result.healthy, nowMs, policy);
 
@@ -717,13 +755,16 @@ export async function reconcileAlerts(
       // the backoff compares against `lastAlertTs`, which is always set once
       // `alertCount > 0`. An earlier `sinceTs` therefore accelerates no email —
       // it only makes "unhealthy since" report the truth about the stall.
-      const siblingState = sibling !== null ? normalizeAlertState(stateByName.get(sibling) ?? null) : null;
+      const siblingState = sibling !== null ? normalizeAlertState(stateByName.get(sibling)?.state ?? null) : null;
       const stallOnsetTs =
         !result.healthy && siblingState !== null && siblingState.status === "unhealthy"
           ? Math.min(decided.sinceTs, siblingState.sinceTs)
           : decided.sinceTs;
       const state = stallOnsetTs < decided.sinceTs ? { ...decided, sinceTs: stallOnsetTs } : decided;
-      await upsertWatchtowerState(env, { name: result.name, state, detail: result.detail, nowMs });
+      // S5 — a tick that changed nothing writes nothing. See `isSteadyState`.
+      if (!isSteadyState(persisted, state, result.detail)) {
+        await upsertWatchtowerState(env, { name: result.name, state, detail: result.detail, nowMs });
+      }
 
       // I15 (§7.12) — the one-shot continuity nudge.
       //
@@ -780,8 +821,8 @@ export async function reconcileAlerts(
  * The `d1` result is reconciled FIRST and through a store that is not D1, and
  * a D1 outage returns right there: everything below reads the table that is
  * down, and attempting it would only trade one email for ten stack traces. */
-export async function runWatchtower(env: Env, mailer: OpsMailer, nowMs: number): Promise<AlertOutcome[]> {
-  const results = await evaluateHealthChecks(env, nowMs);
+export async function runWatchtower(env: Env, mailer: OpsMailer, nowMs: number, scope: SweepScope = {}): Promise<AlertOutcome[]> {
+  const results = await evaluateHealthChecks(env, nowMs, scope);
   const d1 = results.find((r) => r.name === D1_CHECK) as CheckResult;
 
   const outcomes: AlertOutcome[] = [await reconcileD1Alert(env, mailer, d1, nowMs)];
@@ -893,28 +934,103 @@ export async function readAllCheckRows(env: Env): Promise<WatchtowerCheckRow[]> 
   }));
 }
 
-async function readWatchtowerState(env: Env): Promise<Map<string, AlertState>> {
+/** The persisted state PLUS the detail it was written with — `reconcileAlerts`
+ * needs both to tell a genuine no-op tick from one that changed something. */
+interface PersistedCheck {
+  state: AlertState;
+  detail: string;
+}
+
+async function readWatchtowerState(env: Env): Promise<Map<string, PersistedCheck>> {
   const result = await env.DB.prepare(
-    `SELECT check_name, status, since_ts, last_alert_ts, unhealthy_obs, alert_count FROM watchtower_state`,
+    `SELECT check_name, status, since_ts, last_alert_ts, last_detail, unhealthy_obs, alert_count FROM watchtower_state`,
   ).all<{
     check_name: string;
     status: "healthy" | "unhealthy";
     since_ts: number;
     last_alert_ts: number | null;
+    last_detail: string | null;
     unhealthy_obs: number;
     alert_count: number;
   }>();
-  const map = new Map<string, AlertState>();
+  const map = new Map<string, PersistedCheck>();
   for (const row of result.results) {
     map.set(row.check_name, {
-      status: row.status,
-      sinceTs: row.since_ts,
-      lastAlertTs: row.last_alert_ts,
-      unhealthyObs: row.unhealthy_obs,
-      alertCount: row.alert_count,
+      state: {
+        status: row.status,
+        sinceTs: row.since_ts,
+        lastAlertTs: row.last_alert_ts,
+        unhealthyObs: row.unhealthy_obs,
+        alertCount: row.alert_count,
+      },
+      detail: row.last_detail ?? "",
     });
   }
   return map;
+}
+
+/**
+ * Is this tick's outcome byte-identical to what is already stored?
+ *
+ * S5 (scale audit), MEASURED: every entity that has ever alerted re-emits a
+ * healthy `CheckResult` on EVERY tick — the per-entity clear loops in
+ * `sendPipelineChecks` iterate `reported`, not the unhealthy set — and each one
+ * used to cost an `upsertWatchtowerState` D1 write. Probed at one mailbox + one
+ * domain: `{"seededEntityResultsPerTick":[2,2,2,2,2],"watchtowerWritesOver5Ticks":20}`.
+ * That cost is additive to the per-tenant fan-out and grows with the platform's
+ * LIFETIME count of entities that ever hit an alert.
+ *
+ * Skipping the write changes nothing an alert consumer reads except
+ * `updated_at`, which stops advancing for a check that has nothing new to say.
+ * That mattered — `updated_at` freshness was the de-facto dead-cron tell for
+ * `GET /admin/ops/checks` — so that route now serves `sweepAgeSeconds` from
+ * `watchtower_cursor` instead, a signal the sweep writes UNCONDITIONALLY. The
+ * tell is published rather than inferred from a side effect nobody declared.
+ */
+function isSteadyState(prev: PersistedCheck | undefined, next: AlertState, detail: string): boolean {
+  if (!prev) return false;
+  return (
+    prev.detail === detail &&
+    prev.state.status === next.status &&
+    prev.state.sinceTs === next.sinceTs &&
+    prev.state.lastAlertTs === next.lastAlertTs &&
+    prev.state.unhealthyObs === next.unhealthyObs &&
+    prev.state.alertCount === next.alertCount
+  );
+}
+
+/**
+ * How long a check must have been HEALTHY before its row is retired.
+ *
+ * Long enough that the row is still there for an operator reading
+ * `GET /admin/ops/checks` after an incident, short enough that the table does
+ * not accumulate for the platform's lifetime. Retirement is what stops S5's
+ * other half: the ownership sets the per-entity clears test against
+ * (`provisionedDomains`, `mailboxProvenance`, `mailboxIntentEmails`) carry NO
+ * released/status filter by design — that is what lets a stale alert clear
+ * instead of pinning unhealthy forever — so a churned customer's entities keep
+ * emitting a clear result on every tick, for life. Once the row is gone they
+ * are not in `reported`, so nothing emits for them at all.
+ */
+export const CHECK_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Delete check rows that have been healthy for the whole retention window.
+ *
+ * ONLY `status='healthy'`: an unhealthy row is a live incident and `since_ts`
+ * on it means "unhealthy since", so the same predicate would delete exactly the
+ * longest-running problems. Retiring a healthy row is also alert-neutral — the
+ * check's next unhealthy observation reads `prev = null`, which
+ * `decideAlert` already treats identically to `prev = healthy` (a fresh
+ * episode, debounced by the check's own policy), and `readCheckStatus`'s one
+ * consumer (engine/mailbox-acquisition.ts) branches on `!== "unhealthy"`, which
+ * `null` and `"healthy"` both satisfy.
+ */
+export async function retireHealthyCheckRows(env: Env, nowMs: number): Promise<{ retired: number }> {
+  const result = await env.DB.prepare(`DELETE FROM watchtower_state WHERE status = 'healthy' AND since_ts <= ?`)
+    .bind(nowMs - CHECK_RETENTION_MS)
+    .run();
+  return { retired: result.meta.changes ?? 0 };
 }
 
 async function upsertWatchtowerState(

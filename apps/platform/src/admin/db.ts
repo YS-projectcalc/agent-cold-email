@@ -160,14 +160,45 @@ export async function listOpenAndEscalatedSupportTickets(env: Env): Promise<Supp
   return result.results.map(fromD1Row);
 }
 
-export async function countSupportTicketsByStatus(env: Env): Promise<{ open: number; escalated: number }> {
+/**
+ * The digest's ticket counts, WITH THE DENOMINATOR THEY WERE DRAWN FROM
+ * (docs/adversarial/class-sweep-watch-completeness-2026-08-17.md, platform IN
+ * member 2 — "the amplifier").
+ *
+ * This used to return `open` and `escalated` and nothing else: two hardcoded
+ * `SUM(CASE ...)` columns over an unfiltered table, hardcoding the SAME two
+ * statuses as `listOpenAndEscalatedSupportTickets`' `WHERE status IN (...)`. A
+ * consumer cross-checking the digest's counts against its ticket array
+ * therefore got perfect agreement while BOTH were blind, which is precisely why
+ * the digest could not detect its own narrowing. Complete only by accident
+ * today: `'closed'` exists in the TS union and has zero writers anywhere in
+ * src, so the first close/snooze/reopen feature blinds the list and its counts
+ * in the same commit.
+ *
+ * `total` is a plain `COUNT(*)`. `open + escalated + closed === total` is now an
+ * arithmetic identity a caller can check, and a status nobody accounted for
+ * breaks it LOUDLY instead of vanishing.
+ */
+export async function countSupportTicketsByStatus(env: Env): Promise<{
+  open: number;
+  escalated: number;
+  closed: number;
+  total: number;
+}> {
   const row = await env.DB.prepare(
     `SELECT
        SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) as open_count,
-       SUM(CASE WHEN status = 'escalated' THEN 1 ELSE 0 END) as escalated_count
+       SUM(CASE WHEN status = 'escalated' THEN 1 ELSE 0 END) as escalated_count,
+       SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) as closed_count,
+       COUNT(*) as total_count
      FROM support_tickets`,
-  ).first<{ open_count: number | null; escalated_count: number | null }>();
-  return { open: row?.open_count ?? 0, escalated: row?.escalated_count ?? 0 };
+  ).first<{ open_count: number | null; escalated_count: number | null; closed_count: number | null; total_count: number | null }>();
+  return {
+    open: row?.open_count ?? 0,
+    escalated: row?.escalated_count ?? 0,
+    closed: row?.closed_count ?? 0,
+    total: row?.total_count ?? 0,
+  };
 }
 
 /**
@@ -203,15 +234,6 @@ export async function hasDunningEventForCycle(env: Env, tenantId: string, cycle:
     .bind(tenantId, cycle)
     .first();
   return row !== null;
-}
-
-/** Every tenant id known to the control plane — the D1 read-model driving
- * the cross-tenant sweeps/digest (ARCHITECTURE.md #3). Test-mode scale only:
- * a full D1 read-model (rather than re-fetching every tenant id per sweep)
- * is the scale path, noted in admin/README.md. */
-export async function listAllTenantIds(env: Env): Promise<string[]> {
-  const result = await env.DB.prepare(`SELECT id FROM tenants_index`).all<{ id: string }>();
-  return result.results.map((r) => r.id);
 }
 
 /** Resolves a tenant by id from the control-plane index — the admin terminate

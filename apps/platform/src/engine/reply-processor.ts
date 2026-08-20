@@ -1,5 +1,5 @@
 import type { PolledEvent } from "@coldstart/shared";
-import { CRON_PERIOD_MS } from "../admin/ops-sweep.js";
+import { CRON_PERIOD_MS } from "../admin/sweep-budget.js";
 import { BUDGET_EXPIRED, rotationOffset, withItemBudget } from "../isolated-loop.js";
 import type { TenantContext } from "../tenant-context.js";
 import { logAction } from "./deliverability-actions.js";

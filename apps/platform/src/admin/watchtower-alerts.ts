@@ -76,6 +76,11 @@ const CHECK_LABELS: Record<string, string> = {
   cron_sweep: "Ops sweep (cron)",
   cron_legs: "Ops sweep legs",
   warmup_cancel_gave_up: "Warmup cancellations gave up",
+  // Scale audit S1/S4/S11 + sweep-completeness W-M1/W-M4 — the three things
+  // the sweep could not say about ITSELF (admin/sweep-signals.ts).
+  sweep_coverage: "Ops sweep coverage",
+  sweep_signals: "Ops sweep signal reporting",
+  alert_delivery: "Founder alert delivery",
   // Item 1 (docs/adversarial/class-sweep-vendor-truth-2026-08-18.md) — the
   // two account-wide InboxKit checks (admin/watchtower-vendor.ts).
   vendor_wallet: "InboxKit vendor wallet",
@@ -122,6 +127,14 @@ export const DOMAIN_ORPHAN_CHECK = "domain_orphan:";
 // other pair above has one.
 export const CUSTOMER_PROGRESS_OPERATOR_CHECK = "customer_progress_operator:";
 export const CUSTOMER_PROGRESS_AGENT_CHECK = "customer_progress_agent:";
+// The three isolated-loop failures that reached no watchtower check at all
+// (docs/adversarial/wave-1-2-integration-gate-2026-08-18.md §6) — they were
+// customer-visible activity rows only. Own prefixes per item for the same
+// reason every pair above has one, and ONE-SHOT (see `policyFor`): nothing
+// re-observes a release that already failed.
+export const MAILBOX_RELEASE_FAILED_CHECK = "mailbox_release_failed:";
+export const DOMAIN_ORDINAL_FAILED_CHECK = "domain_ordinal_failed:";
+export const MAILBOX_SLOT_FAILED_CHECK = "mailbox_slot_failed:";
 
 /**
  * The three checks whose names cross a module boundary, as constants rather
@@ -134,6 +147,33 @@ export const CUSTOMER_PROGRESS_AGENT_CHECK = "customer_progress_agent:";
 export const CRON_SWEEP_CHECK = "cron_sweep";
 export const CRON_LEGS_CHECK = "cron_legs";
 export const D1_CHECK = "d1";
+
+/**
+ * The sweep's coverage check (scale audit S4 + S11). SEPARATE from `cron_legs`
+ * on purpose: `skippedForLegDeadline` used to be folded into the same
+ * observation as `errors`, and it is set every cycle the rotation cannot reach
+ * every tenant — which is not a fault, it is the design working. At scale it is
+ * non-zero on EVERY tick, permanently, so the leg check pinned unhealthy and a
+ * genuinely dying leg produced no new alert at all, only an edited `detail`
+ * string on an already-suppressed row. Capacity gets its own name.
+ */
+export const SWEEP_COVERAGE_CHECK = "sweep_coverage";
+
+/**
+ * The alerting leg reporting on ITSELF (W-M4). `reportSweepSignals` builds its
+ * observation from a bag constructed before it runs, so its own throw was
+ * reported by nothing while the heartbeat kept the dead-man green.
+ */
+export const SWEEP_SIGNALS_CHECK = "sweep_signals";
+
+/**
+ * Alerts that were OWED this tick and did not reach the founder (W-M1). The
+ * information existed — every `AlertOutcome` carries `emailSent` and a `why` —
+ * and `collectLegSignals` could not see it, because `counterOf` reads three
+ * NUMBER field names and an outcome array has none. The founder was told the
+ * monitor was healthy on the exact tick the monitor could not reach them.
+ */
+export const ALERT_DELIVERY_CHECK = "alert_delivery";
 
 export function labelFor(name: string): string {
   if (name.startsWith(MAILBOX_PROVISIONING_CHECK)) {
@@ -165,6 +205,15 @@ export function labelFor(name: string): string {
   }
   if (name.startsWith(CUSTOMER_PROGRESS_AGENT_CHECK)) {
     return `Customer progress (agent-side stall) ${name.slice(CUSTOMER_PROGRESS_AGENT_CHECK.length)}`;
+  }
+  if (name.startsWith(MAILBOX_RELEASE_FAILED_CHECK)) {
+    return `Mailbox release failed ${name.slice(MAILBOX_RELEASE_FAILED_CHECK.length)}`;
+  }
+  if (name.startsWith(DOMAIN_ORDINAL_FAILED_CHECK)) {
+    return `Domain setup failed ${name.slice(DOMAIN_ORDINAL_FAILED_CHECK.length)}`;
+  }
+  if (name.startsWith(MAILBOX_SLOT_FAILED_CHECK)) {
+    return `Mailbox setup failed ${name.slice(MAILBOX_SLOT_FAILED_CHECK.length)}`;
   }
   return CHECK_LABELS[name] ?? name;
 }
@@ -213,6 +262,21 @@ export function policyFor(checkName: string): AlertPolicy {
   // condition, around real vendor spend. "2 consecutive observations" is not a
   // delay for them, it is permanent silence.
   if (checkName.startsWith(MAILBOX_PROVISIONING_CHECK) || checkName.startsWith(MAILBOX_REBUY_CHECK)) {
+    return IMMEDIATE_ALERT_POLICY;
+  }
+
+  // The same shape, from `forEachIsolated`'s failure list
+  // (engine/isolated-failure-alerts.ts): a release that threw, an ordinal that
+  // could not be set up, a slot that could not be bought. Each is observed
+  // exactly ONCE, by the loop that gave up on it, around real vendor spend.
+  // Nothing re-observes them, so "2 consecutive observations" would be
+  // permanent silence — and two of the three name money that keeps being spent
+  // until a human intervenes.
+  if (
+    checkName.startsWith(MAILBOX_RELEASE_FAILED_CHECK) ||
+    checkName.startsWith(DOMAIN_ORDINAL_FAILED_CHECK) ||
+    checkName.startsWith(MAILBOX_SLOT_FAILED_CHECK)
+  ) {
     return IMMEDIATE_ALERT_POLICY;
   }
 

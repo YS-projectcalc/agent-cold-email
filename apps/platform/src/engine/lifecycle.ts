@@ -10,6 +10,8 @@ import { newId } from "../schema.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { TenantContext } from "../tenant-context.js";
 import { customerSafeVendorDetail, logVendorFailure } from "../vendor-failure.js";
+import { mailboxReleaseFailedCheckName } from "../admin/watchtower.js";
+import { alertIsolatedFailures } from "./isolated-failure-alerts.js";
 import { alertUnresolvedDomainConnectionType } from "./byo-teardown-alert.js";
 import { pauseAllCampaigns } from "./campaigns.js";
 import { logAction } from "./deliverability-actions.js";
@@ -312,6 +314,21 @@ export async function releaseMailboxes(
   // Only the SUCCEEDED addresses: an address whose vendor release failed still
   // exists at the provider, so releasing its intent would authorize exactly the
   // phantom-billable-row replay this invalidation exists to prevent.
+  // THE OPS-SIDE PATH for the row logged above (wave-1-2 integration gate §6).
+  // `MAILBOX_RELEASE_FAILED` was a customer-visible activity row and nothing
+  // else: the mailbox is still live at the vendor, still counted against the
+  // plan slot, and `released_at` is never written — so both sides keep billing
+  // for it, indefinitely, and the only record was in a feed the operator does
+  // not read. Raised AFTER the loop rather than from `onItemError`, so no I/O
+  // await lands between the loop's per-item DO writes.
+  await alertIsolatedFailures(ctx, outcome, {
+    checkName: (m) => mailboxReleaseFailedCheckName(m.email),
+    detail: (m) =>
+      `mailbox ${m.email} could not be released. It is STILL LIVE at the provider and still counted against the plan slot, ` +
+      `so it keeps costing money on both sides until it is released by hand. Its released_at is deliberately unwritten and its ` +
+      `provisioning intent deliberately not invalidated, so a later teardown retries it.`,
+  });
+
   markMailboxIntentsReleased(ctx, outcome.results);
   // G4 — decrement the account slot counter by the REAL plan-slot mailboxes just
   // released (precise via slot_counted; no-op when none were slot-counted).
