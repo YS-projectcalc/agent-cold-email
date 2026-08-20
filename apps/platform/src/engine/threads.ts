@@ -1,14 +1,33 @@
-import { NotFoundError } from "@coldstart/shared";
+import { NotFoundError, type Collapsed } from "@coldstart/shared";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
 import { sendWithGuards } from "./guarded-send.js";
 
 // sent_message_keys rows are evicted at write time once older than this — the
-// same unbounded-growth guard request_idempotency uses (NB1). After the TTL an
-// identical-body manual reply is treated as new, which also bounds how long a
-// legitimate repeat reply stays suppressed. Measured on ctx.clock, same time
-// base that stamps sent_at.
+// same unbounded-growth guard request_idempotency uses (NB1). Measured on
+// ctx.clock, same time base that stamps sent_at.
 const SENT_MESSAGE_KEY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * How long the CONTENT-HASH fallback key stays replayable (IN-7,
+ * docs/adversarial/class-sweep-dedup-semantics-2026-08-17.md).
+ *
+ * A caller-supplied idempotency key is an explicit "this exact request" claim,
+ * so it replays for the row's full life. A content hash is not that claim — it
+ * is this codebase GUESSING, from the text alone, that two calls are one intent.
+ * That guess is right for a retry seconds later and wrong for a genuine repeat:
+ * over the 30-day row TTL it meant a customer replying "Following up on this."
+ * on Monday and again on Thursday got ONE email and TWO successes, with no
+ * second send and nothing said. The key encoded text identity; it never encoded
+ * intent-to-send-again.
+ *
+ * 10 minutes is this codebase's own existing answer to "how long might one
+ * logical attempt still be being retried" (REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS,
+ * engine/idempotency.ts). Inside it the B3/NB4 guarantee is untouched — a
+ * retried no-key reply after a dropped response still replays rather than
+ * double-sending. Outside it, a repeat is treated as what it is.
+ */
+const CONTENT_HASH_REPLAY_WINDOW_MS = 10 * 60 * 1000;
 
 export interface ThreadRef {
   lead_id: string;
@@ -116,7 +135,7 @@ export async function replyToThread(
   threadId: string,
   body: string,
   idempotencyKey?: string,
-): Promise<{ messageId: string }> {
+): Promise<Collapsed<{ messageId: string }>> {
   const ref = lookupThreadRef(ctx, threadId);
   if (!ref) throw new NotFoundError(`thread ${threadId} not found`);
 
@@ -134,18 +153,53 @@ export async function replyToThread(
   // Prefer the caller's request idempotency key; else a content hash so an
   // identical-body retry still dedupes.
   const now = ctx.clock.now();
-  const keyBasis = idempotencyKey ? `k:${idempotencyKey}` : `h:${await sha256Hex(body)}`;
-  const sendKey = `manual-reply:${ctx.tenantId}:${threadId}:${keyBasis}`;
+  const callerKeyed = idempotencyKey !== undefined;
+  const keyBasis = callerKeyed ? `k:${idempotencyKey}` : `h:${await sha256Hex(body)}`;
+  const lookupKey = `manual-reply:${ctx.tenantId}:${threadId}:${keyBasis}`;
 
   // B3 durability (NB4): the sandbox vendor's send-cache is in-memory, so across
   // a DO cold start a retried no-key reply would mint a fresh messageId and
   // double-send. Consult the DURABLE send-key -> messageId map first: a hit means
   // this exact reply already went out — return the recorded id WITHOUT a second
   // send (the matching 'sent' event is already durable from the first send).
+  //
+  // A hit on the CONTENT-HASH fallback is believed only inside
+  // CONTENT_HASH_REPLAY_WINDOW_MS (IN-7 — see the constant).
   const persisted = ctx.sql
-    .exec<{ message_id: string }>(`SELECT message_id FROM sent_message_keys WHERE send_key = ?`, sendKey)
+    .exec<{ message_id: string; sent_at: number; epoch: number }>(
+      `SELECT message_id, sent_at, epoch FROM sent_message_keys WHERE send_key = ?`,
+      lookupKey,
+    )
     .toArray()[0];
-  if (persisted) return { messageId: persisted.message_id };
+  let epoch = 0;
+  if (persisted) {
+    if (callerKeyed || now - persisted.sent_at < CONTENT_HASH_REPLAY_WINDOW_MS) {
+      return { messageId: persisted.message_id, deduplicated: true };
+    }
+    epoch = persisted.epoch + 1;
+  }
+
+  // THE VENDOR KEY, WHICH IS NOT THE LOOKUP KEY (IN-7 root cause). Bounding the
+  // durable map alone does not send the Thursday follow-up: the vendor dedups on
+  // this key too — the sandbox port caches it in memory forever
+  // (vendors/sandbox/email-port.ts:41) and so does the real engine daemon
+  // (apps/engine/src/engine.ts:87, `store.getSend(idempotencyKey)`). A key that
+  // is a pure function of the BODY is therefore spent at the vendor for as long
+  // as the vendor remembers it, whatever this table says. Measured: with the
+  // window fix alone, the three-days-later reply still came back with the first
+  // send's messageId.
+  //
+  // So a genuine repeat gets a NEW vendor key, discriminated by an `epoch` that
+  // is DURABLE and derived, never a wall-clock bucket — a bucket boundary
+  // straddled by a crash-retry would double-send, which is the very thing the
+  // pre-fix `:${now}` key did. Epoch 0 reuses the bare lookup key so every row
+  // and key already recorded keeps its exact current meaning.
+  //
+  // The crash-retry path stays safe BECAUSE the epoch is derived from the same
+  // durable row the retry re-reads: a retry after a crash mid-send re-computes
+  // the identical epoch (the row is unchanged), so it re-presents the identical
+  // vendor key and the vendor dedups it, exactly as before.
+  const sendKey = epoch === 0 ? lookupKey : `${lookupKey}:e${epoch}`;
 
   // Warm-lead Q3 / adversary R1-R2: a manual reply is REAL sending volume, so
   // it goes through the shared guarded primitive (suppression re-check ->
@@ -164,14 +218,20 @@ export async function replyToThread(
     sendKey,
   });
 
-  // Persist the mapping so the dedupe survives DO eviction. OR IGNORE: a
-  // concurrent same-key send that already recorded its id wins — never clobbered.
+  // Persist the mapping under the LOOKUP key (not the epoch-suffixed vendor
+  // key) so the next call finds it. A HIGHER epoch wins — that is a genuinely
+  // later send episode superseding the one this row described. An equal epoch
+  // does not clobber, which keeps the original OR IGNORE property that a
+  // concurrent same-key send already recorded is never overwritten.
   ctx.sql.exec(`DELETE FROM sent_message_keys WHERE sent_at < ?`, now - SENT_MESSAGE_KEY_TTL_MS);
   ctx.sql.exec(
-    `INSERT OR IGNORE INTO sent_message_keys (send_key, message_id, sent_at) VALUES (?, ?, ?)`,
-    sendKey,
+    `INSERT INTO sent_message_keys (send_key, message_id, sent_at, epoch) VALUES (?, ?, ?, ?)
+     ON CONFLICT (send_key) DO UPDATE SET message_id = excluded.message_id, sent_at = excluded.sent_at, epoch = excluded.epoch
+      WHERE excluded.epoch > sent_message_keys.epoch`,
+    lookupKey,
     result.messageId,
     result.sentAt,
+    epoch,
   );
 
   // OR IGNORE against the events dedupe index: a no-request-key retry with the
@@ -190,7 +250,7 @@ export async function replyToThread(
     JSON.stringify({ fromEmail: mailbox.email, toEmail: leadEmail, body, manual: true }),
   );
 
-  return { messageId: result.messageId };
+  return { messageId: result.messageId, deduplicated: false };
 }
 
 export function markThread(ctx: TenantContext, threadId: string, status: string): void {

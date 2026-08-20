@@ -33,6 +33,24 @@ export interface DemoRunSummary {
 // the sandbox/test-only clock control, deliberately duplicated at the SQL
 // level rather than re-entering the DO, since engine/*.ts functions only
 // ever see a `TenantContext`, never the DO instance itself.
+//
+// WHAT ONE DEMO RUN DOES TO EVERY ctx.clock-MEASURED WINDOW (C-M3 residual,
+// docs/adversarial/sweep-completeness-pass-2026-08-17.md §4(iii)). `runDemo`
+// jumps this clock +29 days (past the warmup ramp) and then +3 days (past
+// step 2's delay) — about 32 virtual days inside one HTTP call. A demo tenant's
+// clock is otherwise FROZEN (clock.ts — there is no rate multiplier; the stored
+// 1440x was never applied and has been deleted), so this is the ONLY way its
+// time moves, and it moves as a DISCRETE JUMP, never as a rate.
+//
+// Anything measured on `ctx.clock` therefore ages ~32 days per demo run for
+// these tenants. That crosses REQUEST_IDEMPOTENCY_TTL_MS and
+// SENT_MESSAGE_KEY_TTL_MS (both 30 days) in a single run, so a demo tenant's
+// idempotency claims and manual-reply send keys can expire mid-call. The
+// direction is safe — an expired dedup key re-does work rather than skipping it,
+// and this is a sandbox tenant with no real vendor spend — but a window
+// measured on `ctx.clock` cannot be assumed to hold across a demo run. Windows
+// that must NOT jump are the ones already stamped `realNowMs()` (engine/
+// clamped-age.ts, §7.19), which is why they are.
 function advanceClock(ctx: TenantContext, virtualMs: number): void {
   // `ctx.clock` is a plain Clock now that a paid tenant runs on real time
   // (clock.ts). Narrowing here is the structural guard behind demoRun()'s plan

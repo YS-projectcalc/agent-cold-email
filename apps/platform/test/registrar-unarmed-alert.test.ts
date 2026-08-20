@@ -45,12 +45,12 @@ async function withInjectedDomain<T>(tenantId: string, domain: DomainPort, fn: (
   return runInDurableObject(tenantStub(tenantId), async (_instance, state) => {
     const sql = state.storage.sql;
     const profile = sql
-      .exec<{ plan: "demo" | "free" | "managed"; clock_base: number; clock_offset: number; clock_multiplier: number }>(
-        `SELECT plan, clock_base, clock_offset, clock_multiplier FROM tenant_profile WHERE id = ?`,
+      .exec<{ plan: "demo" | "free" | "managed"; clock_base: number; clock_offset: number }>(
+        `SELECT plan, clock_base, clock_offset FROM tenant_profile WHERE id = ?`,
         tenantId,
       )
       .one();
-    const clock = new VirtualClock(profile.clock_base, profile.clock_offset, profile.clock_multiplier);
+    const clock = new VirtualClock(profile.clock_base, profile.clock_offset);
     const { activated } = readActivationState(sql, tenantId);
     const ctx: TenantContext = {
       sql,
@@ -135,7 +135,7 @@ describe("G5 gate (a) — runSetupInfrastructure's registrar-unarmed handling", 
 
     // Default sandbox adapters (no injected domain override) — the ordinary
     // demo-tenant path, which succeeds without ever touching the registrar seam.
-    await withInjectedDomain(tenantId, createVendorAdapters("demo", new VirtualClock(Date.now(), 0, 1), false).domain, (ctx) =>
+    await withInjectedDomain(tenantId, createVendorAdapters("demo", new VirtualClock(Date.now(), 0), false).domain, (ctx) =>
       runSetupInfrastructure(ctx, SETUP_INPUT, mailer),
     );
 

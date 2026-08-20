@@ -31,7 +31,7 @@ import {
 // spend. This file proves the two-leg (env-armed AND tenant-opted-in) branch
 // and the spend choke-point coverage for the new 'domain' kind path.
 
-const clock = new VirtualClock(Date.now(), 0, 1);
+const clock = new VirtualClock(Date.now(), 0);
 const INBOXKIT_CONFIG = { apiKey: IK_API_KEY, workspaceId: IK_WORKSPACE_ID };
 const COMPLETE_REGISTRANT = {
   firstName: "Jane",

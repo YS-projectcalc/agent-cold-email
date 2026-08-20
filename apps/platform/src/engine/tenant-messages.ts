@@ -133,8 +133,28 @@ export function emitTenantMessage(ctx: TenantContext, input: EmitTenantMessageIn
       )
       .toArray()[0];
     if (existing) {
+      // `last_occurred_at`, NEVER `created_at` (IN-3/IN-5, docs/adversarial/
+      // class-sweep-dedup-semantics-2026-08-17.md). This UPDATE used to
+      // re-stamp `created_at`, which cost two things at once:
+      //
+      //  - the ORIGINAL occurrence time was destroyed, so "how long has this
+      //    been stuck?" was unanswerable and every `sinceMs` shown to an agent
+      //    understated a recurring blocker's true age;
+      //  - `created_at` is an ORDER BY column for BOTH read surfaces and a
+      //    component of `listMessagesPage`'s keyset cursor, so the re-stamp
+      //    moved a live row from below an already-issued cursor to above it and
+      //    that row was skipped by the entire drain. Measured: 20 messages,
+      //    re-emit one mid-pagination, 19 come back.
+      //
+      // Splitting the column keeps the customer-continuity wave's requirement
+      // intact rather than reverting it (NB-3, engine/next-steps.ts): its
+      // min-age expiry gate deliberately measures "time since the platform last
+      // OBSERVED the failure", so a condition that keeps recurring is never
+      // expired while it is still failing. That gate now reads THIS column, and
+      // it is refreshed here exactly as `created_at` used to be. The two facts
+      // were always different; they just shared one column.
       ctx.sql.exec(
-        `UPDATE tenant_messages SET severity = ?, body = ?, action_hint = ?, created_at = ?, expires_at = ? WHERE id = ? AND tenant_id = ?`,
+        `UPDATE tenant_messages SET severity = ?, body = ?, action_hint = ?, last_occurred_at = ?, expires_at = ? WHERE id = ? AND tenant_id = ?`,
         input.severity,
         input.body,
         actionHintJson,
@@ -148,8 +168,8 @@ export function emitTenantMessage(ctx: TenantContext, input: EmitTenantMessageIn
   }
 
   ctx.sql.exec(
-    `INSERT INTO tenant_messages (id, tenant_id, kind, severity, body, action_hint, source, dedup_key, created_at, read_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+    `INSERT INTO tenant_messages (id, tenant_id, kind, severity, body, action_hint, source, dedup_key, created_at, last_occurred_at, read_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
     newId("tmsg"),
     ctx.tenantId,
     input.kind,
@@ -158,6 +178,7 @@ export function emitTenantMessage(ctx: TenantContext, input: EmitTenantMessageIn
     actionHintJson,
     input.source ?? "system",
     input.dedupKey ?? null,
+    now,
     now,
     expiresAt,
   );

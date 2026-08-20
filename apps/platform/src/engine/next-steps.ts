@@ -207,7 +207,10 @@ interface MessageRow {
   id: string;
   kind: string;
   severity: string;
+  /** When the condition was FIRST observed — immutable, and what `sinceMs` means. */
   createdAt: number;
+  /** When it was LAST observed — bumped by every dedup re-emit (IN-3). */
+  lastOccurredAt: number;
 }
 
 /**
@@ -295,21 +298,35 @@ function readNextStepsSnapshot(ctx: TenantContext): NextStepsSnapshot {
   }
 
   const messages = ctx.sql
-    .exec<{ id: string; kind: string; severity: string; created_at: number }>(
+    .exec<{ id: string; kind: string; severity: string; created_at: number; last_occurred_at: number }>(
       // EXPIRY IS PART OF "UNREAD" EVERYWHERE ELSE — listSurfacedTenantMessages,
       // listMessagesPage and emitTenantMessage's dedup all carry this clause.
       // Without it here, `owedCount` counted a row no agent-facing surface
       // shows, so an operator expiring a resolved message (the gate's own
       // "cheap resolution") changed nothing about owed-ness, and the durable
       // expiry below would have been inert.
-      `SELECT id, kind, severity, created_at FROM tenant_messages
+      //
+      // BOTH TIMES, because they answer different questions (IN-3): `created_at`
+      // is when the condition was FIRST seen, which is what an agent's `sinceMs`
+      // means, and `last_occurred_at` is when it was LAST seen, which is what
+      // the min-age expiry gate below must measure. COALESCE'd because rows
+      // written before that column exists carry NULL, and for them `created_at`
+      // IS the last-observed time (it was being re-stamped).
+      `SELECT id, kind, severity, created_at, COALESCE(last_occurred_at, created_at) AS last_occurred_at
+         FROM tenant_messages
        WHERE tenant_id = ? AND read_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
        ORDER BY created_at DESC, rowid DESC`,
       ctx.tenantId,
       realNow,
     )
     .toArray()
-    .map((r) => ({ id: r.id, kind: r.kind, severity: r.severity, createdAt: r.created_at }))
+    .map((r) => ({
+      id: r.id,
+      kind: r.kind,
+      severity: r.severity,
+      createdAt: r.created_at,
+      lastOccurredAt: r.last_occurred_at,
+    }))
     // THE N2 EXCLUSION, at the one site where `owedCount` is sourced.
     .filter((m) => !SELF_WRITTEN_MESSAGE_KINDS.has(m.kind));
 
@@ -1335,24 +1352,27 @@ function messageSteps(
     : candidates.filter((m) => m.severity === "action_required" && RE_DERIVABLE_SETUP_MESSAGE_KINDS.has(m.kind));
   const resolvedIds = new Set(resolved.map((m) => m.id));
   const blocking = candidates.filter((m) => !resolvedIds.has(m.id));
-  // The durable half, gated on age. `clampedAge` (§7.19) rather than a raw
-  // subtraction: `created_at` is stamped from `ctx.clock`, so a VirtualClock
-  // tenant's row can be future-dated — which clamps to age 0 and simply defers
-  // the expiry, the safe direction for a destructive write.
+  // The durable half, gated on age.
   //
-  // NB-3 (build gate r3) — `created_at` IS RE-STAMPED BY THE EMITTER, and that
-  // is deliberate rather than an oversight this gate missed. `emitTenantMessage`'s
-  // dedup branch updates `created_at` on every re-emit, so a `retry_setup` for a
-  // condition that keeps recurring never ages past this grace and is never
-  // expirable. The direction is fail-safe (over-owed, and the re-emit only
-  // happens WHILE the failure recurs, which is exactly when the row should
-  // live), so it is left as is — but it does mean this gate measures "time
-  // since the platform last observed the failure", not "time since the row was
-  // first written", and the wave's own tests age rows by direct UPDATE, so
-  // nothing exercises the re-stamp path.
+  // NB-3 (build gate r3), NOW EXPLICIT IN THE SCHEMA (IN-3, docs/adversarial/
+  // class-sweep-dedup-semantics-2026-08-17.md). This gate must measure "time
+  // since the platform last OBSERVED the failure", not "time since the row was
+  // first written": a `retry_setup` for a condition that keeps recurring must
+  // never age past this grace and become expirable while it is still failing.
+  //
+  // That used to work by accident, because `emitTenantMessage`'s dedup branch
+  // re-stamped `created_at` on every re-emit — which silently cost the original
+  // occurrence time AND moved live rows across issued pagination cursors. The
+  // recurrence now has its own column, so this gate reads what it always meant
+  // (`lastOccurredAt`) and `created_at` is free to mean what it says.
+  //
+  // `clampedAge` (§7.19) rather than a raw subtraction: these times are stamped
+  // from `ctx.clock`, so a VirtualClock tenant's row can be future-dated — which
+  // clamps to age 0 and simply defers the expiry, the safe direction for a
+  // destructive write.
   const expirableIds = resolved
     .filter((m) => {
-      const age = clampedAge(m.createdAt, snap.realNow);
+      const age = clampedAge(m.lastOccurredAt, snap.realNow);
       return age !== null && age >= snap.orphanGraceMs;
     })
     .map((m) => m.id);

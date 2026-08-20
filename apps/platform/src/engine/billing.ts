@@ -15,6 +15,7 @@ import {
   NotFoundError,
   ValidationError,
   type CheckoutInput,
+  type Collapsed,
   type MailboxBilling,
   type NextSteps,
   type RemoveMailboxesInput,
@@ -1050,11 +1051,16 @@ export async function removeMailboxes(
   ctx: TenantContext,
   input: RemoveMailboxesInput,
   intentKey?: string,
-): Promise<RemoveMailboxesResult> {
+): Promise<Collapsed<RemoveMailboxesResult>> {
   assertNotLifecycleFrozen(ctx, "remove_mailboxes");
   // Resolved (and, when keyed, written down) BEFORE the first vendor call, so a
-  // crash mid-release cannot let the retry choose a different set.
-  const targets = intentKey ? recordRemoveIntent(ctx, intentKey, input.count) : resolveRemoveTargets(ctx, input.count);
+  // crash mid-release cannot let the retry choose a different set. The UNKEYED
+  // path has nothing durable to anchor to, so it resolves per call and can never
+  // be a replay — "release one more" is genuinely what a second unkeyed call says.
+  const intent = intentKey
+    ? recordRemoveIntent(ctx, intentKey, input.count)
+    : { members: resolveRemoveTargets(ctx, input.count), replayed: false };
+  const targets = intent.members;
   await releaseMailboxes(ctx, { ids: stillLiveTargets(ctx, targets).map((t) => t.mailboxId) });
   // Decrease: syncMailboxQuantity picks proration_behavior 'none' (desired < synced).
   await syncMailboxQuantity(ctx);
@@ -1068,5 +1074,15 @@ export async function removeMailboxes(
     unreleased: unreleased.map((t) => t.email),
     billing: buildMailboxBilling(ctx, provisionedMailboxCount(ctx)),
     nextSteps: deriveNextSteps(ctx),
+    // NB-R3-1 (docs/adversarial/wave-1-2-integration-gate-2026-08-18.md), and
+    // the first real consumer of `Collapsed<T>` (packages/shared/src/
+    // provenance.ts). Every count above describes the RECORDED downgrade, which
+    // is the right thing to describe — but on a replay it describes work an
+    // EARLIER call did, and without this flag that is byte-identical to having
+    // just done it again. The 30-day `request_idempotency` ageout makes that
+    // reachable without any crash: the claim expires, these intent rows do not,
+    // so a reused key re-runs, releases nothing, and reports a full success. An
+    // agent reading it believes it shrank the fleet while it keeps paying.
+    deduplicated: intent.replayed,
   };
 }

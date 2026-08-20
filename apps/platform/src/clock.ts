@@ -72,12 +72,22 @@ export function requireVirtualClock(clock: Clock): VirtualClock {
 }
 
 /**
- * VirtualClock — base + (elapsed x multiplier), per ARCHITECTURE.md #4.
- * "Elapsed" is a monotonic offset advanced explicitly via `advance()`
- * (called by the engine tick / by tests), NOT by sampling real wall-clock
- * deltas. That makes a 4-week warmup ramp deterministic and instant in
- * tests, and keeps a DO-alarm-driven tick (B2) free to advance the clock by
- * exactly the real interval between alarms x multiplier when that lands.
+ * VirtualClock — a base plus a monotonic offset that moves ONLY when something
+ * explicitly jumps it (`advanceVirtual`), never by sampling real wall time.
+ * That is what makes a 4-week warmup ramp deterministic and instant in a demo
+ * run or a test.
+ *
+ * NO RATE MULTIPLIER (C-M3, docs/adversarial/sweep-completeness-pass-2026-08-17.md
+ * §4(iii)). This class used to carry a `multiplier` and an `advance(realMs)`
+ * that scaled by it, and `tenant-do.ts` stored 1440 for demo/free tenants — but
+ * `advance()` had ZERO call sites anywhere in `apps/` or `packages/`, every real
+ * advance went through `advanceVirtual`, and `now()` never consulted the
+ * multiplier at all. A demo tenant's clock was FROZEN, not running at 1440x.
+ * Dead config that read as a live rate is worse than no config: TWO independent
+ * class sweeps built findings on the 1440x rate as if it were implemented (a
+ * "30-day TTL expires in 30 real minutes" exposure that does not exist), and a
+ * wave scoped to "remove the multiplier" would have fixed nothing. Deleted
+ * rather than applied, per CLAUDE.md rule (a) — git remembers.
  *
  * `offsetMs` is persisted by the caller (TenantDO SQLite) so the clock
  * survives DO eviction/hibernation.
@@ -86,26 +96,17 @@ export class VirtualClock implements Clock {
   constructor(
     private readonly baseMs: number,
     private offsetMs: number,
-    private readonly multiplier: number,
   ) {}
 
   now(): number {
     return this.baseMs + this.offsetMs;
   }
 
-  /** Advance by a real-world duration, scaled by the multiplier. Returns the new offset. */
-  advance(realMs: number): number {
-    if (realMs < 0) throw new RangeError("advance() requires a non-negative duration");
-    this.offsetMs += realMs * this.multiplier;
-    return this.offsetMs;
-  }
-
   /**
-   * Jump the virtual clock forward by an already-virtual duration (bypasses
-   * the multiplier). This is the test/sandbox-control primitive — it's what
-   * "advance virtual clock" in the walking-skeleton test calls, letting a
-   * 4-week warmup ramp resolve without any real wall-clock wait. A future
-   * DO-alarm-driven tick (B2) would instead call `advance(realIntervalMs)`.
+   * Jump the virtual clock forward by an already-virtual duration. This is the
+   * test/sandbox-control primitive — it's what "advance virtual clock" in the
+   * walking-skeleton test calls, letting a 4-week warmup ramp resolve without
+   * any real wall-clock wait.
    */
   advanceVirtual(virtualMs: number): number {
     if (virtualMs < 0) throw new RangeError("advanceVirtual() requires a non-negative duration");

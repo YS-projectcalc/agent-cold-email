@@ -55,8 +55,8 @@ export async function withTenantContext<T>(tenantId: string, fn: (ctx: TenantCon
   return runInDurableObject(tenantStub(tenantId), async (_instance, state) => {
     const sql = state.storage.sql;
     const profile = sql
-      .exec<{ plan: TenantPlan; clock_base: number; clock_offset: number; clock_multiplier: number; clock_mode: string }>(
-        `SELECT plan, clock_base, clock_offset, clock_multiplier, clock_mode FROM tenant_profile WHERE id = ?`,
+      .exec<{ plan: TenantPlan; clock_base: number; clock_offset: number; clock_mode: string }>(
+        `SELECT plan, clock_base, clock_offset, clock_mode FROM tenant_profile WHERE id = ?`,
         tenantId,
       )
       .one();
@@ -67,7 +67,7 @@ export async function withTenantContext<T>(tenantId: string, fn: (ctx: TenantCon
     const clock: Clock =
       profile.clock_mode === "real"
         ? new RealClock()
-        : new VirtualClock(profile.clock_base, profile.clock_offset, profile.clock_multiplier);
+        : new VirtualClock(profile.clock_base, profile.clock_offset);
     // Mirrors tenant-do.ts's buildAdapters(): the I1 activation gate is a
     // FRESH SQL read, never a cached decision (adversarial finding F3).
     const { activated } = readActivationState(sql, tenantId);

@@ -46,6 +46,24 @@ export interface RemoveIntentMember {
 }
 
 /**
+ * A key's target set, plus whether this call RESOLVED it or merely found the one
+ * an earlier call under the same key already recorded.
+ *
+ * The flag exists because those two cases are otherwise indistinguishable to the
+ * caller and produce identical-looking success (NB-R3-1, docs/adversarial/
+ * wave-1-2-integration-gate-2026-08-18.md): `request_idempotency` rows age out
+ * after 30 days and these intent rows never do, so a key reused past the ageout
+ * misses the response replay, re-runs, re-drives an intent whose members are all
+ * already released, and reports the ORIGINAL downgrade's counts as if it had
+ * just performed a second one.
+ */
+export interface RemoveIntent {
+  members: RemoveIntentMember[];
+  /** true = this call re-drove an intent an earlier same-key call recorded. */
+  replayed: boolean;
+}
+
+/**
  * The `count` newest live mailboxes, newest first — the selection a downgrade
  * means by "release N", and the ONLY place it is made.
  *
@@ -91,22 +109,30 @@ export function resolveRemoveTargets(ctx: TenantContext, count: number): RemoveI
  * durable in the same input-gate turn that resolves it: a crash mid-release
  * cannot leave the set un-recorded and let the retry pick a different one.
  */
-export function recordRemoveIntent(ctx: TenantContext, key: string, count: number): RemoveIntentMember[] {
+export function recordRemoveIntent(ctx: TenantContext, key: string, count: number): RemoveIntent {
   const recorded = readRemoveIntent(ctx, key);
-  if (recorded.length > 0) return recorded;
+  if (recorded.length > 0) return { members: recorded, replayed: true };
 
   const targets = resolveRemoveTargets(ctx, count);
-  if (targets.length === 0) return [];
+  if (targets.length === 0) return { members: [], replayed: false };
   const now = ctx.clock.now();
   // Chunked at RELEASE_INTENT_CHUNK_SIZE rows/statement (see the constant's
   // comment) rather than one statement for the whole set. That does NOT
   // reopen the half-written-intent risk the single-statement design was
   // guarding against: the guarantee was never "one SQL statement", it's the
   // Durable Object's INPUT GATE. This whole function is synchronous — no
-  // `await` between chunks, or anywhere in it — so it runs as ONE
-  // uninterruptible turn no matter how many INSERTs it issues; there is no
-  // point between chunks for a crash to land on, so every chunk lands or
-  // none do, exactly as before chunking.
+  // `await` between chunks, or anywhere in it — so a CRASH cannot land between
+  // two chunks: the turn never commits and nothing is written.
+  //
+  // What the input gate does NOT cover is a CAUGHT throw (R4-1, docs/adversarial/
+  // wave-1-2-integration-gate-2026-08-18.md, measured): DO SqlStorage writes
+  // survive an exception raised later in the same turn and caught, which is
+  // precisely what `withRequestIdempotency` does with any throw out of `fn`. So
+  // a chunk that landed before one that did not would leave a SHORT set — and
+  // `readRemoveIntent`'s early return would adopt it as the whole downgrade on
+  // the retry, completing short while reporting `failedCount: 0` and freezing as
+  // terminal. That is an under-release reported as success, on the one path here
+  // whose mistakes are irreversible.
   for (let i = 0; i < targets.length; i += RELEASE_INTENT_CHUNK_SIZE) {
     const chunk = targets.slice(i, i + RELEASE_INTENT_CHUNK_SIZE);
     ctx.sql.exec(
@@ -115,7 +141,21 @@ export function recordRemoveIntent(ctx: TenantContext, key: string, count: numbe
       ...chunk.flatMap((target) => [key, ctx.tenantId, target.mailboxId, target.email, now]),
     );
   }
-  return readRemoveIntent(ctx, key);
+
+  // READ BACK WHAT LANDED, and refuse to hand back a partial intent. The rows
+  // are deleted first so the key carries NOTHING rather than a short set: a
+  // retry must re-resolve from scratch, which is the whole point of recording
+  // the set. Loud beats short — the caller has not released anything yet at this
+  // point, so a throw here costs a retry, while a short set costs mailboxes.
+  const recordedNow = readRemoveIntent(ctx, key);
+  if (recordedNow.length !== targets.length) {
+    ctx.sql.exec(`DELETE FROM mailbox_release_intents WHERE key = ? AND tenant_id = ?`, key, ctx.tenantId);
+    throw new Error(
+      `release intent for key ${key} recorded ${recordedNow.length} of ${targets.length} targets; ` +
+        `the partial intent was discarded so a retry re-resolves the downgrade`,
+    );
+  }
+  return { members: recordedNow, replayed: false };
 }
 
 /** This key's recorded members, oldest-recorded first. Empty for a key that has never run. */

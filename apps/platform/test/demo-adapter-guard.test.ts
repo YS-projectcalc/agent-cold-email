@@ -11,7 +11,7 @@ import { SandboxEmailPort } from "../src/vendors/sandbox/email-port.js";
 // self-serve activation design §2.1 — simulating a future bug or a bypass
 // attempt) and asserts a demo/free tenant STILL gets the sandbox bundle.
 describe("vendor adapter factory — demo/free tenants cannot reach a real adapter", () => {
-  const clock = new VirtualClock(Date.now(), 0, 1);
+  const clock = new VirtualClock(Date.now(), 0);
 
   it("forces sandbox for a demo-plan tenant even when the activation gate is (hypothetically) true", () => {
     const bundle = createVendorAdapters("demo", clock, /* activated */ true);
