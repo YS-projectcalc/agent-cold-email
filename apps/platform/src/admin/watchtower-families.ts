@@ -126,7 +126,23 @@ export const ALERT_FAMILIES: Readonly<Record<string, AlertFamily>> = {
   // and the founder is never told the channel is rate-limited. That is this
   // repo's own recorded class (an alarm that depends on the thing it monitors),
   // and it is the same reason `cron_sweep` is exempt from the debounce.
-  [ALERT_BUDGET_EXCEEDED_CHECK]: { keys: ["saturated"], scope: "global", budget: "exempt" },
+  //
+  // TWO KEYS — DESIGN DELTA (orchestrator ruling on build-gate N2, option (a);
+  // §1.2's frozen row declared `saturated` alone). The two are genuinely
+  // different conditions and want different founder actions: `saturated` means
+  // the ceiling IS being applied and announcements are queued behind it;
+  // `unreadable` means the ceiling is NOT being applied at all, because the
+  // WatchtowerDO holding the counter is unreachable. The check that says "the
+  // alerting channel is not behaving normally" could not say the second thing,
+  // so during a DO outage it returned NOTHING and the founder got an unbounded
+  // storm with no explanation — the gate's stated concern.
+  //
+  // The cap invariant is untouched: 2 < MAX_ANNOUNCED_KEYS_PER_EPISODE (5),
+  // still strictly. And the escalation between them is exactly the escape this
+  // increment exists for — an episode that opened `saturated` and then loses the
+  // store escalates ONCE to `unreadable`, which is a materially worse condition
+  // under the same check name.
+  [ALERT_BUDGET_EXCEEDED_CHECK]: { keys: ["saturated", "unreadable"], scope: "global", budget: "exempt" },
 
   // --- Budget-exempt group 2: one-shot, money-bearing --------------------
   // Suppressing one of these is a silent billable loss (two of the three name

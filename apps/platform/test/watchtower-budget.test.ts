@@ -12,7 +12,7 @@ import {
   type AnnouncementCounts,
   type AnnouncementRing,
 } from "../src/admin/watchtower-budget.js";
-import { alertDeliveryKey } from "../src/admin/watchtower-families.js";
+import { alertDeliveryKey, isBudgetExemptCheck } from "../src/admin/watchtower-families.js";
 import type { CheckResult } from "../src/admin/watchtower-alerts.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
 
@@ -395,6 +395,42 @@ describe("N2 — the fail-open is BOUNDED: a burst cap when the budget cannot be
     expect(subjects).toContain("[coldrig] Durable Object storage: UNHEALTHY");
     expect(mailer.sent).toHaveLength(FAIL_OPEN_PER_TICK);
   }, 120_000);
+
+  // DESIGN DELTA (orchestrator ruling on N2, option (a)). The gate's third
+  // objection to the fail-open was that it is SILENT: `reportAlertBudgetHealth`
+  // returned `[]` on the same error, so `alert_budget_exceeded` was UNREPORTED
+  // at exactly the moment the ceiling was not being applied — the founder got
+  // the storm with no explanation. It now announces under its own key.
+  it("the founder is TOLD the ceiling is not being applied", async () => {
+    const dead = envWithDeadBudget();
+    const mailer = new SandboxOpsMailer();
+    // DEBOUNCED: one unreachable tick is a flap and costs nothing; two
+    // consecutive (10 min) is a real outage and announces.
+    const first = await reportAlertBudgetHealth(dead, mailer, T0);
+    expect(first[0]!.action).toBe("pending");
+    expect(mailer.sent).toEqual([]);
+
+    const second = await reportAlertBudgetHealth(dead, mailer, T0 + SWEEP);
+    expect(second[0]).toMatchObject({ action: "alerted", emailSent: true, why: "sent" });
+    expect(mailer.sent.map((m) => m.subject)).toEqual(["[coldrig] Founder alert budget: UNHEALTHY"]);
+    const body = mailer.sent[0]!.text;
+    expect(body).toContain("CANNOT BE READ");
+    expect(body).toContain("is NOT being applied");
+    // It must not read as reassurance: MORE mail is coming, not less.
+    expect(body).toContain("expect MORE mail than usual");
+  }, 60_000);
+
+  it("it DELIVERS because the family is exempt — it never asks the budget for a slot", async () => {
+    // The mechanism matters: an exempt family is filtered out by
+    // `isBudgetedAnnouncement` before `claimAnnouncementSlots` is reached, so
+    // this announcement cannot be denied one. Were it budgeted, it would be the
+    // one announcement asking for a slot at the moment there is nothing to give.
+    const dead = envWithDeadBudget();
+    const mailer = new SandboxOpsMailer();
+    for (let tick = 0; tick < 2; tick++) await reportAlertBudgetHealth(dead, mailer, T0 + tick * SWEEP);
+    expect(mailer.sent).toHaveLength(1);
+    expect(isBudgetExemptCheck("alert_budget_exceeded")).toBe(true);
+  }, 60_000);
 
   it("the withheld ones report WHY, and their episodes still advance", async () => {
     const dead = envWithDeadBudget();

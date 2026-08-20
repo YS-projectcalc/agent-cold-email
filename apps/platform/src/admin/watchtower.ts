@@ -1191,8 +1191,40 @@ export async function reportAlertBudgetHealth(env: Env, mailer: OpsMailer, nowMs
   try {
     budget = await watchtowerStub(env).readAnnouncementBudget(nowMs);
   } catch (err) {
-    console.error("watchtower: the announcement budget could not be read, so its own check is UNREPORTED this tick", err);
-    return [];
+    // THE CEILING IS NOT BEING APPLIED, and that is worth its own announcement
+    // (DESIGN DELTA — orchestrator ruling on build-gate N2, option (a)). This
+    // used to return `[]`, leaving the check UNREPORTED at exactly the moment
+    // the budget was not bounding anything: the founder got the storm with no
+    // explanation. The counter and the ring live in the same WatchtowerDO, so
+    // "cannot read the budget" and "cannot apply the budget" are one condition.
+    //
+    // IT REACHES THE FOUNDER BECAUSE THE FAMILY IS BUDGET-EXEMPT, not because
+    // of the fail-open allowance: `isBudgetedAnnouncement` filters exempt
+    // families out before `claimAnnouncementSlots` is called at all, so this
+    // announcement never asks for a slot and cannot be denied one. What the
+    // fail-open bound buys it is AUDIBILITY — capping the storm at the reserved
+    // slice per tick is what keeps this message from being buried under a
+    // hundred near-identical ones in the same inbox.
+    console.error("watchtower: the announcement budget could not be read — the daily ceiling is NOT being applied this tick", err);
+    return reconcileAlerts(
+      env,
+      mailer,
+      [
+        {
+          name: ALERT_BUDGET_EXCEEDED_CHECK,
+          healthy: false,
+          materiality: "unreadable",
+          detail:
+            `The founder alert budget CANNOT BE READ — the WatchtowerDO that holds the rolling 24h counter is ` +
+            `unreachable, so the <=${MAX_ANNOUNCEMENT_EMAILS_PER_DAY}/day announcement ceiling is NOT being applied. ` +
+            `Announcements are bounded only at ${MAX_ANNOUNCEMENT_EMAILS_PER_DAY - MAX_PER_ENTITY_ANNOUNCEMENTS_PER_DAY} ` +
+            `per 5-minute tick while this lasts, so expect MORE mail than usual, not less. This condition is correlated ` +
+            `with the storms the budget exists for — the same Durable Object holds the sweep's streak state and the D1 ` +
+            `check's own alert state — so treat a burst arriving alongside this as a platform incident, not as noise.`,
+        },
+      ],
+      nowMs,
+    );
   }
 
   const scope = `${budget.total} of ${MAX_ANNOUNCEMENT_EMAILS_PER_DAY} announcement(s) in the last 24h, ${budget.perEntity} of ${MAX_PER_ENTITY_ANNOUNCEMENTS_PER_DAY} per-entity`;

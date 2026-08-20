@@ -11,6 +11,8 @@ import {
   warmupGaveUpKey,
 } from "../src/admin/watchtower-families.js";
 import { reportSweepSignals } from "../src/admin/sweep-signals.js";
+import { reconcileAlerts, reportAlertBudgetHealth } from "../src/admin/watchtower.js";
+import { ALERT_BUDGET_EXCEEDED_CHECK, type CheckResult } from "../src/admin/watchtower-alerts.js";
 import { watchtowerStub } from "../src/admin/watchtower-infra.js";
 import { FAILURE_SIGNAL_FAILED_THRESHOLD, LEG_ALERT_AFTER_SWEEPS } from "../src/admin/watchtower-grading.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
@@ -133,7 +135,6 @@ const LITERAL_PRODUCERS: Record<string, string[]> = {
   engine: ["down"],
   cron_sweep: ["stale"],
   sweep_signals: ["threw"],
-  alert_budget_exceeded: ["saturated"],
   "cred_push_aging:": ["aging"],
   "send_starved:": ["starved"],
   "mailbox_orphan:": ["orphaned"],
@@ -184,6 +185,61 @@ async function bankedKeyFor(checkName: string, legs: Record<string, unknown>): P
   return keys[0] ?? null;
 }
 
+/**
+ * Assert BOTH directions for one family from the keys its producer actually
+ * banked. Both, always — asserting only reachability let a producer emitting an
+ * UNDECLARED key pass, which is the soundness half and the one that protects the
+ * table when a producer drifts.
+ */
+function assertKeySpace(family: string, produced: (string | null)[]): void {
+  const declared = new Set(ALERT_FAMILIES[family]!.keys);
+  expect(produced.filter((k) => k === null), `${family}: a scenario banked NO key at all`).toEqual([]);
+  expect(
+    [...new Set(produced)].filter((k) => k !== null && !declared.has(k)),
+    `${family}: the producer emitted key(s) its family does not declare — the table no longer describes what the ` +
+      `machine can do, and the cap invariant is computed from the table`,
+  ).toEqual([]);
+  expect(
+    ALERT_FAMILIES[family]!.keys.filter((k) => !produced.includes(k)),
+    `${family}: declares key(s) NO producer input can emit — its escalation is dead at those rungs. ` +
+      `Produced: [${produced.join(", ")}]`,
+  ).toEqual([]);
+}
+
+/** The first key banked for a check, straight out of the state machine's row. */
+async function bankedKey(checkName: string): Promise<string | null> {
+  const row = await env.DB.prepare(`SELECT announced_keys FROM watchtower_state WHERE check_name = ?`)
+    .bind(checkName)
+    .first<{ announced_keys: string }>();
+  if (!row) return null;
+  return (JSON.parse(row.announced_keys) as { keys: string[] }).keys[0] ?? null;
+}
+
+/** A PURE per-entity storm — the shape that saturates the sub-cap. */
+function wedgedTenants(count: number, tick: number): CheckResult[] {
+  return Array.from({ length: count }, (_v, i) => ({
+    name: `tenant_do_wedged:ten_${i}`,
+    healthy: false as const,
+    materiality: "rpc_unreachable",
+    detail: `Durable Object threw instead of answering opsSummary (tick ${tick})`,
+  }));
+}
+
+/** An env whose WatchtowerDO refuses the budget read. */
+function envWithDeadBudgetRead() {
+  return {
+    ...env,
+    WATCHTOWER: {
+      idFromName: (name: string) => env.WATCHTOWER.idFromName(name),
+      get: () => ({
+        readAnnouncementBudget: () => {
+          throw new Error("WatchtowerDO unreachable");
+        },
+      }),
+    },
+  } as unknown as typeof env;
+}
+
 /** A watchtower leg result carrying alerts that were owed and did not land. */
 function undelivered(whys: string[]): Record<string, unknown> {
   return { watchtower: whys.map((why, i) => ({ name: `check_${i}`, action: "alerted", emailSent: false, why })) };
@@ -200,11 +256,36 @@ describe("END-TO-END — the key the PRODUCER banks, for the families that cross
       await bankedKeyFor("alert_delivery", undelivered(["dark_channel", "send_failed"])),
     ];
     expect(produced).toEqual(["dark_channel", "send_failed", "both"]);
-
-    const declared = new Set(ALERT_FAMILIES["alert_delivery"]!.keys);
-    expect(ALERT_FAMILIES["alert_delivery"]!.keys.filter((k) => !produced.includes(k))).toEqual([]);
-    expect(produced.filter((k) => k === null || !declared.has(k))).toEqual([]);
+    assertKeySpace("alert_delivery", produced);
   }, 60_000);
+
+  // DESIGN DELTA (build-gate N2, option (a)): this family declares TWO keys, and
+  // the second exists precisely for the case where the store is unreachable — so
+  // a literal-table entry would be the weakest possible evidence for it. Both
+  // members are driven end-to-end here, each from the branch that produces it.
+  it("alert_budget_exceeded: both declared keys are reachable through the real producer", async () => {
+    const mailer = new SandboxOpsMailer();
+
+    // `saturated` — a real storm fills the ring, then the check observes it.
+    for (let tick = 0; tick < 6; tick++) {
+      await reconcileAlerts(env, mailer, wedgedTenants(100, tick), T0 + tick * SWEEP);
+      await reportAlertBudgetHealth(env, mailer, T0 + tick * SWEEP);
+    }
+    const saturatedKey = await bankedKey(ALERT_BUDGET_EXCEEDED_CHECK);
+
+    // `unreadable` — the WatchtowerDO refuses the read. DEBOUNCED, so two
+    // observations before it announces and banks its key.
+    await env.DB.prepare("DELETE FROM watchtower_state").run();
+    const dead = envWithDeadBudgetRead();
+    for (let tick = 0; tick < 3; tick++) {
+      await reportAlertBudgetHealth(dead, mailer, T0 + (10 + tick) * SWEEP);
+    }
+    const unreadableKey = await bankedKey(ALERT_BUDGET_EXCEEDED_CHECK);
+
+    const produced = [saturatedKey, unreadableKey];
+    expect(produced).toEqual(["saturated", "unreadable"]);
+    assertKeySpace(ALERT_BUDGET_EXCEEDED_CHECK, produced);
+  }, 120_000);
 
   it("cron_legs: all three declared keys are reachable through the real producer", async () => {
     const produced = [
@@ -217,7 +298,7 @@ describe("END-TO-END — the key the PRODUCER banks, for the families that cross
     // disjunction of exactly these two inputs, so a no-failure key would be a
     // mislabel rather than a missing member.
     expect(produced).toEqual(["counted", "threw", "both"]);
-    expect(ALERT_FAMILIES["cron_legs"]!.keys.filter((k) => !produced.includes(k))).toEqual([]);
+    assertKeySpace("cron_legs", produced);
   }, 60_000);
 });
 
@@ -261,6 +342,7 @@ describe("the guard covers EVERY family — it cannot go stale as families are a
       // Covered END-TO-END above, through the real producer.
       "alert_delivery",
       "cron_legs",
+      "alert_budget_exceeded",
       ...PROBES.map((p) => p.family),
       ...Object.keys(LITERAL_PRODUCERS),
     ]);
