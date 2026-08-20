@@ -15,6 +15,19 @@ non-blocking). §-numbering is preserved so the gate's per-§ rulings still map.
 | Line-reference policy (gate: the lane is moving) | Every reference below is anchored on a **function or exported constant name plus the behaviour asserted**, with the line number as a convenience only. A builder who finds the line moved should grep the name; if the *behaviour* moved, that is a finding, not a typo. |
 | Verified against v1's own claims | 19 baseline families (`EXPECTED_CONFIRM_OBSERVATIONS`) + 3 arriving in `scalemon` = **22**; `NEXT_STEP_REASONS` = 12 (`packages/shared/src/next-steps.ts`); `waitingOn` = `"operator" \| "customer_billing" \| null`; `0019_sweep_cursor.sql` exists untracked in the lane. |
 
+## What changed in v3 (gate round 2 — 2 blocking + 3 NB, all inside §5.5)
+
+Round 2 verified all six round-1 fixes closed by re-simulation and retracted its own N2. The two new
+blockers are defects in §5.5, the mechanism v2 added; everything below is scoped to it.
+
+| Gate item | Where | Shape of the answer |
+|---|---|---|
+| **NEW-1** `alert_budget_exceeded` is budgeted by the budget it announces (0 sent / 2015 withheld) | §5.5 exemptions | Added as a third exemption GROUP with its own reason — the repo's "an alarm must not depend on what it monitors" class, the same reason `cron_sweep` is debounce-exempt |
+| **NEW-2** `recovered` under the budget is undecided; both readings cost | §5.5 ruling | **Recoveries are EXEMPT, and the gate's cost estimate for that horn is refuted:** a recovery is owed only for an ANNOUNCED episode, and announcements are what the budget limits, so recoveries ≤ announcements (≤140, not 1,400). Yields **no budget decision can block an episode close** — the 4.0-day false-unhealthy window becomes zero ticks, with **no change to `withheldAlertState`'s recovery-arm semantics** (§5.4's extension for the three new fields still applies) |
+| NEW-3 tumbling window sold as rolling (40 emails in 0.20 h) | §5.5 counter | Mechanism fixed, not the name: a bounded ring of ≤20 send timestamps |
+| NEW-4 23rd family uncovered by §1.2/§3.3, and §4's reasoning inconsistent | §1.2, §3.3, §4 | Key space + policy row added; and a stated rule reconciles it — **new SUBJECT ⇒ family, same subject different rung ⇒ key** |
+| NEW-5 round-robin cannot cross the three entry points | §5.5 ordering | Scope stated honestly, and the gap CLOSED rather than documented: a **reserved 15/5 split** so a per-entity storm cannot starve the monitor's own checks |
+
 ## What changed in v2
 
 | Gate item | Where it is answered | Shape of the answer |
@@ -106,6 +119,7 @@ more.
 | `mailbox_slot_failed:` ✱ (arriving) | `buy_threw` \| `paid_no_infra` | as above | 2 |
 | `d1`, `engine`, `do_storage` | `down` | — | 1 |
 | `send_starved:`, `cred_push_aging:`, `mailbox_orphan:`, `domain_orphan:` | `starved` / `aging` / `orphaned` / `orphaned` | — | 1 |
+| `alert_budget_exceeded` (new, §5.5) | `saturated` | the rolling-window counter | 1 |
 | `cron_sweep` (dead-man) | `stale` | — | 1, **hard-exempt from the escape entirely** |
 
 **max(\|declared space\|) = 4.** Three v1 spaces were narrowed, each with a stated loss:
@@ -302,7 +316,7 @@ tenant mid-provisioning) — named as a non-goal in §8, not smuggled in here.
 
 | Policy | `confirmAfter` | `recoverAfter` | Members | Reason |
 |---|---|---|---|---|
-| `DEBOUNCED` (+ digest twin) | 2 | **3** | `d1`, `do_storage`, `engine`, `failure_signals`, `warmup_cancel_gave_up`, `vendor_wallet`, `warmup_duplicates`, `cred_push_aging:`, `send_starved:`, `tenant_do_wedged:`, `domain_dns_aging:`, `mailbox_orphan:`, `domain_orphan:`, `customer_progress_operator:`, `customer_progress_agent:`, **`sweep_signals`** | 3 clean 5-minute ticks = 15 min, matching the `LEG_RECOVER_AFTER_SWEEPS` hysteresis one layer down |
+| `DEBOUNCED` (+ digest twin) | 2 | **3** | `d1`, `do_storage`, `engine`, `failure_signals`, `warmup_cancel_gave_up`, `vendor_wallet`, `warmup_duplicates`, `cred_push_aging:`, `send_starved:`, `tenant_do_wedged:`, `domain_dns_aging:`, `mailbox_orphan:`, `domain_orphan:`, `customer_progress_operator:`, `customer_progress_agent:`, **`sweep_signals`**, **`alert_budget_exceeded`** | 3 clean 5-minute ticks = 15 min, matching the `LEG_RECOVER_AFTER_SWEEPS` hysteresis one layer down. `alert_budget_exceeded` is re-observed every tick from the counter, so the default applies — a single tick that touches the ceiling is a flap and should cost nothing; two consecutive (10 min) is a saturated channel |
 | `IMMEDIATE` | 1 | **1** | `cron_legs`, `mailbox_provisioning:`, `mailbox_rebuy:`, **`sweep_coverage`**, **`alert_delivery`**, **`mailbox_release_failed:`**, **`domain_ordinal_failed:`**, **`mailbox_slot_failed:`** | The confirm-side exemption reason transfers verbatim: a one-shot is never re-observed (a confirmation would DELETE the recovery, not delay it), and a `gradeSweepStreak`-damped check already requires 3 consecutive clean ticks upstream — a second confirmation double-damps it to 30 min |
 | `DEAD_MAN` | 1 | **1** | `cron_sweep` | Hard exemption. Timing byte-identical; `watchtower-deadman.test.ts` must pass unedited |
 
@@ -386,9 +400,23 @@ The rejections stand (gate: sound, and they survive the fix):
   the threshold, there is a sustained rate just below it.
 - **(b) Widen `Grade` — REJECTED as insufficient.** `Grade` is already three-valued. The missing
   information is **temporal**, not categorical, and the store it needs already exists.
-- **(c) A separate `failure_signals_sustained` family — REJECTED, narrowly.** It adds a 23rd family,
-  a second episode/cooldown pair and a permanent `watchtower_state` row to express a rung of the same
-  check. Under (c′) the sub-threshold → over-threshold escalation is exactly a materiality-key change.
+- **(c) A separate `failure_signals_sustained` family — REJECTED, narrowly.** It spends a whole
+  family, a second episode/cooldown pair and a permanent `watchtower_state` row to express **a rung
+  of an existing check**. Under (c′) the sub-threshold → over-threshold escalation is exactly a
+  materiality-key change, which is the mechanism this increment builds anyway.
+
+  **The rule that makes this consistent with §5.5 adding `alert_budget_exceeded` (NEW-4).** The gate
+  fairly noted that §4 rejects (c) partly for adding a family and §5.5 then adds one. The objection
+  was never "a family is expensive" in the abstract:
+
+  > **A new FAMILY is warranted when the SUBJECT is new. A materiality KEY is warranted when the
+  > subject is the same and only the rung differs.**
+
+  `failure_signals_sustained` has the same subject as `failure_signals` (terminal send failures) and
+  differs only in severity rung ⇒ key. `alert_budget_exceeded`'s subject is **the alerting channel
+  itself**, not any platform condition, and no existing check's key could carry it ⇒ family. The
+  same rule explains why the lane's `sweep_coverage` is correctly its own family rather than a
+  `cron_legs` key: capacity and failure are different subjects.
 
 **Named boundary (NOT fixed here).** `failure_signals` is a global roll-up; at 100+ tenants the summed
 count sits above threshold permanently, pinning the check unhealthy and blinding it — S4's disease at
@@ -463,42 +491,119 @@ A per-episode cap cannot bound a per-day inbox count across an unbounded instanc
 same reasoning §1.4 applies one level down, so it takes the same shape: **a mechanism that does the
 right thing, plus a bound that holds regardless.**
 
-- **`MAX_ALERT_EMAILS_PER_DAY = 20`**, a rolling 24 h counter (`{windowStartMs, count}`) in
-  WatchtowerDO storage — the right home: it is watchtower control state, strongly consistent, and
-  readable during a D1 outage (so the `d1` check's own alert is counted). One RPC per email actually
-  sent, i.e. ≤ 20/day, not per check.
-- **Exempt** (same table, same reasoning as the debounce exemptions): `cron_sweep` (the check of last
-  resort), and every one-shot money-bearing family — `mailbox_provisioning:`, `mailbox_rebuy:`, and
-  the three arriving `*_failed:` prefixes, whose own producer notes that two of the three "name money
-  that keeps being spent until a human intervenes". Suppressing one of those is a silent, billable
-  loss; suppressing a repeat reminder is not.
-- **The exemption's own residual, stated:** a correlated BATCH — 100 tenants' mailbox releases failing
-  in one tick — is unbounded by this design, because each item is deliberately its own check name and
-  its own money. The mitigation is one email per failed BATCH rather than per item, and it belongs at
-  the producer, which already holds the whole list (§7.8), not in the budget.
-- **Over budget ⇒ WITHHELD, never deleted.** It reuses the shipped `withheldAlertState` path: state
-  is not advanced, the email is re-attempted next tick, and the check remains visible in
-  `GET /admin/ops/checks`. `why: "suppressed_daily_budget"`.
-- **Ordering when the budget binds, two rules:** (i) round-robin across FAMILIES before instances, so
-  one noisy family cannot starve every other check — this is what keeps a simultaneous `d1` outage
-  audible during a 100-tenant `tenant_do_wedged:` storm; (ii) within a tick, `alerted` (a new
-  incident) outranks `escalated`, which outranks `realerted` (a repeat that says nothing new).
-- **The overflow is itself announced** through one check, `alert_budget_exceeded`, on the ordinary
-  DEBOUNCED policy — so a permanently-over-budget platform costs 1 confirm + 1/day, not 288/day.
+**The governing principle, stated first because both round-2 blockers were violations of it:**
 
-Resulting ceiling, and it is the number to gate on:
+> **The budget may delay an ANNOUNCEMENT. It may never delay an episode CLOSE, and it may never
+> suppress the report that it is itself suppressing.**
+
+#### The counter
+
+- **`MAX_ALERT_EMAILS_PER_DAY = 20`**, held in WatchtowerDO storage — the right home: watchtower
+  control state, strongly consistent, readable during a D1 outage (so the `d1` check's own alert is
+  counted). One RPC per email actually sent, not per check.
+- **A ring of send timestamps, not `{windowStartMs, count}` (NEW-3).** Two fields express a
+  *tumbling* window that resets on a boundary, which permits 20 sends at T+23.9 h and 20 more at
+  T+24.1 h — 40 emails in a 0.20 h span while every stated gate still passes. The counter is a
+  bounded ring of at most `MAX_ALERT_EMAILS_PER_DAY` timestamps; the count is "entries newer than
+  `nowMs - 24 h`". 20 numbers, exact for arbitrary spans, and it makes §9.8's number true as written
+  rather than true-per-window.
+
+#### Exemptions (three groups, each with its own reason)
+
+1. **`cron_sweep`** — the check of last resort; when it fires every other alert is already silent.
+2. **Every one-shot money-bearing family** — `mailbox_provisioning:`, `mailbox_rebuy:`, and the three
+   `*_failed:` prefixes, whose producer notes that two of the three "name money that keeps being
+   spent until a human intervenes". Suppressing one is a silent billable loss; suppressing a repeat
+   reminder is not.
+3. **`alert_budget_exceeded` itself (NEW-1)** — it goes unhealthy exactly when the budget is full, so
+   budgeting it makes it self-suppressing: simulated over a 7-day storm, **0 sent / 2015 withheld**,
+   and the founder is never told the channel is rate-limited. This is the repo's own recorded class
+   — an alarm that depends on the thing it monitors — arriving through new machinery, and it is the
+   same reason `cron_sweep` is exempt from the debounce. §5.5's entire argument for accepting
+   withheld alerts is that the overflow stays visible, so this exemption is load-bearing, not
+   cosmetic.
+
+**Group 2's residual, stated:** a correlated BATCH — 100 tenants' mailbox releases failing in one
+tick — is unbounded, because each item is deliberately its own check name and its own money. The
+mitigation is one email per failed BATCH rather than per item, and it belongs at the producer, which
+already holds the whole list (§7.8), not in the budget.
+
+#### The ruling on `recovered` (NEW-2)
+
+**Recovery emails are EXEMPT from the budget, and the exemption is self-bounding.** The gate framed
+this as a choice between two costed readings; the second horn is not as expensive as it looks, and
+that is what decides it.
+
+- **Why not "budgeted":** `withheldAlertState`'s recovery arm returns the *whole* previous state, so
+  a budget-withheld recovery reverts `healthyObs` and the episode never closes. Simulated: 100
+  simultaneous recoveries at budget 20 drain over **4.0 days**, with up to 100 checks reading
+  `status='unhealthy'` while actually healthy — on the exact surface the 2-hourly watch cron polls
+  as `?unhealthy=1` against a two-row baseline. That converts a volume problem into a false-alarm
+  problem on the operator's own detector, and it violates the principle above.
+- **Why "exempt" is bounded, contra the gate's estimate of 1,400.** A recovery email is owed only
+  when `alertCount > 0` — i.e. only for an episode that was actually ANNOUNCED. Under a saturated
+  budget most episodes are never announced: a budget-withheld confirming alert leaves `alertCount`
+  at 0, which the gate verified independently. So **recoveries over any window are bounded by
+  announcements over that window**, and announcements are exactly what the budget limits. In the
+  gate's own 7-day 100-instance storm, 140 alerts were sent, so **at most 140 episodes can ever owe
+  a recovery** — not 1,400. In steady state the two rates are equal, so a platform announcing
+  ≤20/day recovers ≤20/day.
+- **What this buys:** with recoveries exempt, **no budget decision can block an episode close.**
+  Episodes close on `recovered` (exempt) and on `healthy` (no email is owed at all), and neither
+  `holding` nor `suppressed` closes anything. The 4.0-day false-unhealthy window becomes **zero
+  ticks**, and `withheldAlertState`'s recovery arm keeps the semantics it shipped with — which stay
+  exactly right for the case they were written for, a transient send failure retried within a tick
+  or two. (§5.4's extension of that function to revert the three NEW fields is unaffected; what is
+  untouched is its recovery-arm rule.)
+- **Worst case, stated honestly:** the day a large storm clears, the founder receives one email per
+  previously-announced episode — ≤140 in the gate's scenario, all of it good news, once. The
+  same-tick recovery collapse ("N checks recovered", one message) is the mitigation and is a
+  follow-up (§8), not a requirement: it changes email shape, not the bound.
+
+#### Ordering when the budget binds — and where it actually applies (NEW-5)
+
+- **(i) Round-robin across FAMILIES before instances**, so one noisy family cannot starve every other
+  check. **Honest scope:** this orders within ONE `reconcileAlerts` call, and there are three entry
+  points in fixed order — `runWatchtower`, then `reportSweepSignals`, then
+  `reportSweepSignalsHealth`. So a `tenant_do_wedged:` storm in the first batch can exhaust the
+  budget before the sweep's own checks are offered a slot. Rule (i)'s *named* goal does survive:
+  `d1` is decided in `reconcileD1Alert` at the top of `runWatchtower`, before the tenant loop, so a
+  simultaneous D1 outage stays audible.
+- **(ii) Within a tick:** `alerted` (a new incident) outranks `escalated`, which outranks `realerted`
+  (a repeat that says nothing new). `recovered` does not appear because it is exempt.
+- **(iii) A RESERVED SLICE for the monitor's own checks.** Documenting NEW-5's gap is not enough,
+  because it is the same cluster NEW-1 silences: per-entity families may consume at most
+  **`MAX_PER_ENTITY_ALERTS_PER_DAY = 15`** of the 20, leaving **5 reserved** for the global platform
+  and monitor families (`cron_legs`, `sweep_coverage`, `sweep_signals`, `alert_delivery`, `d1`,
+  `engine`, `do_storage`, `failure_signals`, `vendor_wallet`, `warmup_*`). Two counters in one DO
+  record, and it makes the cross-batch ordering gap harmless without needing ordering to cross
+  batches at all.
+
+#### The resulting property
+
+> **In any rolling 24 h window: ≤ 20 announcements TOTAL, of which at most 15 may be per-entity —
+> so at least 5 slots are always available to the global and monitor families — plus the exempt
+> families (dead-man, money-bearing one-shots, `alert_budget_exceeded`'s own ladder), plus a
+> recovery tail bounded by the announcements that preceded it.**
+
+(Stated as "≤20 total with a 15 per-entity sub-cap", not "15 + 5": when no per-entity family is
+alerting, the global families may use the whole 20. The reservation is a floor for them, not a
+ceiling.)
 
 | Condition | Uncapped | With §5.5 |
 |---|---|---|
-| Today (1 tenant, 2 stuck domains) | 2/day | **2/day** — the budget never binds |
-| 100 tenants, correlated 50%-duty DO flap | ~100/day | **≤ 22/day** (20 + budget-check confirm + its ladder) |
-| Pathological (all 1,400 per-entity instances flapping) | ~1,400/day | **≤ 22/day** + exempt families |
+| Today (1 tenant, 2 stuck domains) | 2/day | **2/day** — no counter binds |
+| 100 tenants, correlated 50%-duty DO flap | ~114/day (gate-simulated) | **≤ 20/day announcements** + ≤2 budget-check + recovery tail |
+| Pathological (all 1,400 per-entity instances flapping) | ~1,866/day (gate-simulated) | **≤ 20/day announcements**, of which ≤15 per-entity |
+| The day a 7-day storm clears | — | **≤ 140 recoveries, once** (≤ announcements made) |
+| Rolling-window boundary probe (NEW-3) | 40 in 0.20 h | **≤ 20 in any 24 h span** |
 
-**Residual, stated: this is a real trade, and the number is founder policy.** A daily ceiling means
-some alerts are withheld for hours, and under a saturated day a new non-exempt incident is announced
-only when it wins the priority ordering. The dead-man and the money-bearing one-shots always get
-through. **`MAX_ALERT_EMAILS_PER_DAY = 20` is marked [RATIFY:founder]** — it changes what the founder
-can expect from the channel, and per project law a cadence change goes through the policy table.
+**Residual, and the number is founder policy.** A daily ceiling means some announcements are delayed
+for hours, and under a saturated day a new non-exempt incident is announced only when it wins the
+ordering. The dead-man, the money-bearing one-shots and the budget-exceeded report always get
+through, and no incident is ever left un-closed. **`MAX_ALERT_EMAILS_PER_DAY = 20` (and its 15/5
+split) is [RATIFY:founder]** — it changes what the founder can expect from the channel, and per
+project law a cadence change goes through the policy table, not a hot patch.
 
 *Rejected alternative:* per-family roll-up of `tenant_do_wedged:` into a global count-banded check.
 It fixes the one exemplar and leaves every other per-entity family unbounded — the same "the bound
@@ -544,9 +649,20 @@ Items 1-11 are v1's, unchanged unless noted. 12-16 are the gate's test floor.
 14. **B6's four-step continuity scenario (constraint 6)** — driven through `reconcileAlerts` with the
     real cross-clear, asserting `maybeEmitContinuityNudge` is reached with a NEW onset and the second
     episode gets its nudge. RED on the `healthyObs`-blind adoption predicate.
-15. **A 100-instance `tenant_do_wedged:` flap timeline (constraint 5)** — assert the stated per-day
-    inbox ceiling (≤22/day) with §5.5 armed, and assert the uncapped number (~100/day) without it, so
-    the budget is proven load-bearing rather than decorative.
+15. **A 100-instance `tenant_do_wedged:` flap timeline (constraint 5), FIVE arms** — the budget is
+    only proven if each of its parts is proven separately:
+    - **15a volume** — ≤20 announcements in any rolling 24 h with §5.5 armed; ~114/day without it
+      (the gate's measured number), so the budget is load-bearing rather than decorative.
+    - **15b `alert_budget_exceeded` is DELIVERED during a saturated day** (NEW-1). RED on the v2
+      exempt list, where it sent 0 and withheld 2015.
+    - **15c recovery storm** (NEW-2) — 100 simultaneous recoveries: assert every episode CLOSES in
+      the tick it recovers (zero checks reading `status='unhealthy'` while healthy — v2's budgeted
+      reading gives up to 100 for 4.0 days), and assert recovery emails ≤ announcements made.
+    - **15d rolling-window boundary** (NEW-3) — 20 sends at T+23.9 h, more attempted at T+24.1 h:
+      assert ≤20 in the 0.20 h span. RED on `{windowStartMs, count}`, which permits 40.
+    - **15e reserved slice** (NEW-5) — a 100-instance per-entity storm must not prevent `cron_legs` /
+      `sweep_coverage` / `alert_delivery` from sending: assert ≥1 monitor-family email lands on a
+      saturated day.
 16. **`send_starved:` alternation (constraint 4)** — assert the ruled behaviour: 0 emails, episode
     closed each drain. It pins the accepted inertness so a later "fix" is a deliberate decision.
 17. **`watchtower-deadman.test.ts` and the continuity cross-clear tests pass UNEDITED.**
@@ -616,7 +732,9 @@ has not committed, so this is a moving target — re-verify at merge).
   The mechanism, its class-mates and the prerequisite land here; the site does not.
 - **A same-tick roll-up EMAIL for correlated onsets in the watchtower SCAN** (one message naming N
   affected tenants instead of 20 near-identical ones) — better content, separable from the volume
-  bound, top follow-up. The equivalent for the one-shot `*_failed:` families is *not* a follow-up but
+  bound, top follow-up. **Its twin: the same-tick RECOVERY collapse** ("N checks recovered", one
+  message), which is what would turn §5.5's ≤140-once recovery tail into ≤1. Both change email
+  shape, not the bound, which is why neither is required here. The equivalent for the one-shot `*_failed:` families is *not* a follow-up but
   an open ask to the lane that owns their producer (§7.8), because there the failure list already
   exists in one place.
 - **`failure_signals` per-tenant re-keying** — one correlated outage would become 100 emails, worse
@@ -646,13 +764,18 @@ has not committed, so this is a moving target — re-verify at merge).
    expectations pass **unedited**.
 6. Test 12 (§4 polarity) reds on the v1 form and greens on `holdGrade === false`.
 7. Test 14 (B6) reds on the `healthyObs`-blind adoption predicate.
-8. Test 15 shows ≤22 emails/inbox/day at 100 flapping instances with §5.5 armed, and ~100/day without
-   it.
+8. **§5.5's property holds in all five of test 15's arms** (v2 gated a single number and three of the
+   five arms would have passed while the mechanism was broken): ≤20 announcements in any **rolling**
+   24 h span — not per tumbling window — at 100 flapping instances with §5.5 armed vs ~114/day
+   without; `alert_budget_exceeded` delivered on a saturated day; every episode closing in the tick
+   it recovers; ≥1 monitor-family email landing during a per-entity storm.
 9. A pre-migration D1 row and a pre-field DO value each produce ZERO deploy-day emails, with a
    control arm.
 10. `watchtower-deadman.test.ts` and the continuity cross-clear tests pass **unedited**.
 11. The property fuzz reports zero violations of §6.10's three invariants.
 12. Full battery + typecheck quoted with real (non-piped) exit codes on the MERGED tree, after the
     scale-monitoring lane lands.
-13. **[RATIFY:founder]** `MAX_ALERT_EMAILS_PER_DAY = 20` — a daily inbox ceiling that withholds
-    (never deletes) non-exempt alerts.
+13. **[RATIFY:founder]** `MAX_ALERT_EMAILS_PER_DAY = 20`, split 15 per-entity / 5 reserved for the
+    global and monitor families — a daily ceiling that DELAYS (never deletes) non-exempt
+    announcements, never delays an episode close, and never suppresses the report that it is
+    suppressing. Put the number to the founder only after NEW-1 and NEW-2 are built, not before.

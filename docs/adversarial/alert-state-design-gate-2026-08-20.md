@@ -571,3 +571,206 @@ nothing from round 1 needs restating. Add:
 6. `MAX_ALERT_EMAILS_PER_DAY = 20` stays **[RATIFY:founder]** — correctly flagged by the design; it
    changes what the founder can expect from the channel, and NEW-1/NEW-2 should be fixed before the
    number is put to them.
+
+---
+---
+
+# ROUND 3 — gate on design v3
+
+## VERDICT: **SHIP-AFTER-FIX** — NEW-2/3/4/5 CLOSED; **NEW-1 is NOT closed**, by a new route the same revision opened
+
+One BLOCKING finding, and it is one clause of specification. Everything else in v3 verifies.
+
+Round 2's finding NEW-1 was that the check announcing the budget's suppression was itself budgeted,
+so it could never send. v3 fixes exactly that — `alert_budget_exceeded` is now exemption group 3, with
+the right reason. But the **same revision** added NEW-5's per-entity sub-cap, and the sub-cap binds
+before the total counter in §5.5's own headline scenario, so the observation the exemption protects
+never fires. Same property, same silent direction, new cause. This is the regression-ring pattern the
+project has hit before: **the last fix is the prime suspect, and here one fix reopened the adjacent
+fix's case.**
+
+### Grounding
+
+| Item | Value |
+|---|---|
+| Ref | main `7aca76eb39e353b0b46641aa2aefd3b6aa23d9f8`. v2 **is** committed there, so v3 was reviewed as a true diff: **213 lines changed, 168 insertions / 45 deletions**, across §Grounding, §1.2, §3.3, §4, §5.5, §6.15, §8 and §9. |
+| Target | v3, uncommitted working tree, **781 lines / 58 KB**. Complete — clean §9 item 13, no truncation. |
+| Source drift | none since round 1 (`git diff f222afc..HEAD -- apps/ packages/` empty), so the round-1/2 baselines and cites still resolve. |
+| Method | The round-2 model extended with v3's §5.5: ring-buffer rolling window, three exemption groups, exempt recoveries, the 15/5 reserved split, `alerted > escalated > realerted`. Seven scenarios plus a three-way reading probe. |
+
+---
+
+## BLOCKING · NEW-1 is not closed — the per-entity sub-cap keeps the total counter below saturation, so the overflow report never fires
+
+§1.2 gives `alert_budget_exceeded` the single key `saturated`, derived from **"the rolling-window
+counter"** — singular. §5.5's counter section defines exactly one ring ("a bounded ring of at most
+`MAX_ALERT_EMAILS_PER_DAY` timestamps; the count is entries newer than `nowMs - 24 h`"). NEW-5 then
+adds a second, tighter constraint — `MAX_PER_ENTITY_ALERTS_PER_DAY = 15` — described as "two counters
+in one DO record", but **no section updates what `saturated` observes.**
+
+In §5.5's own flagship row — *100 tenants, correlated 50%-duty DO flap* — every contending family is
+per-entity, so the 15 sub-cap binds and the total counter **peaks at 15 of 20 and never saturates.**
+
+Simulated, 7 days, three readings of `saturated`:
+
+| `saturated` reads | announcements sent | `alert_budget_exceeded` SENT | peak total-in-24h |
+|---|---|---|---|
+| `total >= MAX` (the text's natural reading) | 105 | **0** | 15/20 |
+| either counter at its cap | 105 | 8 | 15/20 |
+| anything was withheld this tick | 105 | 336 | 15/20 |
+
+**The brief's acceptance criterion for NEW-1 — "the founder actually learns of rate-limiting during
+the 7-day/100-instance storm, state the sent count" — returns 0.** With a 15/day per-entity ceiling
+against 100 broken instances, only 15 are announced on day one; the other 85 are silent, and nothing
+tells the founder that suppression is happening at all.
+
+Sharper still, and this is why it is blocking rather than a note: **§9.8's arm 15b cannot catch it.**
+Arm 15b asserts "`alert_budget_exceeded` delivered on a saturated day" — and under the total-counter
+reading a pure per-entity storm has no saturated day, so the arm either passes vacuously or its author
+builds a mixed-family fixture in which the defect does not exist. v3 itself quotes round 2's warning
+that "three of the five arms would have passed while the mechanism was broken" and split test 15 in
+response; arm 15b now has that same shape.
+
+**Fix is one clause:** `saturated` must read *either* counter at its cap (the middle row above — 8
+emails, i.e. 1 confirm plus the daily ladder, which is what §5.5 claims). Arm 15b must then be pinned
+to a **pure per-entity** storm, where it reds today.
+
+---
+
+## NEW-2 · CLOSED, and the design refuted my cost estimate — correctly
+
+I framed this as a choice between two costed readings. v3 rules **recoveries EXEMPT** and refutes the
+price I put on that horn. It is right and I was wrong.
+
+A recovery is owed only when `alertCount > 0`, i.e. only for an episode that was actually announced —
+and a budget-withheld confirming alert leaves `alertCount` at 0, which I verified independently in
+round 2 and then failed to carry into my own estimate. So recoveries are bounded by the announcements
+that preceded them, and announcements are exactly what the budget limits. My "~1,400 unbounded" was
+wrong by an order of magnitude; the real bound is the announcement budget.
+
+Both directions simulated:
+
+| Direction | v2 (recoveries budgeted) | v3 (recoveries exempt) |
+|---|---|---|
+| **Drain** — 100 instances broken 2 days, then all recover | 4,320 blocked-close decisions, **peak 15 checks reading `status='unhealthy'` while healthy**, persisting for days | **0 blocked closes, 0 unhealthy-while-healthy, zero-tick window** |
+| **Recovery storm** — the exempt tail | — | 30 recoveries against 30 preceding announcements ⇒ `recoveries <= announcements` **HELD** |
+
+§5.5's governing principle ("the budget may delay an announcement; it may never delay an episode
+close") is achieved by construction: episodes close only on `recovered` (exempt) or `healthy` (owes no
+email), and neither `holding` nor `suppressed` closes anything. `withheldAlertState`'s recovery arm
+keeps the semantics it shipped with, which stay correct for the transient-send-failure case it was
+written for.
+
+## NEW-3 · CLOSED — the ring is a real rolling window
+
+Boundary probe, 30 sends attempted at T+23.9 h and 30 more at T+24.1 h:
+
+| Counter | delivered | span | max in any rolling 24 h |
+|---|---|---|---|
+| `{windowStartMs, count}` (v2) | 40 | 0.20 h | **40** |
+| ring of ≤20 timestamps (v3) | 20 | 0.00 h | **20** |
+
+§9.8's "≤20 in any **rolling** 24 h span — not per tumbling window" is now true as written.
+
+## NEW-4 · CLOSED, with a rule rather than a patch
+
+`alert_budget_exceeded` gains a §1.2 key space (`saturated`, size 1) and a §3.3 policy row
+(DEBOUNCED, with a stated reason: it is re-observed every tick, so one tick touching the ceiling is a
+flap and two consecutive is a saturated channel). The §4 inconsistency is reconciled by a stated rule
+rather than an exception:
+
+> **A new FAMILY is warranted when the SUBJECT is new. A materiality KEY is warranted when the subject
+> is the same and only the rung differs.**
+
+It discriminates correctly on all three cases the doc needs it to: `failure_signals_sustained` is the
+same subject at a different rung (key); `alert_budget_exceeded`'s subject is the alerting channel
+itself (family); the lane's `sweep_coverage` is capacity rather than failure (family). Accepted.
+
+## NEW-5 · CLOSED as specified — and it is what reopened NEW-1
+
+The 15/5 reserved split is stated correctly as "≤20 total with a 15 per-entity sub-cap", a floor for
+the global families rather than a ceiling, so a quiet day still lets globals use all 20. Simulated: a
+100-instance per-entity storm plus three unhealthy monitor families over 7 days → **23 monitor-family
+emails delivered**, never starved. Arm 15e is the right test.
+
+The cost is the blocking finding above: a mechanism that keeps the total counter below its own
+saturation threshold, while the observation that reports suppression is keyed to that threshold.
+
+## §9 gates against the final table
+
+25 families, **max(|declared space|) = 4** (the new row is size 1), cap 5, so `cap > max` holds. Every
+other §9 item maps to a simulated arm. §9.8's five arms are the right decomposition; only 15b needs
+its fixture changed per the blocking finding.
+
+---
+
+## Round-3 attacks that FAILED
+
+- **Can a same-batch GLOBAL storm starve the monitor families, since the reservation is by
+  entity-ness and not by batch?** I expected this to land: `d1` is decided in a batch of its own and
+  five more global families (`engine`, `do_storage`, `failure_signals`, `vendor_wallet`,
+  `warmup_duplicates`) alert inside `runWatchtower`, ahead of the two batches carrying `cron_legs`,
+  `sweep_coverage`, `alert_delivery` and `sweep_signals`. Simulated with all five global families
+  broken *and* a 100-instance per-entity storm: **14 monitor-family emails still landed over 7 days**
+  — roughly the steady daily ladder for each. The globals settle onto 24 h rungs rather than
+  monopolising the reserve, so the monitor families are not starved. Held.
+- **Does exempting recoveries reopen a storm through episode churn?** Churn requires an announcement
+  first, and announcements are capped, so a churning fleet converges to equal announcement and
+  recovery rates rather than diverging. Held (see the non-blocking note below for the volume it
+  implies).
+- **Does anything other than a recovery close an episode, such that the budget could still block a
+  close?** Walked all four closing paths: `recovered` (exempt), `healthy` (owes no email),
+  `no_longer_applicable` (routes to one of those two). `holding` and `suppressed` close nothing. No
+  path exists. Held.
+- **Is the recoveries-≤-announcements bound actually `alerted`-only rather than all announcements?**
+  Yes, strictly — a `realerted` on an already-announced episode does not create a new recovery
+  obligation — so the design's bound is conservative in the safe direction. Held.
+- **Does the new §1.2 row break B3's calibration?** `saturated` is size 1; max stays 4 against cap 5.
+  Held.
+
+## NON-BLOCKING
+
+**`MAX_ALERT_EMAILS_PER_DAY` bounds announcements, not emails, and the founder is being asked to
+ratify the name.** With recoveries exempt, a churning fleet in steady state delivers announcements
+*and* an equal number of recoveries. Simulated, 100 instances with episodes closing every 25 min over
+7 days: **15.0 announcements/day + 15.0 recoveries/day = 30.0 emails/day**, against a constant named
+`MAX_ALERT_EMAILS_PER_DAY = 20`. §5.5 discloses this in prose ("plus a recovery tail bounded by the
+announcements that preceded it") and the resulting-property statement is accurate — but §9.13 puts the
+number to the founder as a "daily ceiling", and the quantity they will actually count in their inbox
+is up to ~2× it plus the exempt families. Either rename the constant to say announcements, or state
+the inbox figure beside it in the ratification ask.
+
+**Minor, same area:** §5.5 does not say whether exempt sends consume ring slots. If they do not (the
+natural reading of an exemption), the total counter under-reads reality, which compounds the blocking
+finding; if they do, the exemptions are weaker than stated. One sentence either way.
+
+## UNVERIFIABLE (carried, unchanged)
+
+The live 2-Mordy-domains baseline; `tenant_do_wedged:`'s real production duty cycle; and §7, which is
+stated against `scalemon` at `67f3535` — a real commit, but not merged, and the lane has moved twice
+during this review already.
+
+---
+
+## What the BUILD BRIEF must carry
+
+Everything from rounds 1 and 2 has landed in the design and needs no restating: the 10 round-1
+constraints are in §6 items 12–17 and §9 items 3–10, and round 2's five §5.5 items are in §5.5's
+counter, exemption, ruling and ordering subsections. The delta is small:
+
+1. **`saturated` must read EITHER counter at its cap** (total ≥ 20 **or** per-entity ≥ 15), stated in
+   §1.2's derivation column and in §5.5's counter section. This is the blocking fix.
+2. **Arm 15b must be pinned to a PURE per-entity storm** — 100 `tenant_do_wedged:` instances, no
+   global families — and assert `alert_budget_exceeded` is delivered. It reds on v3 as written
+   (0 sent) and greens on the fix (8 sent: one confirm plus the daily ladder). A mixed-family fixture
+   here would certify the defect, which is the failure mode v3 split test 15 to avoid.
+3. **State whether exempt sends consume ring slots**, one sentence.
+4. **Frame the [RATIFY:founder] ask in inbox terms** — announcements ≤20/day, plus a recovery tail of
+   the same order, plus the exempt families — so the number ratified is the number the founder counts.
+5. Unchanged from round 2 and still correct: put the number to the founder only after NEW-1 and NEW-2
+   are **built**, not before.
+
+**Test floor, final:** §6 items 1–17 as written, with 15b's fixture corrected per item 2 above. Items
+12 (§4 polarity), 13 (cap-then-ladder over 30 days), 14 (B6 four-step continuity), 15a–e (the budget's
+five arms) and 16 (`send_starved:` inertness) are the ones that must red before they green; item 17
+(dead-man + continuity cross-clear, unedited) is the regression floor.
