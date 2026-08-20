@@ -47,6 +47,43 @@ export interface RequestIdempotencyOptions<T> {
 }
 
 /**
+ * THE REPLAY IS ITSELF A COLLAPSE, and this is the one place that can say so
+ * (docs/adversarial/wave-a-trains-3-4-gate-2026-08-20.md, the RULING).
+ *
+ * `Collapsed<T>`'s flag is defined on the RESPONSE — packages/shared/src/
+ * provenance.ts: "Was this response produced fresh, or is it an earlier one
+ * handed back?" — and names the failure it exists to prevent: a collapse
+ * returned byte-identically to a real admission, so an agent in a loop cannot
+ * tell that its second request was absorbed. A replay is exactly that. The
+ * call sites compute the flag from their OWN collapse layer (an already-recorded
+ * intent, an already-sent content hash) and structurally cannot see this one:
+ * when the replay fires, their `fn` never runs at all.
+ *
+ * WHY THE PRESENCE CHECK RATHER THAN AN UNCONDITIONAL STAMP. `T` is generic
+ * here, so the type is not available to branch on — but the RECORDED PAYLOAD is,
+ * and it answers the same question exactly. The row holds the serialization of
+ * whatever `fn` returned, so a boolean `deduplicated` is present in it precisely
+ * when that call site's return type is `Collapsed<T>`: today `reply`
+ * (engine/threads.ts) and `remove_mailboxes` (engine/billing.ts). Stamping
+ * unconditionally would mint the field on `launch_campaign`,
+ * `setup_infrastructure` and `provision:` responses, whose DTOs, tool
+ * descriptions and openapi schemas never declared it — inventing wire shape at a
+ * money-path wrapper, which is the opposite of a disclosure.
+ *
+ * The third `Collapsed<T>` consumer, `contact_operator`, does not route through
+ * this wrapper (its collapse is message-level dedup, not request-level), so it is
+ * unaffected — its own flag already covers the only layer it has.
+ *
+ * `true` is the only value ever written: this runs only on the replay branch, so
+ * the response IS a handed-back earlier one. A recorded `true` stays `true`.
+ */
+function discloseCollapse<T>(recorded: T): T {
+  if (typeof recorded !== "object" || recorded === null) return recorded;
+  if (typeof (recorded as { deduplicated?: unknown }).deduplicated !== "boolean") return recorded;
+  return { ...recorded, deduplicated: true };
+}
+
+/**
  * Request-level idempotency (B2, CLASS B). When a client presents an
  * idempotency `key` for a mutating intent, the FIRST call runs `fn` and records
  * its serialized result; a REPLAY with the same key returns that stored result
@@ -128,7 +165,7 @@ export async function withRequestIdempotency<T>(
       // Under the Settled contract a 'done' row is terminal by construction, so
       // this replays. The predicate is asked only about rows written BEFORE
       // that contract existed — see RequestIdempotencyOptions.
-      if (!(opts?.recordedIsNonTerminal?.(recorded) ?? false)) return recorded;
+      if (!(opts?.recordedIsNonTerminal?.(recorded) ?? false)) return discloseCollapse(recorded);
       // A pre-contract row recording work that was never finished. Re-claim IN
       // PLACE, synchronously, before any await below — the same "one input-gate
       // turn" guarantee the fresh-claim INSERT and the stale-claim reclaim rely
