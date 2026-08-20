@@ -110,6 +110,12 @@ export interface ThreadDetail {
 
 export interface ReplyResult {
   messageId: string;
+  // Collapsed<T> (train 4, packages/shared/src/provenance.ts): true means NO
+  // new email was sent — `messageId` is from an earlier send this call
+  // matched (same Idempotency-Key at any time, or an identical body within
+  // the last 10 minutes when unkeyed); false means this call sent a new
+  // email.
+  deduplicated: boolean;
 }
 
 export interface ActivityItem {

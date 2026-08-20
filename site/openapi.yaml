@@ -482,12 +482,11 @@ paths:
               $ref: '#/components/schemas/ReplyInput'
       responses:
         '201':
-          description: Reply sent.
+          description: Reply sent (or a dedup replay — see `deduplicated` on the schema).
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: '#/components/schemas/ReplyResult'
         '400':
           $ref: '#/components/responses/ValidationError'
         '401':
@@ -1895,6 +1894,20 @@ components:
       properties:
         body: { type: string, minLength: 1, maxLength: 20000 }
 
+    ReplyResult:
+      type: object
+      required: [messageId, deduplicated]
+      properties:
+        messageId: { type: string }
+        deduplicated:
+          type: boolean
+          description: >
+            true means NO new email was sent — `messageId` is from an
+            earlier send this call matched, either the SAME Idempotency-Key
+            at any time, or (when no key is supplied) an identical body sent
+            within the last 10 minutes. false means this call sent a new
+            email.
+
     MarkInput:
       type: object
       required: [status]
@@ -2294,8 +2307,15 @@ components:
         requested `count`; `failedCount` names how many the provider refused
         (STILL LIVE, still billed) and `unreleased` lists those addresses
         (length === failedCount). `billing` is the projected monthly after
-        the release (the lower count, floored at $99).
-      required: [releasedCount, failedCount, unreleased, billing]
+        the release (the lower count, floored at $99). `deduplicated: true`
+        means this call did NOT re-perform the downgrade — it replayed an
+        earlier call's already-recorded outcome under the same
+        Idempotency-Key (the count/billing fields describe that earlier
+        outcome, not new work done just now). This can happen even after the
+        30-day request-idempotency window itself has expired: the underlying
+        release record persists independently, so a reused key still reports
+        no re-release rather than silently starting a fresh one.
+      required: [releasedCount, failedCount, unreleased, billing, deduplicated]
       properties:
         releasedCount: { type: integer }
         failedCount: { type: integer }
@@ -2304,6 +2324,7 @@ components:
           items: { type: string }
         billing:
           $ref: '#/components/schemas/MailboxBilling'
+        deduplicated: { type: boolean }
         nextSteps:
           $ref: '#/components/schemas/NextSteps'
 
@@ -2471,7 +2492,16 @@ components:
 
     ContactOperatorResult:
       type: object
-      required: [ticketId, note]
+      required: [ticketId, note, deduplicated]
       properties:
         ticketId: { type: string }
         note: { type: string, description: "Tells the caller where the operator's reply will surface (list_messages / infrastructure_status.messages[])." }
+        deduplicated:
+          type: boolean
+          description: >
+            true means no new ticket was filed and no new alert was sent —
+            `ticketId` is from an earlier call whose body AND urgency were
+            IDENTICAL, within the last hour. This is a text match, not an
+            intent match: a genuinely new message with the same wording
+            collapses just as silently, so treat `true` as "this exact text
+            was already sent", not as "nothing new happened".

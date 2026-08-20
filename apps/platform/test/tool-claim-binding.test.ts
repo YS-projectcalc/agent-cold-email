@@ -160,14 +160,23 @@ const RESULT_TYPES: Record<string, ResultTypeEntry> = {
   inbox: { sources: [[inboxSrc, "InboxPage"]] },
   thread: { sources: [[threadsSrc, "ThreadDetail"]] },
   // Two DISTINCT claimed shapes in one description: the success body
-  // ({messageId}) and the refusal body (error-response.ts's send_blocked
-  // shape, verified honest by the class sweep's OUT column).
-  reply: { extra: ["messageId", "error", "code", "reason", "retryable"] },
+  // ({messageId, deduplicated}) and the refusal body (error-response.ts's
+  // send_blocked shape, verified honest by the class sweep's OUT column).
+  // `deduplicated` is `extra`, not sourced, for the same reason it is on
+  // remove_mailboxes/contact_operator below.
+  reply: { extra: ["messageId", "deduplicated", "error", "code", "reason", "retryable"] },
   mark: { extra: ["marked"] },
   pause: { extra: ["paused"] },
   pause_all: { extra: ["pausedAll"] },
   account: { sources: [[reportingSrc, "AccountSummary"]] },
-  remove_mailboxes: { sources: [[billingSrc, "RemoveMailboxesResult"]] },
+  // `deduplicated` is `extra`, not part of `sources`: it's added via
+  // `Collapsed<T> = T & { deduplicated: boolean }` (packages/shared/src/
+  // provenance.ts) at the FUNCTION's return type, not inside the
+  // `RemoveMailboxesResult` interface body itself — declaredProps only
+  // parses named interfaces/type-alias unions, not a generic intersection
+  // applied at a call site, so the real field is declared here by hand
+  // instead. IN-19/IN-20 dedup-semantics claim fixes, train 4 integration.
+  remove_mailboxes: { sources: [[billingSrc, "RemoveMailboxesResult"]], extra: ["deduplicated"] },
   get_dashboard: {
     sources: [
       [dashboardViewsSrc, "DashboardViewSummary"],
@@ -197,7 +206,8 @@ const RESULT_TYPES: Record<string, ResultTypeEntry> = {
     ],
   },
   ack_message: { sources: [[tenantMessagesSrc, "AckMessageResult"]] },
-  contact_operator: { sources: [[contactOperatorSrc, "ContactOperatorResult"]] },
+  // `deduplicated` is `extra` — same Collapsed<T> reason as remove_mailboxes above.
+  contact_operator: { sources: [[contactOperatorSrc, "ContactOperatorResult"]], extra: ["deduplicated"] },
 };
 
 function declaredFieldsFor(entry: ResultTypeEntry): string[] {
