@@ -125,6 +125,80 @@ describe("15b — alert_budget_exceeded IS DELIVERED on a saturated day (NEW-1)"
     expect(delivered[0]!.text).toContain("WITHHOLDING announcements");
   }, 120_000);
 
+  it("delivers EXACTLY 8 over 7 days of that storm — one confirm plus the daily ladder", async () => {
+    // §6.15b's literal number. It is not a magic constant: `alert_budget_exceeded`
+    // takes the DEBOUNCED policy, so it confirms on its SECOND observation
+    // (t=5min), re-alerts at +6h, then once per 24h — which over a 168h window
+    // is 5min, +6h, +30h, +54h, +78h, +102h, +126h, +150h. Eight. The ninth
+    // would land at +174h, outside the window.
+    const mailer = new SandboxOpsMailer();
+    const TICKS = 7 * 24 * 12; // 7 days at the live 5-minute cadence
+    const STORM_EVERY = 24; // top the ring up every 2h as entries age out
+
+    for (let tick = 0; tick < TICKS; tick++) {
+      const now = T0 + tick * SWEEP;
+      // The storm keeps asking. Admission self-regulates: it only takes a slot
+      // when one has aged out, so the per-entity counter sits at its sub-cap
+      // continuously — which is the steady state §5.5 describes, one email per
+      // instance per day.
+      if (tick % STORM_EVERY === 0) await reconcileAlerts(env, mailer, wedgedTenants(100, tick), now);
+      await reportAlertBudgetHealth(env, mailer, now);
+    }
+
+    const delivered = mailer.sent.filter((m) => m.subject === "[coldrig] Founder alert budget: UNHEALTHY");
+    expect(delivered).toHaveLength(8);
+
+    // ...and it was never RECOVERED mid-storm, which would mean the channel had
+    // stopped being saturated while 85 of 100 instances were still suppressed.
+    expect(mailer.sent.filter((m) => m.subject.includes("Founder alert budget") && m.subject.includes("RECOVERED"))).toEqual([]);
+  }, 300_000);
+
+  // THE EXEMPTION'S OWN FIXTURE, and it is NOT the pure per-entity storm.
+  //
+  // A CORRECTION TO THE DESIGN'S ROUND-4 TABLE, found by executing it. That
+  // table reports v2 (the check budgeted) and v3 (`saturated` = total alone)
+  // as BOTH delivering 0 on the pure per-entity fixture. Only v3 does. v2's
+  // machine had no 15/5 sub-cap — the storm took all 20 total slots and the
+  // budgeted check got nothing — but on the machine we actually shipped, the
+  // sub-cap holds the per-entity side at 15 and RESCUES a budgeted global
+  // check through the 5 reserved slots. Executed: flipping
+  // `alert_budget_exceeded` to `budget: "counted"` leaves the 7-day arm above
+  // GREEN at 8.
+  //
+  // So the exemption is still load-bearing, just not in that shape: it earns
+  // its keep when the TOTAL saturates, which needs global families alerting
+  // alongside the storm. That is this test. Each defect gets the fixture that
+  // discriminates it — a pure per-entity fixture certifies this one exactly the
+  // way a mixed fixture would have certified v3.
+  it("is EXEMPT where the exemption is load-bearing — a TOTAL-saturating storm", async () => {
+    const mailer = new SandboxOpsMailer();
+    // Five global families alerting alongside the 100-instance storm: 15
+    // per-entity + 5 global = the total cap, with nothing left for anyone.
+    const globals: CheckResult[] = [
+      { name: "engine", healthy: false, materiality: "down", detail: "engine /health -> HTTP 503" },
+      { name: "do_storage", healthy: false, materiality: "down", detail: "DO probe failed" },
+      { name: "vendor_wallet", healthy: false, materiality: "unreachable", detail: "wallet unreachable" },
+      { name: "warmup_duplicates", healthy: false, materiality: "dup_b2", detail: "duplicate subscriptions" },
+      { name: "failure_signals", healthy: false, materiality: "failed_severe", detail: "120 terminal-failed send(s)" },
+    ];
+    for (let tick = 0; tick < 12; tick++) {
+      await reconcileAlerts(env, mailer, [...wedgedTenants(100, tick), ...globals], T0 + tick * SWEEP);
+      await reportAlertBudgetHealth(env, mailer, T0 + tick * SWEEP);
+    }
+
+    const budget = await budgetNow(T0 + 12 * SWEEP);
+    // BOTH counters at their caps — there is no slot left for anybody.
+    expect(budget.total).toBe(MAX_ANNOUNCEMENT_EMAILS_PER_DAY);
+    expect(budget.perEntity).toBe(MAX_PER_ENTITY_ANNOUNCEMENTS_PER_DAY);
+    expect(admits(budget, false)).toBe(false);
+
+    // ...and the report that the channel is withholding STILL ARRIVES, because
+    // it is exempt. Budgeted, it would be the one announcement with no slot
+    // left, on every tick, forever — an alarm that depends on the thing it
+    // monitors.
+    expect(mailer.sent.filter((m) => m.subject === "[coldrig] Founder alert budget: UNHEALTHY").length).toBeGreaterThanOrEqual(1);
+  }, 120_000);
+
   it("stays quiet, and reports the headroom, while the channel has room", async () => {
     const mailer = new SandboxOpsMailer();
     for (let tick = 0; tick < 4; tick++) {
