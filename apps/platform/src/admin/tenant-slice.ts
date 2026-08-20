@@ -100,8 +100,19 @@ export interface TenantSlice {
   total: number;
   /** True iff `ids` is the whole index (nothing was left for a later tick). */
   complete: boolean;
-  /** Ticks a full rotation takes at this tenant count. */
-  coverageTicks: number;
+  /**
+   * Ticks a full rotation takes at this tenant count IF every fan-out leg
+   * reaches the whole slice — the PLAN, not the outcome.
+   *
+   * NAMED `planned` SINCE THE 2026-08-20 CALIBRATION FIX, because it was being
+   * read as the achieved figure and reported to the founder as one. The
+   * rotation advances by `SweepFanout.leastVisited` (see `commitSweepCursor`),
+   * which the shared fan-out deadline can drive far below `ids.length`: live at
+   * 63 tenants this said 2 ticks while the cursor was moving one tenant per
+   * tick, i.e. 63. Anything grading or publishing COVERAGE LATENCY must use the
+   * achieved count; this field is only ever the intent.
+   */
+  plannedCoverageTicks: number;
 }
 
 /** Rows a single on-demand (non-cron) fan-out may read. The audit's S8: the
@@ -142,7 +153,7 @@ export async function readTenantSlice(env: Env, limit: number = SWEEP_TENANT_SLI
     ids = restart.results.map((r) => r.id);
   }
 
-  return { ids, total, complete: ids.length >= total, coverageTicks: coverageTicks(total, limit) };
+  return { ids, total, complete: ids.length >= total, plannedCoverageTicks: coverageTicks(total, limit) };
 }
 
 /**

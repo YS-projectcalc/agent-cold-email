@@ -147,13 +147,13 @@ describe("S1 — the per-tick DO fan-out no longer grows with the tenant count",
       expect(slice.ids.length).toBe(SLICE);
       expect(slice.total).toBe(SLICE * 3);
       expect(slice.complete).toBe(false);
-      expect(slice.coverageTicks).toBe(3);
+      expect(slice.plannedCoverageTicks).toBe(3);
       for (const id of slice.ids) seen.add(id);
       await runScheduledOpsSweep(env, { mailer: new SandboxOpsMailer(), sliceLimit: SLICE });
     }
     vi.restoreAllMocks();
 
-    // Every tenant reached within `coverageTicks` ticks — the fairness property
+    // Every tenant reached within `plannedCoverageTicks` ticks — the fairness property
     // a bounded sweep owes in exchange for not reaching everyone every tick.
     expect(seen.size).toBe(SLICE * 3);
   }, 60_000);
@@ -163,6 +163,6 @@ describe("S1 — the per-tick DO fan-out no longer grows with the tenant count",
     const slice = await readTenantSlice(env, SLICE);
     vi.restoreAllMocks();
     expect(slice.complete).toBe(true);
-    expect(slice.coverageTicks).toBe(1);
+    expect(slice.plannedCoverageTicks).toBe(1);
   });
 });

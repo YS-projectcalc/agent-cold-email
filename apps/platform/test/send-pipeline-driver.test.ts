@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createExecutionContext, createScheduledController, env, runInDurableObject, waitOnExecutionContext } from "cloudflare:test";
 import worker from "../src/index.js";
 import sdnValidCsv from "./fixtures/ofac/sdn-valid.csv?raw";
+import { coverageTicks, SWEEP_TENANT_SLICE } from "../src/admin/sweep-budget.js";
+import { countTenants } from "../src/admin/tenant-slice.js";
 import {
   activatePaidPlan,
   api,
@@ -114,10 +116,31 @@ function fakeEngine(): FakeEngine {
   return state;
 }
 
+/**
+ * Drive the real cron entry point for a FULL ROTATION, not one tick.
+ *
+ * The cron sweeps a BOUNDED slice per tick and reaches every tenant across
+ * `ceil(total / slice)` ticks — that is the guarantee, and this file's
+ * `tenants_index` accumulates across its tests, so the tenant under test is
+ * usually not in any one tick's window. It used to be, only because
+ * `ASSUMED_DO_RPC_MS` was 16x below real DO latency and the slice it derived
+ * (37) was wider than anything these tests seed. Calibrating that constant
+ * against production (2026-08-20) took the slice to 3 and made these tests
+ * depend on a bound they were never meant to be testing: the positive control
+ * in `proveSendCapableThenQueueAnother` is what reds, i.e. the fixture stops
+ * proving itself send-capable and every "never driven" assertion below it goes
+ * vacuous.
+ *
+ * A rotation is the honest unit here. Every assertion in this file is about
+ * whether the cron drives a tenant AT ALL, never about which tick does it.
+ */
 async function runCron(): Promise<void> {
-  const ctx = createExecutionContext();
-  await worker.scheduled(createScheduledController(), env, ctx);
-  await waitOnExecutionContext(ctx);
+  const ticks = Math.max(1, coverageTicks(await countTenants(env), SWEEP_TENANT_SLICE));
+  for (let i = 0; i < ticks; i++) {
+    const ctx = createExecutionContext();
+    await worker.scheduled(createScheduledController(), env, ctx);
+    await waitOnExecutionContext(ctx);
+  }
 }
 
 function setupBody(brand: string, domain: string) {

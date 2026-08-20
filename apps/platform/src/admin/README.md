@@ -156,14 +156,37 @@ ceilings (the invocation's subrequest budget, and the wall clock the 300s cron
 period has left after the send pipeline's own bounds). `tenant-slice.ts`
 keyset-pages the index against a persisted cursor that advances only as far as
 the LEAST-covered leg got, so every leg still reaches every tenant — just
-across `ceil(total / slice)` ticks rather than every tick.
+across `ceil(total / covered)` ticks rather than every tick.
+
+**`covered`, not `slice`.** The rotation advances by `SweepFanout.leastVisited`,
+which the shared fan-out deadline can drive well below the slice, so the two
+numbers are not interchangeable and only the first one is coverage latency.
+Reporting the second as the first is a defect that reached production: see the
+calibration note below.
 
 That coverage latency is the price, and it is PUBLISHED rather than emergent:
-the `sweep_coverage` watchtower check reports the rotation length and alerts
-once a full pass takes longer than an hour. When it fires, the answer is the
-D1/Analytics read-model ARCHITECTURE.md #3 already names as the scale path —
-NOT a bigger slice, which is bounded by the subrequest budget and is what used
-to make the heartbeat vanish.
+the `sweep_coverage` watchtower check reports the ACHIEVED rotation length and
+alerts once a full pass takes longer than an hour. When it fires, the answer is
+the D1/Analytics read-model ARCHITECTURE.md #3 already names as the scale path
+— NOT a bigger slice.
+
+### Calibration (2026-08-20) — the slice is now WALL-CLOCK bound
+
+`ASSUMED_DO_RPC_MS` was 25ms, an in-process miniflare floor. Measured against
+production (`wrangler tail`, worker `133fc911`, 63 tenants, three consecutive
+ticks captured whole) a fan-out DO RPC round trip is **p50 350ms / mean 414ms /
+p75 450ms**, and `cpuTime` is 1-3% of `wallTime` on every one of those methods
+— the cost is the cold DO hop, not work, so it does not optimise away.
+
+Two consequences worth knowing before touching these constants:
+
+- **The binding ceiling changed.** The slice is 3 (wall clock), not 37
+  (subrequests). "A bigger slice is bounded by the subrequest budget" was the
+  old remedy text and it is no longer true: at real latency the 15s fan-out
+  deadline binds first, by an order of magnitude.
+- **The architecture is at its published wall now, not at ~590 tenants.** That
+  figure was itself computed through the 25ms assumption. A one-hour rotation is
+  36 tenants at the real slice; the platform has 63. The read-model is DUE.
 
 An on-demand caller (`POST /admin/ops/dunning-sweep`, `GET /admin/ops/digest`)
 passes no slice and gets a bounded full scan, with `tenants.scanned` beside

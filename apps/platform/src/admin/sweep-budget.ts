@@ -253,15 +253,70 @@ export const LEG_SUBREQUEST_COSTS: Record<string, { perTenant: number; ownFanout
 export const SWEEP_FANOUT_RPCS_PER_TENANT = SWEEP_RPCS_PER_TENANT - 2;
 
 /**
- * Assumed wall clock for one DO RPC round trip.
+ * MEASURED wall clock for one DO RPC round trip, caller-side, on the real
+ * platform — the distribution the slice is now derived from.
  *
- * EXPLICITLY AN ASSUMPTION (scale audit UNVERIFIABLE 3: every wall-clock number
- * in that audit is in-process miniflare, a floor rather than a forecast). The
- * fan-out deadline is what makes being WRONG about this number degrade into a
- * deferral — the cursor simply does not advance as far this tick — instead of
- * into a sweep that overruns its own cron period.
+ * PROVENANCE. `wrangler tail agent-cold-email-api --format json` against prod
+ * worker `133fc911` at 63 tenants, 2026-08-20: three consecutive cron ticks
+ * captured whole, with the distribution below pooled over the first two. Each
+ * sample is the interval between two consecutive starts of the SEQUENTIAL
+ * per-tenant RPCs a fan-out leg issues, which is exactly the quantity the
+ * fan-out deadline spends. Restricted to the fan-out legs' methods
+ * (`deliverabilitySweep`, `opsSummary`, `warmupCancelSweep`,
+ * `runWebhookDeliveries`), because those are the mix the deadline pays for.
+ *
+ * The third tick is the corroboration rather than a sample: on all three the
+ * rotation cursor advanced by exactly one tenant (it landed on `ids[0]`,
+ * `ids[1]`, `ids[2]` of the same slice), which is the behaviour these numbers
+ * predict and the shipped constant did not.
+ *
+ * THE COST IS DISPATCH, NOT WORK, so it will not optimise away: the same tail
+ * reports `cpuTime` at 1-3% of `wallTime` on every one of these methods. Each
+ * tenant's DO is touched once per tick and evicted in between, so essentially
+ * every RPC pays a cold hop.
+ *
+ * This exists as a SEPARATE constant from the assumption below so that
+ * `sweep-budget.test.ts` has an oracle that is not derived from the thing it
+ * checks — the defect it guards against is a plausible-looking constant that
+ * nothing contradicts.
  */
-export const ASSUMED_DO_RPC_MS = 25;
+export const MEASURED_DO_RPC_MS = {
+  meanMs: 414,
+  p50Ms: 350,
+  p75Ms: 450,
+  p90Ms: 531,
+  samples: 77,
+  capturedAt: "2026-08-20",
+} as const;
+
+/**
+ * The per-RPC round trip the slice is SIZED against: the measured p75.
+ *
+ * WAS 25 — an in-process miniflare floor, correctly labelled an assumption and
+ * then never re-measured. It was low by ~17x, and the consequences were not the
+ * graceful ones the old docstring promised. At 63 tenants it sized the slice at
+ * 37 while the 15s deadline afforded 3, so leg 1 (`deliverabilitySweep`, one
+ * RPC per tenant) consumed the ENTIRE deadline by itself and every trailing leg
+ * ran exactly one tenant and deferred 36. Because `commitSweepCursor` advances
+ * by the LEAST-covered leg — correctly, or coverage would go probabilistic —
+ * the rotation moved ONE tenant per tick: a full pass took 63 ticks (~5.25h)
+ * while `sweep_coverage` told the founder it took 2 (~10 min), inside the very
+ * alert whose subject is degraded detection latency.
+ *
+ * WHY p75 AND NOT THE MEAN. The fan-out phase is a SUM of
+ * `SWEEP_FANOUT_RPCS_PER_TENANT x slice` sequential draws, so sizing at the
+ * mean puts the expected cost exactly ON the deadline — the last leg then clips
+ * on roughly half of all ticks, `leastVisited` drops below the slice, and the
+ * published coverage figure is optimistic again by exactly the mechanism this
+ * re-calibration exists to remove. At p75 the expected cost is ~11.2s of the
+ * 15s deadline, so the slice completes on a typical tick and the number the
+ * check publishes is the number the rotation achieves.
+ *
+ * The deadline still makes being wrong DEGRADE rather than break — but "it
+ * degrades gracefully" was used to justify never checking the number, and a
+ * graceful degradation that misreports itself is not one.
+ */
+export const ASSUMED_DO_RPC_MS = MEASURED_DO_RPC_MS.p75Ms;
 
 /**
  * The wall-clock ceiling for the whole pre-send-pipeline fan-out.

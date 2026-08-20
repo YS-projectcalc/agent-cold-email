@@ -14,6 +14,7 @@ import {
   SWEEP_FANOUT_DEADLINE_MS,
   SWEEP_FANOUT_RPCS_PER_TENANT,
   LEG_SUBREQUEST_COSTS,
+  MEASURED_DO_RPC_MS,
   RESERVE_REAP_BATCH,
   RESERVE_REAP_SUBREQUESTS,
   RESERVE_REAP_SUBREQUESTS_PER_ITEM,
@@ -68,6 +69,55 @@ describe("S6 — the cron period is fully accounted for, by construction", () =>
     // assumed was zero.
     const fanoutWorstCaseMs = SWEEP_TENANT_SLICE * SWEEP_FANOUT_RPCS_PER_TENANT * ASSUMED_DO_RPC_MS;
     expect(fanoutWorstCaseMs).toBeLessThanOrEqual(SWEEP_FANOUT_DEADLINE_MS);
+  });
+});
+
+// CALIBRATION (live-signal fix 2026-08-20). The test above is REAL but it cannot
+// catch the defect that actually shipped: it checks the slice against the
+// ASSUMPTION, and the assumption was wrong by 16x. `A <= A` in different units.
+//
+// `ASSUMED_DO_RPC_MS = 25` was an in-process miniflare floor, honestly labelled
+// as an assumption and never re-measured against production. At 63 real tenants
+// it sized the slice at 37 while the 15s deadline afforded 3, so the trailing
+// fan-out legs abandoned 36 of every 37-tenant slice, the rotation cursor
+// advanced ONE tenant per tick, and `sweep_coverage` alerted the founder with a
+// coverage figure ("a full pass every 2 tick(s) (~10 min)") that was 31x
+// optimistic — the reassuring number was inside the alert that exists to say
+// detection latency has degraded.
+//
+// THE ORACLE HERE IS THE MEASUREMENT, which is not derived from any constant in
+// the source: `MEASURED_DO_RPC_MS` is a captured production distribution
+// (provenance in its docstring). That makes these guards capable of failing —
+// re-introducing 25 reds them, and so does a future latency regression once
+// somebody re-measures.
+describe("the slice is calibrated against MEASURED production latency, not an assumption", () => {
+  it("the assumption is not below the measured p75 — a budget takes the worst case", () => {
+    expect(
+      ASSUMED_DO_RPC_MS,
+      "ASSUMED_DO_RPC_MS is below the measured p75 DO RPC round trip. The slice it derives will not fit the " +
+        "fan-out deadline at real latency: the trailing legs abandon most of every slice, the rotation cursor " +
+        "advances by the LEAST-covered leg, and the published coverage figure becomes fiction.",
+    ).toBeGreaterThanOrEqual(MEASURED_DO_RPC_MS.p75Ms);
+  });
+
+  it("the shipped slice COMPLETES at the measured mean, with headroom — not merely at the assumption", () => {
+    // The fan-out phase is `SWEEP_FANOUT_RPCS_PER_TENANT x slice` SEQUENTIAL
+    // round trips, so its expected cost is that count times the measured MEAN.
+    // A slice whose expected cost merely touches the deadline clips its last
+    // leg on about half of all ticks, which puts the published coverage number
+    // back into the optimistic-by-default state this whole fix removes.
+    const expectedMs = SWEEP_TENANT_SLICE * SWEEP_FANOUT_RPCS_PER_TENANT * MEASURED_DO_RPC_MS.meanMs;
+    expect(
+      expectedMs,
+      `at the measured mean the fan-out needs ${expectedMs}ms of the ${SWEEP_FANOUT_DEADLINE_MS}ms deadline`,
+    ).toBeLessThanOrEqual(SWEEP_FANOUT_DEADLINE_MS * 0.85);
+  });
+
+  it("the measurement records its own provenance, so the next re-calibration can date it", () => {
+    // A bare number would be indistinguishable from the guess it replaced.
+    expect(MEASURED_DO_RPC_MS.capturedAt).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(MEASURED_DO_RPC_MS.samples).toBeGreaterThan(0);
+    expect(MEASURED_DO_RPC_MS.p75Ms).toBeGreaterThanOrEqual(MEASURED_DO_RPC_MS.meanMs * 0.5);
   });
 });
 
