@@ -14,8 +14,8 @@
 import { lookupTenantContactEmail } from "../db.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { TenantContext } from "../tenant-context.js";
-import { matchAgainstSdn, type MatchedSdnEntry, type ScreenCandidate } from "./match.js";
-import { getActiveSdnEntries, getActiveSdnListVersion } from "./sdn-list.js";
+import { matchAgainstSdn, sdnLookupKeys, type MatchedSdnEntry, type ScreenCandidate } from "./match.js";
+import { getActiveSdnListVersion, getSdnEntriesForLookup, sdnVersionHasEntries } from "./sdn-list.js";
 import { alertScreeningHit, alertScreeningListUnavailable } from "./screening-alert.js";
 import { upsertScreeningReview } from "../admin/db.js";
 
@@ -126,33 +126,38 @@ export async function screenTenant(ctx: TenantContext, opts: ScreenTenantOptions
     );
   }
 
-  const entries = await getActiveSdnEntries(ctx.env, listVersion);
+  // S9 (docs/adversarial/scale-readiness-audit-2026-08-17.md): read the rows
+  // that COULD match, not all ~17k. `sdnLookupKeys` derives the selection from
+  // the match rules themselves and is a deliberate superset, so `matchAgainstSdn`
+  // below still decides every verdict — see ofac/match.ts.
+  const entries = await getSdnEntriesForLookup(ctx.env, listVersion, sdnLookupKeys(candidates));
+  const matches = matchAgainstSdn(candidates, entries);
 
   // TOCTOU fail-open guard (adversary finding 1, docs/adversarial/
   // sdn-relay-review-2026-07-24.md): this function reads `listVersion` above
-  // and `entries` here in TWO SEPARATE awaits — a concurrent swapInSdnList
+  // and the entries here in TWO SEPARATE awaits — a concurrent swapInSdnList
   // can flip `active_version` to a NEW version and run its post-flip cleanup
   // (`DELETE FROM sdn_entries WHERE list_version != <new>`, sdn-list.ts) in
-  // between, deleting every row this now-stale `listVersion` pointed to.
-  // `matchAgainstSdn(candidates, [])` would then return zero matches ->
-  // 'clear' — the OPPOSITE of the null-version case above, and the wrong
-  // direction for a sanctions gate: a sanctioned tenant could be cleared
-  // purely by racing a list swap. swapInSdnList's cleanup is a SINGLE atomic
-  // DELETE per version (not incremental), so this race can only ever produce
-  // EXACTLY zero entries for a stale pointer — never a partial count — which
-  // is why this checks `=== 0` and not a size floor: a floor threshold would
-  // also misfire against every pre-existing test's small (2-5 entry)
-  // intentionally-tiny fixture lists, which are legitimate, not a race.
-  if (entries.length === 0) {
+  // between, deleting every row this now-stale `listVersion` pointed to. That
+  // would return zero matches -> 'clear' — the OPPOSITE of the null-version
+  // case above, and the wrong direction for a sanctions gate: a sanctioned
+  // tenant could be cleared purely by racing a list swap.
+  //
+  // THE GUARD ASKS THE LIST, IT NO LONGER INFERS FROM THE RESULT. While the
+  // read was a full scan, "zero rows" could only mean the version had been
+  // deleted. Under S9's narrowing zero rows is the ORDINARY clean-tenant
+  // answer, so keying the guard on emptiness would hold every clean signup for
+  // review. It runs only when there is nothing to report — a hit is itself
+  // proof the version was populated — so the common path costs one indexed
+  // single-row probe, not a scan.
+  if (matches.length === 0 && !(await sdnVersionHasEntries(ctx.env, listVersion))) {
     return failClosedListUnavailable(
       ctx,
       opts,
       screenedFields,
-      `active list_version ${listVersion} returned zero entries — this can only mean a concurrent list swap raced this read (never a legitimate empty list); held fail-closed, not a name match`,
+      `active list_version ${listVersion} holds zero entries — this can only mean a concurrent list swap raced this read (never a legitimate empty list); held fail-closed, not a name match`,
     );
   }
-
-  const matches = matchAgainstSdn(candidates, entries);
 
   if (matches.length === 0) {
     persistVerdict(ctx, "clear", listVersion);

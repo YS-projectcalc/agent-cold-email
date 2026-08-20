@@ -1,0 +1,23 @@
+-- S9 (docs/adversarial/scale-readiness-audit-2026-08-17.md) — the index the
+-- screening lookup reads.
+--
+-- Before this, `getActiveSdnEntries` selected EVERY row of the active version
+-- (~17k for the real Treasury feed) and JSON.parse'd every `tokens_json` blob,
+-- on every signup: ~8.5M row reads and ~8.5M parses at 500 signups, spent in
+-- Worker CPU, which is the budget that actually binds.
+--
+-- `getSdnEntriesForLookup` (src/ofac/sdn-list.ts) now asks for the only rows
+-- that could match, two ways, both of which this ONE index serves:
+--
+--   1. exact name  -> `name_normalized IN (...)`      — equality on the 2nd column
+--   2. first token -> `name_normalized >= 't ' AND name_normalized < 't!'`
+--                                                     — a range on the 2nd column
+--
+-- Both are scoped by `list_version` first, which is why this is composite rather
+-- than an index on `name_normalized` alone: only ONE version is ever active, but
+-- a version being built by the shadow-swap coexists with it in this table.
+--
+-- idx_sdn_entries_version (0012) stays: it serves the whole-version DELETEs that
+-- swapInSdnList's cleanup and its partial-write rollback both run, where the
+-- second column would only make the entries wider to scan.
+CREATE INDEX IF NOT EXISTS idx_sdn_entries_version_name ON sdn_entries(list_version, name_normalized);
