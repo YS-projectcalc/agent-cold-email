@@ -15,6 +15,29 @@ non-blocking). §-numbering is preserved so the gate's per-§ rulings still map.
 | Line-reference policy (gate: the lane is moving) | Every reference below is anchored on a **function or exported constant name plus the behaviour asserted**, with the line number as a convenience only. A builder who finds the line moved should grep the name; if the *behaviour* moved, that is a finding, not a typo. |
 | Verified against v1's own claims | 19 baseline families (`EXPECTED_CONFIRM_OBSERVATIONS`) + 3 arriving in `scalemon` = **22**; `NEXT_STEP_REASONS` = 12 (`packages/shared/src/next-steps.ts`); `waitingOn` = `"operator" \| "customer_billing" \| null`; `0019_sweep_cursor.sql` exists untracked in the lane. |
 
+## POST-FREEZE CORRECTIONS (build round, 2026-08-20) — evidence only, no decision moved
+
+The design is FROZEN; these are corrections to EVIDENCE CITED in the v4 block below, found by
+executing it during the build. Every §-decision, constant and constraint is unchanged, and both
+corrections make the design's own claims narrower rather than wider. Raised in
+`docs/adversarial/alert-state-build-gate-2026-08-20.md` (build gate, ruling + N7).
+
+1. **§6.15b / the v4 table's "reds at 0 on both defective readings" is true of ONE reading, not
+   two.** On the pure per-entity fixture the shipped 15/5 sub-cap pins the total at 15/20, which
+   *rescues* a budgeted global check through the 5 reserved slots — so the v2 defect (the check
+   itself budgeted) leaves that arm **GREEN at 8**; only v3 (`saturated` reading the total counter
+   alone) reds at 0. The conflation is between v2's machine, which had no sub-cap, and v4's fixture.
+   The build carries BOTH fixtures, each discriminating its own defect: the pure per-entity storm for
+   v3, and a TOTAL-saturating mixed storm for the exemption. Verified in both directions by the build
+   gate.
+
+2. **§5.5's round-4 item 3 — "672 such ticks under BOTH defective readings" cannot be true of the
+   any-withholding reading.** Under any-withholding, `saturated` is broader than denial, so
+   `denial ⟹ saturated` holds trivially and the violating count is **0 by construction**; 672 can
+   only belong to the total-only reading. Same shape as correction 1. Nothing rests on it: the
+   invariant it supports (`denial ⟹ saturated`, exactly) was re-derived from the shipped code and is
+   pinned exhaustively over the whole counter space in `watchtower-budget.test.ts`.
+
 ## What changed in v4 (gate round 3 — 1 blocking + 2 notes, all inside §5.5)
 
 Round 3 accepted v3's NEW-2 refutation and closed NEW-2/3/4/5. It found that **v3's own NEW-5 fix

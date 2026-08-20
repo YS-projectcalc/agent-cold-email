@@ -73,6 +73,7 @@ import {
   type AnnouncedKeys,
 } from "./watchtower-policy.js";
 import {
+  announcementOrder,
   MAX_ANNOUNCEMENT_EMAILS_PER_DAY,
   MAX_PER_ENTITY_ANNOUNCEMENTS_PER_DAY,
   type AnnouncementCandidate,
@@ -1057,14 +1058,52 @@ function familyKeyOf(checkName: string): string {
 }
 
 /**
- * Claim budget slots, or let every announcement through if the budget cannot be
- * consulted.
+ * Announcements admitted in ONE tick while the budget cannot be consulted.
  *
- * FAIL-OPEN, STATED. The WatchtowerDO holding the ring is the same DO the `d1`
- * check's alert state lives in, and it is unreachable exactly when the platform
- * is worst off. For a MONITOR, "we could not check the rate limit" must not mean
- * "stay silent": under-alerting is the failure this whole subsystem exists to
- * prevent, and the ring's own 24h window bounds the overshoot regardless.
+ * SIZED AT THE RESERVED GLOBAL SLICE, not picked (build gate N2). When the
+ * counter is unreadable we cannot know what has already been spent, so we grant
+ * exactly what the budget GUARANTEES is available no matter what any storm has
+ * consumed: `MAX_ANNOUNCEMENT_EMAILS_PER_DAY - MAX_PER_ENTITY_ANNOUNCEMENTS_PER_DAY`,
+ * the floor the 15/5 sub-cap reserves for the global and monitor families. It is
+ * the one number the budget's own rules make safe to hand out blind.
+ */
+const FAIL_OPEN_ANNOUNCEMENTS_PER_TICK = MAX_ANNOUNCEMENT_EMAILS_PER_DAY - MAX_PER_ENTITY_ANNOUNCEMENTS_PER_DAY;
+
+/**
+ * Claim budget slots, or hand out a bounded fallback allowance if the budget
+ * cannot be consulted.
+ *
+ * FAIL-OPEN, AND NOW PRICED. The WatchtowerDO holding the ring is the same DO
+ * the `d1` check's alert state lives in, so it is unreachable exactly when the
+ * platform is worst off — and a DO-platform incident is precisely when a
+ * 100-instance `tenant_do_wedged:` storm happens, so the failure is CORRELATED
+ * with the storm the budget exists for, not independent of it. For a MONITOR,
+ * "we could not check the rate limit" must not mean "stay silent"; under-
+ * alerting is the failure this whole subsystem exists to prevent. But
+ * unconditional fail-open is not the only alternative: the gate measured 200
+ * announcements in 24h at 100 instances against a ratified <=20.
+ *
+ * WHAT THIS BOUNDS AND WHAT IT DOES NOT — stated exactly, because the founder is
+ * being asked to ratify a number:
+ *  - BOUNDED: the per-tick BURST. A correlated 100-instance onset can no longer
+ *    put 100 emails in one inbox in one tick; it gets the reserved slice, in the
+ *    budget's own priority order (a new incident before an escalation before a
+ *    repeat, round-robin across families), so the emails that do go out are the
+ *    ones the budget would itself have chosen.
+ *  - NOT BOUNDED: the 24h TOTAL. That bound cannot be restored while the store
+ *    holding the counter is the thing that is down. Worker memory is
+ *    isolate-scoped and lossy, so a Worker-side tally cannot survive to be
+ *    reconciled when the DO returns; and putting the fallback counter in D1
+ *    would re-couple the failure domain the WatchtowerDO was chosen to escape
+ *    (the `d1` check's own alert must stay decidable during a D1 outage).
+ *    Fail-open sends are therefore NEVER recorded in the ring — they are
+ *    invisible to it by construction, and when the DO returns the budget resumes
+ *    from whatever it last knew.
+ *
+ * The residual is disclosed in the §9.13 [RATIFY:founder] ask: while the
+ * WatchtowerDO is unreachable the <=20/day ceiling does not hold, and
+ * `alert_budget_exceeded` is itself unreported in that state (it reads the same
+ * store), so the founder gets the storm without the explanation.
  */
 async function claimAnnouncementSlots(
   env: Env,
@@ -1075,8 +1114,17 @@ async function claimAnnouncementSlots(
   try {
     return await watchtowerStub(env).admitAnnouncements(candidates, nowMs);
   } catch (err) {
-    console.error("watchtower: the announcement budget could not be consulted — every announcement is being let through", err);
-    return candidates.map(() => null as string | null).fill(FAIL_OPEN_CLAIM);
+    console.error(
+      `watchtower: the announcement budget could not be consulted — admitting at most ${FAIL_OPEN_ANNOUNCEMENTS_PER_TICK} announcement(s) this tick`,
+      err,
+    );
+    // The SAME ordering the DO would have applied, so the fallback spends its
+    // allowance on the same candidates the budget would have chosen.
+    const claims: (string | null)[] = candidates.map(() => null);
+    for (const index of announcementOrder(candidates).slice(0, FAIL_OPEN_ANNOUNCEMENTS_PER_TICK)) {
+      claims[index] = FAIL_OPEN_CLAIM;
+    }
+    return claims;
   }
 }
 

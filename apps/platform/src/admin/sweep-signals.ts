@@ -47,6 +47,7 @@
 //                       from outside, because a bag built above the reporter
 //                       cannot contain the reporter).
 
+import type { DeliveryReason } from "@coldstart/shared";
 import type { Env } from "../env.js";
 import type { OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { OpsDigest } from "./ops-sweep.js";
@@ -130,8 +131,19 @@ export interface LegSignals {
    * failure: a leg this module cannot read is a leg it cannot clear either, and
    * silence about it is the exact defect W-M3 names. */
   unknownLegs: string[];
-  /** Alerts owed this tick that did not reach the founder (W-M1). */
-  undeliveredAlerts: { count: number; reasons: string[] };
+  /**
+   * Alerts owed this tick that did not reach the founder (W-M1).
+   *
+   * TWO SHAPES OF THE SAME FACT, and they are not interchangeable (build gate
+   * B1). `reasons` is RENDERED PROSE for the founder's email body — it names
+   * which check failed, which the founder needs. `whys` is the closed
+   * `DeliveryReason` enum, deduped, for `alertDeliveryKey` to classify. Feeding
+   * the prose to the classifier is what made 2 of `alert_delivery`'s 3 declared
+   * materiality keys unreachable and banked `send_failed` for every dark
+   * channel: the elements were `"engine (dark_channel)"`, so a
+   * `.includes("dark_channel")` membership test was false for every input.
+   */
+  undeliveredAlerts: { count: number; reasons: string[]; whys: DeliveryReason[] };
   detail: string;
   deferralDetail: string;
 }
@@ -160,6 +172,7 @@ export function collectLegSignals(legs: Record<string, unknown>): LegSignals {
   const failureParts: string[] = [];
   const deferralParts: string[] = [];
   const undeliveredReasons: string[] = [];
+  const undeliveredWhys: DeliveryReason[] = [];
   let counted = 0;
   let deferred = 0;
   let undelivered = 0;
@@ -215,6 +228,10 @@ export function collectLegSignals(legs: Record<string, unknown>): LegSignals {
         if (outcome.why !== "send_failed" && outcome.why !== "dark_channel") continue;
         undelivered++;
         undeliveredReasons.push(`${outcome.name} (${outcome.why})`);
+        // The CLASSIFICATION, kept separate from the prose above. Deduped: the
+        // key is about which failure MODES are present, not how many checks hit
+        // them (the count rides `count`, and the names ride `reasons`).
+        if (!undeliveredWhys.includes(outcome.why)) undeliveredWhys.push(outcome.why);
       }
       continue;
     }
@@ -243,7 +260,7 @@ export function collectLegSignals(legs: Record<string, unknown>): LegSignals {
     counted,
     deferred,
     unknownLegs,
-    undeliveredAlerts: { count: undelivered, reasons: undeliveredReasons },
+    undeliveredAlerts: { count: undelivered, reasons: undeliveredReasons, whys: undeliveredWhys },
     detail,
     deferralDetail: deferralParts.join(", "),
   };
@@ -394,7 +411,7 @@ export async function reportSweepSignals(
         : {
             name: ALERT_DELIVERY_CHECK,
             healthy: false,
-            materiality: alertDeliveryKey(signals.undeliveredAlerts.reasons),
+            materiality: alertDeliveryKey(signals.undeliveredAlerts.whys),
             detail:
               `${signals.undeliveredAlerts.count} watchtower alert(s) were OWED and did not reach the ops address on consecutive ticks: ` +
               `${signals.undeliveredAlerts.reasons.join(", ")}. ` +

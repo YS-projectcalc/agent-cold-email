@@ -158,10 +158,22 @@ export class WatchtowerDO extends DurableObject<Env> {
    * `null` for each one the budget turned away, positionally.
    *
    * ADMISSION HAPPENS HERE, NOT IN THE WORKER. A read-then-decide in the Worker
-   * leaves a gap: the cron tick and an event-driven `reportCheck` from a tenant
-   * DO can both read `total = 19` and both send. DO storage is serialized by the
-   * input gate, so deciding and recording in one call is what makes "<=20 in any
-   * rolling 24h span" exact rather than approximate.
+   * leaves a gap, and the gap is real for two reasons — neither of which is the
+   * one this comment used to give (build gate N3). It claimed an event-driven
+   * `reportCheck` from a tenant DO could contend with the cron tick; it cannot.
+   * Every `reportCheck` caller raises an EXEMPT family (`mailbox_provisioning:`,
+   * `mailbox_rebuy:`, the three `*_failed:` prefixes), and exempt candidates are
+   * filtered out by `isBudgetedAnnouncement` before they ever reach here; the
+   * one counted caller (`sweep_signals`) runs sequentially in the same cron
+   * invocation. The reasons that DO hold:
+   *   1. THREE `reconcileAlerts` entry points per tick (`runWatchtower`,
+   *      `reportSweepSignals`, `reportSweepSignalsHealth`), each reading the
+   *      counter separately;
+   *   2. OVERLAPPING CRON INVOCATIONS — a slow tick and its successor.
+   * DO storage is serialized by the input gate, so deciding and recording in one
+   * call is what makes "<=20 in any rolling 24h span" exact rather than
+   * approximate. Stated precisely so a future editor does not "simplify" this
+   * back out on a premise that was never true.
    *
    * RECORDED ON CLAIM, RELEASED ON FAILURE (`releaseAnnouncements`). The ring is
    * a log of emails ACTUALLY SENT — a claimed slot whose send then failed is not

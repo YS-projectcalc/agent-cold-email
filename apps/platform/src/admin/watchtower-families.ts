@@ -21,7 +21,8 @@
 // classification over a CLOSED enumeration, derived from structured facts the
 // producer already holds.
 
-import type { NextStepReason } from "@coldstart/shared";
+import type { DeliveryReason, NextStepReason } from "@coldstart/shared";
+import { FAILURE_SIGNAL_FAILED_THRESHOLD } from "./watchtower-grading.js";
 import {
   ALERT_BUDGET_EXCEEDED_CHECK,
   ALERT_DELIVERY_CHECK,
@@ -198,11 +199,32 @@ export function isBudgetExemptCheck(checkName: string): boolean {
 // the table cannot drift. They take the structured facts the producer already
 // holds — never a rendered string.
 
-/** `failure_signals`' banded severity. `sustained_subthreshold` is stated by the
- * dead-band hold arm directly (§4), not derived from counts. */
+/**
+ * `failure_signals`' banded severity. `sustained_subthreshold` is stated by the
+ * dead-band hold arm directly (§4), not derived from counts.
+ *
+ * THE BANDS ARE §1.2's, LITERALLY: `failed_severe` at 100+, `failed_elevated` at
+ * 3-99, `complaints` below the failure threshold. It used to branch at
+ * `failed > 0`, which reported `failed_elevated` for an alert that only fired
+ * because a COMPLAINT crossed its own threshold — `failureSignalsKey(2, 5)` gave
+ * `failed_elevated` (build gate N4). This function is only reached when
+ * `gradeFailureSignals` returned `false`, i.e. `complaints >= 1 || failed >= 3`,
+ * so below the failure threshold the complaint IS what fired it.
+ *
+ * RESIDUAL PRECEDENCE, DELIBERATE AND STATED: a complaint arriving on top of an
+ * already-elevated failure count does not escalate — the key stays on the
+ * failure band. The declared space has four members and the cap invariant is
+ * STRICTLY greater than the widest space (5 > 4), so a fifth
+ * "severe-with-complaints" member is not available without moving the cap, which
+ * is frozen design. Either precedence loses one direction: failure-first loses
+ * "a complaint joined an outage", complaint-first would lose "the outage got an
+ * order of magnitude worse during a complaint". Failure-first is chosen because
+ * the failure bands are the ones that carry an order-of-magnitude escalation,
+ * and the complaint count rides the detail either way at zero email cost.
+ */
 export function failureSignalsKey(failed: number, complaints: number): string {
   if (failed >= 100) return "failed_severe";
-  if (failed > 0) return "failed_elevated";
+  if (failed >= FAILURE_SIGNAL_FAILED_THRESHOLD) return "failed_elevated";
   return "complaints";
 }
 
@@ -214,20 +236,47 @@ export function cronLegsKey(threw: boolean, counted: boolean): string {
   return threw ? "threw" : "counted";
 }
 
-/** `sweep_coverage`'s two independent ways of not keeping up. */
+/**
+ * `sweep_coverage`'s two independent ways of not keeping up.
+ *
+ * DEVIATION FROM §1.2, DECLARED (build gate N5): the frozen cell derives
+ * `in_tick_deferral` from `signals.deferred > 0`; the producer passes
+ * `signals.deferred >= DEFERRED_LEG_VISITS_ALERT_AFTER`. The threshold is the
+ * right input — it aligns the KEY with the alerting CAUSE, so the key cannot
+ * report a condition the check did not fire on — but it is an undocumented
+ * divergence from frozen text, and this is the note. ⚠️ The inputs themselves
+ * are NOT changed here: the sibling `sweep-calibration` lane deletes
+ * `DEFERRED_LEG_VISITS_ALERT_AFTER` and reshapes the coverage type, so this
+ * key's derivation AND its declared space are re-reconciled at that fold
+ * (build gate F1). Do not tune this in isolation.
+ */
 export function sweepCoverageKey(sliceUnreadable: boolean, rotationBehind: boolean, inTickDeferral: boolean): string {
   if (sliceUnreadable) return "slice_unreadable";
   if (rotationBehind && inTickDeferral) return "both";
   return rotationBehind ? "rotation_behind" : "in_tick_deferral";
 }
 
-/** `alert_delivery`'s reasons, already a closed `DeliveryReason` subset at the
- * producer. Never a catch-all: the new `suppressed_key_cap` /
- * `suppressed_daily_budget` reasons are DELIBERATE withholdings, not delivery
- * failures, and must not false-count as either arm here (design §7.2). */
-export function alertDeliveryKey(reasons: readonly string[]): string {
-  const dark = reasons.includes("dark_channel");
-  const failed = reasons.includes("send_failed");
+/**
+ * `alert_delivery`'s failure MODES, from the closed `DeliveryReason` enum.
+ *
+ * ⚠️ TAKES `undeliveredAlerts.whys`, NEVER `.reasons` (build gate B1). This
+ * docstring used to claim the input was "already a closed DeliveryReason subset
+ * at the producer" — it was not. The producer handed it
+ * `undeliveredAlerts.reasons`, which `collectLegSignals` builds as RENDERED
+ * PROSE (`"engine (dark_channel)"`), so both membership tests were false for
+ * every input and this fell through to `send_failed` on every single alert:
+ * 2 of the 3 declared keys were unreachable and a dark channel was banked as a
+ * send failure. The function was always correct; its input was not. Executed by
+ * the gate: `DISTINCT KEYS PRODUCIBLE: ["send_failed"]`.
+ *
+ * Never a catch-all either: the `suppressed_key_cap` / `suppressed_daily_budget`
+ * / `pending_recovery` reasons are DELIBERATE withholdings, not delivery
+ * failures, and the producer's allow-list filter keeps them out before they
+ * reach here (design §7.2).
+ */
+export function alertDeliveryKey(whys: readonly DeliveryReason[]): string {
+  const dark = whys.includes("dark_channel");
+  const failed = whys.includes("send_failed");
   if (dark && failed) return "both";
   return dark ? "dark_channel" : "send_failed";
 }

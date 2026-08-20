@@ -12,6 +12,7 @@ import {
   type AnnouncementCounts,
   type AnnouncementRing,
 } from "../src/admin/watchtower-budget.js";
+import { alertDeliveryKey } from "../src/admin/watchtower-families.js";
 import type { CheckResult } from "../src/admin/watchtower-alerts.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
 
@@ -96,7 +97,7 @@ describe("15b — alert_budget_exceeded IS DELIVERED on a saturated day (NEW-1)"
   //   - budgeting the check itself never fires either, because it goes unhealthy
   //     exactly when there is no slot left (gate round 2: 0 sent / 2015 withheld).
   // A MIXED-family fixture certifies the defect instead of catching it.
-  it("reds at 0 on BOTH historical readings, on this exact fixture", async () => {
+  it("reds at 0 on the TOTAL-ONLY reading — the defect this fixture discriminates", async () => {
     const mailer = new SandboxOpsMailer();
     for (let tick = 0; tick < 40; tick++) {
       await reconcileAlerts(env, mailer, wedgedTenants(100, tick), T0 + tick * SWEEP);
@@ -114,10 +115,19 @@ describe("15b — alert_budget_exceeded IS DELIVERED on a saturated day (NEW-1)"
     // GREEN: EITHER counter at its cap.
     expect(isSaturated(budget)).toBe(true);
 
-    // RED ARM (v2): the check budgeted like any other announcement. It is
-    // per-entity-blind and global, so it would compete for the 5 reserved slots
-    // — but it only ever asks on a day when there is nothing left to give.
-    expect(admits({ total: MAX_ANNOUNCEMENT_EMAILS_PER_DAY, perEntity: 0 }, false)).toBe(false);
+    // ⚠️ THE v2 DEFECT (the check budgeted like any other announcement) IS NOT
+    // DISCRIMINATED HERE, and this test no longer pretends to. It used to carry
+    // a hand-built `admits({total: 20, perEntity: 0}, false)` assertion as a
+    // "red arm" — a tautology about `admits`, four lines after this same test
+    // asserts the total is BELOW 20, so it observed nothing about the fixture.
+    // Executed by the build gate: with `alert_budget_exceeded` flipped to
+    // `budget: "counted"`, this whole test stays GREEN.
+    //
+    // The reason is the shipped 15/5 sub-cap: it pins the total at 15/20 in a
+    // pure per-entity storm, which RESCUES a budgeted global check through the
+    // 5 reserved slots. The fixture that does discriminate the exemption is the
+    // TOTAL-saturating one below ("is EXEMPT where the exemption is
+    // load-bearing"), and it reds at 0 under that mutation.
 
     // ...and on the real path it ARRIVES.
     const delivered = mailer.sent.filter((m) => m.subject.includes("Founder alert budget") && m.subject.includes("UNHEALTHY"));
@@ -292,7 +302,11 @@ describe("15e — the RESERVED SLICE keeps the monitor's own checks audible (NEW
     const monitor: CheckResult[] = [
       { name: "cron_legs", healthy: false, materiality: "threw", detail: "a sweep leg is throwing every tick" },
       { name: "sweep_coverage", healthy: false, materiality: "rotation_behind", detail: "the rotation needs 40 ticks" },
-      { name: "alert_delivery", healthy: false, materiality: "dark_channel", detail: "alerts owed and not delivered" },
+      // KEY FROM THE REAL CLASSIFIER, not hand-written (build gate B1b). This
+      // line used to spell `"dark_channel"` by hand — a key the producer could
+      // not emit at all while `alertDeliveryKey` was being fed rendered prose.
+      // A fixture that asserts on an unreachable key certifies the defect.
+      { name: "alert_delivery", healthy: false, materiality: alertDeliveryKey(["dark_channel"]), detail: "alerts owed and not delivered" },
     ];
     // These are IMMEDIATE, so one observation confirms.
     await reconcileAlerts(env, mailer, monitor, T0 + 9 * SWEEP);
@@ -310,12 +324,129 @@ describe("15e — the RESERVED SLICE keeps the monitor's own checks audible (NEW
   }, 120_000);
 });
 
+describe("N2 — the fail-open is BOUNDED: a burst cap when the budget cannot be consulted", () => {
+  // THE COST THE FIRST BUILD DID NOT PRICE (build gate N2). `claimAnnouncementSlots`
+  // catches any error from `admitAnnouncements` and used to admit EVERY candidate,
+  // measured at 200 announcements in 24h at 100 instances against a ratified <=20.
+  // The direction is right for a monitor — under-alerting is the failure this
+  // subsystem exists to prevent — but the failure is CORRELATED with the storm the
+  // budget bounds, because the DO holding the ring is the one that is down.
+  //
+  // What is bounded is the per-tick BURST, at the reserved global slice: the one
+  // allowance the budget's own rules make safe to hand out blind. What is NOT
+  // bounded is the 24h total — see `claimAnnouncementSlots`' docstring for why
+  // that is not honestly implementable while the counter's store is the thing
+  // that is down, and §9.13 for the disclosure that owes.
+  const FAIL_OPEN_PER_TICK = MAX_ANNOUNCEMENT_EMAILS_PER_DAY - MAX_PER_ENTITY_ANNOUNCEMENTS_PER_DAY;
+
+  /** An env whose WatchtowerDO refuses every budget call. */
+  function envWithDeadBudget() {
+    return {
+      ...env,
+      WATCHTOWER: {
+        idFromName: (name: string) => env.WATCHTOWER.idFromName(name),
+        get: () => ({
+          admitAnnouncements: () => {
+            throw new Error("WatchtowerDO unreachable");
+          },
+          releaseAnnouncements: () => {
+            throw new Error("WatchtowerDO unreachable");
+          },
+          readAnnouncementBudget: () => {
+            throw new Error("WatchtowerDO unreachable");
+          },
+        }),
+      },
+    } as unknown as typeof env;
+  }
+
+  it("a correlated 100-instance onset cannot put 100 emails in one tick", async () => {
+    const dead = envWithDeadBudget();
+    const mailer = new SandboxOpsMailer();
+    // Two ticks: the first confirms nothing (DEBOUNCED), the second announces
+    // all 100 at once — the acute burst.
+    await reconcileAlerts(dead, mailer, wedgedTenants(100, 0), T0);
+    const before = mailer.sent.length;
+    await reconcileAlerts(dead, mailer, wedgedTenants(100, 1), T0 + SWEEP);
+    const burst = mailer.sent.length - before;
+
+    // RED ON THE UNCONDITIONAL FAIL-OPEN: that admitted all 100.
+    expect(burst).toBe(FAIL_OPEN_PER_TICK);
+    expect(burst).toBeLessThan(100);
+  }, 120_000);
+
+  it("spends the allowance in the BUDGET's own priority order, not array order", async () => {
+    // A new incident outranks a repeat, round-robin across families — so the
+    // emails that do go out are the ones the budget would itself have chosen.
+    const dead = envWithDeadBudget();
+    const mailer = new SandboxOpsMailer();
+    const globals: CheckResult[] = [
+      { name: "engine", healthy: false, materiality: "down", detail: "engine down" },
+      { name: "do_storage", healthy: false, materiality: "down", detail: "DO probe failed" },
+    ];
+    // The storm is FIRST in the array — under array order it would take every slot.
+    for (let tick = 0; tick < 2; tick++) {
+      await reconcileAlerts(dead, mailer, [...wedgedTenants(100, tick), ...globals], T0 + tick * SWEEP);
+    }
+    const subjects = mailer.sent.map((m) => m.subject);
+    // Round-robin across families means the two global families are reached
+    // despite 100 per-entity instances queued ahead of them.
+    expect(subjects).toContain("[coldrig] Engine /health: UNHEALTHY");
+    expect(subjects).toContain("[coldrig] Durable Object storage: UNHEALTHY");
+    expect(mailer.sent).toHaveLength(FAIL_OPEN_PER_TICK);
+  }, 120_000);
+
+  it("the withheld ones report WHY, and their episodes still advance", async () => {
+    const dead = envWithDeadBudget();
+    const mailer = new SandboxOpsMailer();
+    await reconcileAlerts(dead, mailer, wedgedTenants(100, 0), T0);
+    const outcomes = await reconcileAlerts(dead, mailer, wedgedTenants(100, 1), T0 + SWEEP);
+    expect(outcomes.filter((o) => o.why === "suppressed_daily_budget").length).toBe(100 - FAIL_OPEN_PER_TICK);
+    const rows = await env.DB.prepare(`SELECT COUNT(*) AS n FROM watchtower_state WHERE status = 'unhealthy'`).first<{ n: number }>();
+    expect(rows!.n).toBe(100);
+  }, 120_000);
+});
+
 describe("the invariant that makes under-reading safe — DENIAL IMPLIES SATURATION", () => {
   // Exempt sends do not consume ring slots and are not recorded, so the total
   // counter UNDER-READS real inbox volume. That cannot hide suppression, because
   // whenever a send is denied `saturated` is true — the counters that GATE are
   // the counters OBSERVED. Checked exhaustively over the whole counter space
   // rather than sampled.
+  // N7 — verifying a design-gate evidence claim rather than trusting it.
+  // Round 4 item 3 reports "0 ticks where a send was denied while `saturated`
+  // was false under v4, against 672 such ticks under BOTH defective readings".
+  // The two defective readings round 3 names are TOTAL-ONLY and ANY-WITHHOLDING.
+  // Under any-withholding the count cannot be 672: `saturated` is then broader
+  // than denial, so denial implies saturation TRIVIALLY and the violating count
+  // is 0 by construction. The 672 figure can only belong to the total-only
+  // reading — the same conflation of two machines that made the round-4 table
+  // wrong. Nothing rests on it: the invariant itself is exhaustively pinned
+  // below, and it is exact.
+  it("N7 — under an ANY-WITHHOLDING reading, denial implies saturation trivially (0 violations, never 672)", () => {
+    let violations = 0;
+    let denials = 0;
+    for (let total = 0; total <= MAX_ANNOUNCEMENT_EMAILS_PER_DAY + 2; total++) {
+      for (let perEntity = 0; perEntity <= Math.min(total, MAX_PER_ENTITY_ANNOUNCEMENTS_PER_DAY + 2); perEntity++) {
+        for (const scope of [true, false]) {
+          const counts = { total, perEntity };
+          const denied = !admits(counts, scope);
+          if (!denied) continue;
+          denials++;
+          // The any-withholding reading: "saturated" IS "something was withheld".
+          const anyWithholdingSaturated = denied;
+          if (!anyWithholdingSaturated) violations++;
+          // ...and the total-only reading, which is where violations DO occur.
+          if (!(counts.total >= MAX_ANNOUNCEMENT_EMAILS_PER_DAY)) {
+            expect(counts.perEntity).toBeGreaterThanOrEqual(MAX_PER_ENTITY_ANNOUNCEMENTS_PER_DAY);
+          }
+        }
+      }
+    }
+    expect(denials).toBeGreaterThan(0);
+    expect(violations).toBe(0);
+  });
+
   it("holds for every reachable (total, perEntity, scope) triple", () => {
     for (let total = 0; total <= MAX_ANNOUNCEMENT_EMAILS_PER_DAY + 2; total++) {
       for (let perEntity = 0; perEntity <= Math.min(total, MAX_PER_ENTITY_ANNOUNCEMENTS_PER_DAY + 2); perEntity++) {

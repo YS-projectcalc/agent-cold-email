@@ -550,7 +550,31 @@ function healthyState(sinceTs: number): AlertState {
  */
 export function withheldAlertState(prev: PersistedAlertState | null, transition: AlertTransition): AlertState {
   const previous = normalizeAlertState(prev);
-  if (transition.action === "recovered") return previous ?? transition.next;
+  if (transition.action === "recovered") {
+    // THE EPISODE STAYS OPEN and the recovery is retried until it lands — the
+    // semantics this arm shipped with, unchanged.
+    //
+    // WHAT IS RECORDED IS THAT THE PRODUCER SAID HEALTHY (build gate N6). The
+    // `healthyObs === 0` gate on onset adoption (`reconcileAlerts`) reads this
+    // column to mean "the producer has NOT reported healthy", and a withheld
+    // recovery left it at 0 while the producer plainly had — so a departed
+    // sibling stayed adoptable and the new episode inherited its stale onset,
+    // which is exactly the silent-nudge-deletion B6 exists to prevent. Reachable
+    // via the `no_longer_applicable` route only: a tenant leaves scope while an
+    // announced `customer_progress_*` episode is open, that recovery email is
+    // dark-channel-withheld, and the tenant later returns and stalls again. (The
+    // same-tick blame-flip cross-clear cannot reach it — `reclassified`
+    // suppresses the SEND, so no email is composed and nothing is withheld.)
+    //
+    // `Math.max`, not `+ 1`, so the retry cadence cannot drift: a `reobserved`
+    // clear that reached `recovered` already carries
+    // `healthyObs === recoverAfterObservations - 1`, which is >= 1, so this is a
+    // no-op there and only the `no_longer_applicable` route moves 0 -> 1. That
+    // route closes UNCONDITIONALLY on every observation, so the recovery is
+    // still retried on the very next tick.
+    const held = previous ?? transition.next;
+    return { ...held, healthyObs: Math.max(held.healthyObs, 1) };
+  }
   return {
     ...transition.next,
     lastAlertTs: previous?.lastAlertTs ?? null,
