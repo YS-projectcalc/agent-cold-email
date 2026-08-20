@@ -618,3 +618,180 @@ what want naming.
      partial-scan halves), so a non-empty `missing` is worth paging on.
 5. **Follow-ups before the platform scales** (not deploy blockers): NEW-2 (~5 lines, worth doing now)
    and NEW-1, then NEW-3's three stale consumers.
+
+---
+---
+
+# ROUND 3 (FINAL) — 2026-08-20
+
+**Ground ref** worktree `.claude/worktrees/integrate-waveb`, branch `integrate/wave-b1-2026-08-20`,
+`git rev-parse HEAD` = **`de1619f`**, parent **`a6a0b0b`** (the round-2 ref), tree CLEAN.
+One commit, 11 files, +403/−54. Review diff `a6a0b0b..de1619f`.
+
+## VERDICT: **SHIP.** All four round-2 NEW items CLOSED. 1 new NON-BLOCKING (prose), 0 blocking.
+
+Three rounds: 1 blocking + 9 non-blocking → 0 + 4 new → 0 + 1. No further round is owed.
+
+## Battery at `de1619f`
+
+| suite | result | exit |
+|---|---|---|
+| `npm run typecheck` (root) | clean | **0** |
+| `apps/platform` vitest | **233 files / 2268 passed / 1 skipped** | **0** |
+| `apps/engine` vitest | 153 passed / 4 skipped | **0** |
+| `apps/dashboard` vitest | 165 passed | **0** |
+| `packages/cli` | 12 pass / 0 fail | **0** |
+
++7 tests, 0 new files — reconciles to the diff (net +4 in `sweep-budget.test.ts` after the tautology
+was deleted, +1 absence-guard pin, +2 in `spend-ceiling.test.ts`).
+
+## NEW-1 — CLOSED, re-derived and probed
+
+Arithmetic re-derived independently: `60 + 25×2 + 25×3 = 185`;
+`slice = min(floor((600−185)/11), 66) = min(37, 66) = 37`; `tick = 11×37 + 185 = 592`;
+reserve `1000 − 592 = 408`; `coverageTicks(500, 37) = 14`. All five match.
+
+The reaper now reads `ORDER BY created_at ASC LIMIT ?` bound to `RESERVE_REAP_BATCH` and runs through
+`sweepTenants` with `sweepDeadlineOf(scope.fanout)`. **Executed**, against the same 300-orphan fixture
+that produced round 2's finding:
+```
+tick1: seeded=300 reaped=25 (cap 25) => ~76 subrequests [round 2 was ~901];
+       oldest reaped first = true; remaining=275
+drain: 60 -> 35 -> 10 -> 0 (reaped 25/25/10)
+deadline: reaped=1 deferred=9 leastVisited=null
+```
+Bounded (76 subrequests, comfortably inside one 592-subrequest tick), oldest-first, genuinely
+self-draining with no head-of-line pinning, deadline-bound (first item always attempted), and the
+rotation accumulator is left `null` so the reaper can never advance the tenant cursor.
+
+## NEW-2 — CLOSED. My exact round-2 plant now reds, and so do three others
+
+The tautology is gone, replaced by two oracles neither of which is the thing it checks. I planted five
+defects and ran each against the guard:
+
+| plant | expected | result | which oracle fired |
+|---|---|---|---|
+| **A** — my verbatim round-2 plant: `AUDIT_SWEEP_SUBREQUESTS = 300×3`, declared, never summed | red | **RED** | *"every declared subrequest term is an OPERAND of the aggregate"* |
+| **B** — a real new leg (`auditSweep`) in `scheduled.ts`, absent from the cost table | red | **RED** | *"every leg the scheduler actually runs has a declared cost"* |
+| **C** — a table entry's `ownFanout` raised without touching the aggregate | red | **RED** | *"the per-leg costs SUM to the two derived constants"* |
+| **D** — reformat the `const legs = {…}` bag (indent one entry by 2 more spaces) | must not false-pass | **RED**, naming `tenantSlice` | *"prices no leg the scheduler does not run"* |
+| **E** — the same defect with the term named `AUDIT_LEG_COST` instead of `*_SUBREQUESTS` | — | **GREEN** | (residual, below) |
+
+Baseline and post-restore both 17/17, so the plants were the only variable. Plant D is the answer to
+"does the source-text check survive formatting edits without false-passing": `legBagKeys` throws loudly
+if the bag cannot be found at all, and if the bag parses but an entry is missed, the **reverse**
+assertion catches it — the two directions cover each other. Plant B answers "can a leg live in
+`scheduled.ts` but not the cost table": no.
+
+**Residual (NON-BLOCKING, narrow):** the source-text oracle is bound to the `*_SUBREQUESTS` naming
+convention, so plant E passes. It is not a budget hole — a term with no leg behind it is dead code, and
+the moment a real leg exists, oracle 1 or 3 catches it whatever the constant is called (plant C proves
+oracle 3 fires on a literal). Worth one line in the guard's comment so the convention is stated rather
+than assumed.
+
+## NEW-3 — CLOSED, and both rewritten rationales verified against the code
+
+`ABSENCE_MIN_AGE_MS` 15 → **45 min**, matching the reaper. The pin is real, not decorative — reverting
+it to 15 against the 30-minute claim TTL reds with the hazard named:
+```
+AssertionError: ABSENCE_MIN_AGE_MS decides that a dispatched buy never happened. Below the claim TTL
+it can say that about a saga that is still running, and the platform buys the mailbox a second time.
+expected 900000 to be greater than 1800000
+```
+The other two constants correctly keep their VALUES and drop their false DERIVATIONS. I verified both
+new rationales against the code rather than reading them:
+- `contact-operator-reconcile.ts` now says its window covers "exactly one D1 read then one D1 write, no
+  vendor round trips". **True**: `contact-operator.ts`'s compensation boundary is
+  `lookupTenantContactEmail` → `insertSupportTicket`, and the `mailer.send` sits in a *separate*
+  try/catch outside it.
+- `threads.ts` now says its 10 minutes covers "a client retrying a reply whose RESPONSE was dropped".
+  **True**: replies go through the engine, not the InboxKit client, so the S3 retry cannot lengthen
+  them; nothing else reads `CONTENT_HASH_REPLAY_WINDOW_MS`.
+Both docstrings also name which direction a future "make these consistent" edit would break, which is
+the failure mode that made these findings worth raising.
+`ABSENCE_RECHECK_BACKOFF_MS` is independent (sized on the readiness wait), so the move strands nothing.
+
+## NEW-4 — CLOSED as a disposition
+
+`sweep-signals.ts`'s change is **comment-only** (verified: the diff has zero non-comment lines). The
+module docstring's "abandoning EVERY tenant at its budget" is corrected, and a new paragraph states
+plainly what the coverage check does and does not catch — including that one wedged tenant matches no
+check, and the honest softening that `withItemBudget` abandons the wait rather than the work. A second
+ROADMAP `[ORDER]` line exists carrying the same reasoning. Correct call: a per-tenant staleness signal
+belongs to the alert-state increment, not to a threshold tweak in this wave.
+
+## NEW (round 3) · NON-BLOCKING · `COVERAGE_TICKS_ALERT_AFTER`'s gloss is stale by ~33%
+
+`sweep-signals.ts:257` still reads *"At the shipped slice that is ~590 tenants, which is exactly where
+the audit says the per-tenant RPC fan-out has to be replaced by the D1/Analytics read-model."* That
+number was computed against the original slice of **49**. The slice has since moved twice — 49 → 44
+(round 2) → **37** (round 3) — so `12 × 37 = ~444`, not ~590. The threshold itself is unchanged and
+still correctly derived (12 ticks = one hour at the 5-minute cadence); only the tenant-count gloss is
+stale, and the error direction is safe (the founder is warned *earlier* than advertised). Concretely:
+`sweep_coverage` now goes unhealthy on its coverage-ticks arm from ~445 tenants, and at the 500-tenant
+reference point `coverageTicks = 14 > 12`. This is the same class as NEW-3 — a derived gloss not
+re-derived when its input moved — in the file the fix just edited. One line.
+
+Two cosmetic notes, no action needed: `sweepTenants` is now called with ledger entry ids and sentinel
+review ids, so its `tenantIds` parameter name has outgrown itself; and `signals.deferred` now sums
+three different units (tenant visits, sentinel reviews, ledger entries) against a threshold denominated
+in tenant visits — `DEFERRED_LEG_VISITS_ALERT_AFTER`'s own docstring already flags the units concern.
+
+## Attacks that FAILED in round 3
+
+- The dual oracle, four separate ways (plants A–D above) — it holds in both directions and does not
+  false-pass on a formatting edit.
+- The reaper's bound, ordering, drain and cursor-safety — all four probed, all four hold.
+- The absence-guard pin — reds at the exact 15-vs-30 boundary with the money hazard in the message.
+- Both rewritten rationales — traced to the code, both true.
+- Regression sweep of the small diff: every dependent of `SWEEP_TENANT_SLICE` re-checked after the
+  44 → 37 move (`SWEEP_TICK_SUBREQUESTS`, `DEFERRED_LEG_VISITS_ALERT_AFTER`, `readTenantSlice`'s
+  default, the coverage detail string) — all track the constant; only the prose gloss above does not.
+- No claim-surface change for the third round running: `git diff --stat a6a0b0b..de1619f` over `site/`,
+  `packages/`, `apps/dashboard`, `apps/engine` and `wrangler.toml` is empty.
+
+## UNVERIFIABLE (carried forward unchanged, final)
+
+1. `SWEEP_SUBREQUEST_BUDGET = 1000` and whether DO RPCs count toward it — the whole slice derivation
+   rests on it. 2. `ASSUMED_DO_RPC_MS = 25`. 3. Live D1 index-build cost for `0020`. 4. InboxKit's real
+   rate limit / `Retry-After` behaviour (N7's 30-minute re-derivation is a bound, not an observation).
+5. Real send volume per tenant per day, which sets N8's arming point.
+
+---
+
+# CONSOLIDATED DEPLOY REQUIREMENTS (final, supersedes the round-2 list)
+
+1. **Migrations, in this order: `0019_sweep_cursor.sql`, then `0020_sdn_entries_name_index.sql`.**
+   Both additive and idempotent (`CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`), no
+   destructive DDL, both wired into `test/setup.ts` in the same order. `0020` builds a composite index
+   over ~19k `sdn_entries` rows — one-time, expected trivial, unmeasured against live D1.
+2. **`PAYING_TENANT_COUNT` — optional `[vars]` entry, no secret.** Unset ⇒ the pilot bound.
+   **FOUNDER-VISIBLE: the default monthly spend ceiling moves $150 → $180** at count = 1. Raise THIS
+   knob as customers land — `SPEND_CEILING_CENTS` is an absolute override that freezes the formula, and
+   the capacity alert now says so. A raise is durable for the calendar month; the manual lowering
+   command is in `spend-ceiling.ts`'s `readInForceCeiling` docstring.
+3. **No site deploy needed.** No `site/`, `packages/`, `apps/dashboard` or `wrangler.toml` change in
+   any of the three rounds; the changed admin endpoints are operator-only and appear in no published
+   `openapi.yaml` path.
+4. **Sweep numbers the operator should know (CHANGED this round — the round-2 list is superseded):**
+   tenant slice **37/tick** (was 49 pre-wave, 44 at round 2); one tick costs **592** subrequests of a
+   1000 budget, leaving a **408** tail reserve; a full rotation at 500 tenants is **14 ticks (~70 min)**.
+   Because 14 > `COVERAGE_TICKS_ALERT_AFTER` (12), `sweep_coverage` will report unhealthy on its
+   coverage-ticks arm from roughly **445 tenants** — that is the check working as designed (it means
+   "replace the per-tenant fan-out with the read-model"), but it arrives earlier than the ~590 the
+   docstring still claims.
+5. **Ops-watch spec updates** (the cron polling `?unhealthy=1` + `sweepAgeSeconds` against a 2-row
+   baseline):
+   - the 2-row unhealthy baseline is **void** — the never-clearing `*_FAILED` families make the
+     unhealthy set grow monotonically with real provisioning/teardown failures (N4);
+   - new response fields to consume: `count`, `total`, `truncated`, `expected`, `missing`,
+     `sweepAgeSeconds`, `sweepStale`, `retentionMs`;
+   - `unhealthyCount` deliberately KEEPS its whole-store meaning — do not re-baseline it;
+   - `sweepAgeSeconds` means "the watchtower LEG last completed", not "the cron last fired" — a stale
+     value can also mean a throwing watchtower leg; pair it with `GET /status` (N9);
+   - `missing` is now trustworthy on a healthy platform (N3 closed both halves), so a non-empty
+     `missing` is worth paging on.
+6. **Carried on the ROADMAP, not deploy blockers:** the two `[ORDER]` lines (the three one-shot
+   `*_FAILED` families have no clearer, N4; a single persistently-wedged tenant reaches no check,
+   NEW-4) — both routed into the alert-state increment. Plus the two one-line prose fixes above
+   (the `~590 tenants` gloss, and stating the `*_SUBREQUESTS` naming convention in the guard).
