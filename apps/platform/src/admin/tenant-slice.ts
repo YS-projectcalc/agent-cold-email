@@ -11,11 +11,18 @@
 // on the same tick, so "this tenant was swept" is one fact rather than seven.
 //
 // COVERAGE IS THE PRICE, AND IT IS PUBLISHED. A bounded sweep reaches every
-// tenant across `coverageTicks(total, slice)` ticks instead of every tick. That
-// is a real degradation of detection latency and it is reported
+// tenant across `coverageTicks(total, leastVisited)` ticks instead of every
+// tick. That is a real degradation of detection latency and it is reported
 // (`admin/sweep-signals.ts`'s coverage check + GET /admin/ops/checks), because a
 // bound whose latency nobody publishes is the same blind spot pointing the
 // other way.
+//
+// THE SECOND ARGUMENT IS `leastVisited`, NOT THE SLICE. It was the slice until
+// 2026-08-20, and that is a different number whenever the shared fan-out
+// deadline stops a trailing leg partway through — which at real DO latency was
+// every tick, making the published figure 31x optimistic. `commitSweepCursor`
+// below already advances the rotation by the least-covered leg for exactly this
+// reason; the reported latency has to use the same quantity the cursor does.
 //
 // KEYSET, NOT OFFSET. `WHERE id > ? ORDER BY id LIMIT ?` bounds the D1 read
 // itself (the old `SELECT id FROM tenants_index` had no LIMIT, so the whole
