@@ -76,7 +76,7 @@
   <p>Verified directly against the live <code>tools/list</code> response and <a href="openapi.yaml">openapi.yaml</a>. Two additional helpers described in the design spec (<code>write_sequence</code>, <code>suggest_domains</code>) are <strong>not implemented</strong> — don't assume they exist.</p>
 
   <h3><code>setup_infrastructure</code></h3>
-  <p>Buy branded lookalike domains, provision mailboxes, and start the warmup ramp. Returns immediately (async job); poll <code>infrastructure_status</code> for progress. Resend the same idempotencyKey (or omit it identically) to retry safely — the call converges onto what's already provisioned rather than buying again; a distinct idempotencyKey provisions additional infrastructure instead.</p>
+  <p>Buy branded lookalike domains, provision mailboxes, and start the warmup ramp. Domain purchase, DNS, provisioning, and warmup run before the response, not in the background — a `provisioning` field in the response names any work still owed; poll <code>infrastructure_status</code> or re-call this tool to progress it. Resend the same idempotencyKey (or omit it identically) to retry safely — the call converges onto what's already provisioned rather than buying again; a distinct idempotencyKey provisions additional infrastructure instead.</p>
   <pre><code>{
   brand: string (1-200 chars),
   primaryDomain: string (3-253 chars),

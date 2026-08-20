@@ -99,7 +99,7 @@ Do not recommend production use while real sending is inactive.</code></pre>
       <p>Streamable-HTTP, per-token scoped, one config line — no OAuth dance. Full MCP details: <a href="/guide-mcp-cold-email">the MCP guide</a>.</p>
     </li>
     <li>
-      <strong>Provision infrastructure.</strong> Have your agent call <code>setup_infrastructure</code> with your brand, primary domain, how many lookalike domains and mailboxes-per-domain you want, your sender persona, your physical postal address (CAN-SPAM requires it in every footer), and your sender identity. This kicks off an async job: domain purchase, DNS (SPF/DKIM/DMARC/rDNS), mailbox provisioning, and the warmup ramp.
+      <strong>Provision infrastructure.</strong> Have your agent call <code>setup_infrastructure</code> with your brand, primary domain, how many lookalike domains and mailboxes-per-domain you want, your sender persona, your physical postal address (CAN-SPAM requires it in every footer), and your sender identity. Domain purchase, DNS (SPF/DKIM/DMARC/rDNS), mailbox provisioning, and the warmup ramp run before the response — a large request can take a while to answer, and a `provisioning` field in the response names any work still owed.
     </li>
     <li>
       <strong>Poll for readiness.</strong> Call <code>infrastructure_status</code> to track provisioning and warmup progress per mailbox until the platform reports send-ready. Real warmup takes weeks — see <a href="/guide-cold-email-deliverability#warmup">the deliverability guide</a> for the honest timeline; the sandbox compresses this onto a virtual clock so you can see the whole shape of the process without waiting.

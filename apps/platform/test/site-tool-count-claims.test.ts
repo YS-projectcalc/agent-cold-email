@@ -259,12 +259,25 @@ describe("claim-surface tool-count guard", () => {
     expect(stale, `${label} still claims retired tool count(s): ${stale.join(", ")}`).toEqual([]);
   });
 
-  it.each(CLAIM_SURFACES)("%s never uses a spelled-out stale cardinal (e.g. 'Twenty-four')", (label, text) => {
-    // Digit-based claims are covered by claimsToolCountOf above; this repo
-    // has twice shipped a spelled-out straggler after a numeric sweep (see
-    // docs/adversarial/fully-live-reframe-2026-07-19.md) because a plain "24"
-    // grep doesn't catch "Twenty-four".
-    expect(text, `${label} contains a stale spelled-out cardinal`).not.toMatch(/twenty-?four/i);
+  // Digit-based claims are covered by claimsToolCountOf above; this repo has
+  // shipped a spelled-out straggler after a numeric sweep more than once (see
+  // docs/adversarial/fully-live-reframe-2026-07-19.md — "Twenty-four" slipped
+  // past a plain "24" grep; TRAIN-3 claim-truth sweep 2026-08-19 — "Twenty-five"
+  // did too, in three MORE surfaces, because the original guard here only ever
+  // checked the ONE historical word). One spelled-out form per entry in
+  // RETIRED_TOOL_COUNTS, not just the single incident that prompted this test.
+  const RETIRED_SPELLED_CARDINALS: Record<(typeof RETIRED_TOOL_COUNTS)[number], string> = {
+    17: "seventeen",
+    19: "nineteen",
+    21: "twenty-?one",
+    24: "twenty-?four",
+    25: "twenty-?five",
+    27: "twenty-?seven",
+  };
+
+  it.each(CLAIM_SURFACES)("%s never uses a spelled-out retired cardinal (e.g. 'Twenty-four', 'Twenty-five')", (label, text) => {
+    const stale = RETIRED_TOOL_COUNTS.filter((n) => new RegExp(RETIRED_SPELLED_CARDINALS[n], "i").test(text));
+    expect(stale, `${label} still spells out retired tool count(s): ${stale.join(", ")}`).toEqual([]);
   });
 
   it.each([...SURFACES_THAT_STATE_THE_COUNT])("%s states the CURRENT tool count somewhere", (label) => {

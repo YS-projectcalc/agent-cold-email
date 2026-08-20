@@ -79,10 +79,14 @@ paths:
       tags: [infrastructure]
       summary: Provision branded lookalike domains and mailboxes; start warmup.
       description: >
-        Asynchronous: returns 202 immediately. Poll GET /infrastructure-status
-        for progress. In demo/free plans this runs entirely against a
-        fault-injecting sandbox — no real domain purchase or mailbox
-        provisioning occurs.
+        Domain purchase + DNS + mailbox provisioning + warmup run BEFORE the
+        response, not in the background — a large request can take a while
+        to answer. Returns 202 when work is still owed (a `provisioning`
+        field names which state), 200 when it finished within this call;
+        poll GET /infrastructure-status or re-call this endpoint to progress
+        a `provisioning` outcome. In demo/free plans this runs entirely
+        against a fault-injecting sandbox — no real domain purchase or
+        mailbox provisioning occurs.
 
 
         `domains` covers ordinals 0..domains-1; each ordinal fills to its own
@@ -145,10 +149,13 @@ paths:
       responses:
         '202':
           description: >
-            Provisioning started. Returns { jobId, billing } where `billing`
-            (MailboxBilling) is the SPEC §18 projection for the real
-            post-provision mailbox count. A quoteOnly:true request instead
-            returns 200 with { quoteOnly: true, billing } and provisions nothing.
+            Provisioning started. Returns { jobId, billing } where `jobId` is
+            a correlation id only, not a trackable job handle — there is no
+            job store and no endpoint that accepts it, so do not poll for it
+            or treat its presence as meaningful. `billing` (MailboxBilling)
+            is the SPEC §18 projection for the real post-provision mailbox
+            count. A quoteOnly:true request instead returns 200 with
+            { quoteOnly: true, billing } and provisions nothing.
 
 
             A `provisioning` field is present only when the call returned
