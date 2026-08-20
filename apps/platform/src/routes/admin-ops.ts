@@ -3,14 +3,14 @@ import { TerminateInput } from "@coldstart/shared";
 import { getTenantIndexById } from "../admin/db.js";
 import { buildOpsDigest, runDunningSweep } from "../admin/ops-sweep.js";
 import { terminateTenantForAbuse } from "../admin/terminate.js";
-import { CHECK_RETENTION_MS, readAllCheckRows } from "../admin/watchtower.js";
+import { CHECK_RETENTION_MS, readCheckRows, readPresentCheckNames } from "../admin/watchtower.js";
 import { expectedCheckRoster } from "../admin/watchtower-roster.js";
 import { readSweepFreshness } from "../admin/watchtower-infra.js";
 import { CRON_SWEEP_CHECK, D1_CHECK } from "../admin/watchtower-alerts.js";
 import { RealClock } from "../clock.js";
 import { countWaitlistEmails, listWaitlistEmails } from "../db.js";
 import type { Env } from "../env.js";
-import { parseJsonBody } from "../validate.js";
+import { parseIntQueryParam, parseJsonBody } from "../validate.js";
 
 // Item 3e (docs/adversarial/class-sweep-vendor-truth-2026-08-18.md, D7) — the
 // checks GET /admin/ops/checks structurally cannot report (they live in
@@ -53,7 +53,7 @@ export const adminOpsRoute = new Hono<{ Bindings: Env }>()
   })
   // Founder ORDER 2026-08-14 (ROADMAP.md ## Open) — the operator's own Claude
   // watch polls per-check state instead of parsing OPS_ALERT_EMAIL alerts.
-  // READ-ONLY (`readAllCheckRows` is a pure SELECT on `watchtower_state`, the
+  // READ-ONLY (`readCheckRows` is a pure SELECT on `watchtower_state`, the
   // same table `reconcileAlerts` writes) — this route never calls
   // reconcileAlerts/decideAlert, so it cannot touch alert emission, dedup
   // state or check registration. Unhealthy checks first; `?unhealthy=1`
@@ -64,17 +64,22 @@ export const adminOpsRoute = new Hono<{ Bindings: Env }>()
   // (`../watchtower-do.ts:39-42`, 2026-08-06 alerting audit B1/B2 — a check
   // ON D1 cannot itself be stored IN D1) and NEVER appear here. A consumer
   // MUST pair this endpoint with `GET /status` (`./status.ts`), which
-  // surfaces both as a 503 `degraded`. Per-row `updatedAt` staleness is this
-  // endpoint's own dead-cron tell: a dead cron stops writing entirely, so
+  // surfaces both as a 503 `degraded`. A dead cron stops writing entirely, so
   // this route keeps serving a frozen, healthy-looking snapshot rather than
-  // ever going empty or erroring.
+  // ever going empty or erroring — which is why the dead-cron tell is the
+  // explicit `sweepAgeSeconds` below and NOT per-row `updatedAt` freshness
+  // (that inference is doubly dead now: the sweep skips no-op writes, and a
+  // paged read cannot see the row whose mtime you were reasoning about).
   //
-  // ROWS ARE RETIRED NOW, not accumulated (scale audit S5): a check that has
-  // been healthy for `CHECK_RETENTION_MS` is DELETEd by the sweep, so this
-  // table no longer grows with the platform's lifetime count of entities that
-  // ever alerted. That closes the unbounded-growth ledger item for this
-  // endpoint and is why it still needs no cap — but it also means a row you saw
-  // last month may be gone, so `retentionMs` rides on the wire.
+  // TWO INDEPENDENT BOUNDS, and both are needed. Rows are RETIRED (scale audit
+  // S5): a check healthy for `CHECK_RETENTION_MS` is DELETEd by the sweep, so
+  // the table no longer grows with the platform's lifetime count of entities
+  // that ever alerted — but retention bounds it only by TIME, and a platform
+  // can hold far more than a page of checks inside one window. An incident is
+  // exactly when it does. So the READ is bounded too (S8, `?limit=` clamped to
+  // the same default/max every other admin list read uses), and both bounds are
+  // published: `retentionMs` says a row you saw last month may be gone, and
+  // `total`/`truncated` say whether the rows you are holding are all of them.
   //
   // THE ROSTER IS THE DENOMINATOR (docs/adversarial/
   // class-sweep-watch-completeness-2026-08-17.md). Two of the always-on checks
@@ -90,19 +95,35 @@ export const adminOpsRoute = new Hono<{ Bindings: Env }>()
   // sweep now skips a write for a check whose state and detail are unchanged
   // (S5), so that inference is gone. This number comes from
   // `watchtower_cursor`, which every completed sweep stamps unconditionally.
+  // `?unhealthy=1` STILL RETURNS EVERY UNHEALTHY ROW, up to the clamp — the
+  // filter is applied in SQL, and the page order puts unhealthy rows first in
+  // the unfiltered read too, so a broken check can never be buried behind a
+  // page of healthy ones. Past the clamp (>200 unhealthy checks, or >`?limit=`
+  // up to 1000) the most-recently-changed are returned first and
+  // `truncated: true` with `total` says exactly how many were left out: the
+  // operator loses ROWS, never the COUNT.
+  //
+  // `unhealthyCount` keeps its original meaning — the whole store, never this
+  // page's share — because the ops watch polls it against a known baseline and
+  // silently redefining a number a monitor compares against is the defect class
+  // this endpoint exists to guard.
   .get("/admin/ops/checks", async (c) => {
     const onlyUnhealthy = c.req.query("unhealthy") === "1";
-    const [rows, freshness] = await Promise.all([readAllCheckRows(c.env), readSweepFreshness(c.env, new RealClock().now())]);
-    const unhealthyCount = rows.filter((r) => !r.healthy).length;
-    const checks = (onlyUnhealthy ? rows.filter((r) => !r.healthy) : rows)
-      // Stable sort (V8/ES2019+): unhealthy first, healthy after, each group
-      // keeping the D1 read's own order.
-      .sort((a, b) => Number(a.healthy) - Number(b.healthy));
-    const present = new Set(rows.map((r) => r.name));
     const expected = expectedCheckRoster(c.env);
+    const [page, freshness, present] = await Promise.all([
+      readCheckRows(c.env, { limit: parseIntQueryParam(c.req.query("limit")), onlyUnhealthy }),
+      readSweepFreshness(c.env, new RealClock().now()),
+      // Asked of the TABLE, not of the page: deriving `missing` from a page
+      // would report every expected check that fell past the LIMIT as absent.
+      readPresentCheckNames(c.env, expected),
+    ]);
+    const total = onlyUnhealthy ? page.unhealthyTotal : page.total;
     return c.json({
-      checks,
-      unhealthyCount,
+      checks: page.rows,
+      count: page.rows.length,
+      total,
+      truncated: page.rows.length < total,
+      unhealthyCount: page.unhealthyTotal,
       expected,
       missing: expected.filter((name) => !present.has(name)),
       excludesDoStoreChecks: DO_STORE_ONLY_CHECKS,

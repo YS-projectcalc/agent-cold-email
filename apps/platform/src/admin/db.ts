@@ -14,8 +14,13 @@ import type { SupportCategory } from "./support-kb.js";
 // shares. 200 mirrors the per-tenant messages twin (engine/tenant-messages.ts),
 // which is the convention this codebase already settled on; the max exists so an
 // explicit `?limit=` cannot re-open the unbounded read.
-const DEFAULT_ADMIN_LIST_LIMIT = 200;
-const MAX_ADMIN_LIST_LIMIT = 1000;
+//
+// EXPORTED so the last member of this class — `readCheckRows` in
+// admin/watchtower.ts, which lives in that file because it reads
+// `watchtower_state` and nothing else here does — bounds itself with the SAME
+// two numbers rather than a second pair that can drift (CLAUDE.md rule c).
+export const DEFAULT_ADMIN_LIST_LIMIT = 200;
+export const MAX_ADMIN_LIST_LIMIT = 1000;
 
 export interface SupportTicketRow {
   id: string;

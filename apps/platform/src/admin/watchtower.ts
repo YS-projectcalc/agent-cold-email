@@ -20,6 +20,8 @@
 import type { Notified, RecoveryBasis } from "@coldstart/shared";
 import { isLifecycleFrozen } from "../engine/billing-state.js";
 import { countTenants, resolveSweepTenants, sweepTenants, type SweepScope } from "./tenant-slice.js";
+import { DEFAULT_ADMIN_LIST_LIMIT, MAX_ADMIN_LIST_LIMIT } from "./db.js";
+import { clampListLimit } from "../validate.js";
 import type { Env } from "../env.js";
 import { isPaidPlan } from "@coldstart/shared";
 import {
@@ -906,32 +908,123 @@ export interface WatchtowerCheckRow {
   updatedAt: number;
 }
 
+/** One PAGE of check rows, with the totals it was drawn from. */
+export interface WatchtowerCheckPage {
+  rows: WatchtowerCheckRow[];
+  /** Every row in the table, whatever this page's filter was. */
+  total: number;
+  /** Every UNHEALTHY row in the table — never this page's share of them. */
+  unhealthyTotal: number;
+}
+
 /**
- * Every persisted check row, unfiltered — for `GET /admin/ops/checks`
- * (`../routes/admin-ops.ts`), the operator's own agent polling per-check
- * health instead of parsing `OPS_ALERT_EMAIL` alerts. Pure SELECT: it shares
- * `watchtower_state` with `reconcileAlerts` but never writes to it, so this
- * read path cannot affect alert emission, dedup state or the 6h cooldown.
+ * One bounded page of persisted check rows, PLUS the totals it came from — for
+ * `GET /admin/ops/checks` (`../routes/admin-ops.ts`), the operator's own agent
+ * polling per-check health instead of parsing `OPS_ALERT_EMAIL` alerts. Pure
+ * SELECT: it shares `watchtower_state` with `reconcileAlerts` but never writes
+ * to it, so this read path cannot affect alert emission, dedup state or the 6h
+ * cooldown.
+ *
+ * S8 (docs/adversarial/scale-readiness-audit-2026-08-17.md) — this was the last
+ * unbounded cross-tenant operator read: no LIMIT, no cursor, no truncation, over
+ * a table the S5 retirement bounds only by TIME (a platform can hold more than
+ * a page of checks inside one retention window, and an incident is exactly when
+ * it does).
+ *
+ * THE PAGE AND ITS DENOMINATOR COME OUT TOGETHER, deliberately: a caller cannot
+ * obtain the rows without also obtaining the numbers that say whether they are
+ * all of them. That is the whole watch-completeness lesson applied to its own
+ * fix — bounding a read without publishing what it was bounded from just moves
+ * the blind spot.
+ *
+ * TWO SEPARATE MECHANISMS KEEP A BROKEN CHECK ON PAGE ONE, and they cover
+ * different reads — worth stating precisely, because each one alone looks
+ * sufficient:
+ *
+ *  - the ORDER BY sorts unhealthy first, which is what the UNFILTERED read
+ *    depends on. Without it, a page of healthy checks with newer `since_ts`
+ *    buries every broken one past the LIMIT. (Executed: dropping the
+ *    `(status = 'healthy') ASC` term reds `admin-ops-checks.test.ts`.)
+ *  - the WHERE is what makes `?unhealthy=1` a filtered READ rather than a
+ *    filtered PAGE. Given the ordering above the two happen to agree on which
+ *    rows come back, so this is not load-bearing for correctness today — what
+ *    it buys is not materialising a page of healthy rows only to discard them,
+ *    and a `count` that needs no post-filtering. Stated rather than dressed up
+ *    as the guard.
+ *
+ * The clamp can only cost you unhealthy rows once there are MORE unhealthy rows
+ * than the clamp, and `unhealthyTotal` + the route's `truncated` say so
+ * explicitly when it happens.
+ *
+ * The order is also TOTAL (`since_ts DESC, check_name ASC` after the status
+ * term): without a total order a LIMIT returns whatever the index walk
+ * produces, so successive polls could disagree about which rows exist and a
+ * watch that diffs pages would see phantom appearances and disappearances.
  */
-export async function readAllCheckRows(env: Env): Promise<WatchtowerCheckRow[]> {
+export async function readCheckRows(
+  env: Env,
+  opts: { limit?: number; onlyUnhealthy?: boolean } = {},
+): Promise<WatchtowerCheckPage> {
+  const limit = clampListLimit(opts.limit, DEFAULT_ADMIN_LIST_LIMIT, MAX_ADMIN_LIST_LIMIT);
+  const [totals, page] = await Promise.all([
+    env.DB.prepare(
+      `SELECT COUNT(*) as total, SUM(CASE WHEN status = 'unhealthy' THEN 1 ELSE 0 END) as unhealthy FROM watchtower_state`,
+    ).first<{ total: number | null; unhealthy: number | null }>(),
+    env.DB.prepare(
+      `SELECT check_name, status, since_ts, last_alert_ts, last_detail, updated_at
+         FROM watchtower_state
+        ${opts.onlyUnhealthy ? `WHERE status = 'unhealthy'` : ``}
+        ORDER BY (status = 'healthy') ASC, since_ts DESC, check_name ASC
+        LIMIT ?`,
+    )
+      .bind(limit)
+      .all<{
+        check_name: string;
+        status: "healthy" | "unhealthy";
+        since_ts: number;
+        last_alert_ts: number | null;
+        last_detail: string;
+        updated_at: number;
+      }>(),
+  ]);
+
+  return {
+    rows: page.results.map((row) => ({
+      name: row.check_name,
+      healthy: row.status === "healthy",
+      detail: row.last_detail,
+      sinceTs: row.since_ts,
+      lastAlertTs: row.last_alert_ts,
+      updatedAt: row.updated_at,
+    })),
+    total: totals?.total ?? 0,
+    unhealthyTotal: totals?.unhealthy ?? 0,
+  };
+}
+
+/**
+ * Which of `names` currently have a row — the ROSTER lookup, asked directly of
+ * the table rather than inferred from a page.
+ *
+ * `missing` (the roster denominator this endpoint publishes) used to be derived
+ * from the full unfiltered read, which was correct only because that read was
+ * unbounded. Deriving it from a PAGE instead would name every expected check
+ * that fell past the LIMIT as absent — turning the guard against a silently
+ * deleted check into a generator of false ones, on exactly the surface an
+ * operator trusts to tell them what is not being watched.
+ *
+ * Bounded by the caller's own list: `expectedCheckRoster` returns a
+ * code-defined roster (single digits today), comfortably inside D1's 100
+ * bound-parameter ceiling per statement.
+ */
+export async function readPresentCheckNames(env: Env, names: readonly string[]): Promise<Set<string>> {
+  if (names.length === 0) return new Set();
   const result = await env.DB.prepare(
-    `SELECT check_name, status, since_ts, last_alert_ts, last_detail, updated_at FROM watchtower_state`,
-  ).all<{
-    check_name: string;
-    status: "healthy" | "unhealthy";
-    since_ts: number;
-    last_alert_ts: number | null;
-    last_detail: string;
-    updated_at: number;
-  }>();
-  return result.results.map((row) => ({
-    name: row.check_name,
-    healthy: row.status === "healthy",
-    detail: row.last_detail,
-    sinceTs: row.since_ts,
-    lastAlertTs: row.last_alert_ts,
-    updatedAt: row.updated_at,
-  }));
+    `SELECT check_name FROM watchtower_state WHERE check_name IN (${names.map(() => "?").join(", ")})`,
+  )
+    .bind(...names)
+    .all<{ check_name: string }>();
+  return new Set(result.results.map((row) => row.check_name));
 }
 
 /** The persisted state PLUS the detail it was written with — `reconcileAlerts`
