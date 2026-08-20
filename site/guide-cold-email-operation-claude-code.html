@@ -103,7 +103,7 @@ claude mcp add --transport http coldrig \
   <table>
     <thead><tr><th>Capability</th><th>Status</th><th>How Claude Code actually gets it</th></tr></thead>
     <tbody>
-      <tr><td>Reply / bounce / complaint webhooks (push)</td><td>Live</td><td><code>configure_webhook</code> subscribes a URL to <code>reply</code>, <code>bounce</code>, <code>soft_bounce</code>, and <code>complaint</code> events (HMAC-SHA256 signed); <code>get_webhooks</code> lists subscriptions and recent deliveries.</td></tr>
+      <tr><td>Reply / bounce / complaint webhooks (push)</td><td>Live</td><td><code>configure_webhook</code> subscribes a URL to <code>reply</code>, <code>bounce</code>, <code>soft_bounce</code>, <code>complaint</code>, and <code>unsubscribe</code> events (HMAC-SHA256 signed); <code>get_webhooks</code> lists subscriptions and recent deliveries.</td></tr>
       <tr><td>Reply / bounce feed (pull)</td><td>Live</td><td><code>activity</code> — a cursor-paginated, chronological feed you page through — and <code>inbox</code> for the unified reply view.</td></tr>
       <tr><td>Near-real-time triage</td><td>Live, either way</td><td>Configure a webhook for push delivery, or run Claude Code on a schedule you control (your own cron, a CI job, or simply asking each session) that calls <code>activity</code> with the last cursor — your choice.</td></tr>
       <tr><td>AI-drafted replies</td><td>Not provided</td><td>Claude Code drafts and sends replies itself via <code>reply</code>; there is no built-in autoresponder or AI SDR.</td></tr>

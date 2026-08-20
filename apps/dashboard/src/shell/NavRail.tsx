@@ -1,6 +1,6 @@
 import { NavLink } from "react-router-dom";
 import { useAuth } from "../auth/AuthProvider";
-import { BillingIcon, DashboardIcon, InboxIcon, LogoutIcon, SettingsIcon, SetupIcon } from "../lib/icons";
+import { BillingIcon, DashboardIcon, InboxIcon, LogoutIcon, MessagesIcon, SettingsIcon, SetupIcon } from "../lib/icons";
 import { BRAND_NAME } from "../lib/brand";
 import { LogoMark } from "../lib/LogoMark";
 
@@ -24,6 +24,10 @@ export function NavRail() {
       <NavLink to="setup" className={({ isActive }) => `${linkBase} ${isActive ? linkActive : ""}`}>
         <SetupIcon />
         Setup
+      </NavLink>
+      <NavLink to="messages" className={({ isActive }) => `${linkBase} ${isActive ? linkActive : ""}`}>
+        <MessagesIcon />
+        Messages
       </NavLink>
       <NavLink to="billing" className={({ isActive }) => `${linkBase} ${isActive ? linkActive : ""}`}>
         <BillingIcon />

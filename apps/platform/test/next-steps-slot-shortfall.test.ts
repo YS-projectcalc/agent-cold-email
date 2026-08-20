@@ -239,7 +239,13 @@ describe("R2-BLOCKING part 2 — the durable expiry cannot outrun the orphan gra
     // Age the row past the grace without waiting for it.
     await withTenantContext(tenantId, (ctx) =>
       ctx.sql.exec(
-        `UPDATE tenant_messages SET created_at = ? WHERE tenant_id = ?`,
+        // BOTH time columns (IN-3): the min-age expiry gate reads
+        // `last_occurred_at` ("when did we last SEE this failure"), and
+        // `created_at` is now immutable. A row that is genuinely stale is old on
+        // both counts — first seen long ago AND not recurred since — which is
+        // exactly the state this test means by "backdated".
+        `UPDATE tenant_messages SET created_at = ?, last_occurred_at = ? WHERE tenant_id = ?`,
+        ctx.clock.now() - DEFAULT_PROVISIONING_ORPHAN_GRACE_MS * 2,
         ctx.clock.now() - DEFAULT_PROVISIONING_ORPHAN_GRACE_MS * 2,
         ctx.tenantId,
       ),
@@ -535,7 +541,7 @@ describe("R3 NON-BLOCKING fold-ins", () => {
     const tenantId = await seedTenant({ ordinals: [{ domain: "vclock0.com", liveMailboxes: 2 }], billedQuantity: 5 });
     await withTenantContext(tenantId, (ctx) =>
       ctx.sql.exec(
-        `UPDATE tenant_profile SET clock_mode = 'virtual', clock_base = ?, clock_offset = ?, clock_multiplier = 1 WHERE id = ?`,
+        `UPDATE tenant_profile SET clock_mode = 'virtual', clock_base = ?, clock_offset = ? WHERE id = ?`,
         Date.now(),
         40 * 24 * 60 * 60 * 1000,
         ctx.tenantId,

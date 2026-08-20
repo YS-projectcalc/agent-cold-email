@@ -121,7 +121,13 @@ function derive(tenantId: string): Promise<NextSteps> {
 function ageMessagesPastOrphanGrace(tenantId: string): Promise<void> {
   return withTenantContext(tenantId, (ctx) => {
     ctx.sql.exec(
-      `UPDATE tenant_messages SET created_at = ? WHERE tenant_id = ?`,
+      // BOTH time columns (IN-3): the min-age expiry gate reads
+      // `last_occurred_at` ("when did we last SEE this failure"), and
+      // `created_at` is now immutable. A row that is genuinely stale is old on
+      // both counts — first seen long ago AND not recurred since — which is
+      // exactly the state these tests mean by "backdated".
+      `UPDATE tenant_messages SET created_at = ?, last_occurred_at = ? WHERE tenant_id = ?`,
+      ctx.clock.now() - DEFAULT_PROVISIONING_ORPHAN_GRACE_MS * 2,
       ctx.clock.now() - DEFAULT_PROVISIONING_ORPHAN_GRACE_MS * 2,
       ctx.tenantId,
     );
@@ -273,6 +279,44 @@ describe("B-2 — the exclusion is banked durably, so operator surfaces stop sho
     // acknowledged it".
     expect(retry?.read_at).toBeNull();
     expect(human?.expires_at, "a human-written action item is never expired by this").toBeNull();
+  });
+
+  // NB-3, RECONCILED WITH IN-3 (docs/adversarial/class-sweep-dedup-semantics-
+  // 2026-08-17.md). The min-age gate must measure "time since the platform last
+  // OBSERVED the failure", so a condition that keeps RECURRING is never expired
+  // while it is still failing. That used to ride on emitTenantMessage
+  // re-stamping `created_at`, which cost the original occurrence time and moved
+  // live rows across issued pagination cursors; the recurrence now has its own
+  // column and this gate reads it.
+  //
+  // The r3 gate noted that "the wave's own tests age rows by direct UPDATE, so
+  // nothing exercises the re-stamp path". This is that test.
+  it("does NOT expire a resolved row that RECURRED inside the grace, however old it is", async () => {
+    const tenantId = await seedTenant(HEALTHY_FLEET);
+    await emitRetrySetup(tenantId);
+    // Old by first-occurrence, so a gate reading `created_at` would bank it.
+    await ageMessagesPastOrphanGrace(tenantId);
+
+    // ...but the platform just observed the failure again. A re-emit under the
+    // SAME dedup key is the real production path for that.
+    await emitRetrySetup(tenantId);
+
+    await tenantStub(tenantId).opsSummary(realNowMs());
+
+    const retry = (await messageRows(tenantId)).find((r) => r.kind === "retry_setup");
+    expect(retry?.expires_at, "a freshly re-observed failure must not be expired").toBeNull();
+
+    // And the first-occurrence time is still intact, which is the other half:
+    // the row can say how long this has been going on.
+    const times = await withTenantContext(tenantId, (ctx) =>
+      ctx.sql
+        .exec<{ created_at: number; last_occurred_at: number }>(
+          `SELECT created_at, last_occurred_at FROM tenant_messages WHERE tenant_id = ? AND kind = 'retry_setup'`,
+          ctx.tenantId,
+        )
+        .one(),
+    );
+    expect(times.last_occurred_at).toBeGreaterThan(times.created_at);
   });
 
   it("does NOT expire a row whose condition still holds", async () => {

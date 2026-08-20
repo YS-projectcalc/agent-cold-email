@@ -75,7 +75,11 @@ export const waitlistRoute = new Hono<{ Bindings: Env }>()
 
     const email = parsed.data.email.trim().toLowerCase();
     // Durable D1 store, no expiry. INSERT OR IGNORE dedupes by email (PK) —
-    // a repeat submission is a silent no-op, still `ok: true`.
+    // a repeat submission is a silent no-op, still `ok: true`, and the silence
+    // is REQUIRED rather than incidental: this route is unauthenticated, so an
+    // answer that differed for a known address would be an email enumeration
+    // oracle (IN-18 — see insertWaitlistEmail's doc, and
+    // test/waitlist-nondisclosure.test.ts which pins the responses identical).
     await insertWaitlistEmail(c.env, email, new RealClock().now());
 
     return json({ ok: true }, 200, origin);

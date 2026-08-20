@@ -110,6 +110,12 @@ export interface ThreadDetail {
 
 export interface ReplyResult {
   messageId: string;
+  // Collapsed<T> (train 4, packages/shared/src/provenance.ts): true means NO
+  // new email was sent — `messageId` is from an earlier send this call
+  // matched (same Idempotency-Key at any time, or an identical body within
+  // the last 10 minutes when unkeyed); false means this call sent a new
+  // email.
+  deduplicated: boolean;
 }
 
 export interface ActivityItem {
@@ -154,6 +160,17 @@ export interface MailboxHealthReport {
   // was actually reported. Not rendered in the mailbox table; kept typed for
   // parity with the API shape, so anything that starts rendering them must
   // handle the null rather than print a fabricated 0.
+  //
+  // `vendorHealth`/`vendorHealthError` (class sweep TRAIN-3 widening, C-M2,
+  // docs/adversarial/sweep-completeness-pass-2026-08-17.md) — the
+  // DISCRIMINATOR: `vendorHealth:'unknown'` means the two numbers above are
+  // BOTH null and meaningless (the lookup failed for this mailbox), not
+  // "the vendor reported zero". Previously omitted here despite the file's
+  // own comment claiming "parity with the API shape" — a future renderer of
+  // the two `vendor*` numbers without this field would have no way to tell
+  // a real zero-signal report from a failed lookup.
+  vendorHealth: "ok" | "unknown";
+  vendorHealthError: string | null;
   vendorReputationScore: number | null;
   vendorPlacementRate: number | null;
   // Surfaced by apps/platform/src/engine/provisioning.ts's
@@ -240,4 +257,36 @@ export interface CheckoutResult {
   mode: "stripe" | "simulated";
   url: string;
   sessionId: string;
+}
+
+// W-M5 (docs/adversarial/sweep-completeness-pass-2026-08-17.md) — mirrors
+// apps/platform/src/engine/tenant-messages.ts's TenantMessage/
+// MessageListPage (GET /messages, the SAME endpoint the MCP list_messages
+// tool calls). This is the dashboard's human-fallback render path: before
+// this type existed, the dashboard could not render an operator message at
+// all, which is the other half of why a founder-sent operator reply once sat
+// unread for days — the agent wasn't running, and the human had nowhere to
+// look. `readAt` here means "acked by THIS tenant's agent via ack_message",
+// not "seen by a human" — matches the agent-facing surface's own semantics
+// (never renamed to "ackedAt" the way the admin/operator surface does,
+// because this IS the tenant-facing surface, not the operator one).
+export interface TenantMessage {
+  id: string;
+  kind: string;
+  severity: "info" | "action_required" | "operator_pending" | "terminal";
+  body: string;
+  actionHint: Record<string, unknown> | null;
+  source: "system" | "operator";
+  createdAt: number;
+  readAt: number | null;
+}
+
+export interface MessageListPage {
+  messages: TenantMessage[];
+  nextCursor: string | null;
+}
+
+export interface AckMessageResult {
+  acked: true;
+  alreadyAcked: boolean;
 }

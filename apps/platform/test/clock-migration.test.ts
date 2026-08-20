@@ -334,7 +334,7 @@ describe("clock selection (wave-2 DECISION 2)", () => {
   });
 
   it("requireVirtualClock is a structural guard, and resolves THROUGH the delegate", () => {
-    const virtual = new VirtualClock(1000, 0, 1);
+    const virtual = new VirtualClock(1000, 0);
     expect(requireVirtualClock(virtual)).toBe(virtual);
     expect(requireVirtualClock(new DelegatingClock(() => virtual))).toBe(virtual);
     expect(() => requireVirtualClock(new RealClock())).toThrow(/real clock/i);

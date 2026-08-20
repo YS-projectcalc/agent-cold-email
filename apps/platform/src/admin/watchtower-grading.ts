@@ -96,6 +96,28 @@ export interface StreakGrade {
  * has crossed its threshold EVERY further tick keeps returning the same grade —
  * the alert machine, not this function, is what stops that becoming a second
  * email (it sees no state change and suppresses within the cooldown).
+ *
+ * THE BAD TALLY SURVIVES A GOOD TICK; only a CONFIRMED recovery clears it (IN-8,
+ * docs/adversarial/class-sweep-dedup-semantics-2026-08-17.md, widened by
+ * sweep-completeness-pass-2026-08-17.md §4(ii) to "any grader whose no-signal
+ * state is reported identically to healthy").
+ *
+ * This used to zero `unhealthy` on ANY good tick, which made the gate
+ * "N CONSECUTIVE bad ticks" — and a leg that fails INTERMITTENTLY rather than
+ * continuously never assembles N in a row. It therefore returned `null` (HOLD)
+ * forever, the caller reports nothing for a HOLD, and a sweep leg failing half
+ * the time stayed silent indefinitely. Executed: 8 ticks of [bad, good, ...]
+ * produced no grade at all. The dead band was not a band on SEVERITY, it was
+ * "anything short of a 100% duty cycle".
+ *
+ * Carrying the tally across good ticks makes the gate "N bad ticks not yet
+ * answered by a full recovery run", which is the condition the alert actually
+ * means. The hysteresis this function exists for is untouched, because it lives
+ * entirely in the RECOVERY direction: a recovery still requires `recoverAfter`
+ * consecutive clean ticks, so an intermittent leg alerts ONCE and then stays
+ * unhealthy rather than producing the alternating email pair (24 emails in 2
+ * simulated hours) that motivated this file. An isolated blip still clears — it
+ * simply has to be answered by a real clean run first.
  */
 export function gradeStreak(
   prev: StreakState,
@@ -107,6 +129,7 @@ export function gradeStreak(
     const next = { unhealthy: prev.unhealthy + 1, healthy: 0 };
     return { next, grade: next.unhealthy >= alertAfter ? false : null };
   }
-  const next = { unhealthy: 0, healthy: prev.healthy + 1 };
-  return { next, grade: next.healthy >= recoverAfter ? true : null };
+  const healthy = prev.healthy + 1;
+  const recovered = healthy >= recoverAfter;
+  return { next: { unhealthy: recovered ? 0 : prev.unhealthy, healthy }, grade: recovered ? true : null };
 }

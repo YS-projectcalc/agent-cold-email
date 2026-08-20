@@ -31,10 +31,10 @@ Full design rationale: [`SPEC.md`](./SPEC.md).
 | Tool | What it does |
 |---|---|
 | `setup_infrastructure` | Buy branded lookalike domains, provision mailboxes, kick off warmup |
-| `infrastructure_status` | Provisioning + warmup progress, per-mailbox health, send-readiness date |
+| `infrastructure_status` | Provisioning + warmup progress, per-mailbox health, send-readiness (a boolean per mailbox and account-wide, not an ETA) |
 | `launch_campaign` | Create and activate a sequence against a lead list |
 | `campaign_results` | Per-campaign sends, replies, bounces, complaints |
-| `metrics` | Account-wide deliverability + warmup health |
+| `metrics` | Account-wide outcome totals (sent, reply, bounce, complaint, unsubscribe, failed, soft_bounce) — use `infrastructure_status` for warmup/deliverability health |
 | `inbox` | Unified reply inbox across all mailboxes |
 | `thread` | One thread's full message history |
 | `reply` | Send a reply on a thread (stop-on-reply is automatic) |
@@ -48,7 +48,7 @@ Full design rationale: [`SPEC.md`](./SPEC.md).
 | `list_campaigns` | List every campaign with id, name, status, and event counts |
 | `activity` | Unified, chronological feed of campaign events + deliverability control-loop actions |
 | `get_webhooks` | List outbound webhook subscriptions, or fetch one plus its recent delivery/attempt log |
-| `configure_webhook` | Create/update/delete an outbound webhook — push reply, bounce, soft_bounce, and complaint events (HMAC-signed) to your own HTTPS endpoint |
+| `configure_webhook` | Create/update/delete an outbound webhook — push reply, bounce, soft_bounce, complaint, and unsubscribe events (HMAC-signed) to your own HTTPS endpoint |
 | `get_byo_domains` | List your bring-your-own domains, or fetch one domain's full intake detail (pre-flight scan, abuse verdict, consent status) |
 | `configure_byo_domain` | Register or advance a BYO domain intake — register, poll DNS, acknowledge primary-domain consent, request platform-provisioned mailboxes, or connect an existing mailbox you already hold credentials for |
 | `suppress_lead` | Permanently suppress an email address tenant-wide — the manual "stop emailing me" path for opt-outs the typed-unsubscribe matcher misses |
@@ -121,7 +121,7 @@ Real sending runs live in production alongside the full sandbox — this is no l
 - ✅ A public HTTP facade covering the full 28-intent surface (this repo), live at the URL above.
 - ✅ A hosted MCP endpoint (`/mcp`, JSON-RPC 2.0 over streamable HTTP) exposing the same 28 tools, live now.
 - ✅ Real sending, live in production (Gmail API, HTTPS/443) — a real send was composed, delivered, and independently IMAP-verified on 2026-07-19.
-- ✅ Real outbound push webhooks (`get_webhooks`, `configure_webhook`) — reply, bounce, soft_bounce, and complaint events deliver HMAC-signed to your own HTTPS endpoint, alongside the existing pollable `activity` feed.
+- ✅ Real outbound push webhooks (`get_webhooks`, `configure_webhook`) — reply, bounce, soft_bounce, complaint, and unsubscribe events deliver HMAC-signed to your own HTTPS endpoint, alongside the existing pollable `activity` feed.
 - ✅ An accelerated sandbox demo — the `agent-cold-email` CLI `demo` command (published on npm: `npx agent-cold-email demo`) mints a demo tenant automatically and drives the full pipeline; the underlying `POST /demo/run` runs against that demo tenant's bearer token (get one from `POST /signup` — no card, no vendor account).
 - ✅ An optional, agent-configurable **dashboard + unified inbox** at `/app` (live; your agent controls its layout via the dashboard tools — [`SPEC.md` §19](./SPEC.md)).
 - ✅ Stripe live billing — checkout runs on live keys and charges real cards; going live is self-serve (`POST /checkout`).

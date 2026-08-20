@@ -86,7 +86,25 @@ describe("NB-2 — cron-leg failures reach the founder, damped", () => {
     expect(mailer.sent[0]!.text).toContain("sendPipeline.budgetExpiries=2");
   });
 
-  it("an intermittent leg never produces an alternating alert/recovery pair", async () => {
+  // ASSERTION CHANGED, DELIBERATELY (IN-8, docs/adversarial/class-sweep-dedup-
+  // semantics-2026-08-17.md; the sweep's failing-test sketch 5 predicted this
+  // test would red-line). It used to assert ZERO emails here, which is not what
+  // its name says and not what the anti-storm property requires — it was the
+  // defect written down as spec.
+  //
+  // What is actually happening below: a cron sweep leg failing EVERY OTHER TICK
+  // for two hours. That is 12 real failures. `gradeStreak` zeroed its unhealthy
+  // tally on any good tick, so the leg never reached LEG_ALERT_AFTER_SWEEPS
+  // CONSECUTIVE bad ticks, returned HOLD forever, and the founder was told
+  // nothing — permanently, for a leg failing half the time. Asserting `[]` made
+  // that silence the requirement.
+  //
+  // The property this test exists to protect is the NB-1 cry-wolf one: no
+  // ALTERNATING alert/recovery pair (the pre-NB-1 code sent 24 emails in this
+  // exact scenario). That is preserved and is asserted precisely below — ONE
+  // unhealthy email, and no recovery email, because an intermittent leg never
+  // assembles a full clean recovery run.
+  it("an intermittent leg alerts ONCE and never produces an alternating alert/recovery pair", async () => {
     const mailer = new SandboxOpsMailer();
     // 24 ticks (2h), failing every other one — the NB-1 flap pattern, applied
     // to the leg counters instead.
@@ -94,7 +112,8 @@ describe("NB-2 — cron-leg failures reach the founder, damped", () => {
       const legs = i % 2 === 0 ? failingLegs : { dunning: { errors: 0 } };
       await reportSweepSignals(env, mailer, { legs, digest: null }, T0 + i * 300_000);
     }
-    expect(legSubjects(mailer)).toEqual([]);
+    expect(legSubjects(mailer)).toEqual(["[coldrig] Ops sweep legs: UNHEALTHY"]);
+    expect(legSubjects(mailer).filter((s) => s.includes("RECOVERED"))).toEqual([]);
   });
 
   it("recovers only after consecutive clean ticks", async () => {

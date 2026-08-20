@@ -1,20 +1,24 @@
 # hard-builder memory index
 
 > One line per memory. The fix recipes, repro shapes and revert-proofs live in the linked files — open the file before acting on a hook.
+- [changed-detail-escape-storms-on-alternation](changed-detail-escape-storms-on-alternation.md) — ⚠️ escaping a cooldown on a CHANGED detail storms on alternation (13 emails/13 ticks); needs a per-episode announced SET.
+- [dedup-key-is-also-spent-at-the-vendor](dedup-key-is-also-spent-at-the-vendor.md) — ⚠️ shrinking a LOCAL dedup window is a no-op when the vendor caches the key; fix the KEY (durable epoch, not a clock bucket).
+- [sweep-prescribed-key-needs-component-provenance-check](sweep-prescribed-key-needs-component-provenance-check.md) — ⚠️ `receivedAt` is POLL time; provenance-check every component of a prescribed key.
+- [two-waves-fight-over-one-column-split-it](two-waves-fight-over-one-column-split-it.md) — a sweep-vs-design clash usually means one column carries two facts; split it.
 - [total-count-assertion-proxies-per-resource-invariant](total-count-assertion-proxies-per-resource-invariant.md) — ⚠️ a TOTAL-call-count guard as PER-RESOURCE proxy reads P0 once isolation stops the early abort.
 - [wall-clock-rotation-makes-order-assertions-periodic-flakes](wall-clock-rotation-makes-order-assertions-periodic-flakes.md) — `rotationOffset` flips list order every cron period — fixed-order asserts are wall-clock flakes.
 
 ## Failure mechanisms (check before diagnosing a hard case)
 - [seam-carries-the-claim-and-drops-the-money-field](seam-carries-the-claim-and-drops-the-money-field.md) — ⚠️ a params/prose no-disagree seam still shipped `effect: null` on bill-raising calls; guard the DERIVATION, not the seam.
 - [resolution-predicate-inherits-its-reason-sets-coverage](resolution-predicate-inherits-its-reason-sets-coverage.md) — ⚠️ "no reason in S is owed" used as "RESOLVED" silences every emit-state S doesn't cover.
-- [destructive-rederivation-outruns-the-grace-it-races](destructive-rederivation-outruns-the-grace-it-races.md) — ⚠️ a 5-min re-derivation sweep destroys a record 6x before a 30-min grace can contradict it.
-- [insert-only-column-null-for-pre-column-population](insert-only-column-null-for-pre-column-population.md) — ⚠️ CUSTOMER P0 08-19: `addColumnIfMissing` + INSERT-only writer = permanently NULL for the pre-column population. Sibling: [[insert-only-ask-vs-shrinking-live-set]].
-- [bookkeeping-write-outside-try-fails-the-call](bookkeeping-write-outside-try-fails-the-call.md) — ⚠️ (shipped-then-caught): a bare MCP-handler liveness stamp makes bookkeeping a precondition of all 28 tools.
+- [destructive-rederivation-outruns-the-grace-it-races](destructive-rederivation-outruns-the-grace-it-races.md) — ⚠️ a 5-min sweep destroys a record 6x before a 30-min grace can contradict it.
+- [insert-only-column-null-for-pre-column-population](insert-only-column-null-for-pre-column-population.md) — ⚠️ CUSTOMER P0 08-19: `addColumnIfMissing` + INSERT-only writer = permanently NULL for pre-column rows.
+- [bookkeeping-write-outside-try-fails-the-call](bookkeeping-write-outside-try-fails-the-call.md) — ⚠️ a bare liveness stamp makes bookkeeping a precondition of all 28 tools.
 - [staleness-exclusion-needs-severity-scope-not-just-kind](staleness-exclusion-needs-severity-scope-not-just-kind.md) — "re-derivable" is (kind × severity) — the same kind's `operator_pending` form is a LIVE blocker.
-- [two-valued-grade-for-a-three-valued-refusal](two-valued-grade-for-a-three-valued-refusal.md) — ⚠️ THE 08-18 CLASS: a boolean `retryable` can't say "operator clears it, retry then works"; widest member = 401/402/403.
-- [vendor-prepaid-wallet-exhaustion-reads-as-permanent](vendor-prepaid-wallet-exhaustion-reads-as-permanent.md) — ⚠️ CUSTOMER P0 08-18: an empty InboxKit CREDIT WALLET 4xx's every money-out call, graded permanent.
+- [two-valued-grade-for-a-three-valued-refusal](two-valued-grade-for-a-three-valued-refusal.md) — ⚠️ THE 08-18 CLASS: a boolean `retryable` can't say "operator clears it, then retry works".
+- [vendor-prepaid-wallet-exhaustion-reads-as-permanent](vendor-prepaid-wallet-exhaustion-reads-as-permanent.md) — ⚠️ P0 08-18: an empty InboxKit wallet 4xx's every money-out call, graded permanent.
 - [fixture-born-with-the-code-restates-its-premise](fixture-born-with-the-code-restates-its-premise.md) — ⚠️ a fixture authored in the SAME commit as its parser tests the code's premise, not the vendor's.
-- [operator-read-scoped-by-key-prefix-reports-empty-as-truth](operator-read-scoped-by-key-prefix-reports-empty-as-truth.md) — `provisioning-state.ts`'s key-prefix filter means `requestIdempotency:[]` never meant "no claim."
+- [operator-read-scoped-by-key-prefix-reports-empty-as-truth](operator-read-scoped-by-key-prefix-reports-empty-as-truth.md) — a key-prefix-filtered operator read: `requestIdempotency:[]` never meant "no claim."
 - [confirmation-guard-deletes-one-shot-signals](confirmation-guard-deletes-one-shot-signals.md) — ⚠️ a debounce at a SHARED alert choke point delays a re-sampled check but DELETES a one-shot event report.
 - [gate-waits-on-state-the-gated-action-produces](gate-waits-on-state-the-gated-action-produces.md) — ⚠️ a readiness gate awaiting state only the gated action produces is a DEADLOCK.
 - [code-with-no-production-driver-passes-every-test](code-with-no-production-driver-passes-every-test.md) — ⚠️ a feature whose only caller is an entry point production never invokes is 100% green and 100% dead.
@@ -23,7 +27,7 @@
 - [coldstart-per-tick-recompute-clobbers-control-state](coldstart-per-tick-recompute-clobbers-control-state.md) — a per-tick refresh that recomputes a column wipes any control-loop override on that same column.
 - [coldstart-suspend-auth-split-do-vs-d1](coldstart-suspend-auth-split-do-vs-d1.md) — DO `tenant_profile.status='suspended'` does NOT lock the token; flip both or the tenant re-provisions.
 - [backtick-inside-template-literal-sql](backtick-inside-template-literal-sql.md) — a backtick inside a backtick-delimited SQL template literal (even in a comment) ends the string → misleading TS1005 errors.
-- [sandbox-port-masks-real-server-contract](sandbox-port-masks-real-server-contract.md) — the in-process sandbox EmailPort hides 4 real-server obligations; validate against a real SMTP/IMAP server before freezing a port.
+- [sandbox-port-masks-real-server-contract](sandbox-port-masks-real-server-contract.md) — the sandbox EmailPort hides 4 real-server obligations; validate against a real server first.
 - [async-tally-reset-on-triggering-action](async-tally-reset-on-triggering-action.md) — resetting a counter on the same action that async-feeds it makes the threshold unreachable.
 - [dsn-arf-fields-live-in-mime-subparts](dsn-arf-fields-live-in-mime-subparts.md) — DSN/ARF fields live in MIME SUB-PARTS; an RFC 5322 top-level header parser silently returns empty → whole-source line-anchored scan.
 - [persist-before-confirm-cross-boundary](persist-before-confirm-cross-boundary.md) — ⚠️ CLASS: state advanced BEFORE the cross-boundary effect is confirmed. 5 members + the spend-side mirror.
@@ -35,10 +39,10 @@
 - [rpc-boundary-strips-class-identity](rpc-boundary-strips-class-identity.md) — ⚠️ an error thrown in the DO reaches the Worker with NO prototype, so `instanceof` is FALSE at the HTTP surface; branch on `err.name`.
 - [merge-of-prerefactor-lane-reverts-sibling-fix](merge-of-prerefactor-lane-reverts-sibling-fix.md) — taking the incoming side of a moved-function conflict silently REVERTS the refactor lane's fix inside it.
 - [customer-safe-translator-gated-on-error-shape](customer-safe-translator-gated-on-error-shape.md) — a sanitizing translator behind a shape predicate leaks vendor identity via a raw `String(err)` fallthrough.
-- [false-recovery-disarms-cooldown-dedup](false-recovery-disarms-cooldown-dedup.md) — clearing an incident on the vendor ACCEPTING a remedy lies and disarms the cooldown dedup; clear only where the goal state is proven.
-- [fixture-decorates-vendor-owned-object](fixture-decorates-vendor-owned-object.md) — ⚠️ a fixture putting OUR field on a VENDOR-MINTED object restates the parser's premise; 1271 green, two billing lanes dead in prod.
+- [false-recovery-disarms-cooldown-dedup](false-recovery-disarms-cooldown-dedup.md) — clearing on the vendor ACCEPTING a remedy disarms the cooldown; clear only on a proven goal state.
+- [fixture-decorates-vendor-owned-object](fixture-decorates-vendor-owned-object.md) — ⚠️ OUR field on a VENDOR-MINTED fixture restates the parser's premise; 1271 green, 2 billing lanes dead.
 - [guard-scoped-wider-than-the-state-it-protects](guard-scoped-wider-than-the-state-it-protects.md) — ⚠️ (I shipped it): a dedup guard keyed globally over independent state machines silences them all.
-- [completion-pass-must-recheck-ordering](completion-pass-must-recheck-ordering.md) — a reconcile pass that "finishes crashed work" is a SECOND write path bypassing the primary's guards; re-apply every pre-effect guard.
+- [completion-pass-must-recheck-ordering](completion-pass-must-recheck-ordering.md) — a "finish crashed work" pass is a SECOND write path; re-apply every pre-effect guard.
 - [sandbox-fallback-masks-a-missing-activation-gate](sandbox-fallback-masks-a-missing-activation-gate.md) — ⚠️ a missing gate degrading to a SANDBOX adapter makes "no vendor call" true on the broken code too.
 - [polling-check-error-is-indistinguishable-from-negative](polling-check-error-is-indistinguishable-from-negative.md) — a poll whose ERROR looks like its NEGATIVE reports "all clear" while broken.
 - [fail-loud-throw-after-billed-vendor-call](fail-loud-throw-after-billed-vendor-call.md) — a new throw AFTER a billed vendor call but BEFORE its durable marker becomes a deterministic re-charge loop if graded retryable.
@@ -49,9 +53,9 @@
 - [idempotency-replays-a-non-terminal-outcome-forever](idempotency-replays-a-non-terminal-outcome-forever.md) — ⚠️ recording any RETURN as replayable makes a 202 an eternal no-op; replay only if TERMINAL.
 - [anchor-stamped-before-the-read-defeats-its-own-bound](anchor-stamped-before-the-read-defeats-its-own-bound.md) — ⚠️ an age bound whose anchor is stamped by the call that reads it measures ~0 forever for the legacy NULL population.
 - [classifier-cannot-see-an-undiscriminated-return](classifier-cannot-see-an-undiscriminated-return.md) — ⚠️ a result-SHAPE classifier is blind to any branch returning the success shape.
-- [deleted-mechanism-leaves-its-prose-and-its-sentinel](deleted-mechanism-leaves-its-prose-and-its-sentinel.md) — replacing a mechanism leaves the customer sentence describing it AND a sentinel re-committing the original sin.
+- [deleted-mechanism-leaves-its-prose-and-its-sentinel](deleted-mechanism-leaves-its-prose-and-its-sentinel.md) — replacing a mechanism leaves its customer prose AND a sentinel re-committing it.
 - [vendor-200-with-error-true-reads-as-absent](vendor-200-with-error-true-reads-as-absent.md) — InboxKitClient rejects only on non-2xx, so a 200 `{error:true}` reads as "vendor holds nothing."
-- [error-isolation-refactor-voids-throw-dependent-invariants](error-isolation-refactor-voids-throw-dependent-invariants.md) — ⚠️ CLASS: fail-fast→per-item isolation voids every caller invariant the throw justified.
+- [error-isolation-refactor-voids-throw-dependent-invariants](error-isolation-refactor-voids-throw-dependent-invariants.md) — ⚠️ fail-fast→per-item isolation voids every invariant the throw justified.
 - [fix-shape-differs-when-decider-and-sender-split-across-rpc](fix-shape-differs-when-decider-and-sender-split-across-rpc.md) — ⚠️ a sweep row naming 3 sites got closed at 1; DO-decides/Worker-sends needs two-phase decide/commit.
 - [nonterminal-retry-drives-a-relative-destructive-op](nonterminal-retry-drives-a-relative-destructive-op.md) — ⚠️ a correct NON-TERMINAL verdict hands an unbounded retry to a RELATIVE destructive op.
 - [orphan-detection-blind-to-the-row-never-created](orphan-detection-blind-to-the-row-never-created.md) — ⚠️ stuck-row orphan checks can't see the row NEVER created; detect via paid-commitment-vs-state.

@@ -15,6 +15,7 @@ import {
   NotFoundError,
   ValidationError,
   type CheckoutInput,
+  type Collapsed,
   type MailboxBilling,
   type NextSteps,
   type RemoveMailboxesInput,
@@ -1050,12 +1051,22 @@ export async function removeMailboxes(
   ctx: TenantContext,
   input: RemoveMailboxesInput,
   intentKey?: string,
-): Promise<RemoveMailboxesResult> {
+): Promise<Collapsed<RemoveMailboxesResult>> {
   assertNotLifecycleFrozen(ctx, "remove_mailboxes");
   // Resolved (and, when keyed, written down) BEFORE the first vendor call, so a
-  // crash mid-release cannot let the retry choose a different set.
-  const targets = intentKey ? recordRemoveIntent(ctx, intentKey, input.count) : resolveRemoveTargets(ctx, input.count);
-  await releaseMailboxes(ctx, { ids: stillLiveTargets(ctx, targets).map((t) => t.mailboxId) });
+  // crash mid-release cannot let the retry choose a different set. The UNKEYED
+  // path has nothing durable to anchor to, so it resolves per call and can never
+  // be a replay — "release one more" is genuinely what a second unkeyed call says.
+  const intent = intentKey
+    ? recordRemoveIntent(ctx, intentKey, input.count)
+    : { members: resolveRemoveTargets(ctx, input.count), replayed: false };
+  const targets = intent.members;
+  // CAPTURE the outcome — do not discard it (B1, docs/adversarial/
+  // wave-a-trains-3-4-gate-2026-08-20.md). `releasedCount` is the only thing
+  // that knows whether THIS call did work, and it is the third time this
+  // function's grown return type has been destructured away at this call site
+  // (the wave-1+2 gate's CLASS 3 finding was the same discarded value here).
+  const outcome = await releaseMailboxes(ctx, { ids: stillLiveTargets(ctx, targets).map((t) => t.mailboxId) });
   // Decrease: syncMailboxQuantity picks proration_behavior 'none' (desired < synced).
   await syncMailboxQuantity(ctx);
   // Read the outcome off the mailboxes themselves rather than off this call's
@@ -1068,5 +1079,29 @@ export async function removeMailboxes(
     unreleased: unreleased.map((t) => t.email),
     billing: buildMailboxBilling(ctx, provisionedMailboxCount(ctx)),
     nextSteps: deriveNextSteps(ctx),
+    // NB-R3-1 (docs/adversarial/wave-1-2-integration-gate-2026-08-18.md), and
+    // the first real consumer of `Collapsed<T>` (packages/shared/src/
+    // provenance.ts). Every count above describes the RECORDED downgrade, which
+    // is the right thing to describe — but on a replay it describes work an
+    // EARLIER call did, and without this flag that is byte-identical to having
+    // just done it again. The 30-day `request_idempotency` ageout makes that
+    // reachable without any crash: the claim expires, these intent rows do not,
+    // so a reused key re-runs, releases nothing, and reports a full success. An
+    // agent reading it believes it shrank the fleet while it keeps paying.
+    //
+    // BOTH HALVES ARE REQUIRED (B1, docs/adversarial/wave-a-trains-3-4-gate-
+    // 2026-08-20.md). `intent.replayed` alone was wrong in the OTHER direction:
+    // it means only "a recorded intent already existed for this key", never
+    // "this call did no work". The tool's own description instructs an agent to
+    // resend the identical request with the same key until `failedCount` is 0,
+    // and wave 1+2 made `failedCount > 0` non-terminal precisely so that retry
+    // RE-RUNS — so the designed, documented retry always lands on
+    // `replayed: true`. The healing pass then made a real vendor release,
+    // irreversibly destroyed a mailbox, and reported "not new work done just
+    // now" (gate probe: released 2/failed 1, then released the 3rd, live 5 -> 2,
+    // flagged as a replay). `releasedCount === 0` is what actually answers "did
+    // this call do anything", and it comes from the return value one line up
+    // that used to be discarded.
+    deduplicated: intent.replayed && outcome.releasedCount === 0,
   };
 }

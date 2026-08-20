@@ -94,7 +94,7 @@ bearer_token_env_var = "COLDRIG_TOKEN"</code></pre>
   </table>
 
   <h2 id="replies">The reply-handling boundary, in short</h2>
-  <p>Push webhooks are live — <code>configure_webhook</code> delivers reply, bounce, soft_bounce, and complaint events (HMAC-signed) to your own HTTPS endpoint. <code>activity</code> and <code>inbox</code> remain pollable too if you'd rather run Codex on your own cadence. Full honest capability matrix: <a href="/guide-cold-email-operation-claude-code#replies">see the detailed breakdown</a>.</p>
+  <p>Push webhooks are live — <code>configure_webhook</code> delivers reply, bounce, soft_bounce, complaint, and unsubscribe events (HMAC-signed) to your own HTTPS endpoint. <code>activity</code> and <code>inbox</code> remain pollable too if you'd rather run Codex on your own cadence. Full honest capability matrix: <a href="/guide-cold-email-operation-claude-code#replies">see the detailed breakdown</a>.</p>
 
   <h2 id="cost">Cost</h2>
   <p>Same platform, same meter, regardless of client: <strong>$99/month for 5 provisioned mailboxes, then $10/month per additional mailbox</strong>. Full worked examples and the live calculator: <a href="/pricing">pricing</a>.</p>

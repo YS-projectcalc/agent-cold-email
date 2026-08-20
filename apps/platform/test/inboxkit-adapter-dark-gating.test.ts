@@ -26,7 +26,7 @@ import { SandboxMailboxPort } from "../src/vendors/sandbox/mailbox-port.js";
 // reach a real domain port — only a decoupled `registrarConfig` could, and
 // even that adapter is deferred to the GA wave, so domain always hard-blocks.
 
-const clock = new VirtualClock(Date.now(), 0, 1);
+const clock = new VirtualClock(Date.now(), 0);
 const INBOXKIT_CONFIG = { apiKey: "test-key", workspaceId: "00000000-0000-4000-8000-000000000001" };
 
 describe("InboxKit adapters — unreachable from the current call-site shape", () => {

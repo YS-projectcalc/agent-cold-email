@@ -27,7 +27,7 @@
 // severs the channel on purpose, and that exception is stated wherever the
 // tool is documented rather than carved out here.
 
-import { RateLimitError } from "@coldstart/shared";
+import { RateLimitError, type Collapsed } from "@coldstart/shared";
 import type { ContactOperatorInput } from "@coldstart/shared";
 import { insertSupportTicket, markSupportTicketsEmailed } from "../admin/db.js";
 import { lookupTenantContactEmail } from "../db.js";
@@ -55,11 +55,23 @@ export async function contactOperator(
   ctx: TenantContext,
   input: ContactOperatorInput,
   mailer: OpsMailer = createOpsMailer(ctx.env),
-): Promise<ContactOperatorResult> {
+): Promise<Collapsed<ContactOperatorResult>> {
   const now = new RealClock().now();
 
   const admission = admitContactOperatorCall(ctx, input, now);
-  if (admission.kind === "duplicate") return { ticketId: admission.ticketId, note: REPLY_NOTE };
+  // IN-2 (docs/adversarial/class-sweep-dedup-semantics-2026-08-17.md), the
+  // disclosure half of IN-1 and the third real consumer of `Collapsed<T>`.
+  // This used to return the SAME shape and the SAME REPLY_NOTE as a filed
+  // ticket, so no client — MCP or REST — could tell that its second, genuinely
+  // new message had been absorbed into an earlier one and reached nobody.
+  // Confirmed live by the audit (F7 probe 2: one ticket id returned twice).
+  //
+  // The collapse itself is unchanged and deliberate: the guard admits 5
+  // calls/hour and each admission can cost an ops email, so an identical
+  // resend inside the window must not burn a second one. Only the silence goes.
+  if (admission.kind === "duplicate") {
+    return { ticketId: admission.ticketId, note: REPLY_NOTE, deduplicated: true };
+  }
   if (admission.kind === "rate_limited") {
     throw new RateLimitError(
       `too many contact_operator calls — at most ${MAX_CALLS_PER_WINDOW} per hour per tenant.`,
@@ -135,7 +147,7 @@ export async function contactOperator(
     }
   }
 
-  return { ticketId, note: REPLY_NOTE };
+  return { ticketId, note: REPLY_NOTE, deduplicated: false };
 }
 
 /**

@@ -3,6 +3,7 @@ import type { DashboardLayout } from "@coldstart/shared";
 import { apiRequest } from "./client";
 import type {
   AccountSummary,
+  AckMessageResult,
   ActivityPage,
   CampaignListItem,
   CheckoutResult,
@@ -14,6 +15,7 @@ import type {
   InfrastructureStatus,
   LoginConsumeResult,
   LoginRequestResult,
+  MessageListPage,
   ReplyResult,
   RotateTokenResult,
   SignupResult,
@@ -341,6 +343,57 @@ export function useMarkThread() {
       if (context?.previous) restoreInboxQueries(qc, context.previous);
     },
     onSettled: () => qc.invalidateQueries({ queryKey: [INBOX_INFINITE_KEY_ROOT] }),
+  });
+}
+
+// --- W-M5 tenant messages (system + operator notices) — the dashboard's
+// human fallback for the same store list_messages/infrastructure_status's
+// messages[] read (SPEC.md §19.4 GET /messages). Same cursor-paginated,
+// unacked-first shape and endpoint as the MCP surface — this is deliberately
+// NOT infrastructure_status's capped-5 preview, so the human sees the SAME
+// full, paginated history the tenant's own agent would via list_messages. ---
+
+const MESSAGES_INFINITE_KEY = ["messages-infinite"] as const;
+
+/** Cursor-paginated, unacked-first (mirrors useInboxInfinite's shape and its
+ * no-interval-poll rationale — a ticking list re-polling under an open row
+ * would reshuffle it out from under the reader; refetch-on-focus only). */
+export function useMessagesInfinite(limit = 20) {
+  return useInfiniteQuery({
+    queryKey: MESSAGES_INFINITE_KEY,
+    queryFn: ({ pageParam }) => apiRequest<MessageListPage>(`/messages?limit=${limit}${pageParam ? `&cursor=${encodeURIComponent(pageParam)}` : ""}`),
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.nextCursor,
+    refetchOnWindowFocus: true,
+  });
+}
+
+/** Optimistic ack (mirrors useMarkThread's pattern): flips `readAt` on the
+ * matching row across every cached page immediately, rolls back on error. */
+export function useAckMessage() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => apiRequest<AckMessageResult>(`/messages/${encodeURIComponent(id)}/ack`, { method: "POST" }),
+    onMutate: async (id: string) => {
+      await qc.cancelQueries({ queryKey: MESSAGES_INFINITE_KEY });
+      const previous = qc.getQueriesData<{ pages: MessageListPage[]; pageParams: unknown[] }>({ queryKey: MESSAGES_INFINITE_KEY });
+      qc.setQueriesData<{ pages: MessageListPage[]; pageParams: unknown[] }>({ queryKey: MESSAGES_INFINITE_KEY }, (data) => {
+        if (!data) return data;
+        const now = Date.now();
+        return {
+          ...data,
+          pages: data.pages.map((page) => ({
+            ...page,
+            messages: page.messages.map((m) => (m.id === id ? { ...m, readAt: m.readAt ?? now } : m)),
+          })),
+        };
+      });
+      return { previous };
+    },
+    onError: (_err, _id, context) => {
+      if (context?.previous) for (const [key, data] of context.previous) qc.setQueryData(key, data);
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: MESSAGES_INFINITE_KEY }),
   });
 }
 

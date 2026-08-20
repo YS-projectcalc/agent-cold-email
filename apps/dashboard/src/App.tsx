@@ -10,6 +10,7 @@ import { AppShell } from "./shell/AppShell";
 // that never opens Settings, never pays for that code.
 const DashboardPage = lazy(() => import("./pages/DashboardPage").then((m) => ({ default: m.DashboardPage })));
 const InboxPage = lazy(() => import("./pages/InboxPage").then((m) => ({ default: m.InboxPage })));
+const MessagesPage = lazy(() => import("./pages/MessagesPage").then((m) => ({ default: m.MessagesPage })));
 const SetupPage = lazy(() => import("./pages/SetupPage").then((m) => ({ default: m.SetupPage })));
 const BillingPage = lazy(() => import("./pages/BillingPage").then((m) => ({ default: m.BillingPage })));
 const SettingsPage = lazy(() => import("./pages/SettingsPage").then((m) => ({ default: m.SettingsPage })));
@@ -93,6 +94,14 @@ export function App() {
           element={
             <Suspense fallback={<RouteFallback />}>
               <SetupPage />
+            </Suspense>
+          }
+        />
+        <Route
+          path="messages"
+          element={
+            <Suspense fallback={<RouteFallback />}>
+              <MessagesPage />
             </Suspense>
           }
         />

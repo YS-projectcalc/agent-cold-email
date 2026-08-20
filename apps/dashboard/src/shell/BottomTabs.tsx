@@ -1,5 +1,5 @@
 import { NavLink } from "react-router-dom";
-import { BillingIcon, DashboardIcon, InboxIcon, SettingsIcon, SetupIcon } from "../lib/icons";
+import { BillingIcon, DashboardIcon, InboxIcon, MessagesIcon, SettingsIcon, SetupIcon } from "../lib/icons";
 
 const linkBase = "flex flex-1 flex-col items-center gap-0.5 py-2 text-[11px] font-medium text-ink-muted";
 const linkActive = "text-accent";
@@ -21,6 +21,10 @@ export function BottomTabs() {
       <NavLink to="setup" className={({ isActive }) => `${linkBase} ${isActive ? linkActive : ""}`}>
         <SetupIcon />
         Setup
+      </NavLink>
+      <NavLink to="messages" className={({ isActive }) => `${linkBase} ${isActive ? linkActive : ""}`}>
+        <MessagesIcon />
+        Messages
       </NavLink>
       <NavLink to="billing" className={({ isActive }) => `${linkBase} ${isActive ? linkActive : ""}`}>
         <BillingIcon />

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { simpleParser } from "mailparser";
 import type { PolledEvent } from "@coldstart/shared";
 
@@ -97,8 +98,7 @@ async function classifyReply(
   const resolved = resolveOriginal(source, resolveThread);
   if (!resolved) return null; // not a reply to any send we know -> ignore
   const parsed = await simpleParser(source);
-  const messageId = parsed.messageId ?? rawHeader(source, "Message-ID") ?? "";
-  if (!messageId) return null; // no stable dedupe key -> can't safely emit
+  const messageId = parsed.messageId ?? rawHeader(source, "Message-ID") ?? syntheticMessageId(source);
   const fromEmail = parsed.from?.value?.[0]?.address ?? "";
   return {
     kind: "reply",
@@ -109,6 +109,33 @@ async function classifyReply(
     body: parsed.text ?? "",
     receivedAt,
   };
+}
+
+/**
+ * The dedup anchor for an attributable reply whose client sent no Message-ID
+ * (RFC 5322 makes it a SHOULD). IN-22, docs/adversarial/class-sweep-dedup-
+ * semantics-2026-08-17.md: refusing to emit such a reply DESTROYED it, because
+ * the poll loop drops a null with no counter and the cursor advances anyway.
+ *
+ * Derived from the message BYTES and nothing else, which is the property that
+ * makes it usable as a dedup key at all. `receivedAt` is deliberately NOT an
+ * input even though the sweep's sketch suggested it: engine.ts passes
+ * `this.now()` — the POLL time, not the message's — and `poll`'s own contract is
+ * that a lost response redelivers the identical batch, so a receivedAt-keyed id
+ * would mint a fresh key on every re-poll and file the same reply repeatedly.
+ *
+ * The `synthetic:` prefix is not decoration: `messageId` shares the Worker's
+ * `(tenant_id, type, message_id)` dedup index with real wire ids, and
+ * `resolveOriginal` matches candidates against real ids, so the two populations
+ * must be disjoint. No legal RFC 5322 msg-id has this shape.
+ *
+ * Residual, in the safe direction: a server that returns byte-different bytes
+ * for one message across two fetches yields two keys and files a duplicate
+ * reply. That is an OVER-count whose side effects are all idempotent, against a
+ * pre-fix TOTAL loss of the customer's reply.
+ */
+function syntheticMessageId(source: string): string {
+  return `synthetic:${createHash("sha256").update(source, "utf8").digest("hex")}`;
 }
 
 /**
