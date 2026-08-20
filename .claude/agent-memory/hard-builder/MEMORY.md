@@ -2,6 +2,7 @@
 
 > One line per memory. The fix recipes, repro shapes and revert-proofs live in the linked files — open the file before acting on a hook.
 - [changed-detail-escape-storms-on-alternation](changed-detail-escape-storms-on-alternation.md) — ⚠️ escaping a cooldown on a CHANGED detail storms on alternation (13 emails/13 ticks); needs a per-episode announced SET.
+- [announced-set-cap-bounds-storm-regardless-of-key-correctness](announced-set-cap-bounds-storm-regardless-of-key-correctness.md) — the sibling FIX shape (design-stage): cap the announced set, and prefer a legacy predicate new code can't produce over a backfill.
 - [dedup-key-is-also-spent-at-the-vendor](dedup-key-is-also-spent-at-the-vendor.md) — ⚠️ shrinking a LOCAL dedup window is a no-op when the vendor caches the key; fix the KEY (durable epoch, not a clock bucket).
 - [sweep-prescribed-key-needs-component-provenance-check](sweep-prescribed-key-needs-component-provenance-check.md) — ⚠️ `receivedAt` is POLL time; provenance-check every component of a prescribed key.
 - [two-waves-fight-over-one-column-split-it](two-waves-fight-over-one-column-split-it.md) — a sweep-vs-design clash usually means one column carries two facts; split it.
@@ -9,6 +10,13 @@
 - [wall-clock-rotation-makes-order-assertions-periodic-flakes](wall-clock-rotation-makes-order-assertions-periodic-flakes.md) — `rotationOffset` flips list order every cron period — fixed-order asserts are wall-clock flakes.
 
 ## Failure mechanisms (check before diagnosing a hard case)
+- [deferring-a-snapshot-past-a-failed-append-promotes-it](deferring-a-snapshot-past-a-failed-append-promotes-it.md) — ⚠️ memory-first writer + DEFERRED snapshot = a faulted durable append persisted as success; inline timing was load-bearing.
+- [narrowing-a-read-makes-empty-mean-something-new](narrowing-a-read-makes-empty-mean-something-new.md) — ⚠️ adding a WHERE for cost re-defines "zero rows"; any fail-closed guard keyed on emptiness flips to every-clean-request.
+- [knob-frozen-into-a-row-at-first-use](knob-frozen-into-a-row-at-first-use.md) — ⚠️ a knob copied into a period row by INSERT OR IGNORE makes "raise the limit and retry" a no-op for the rest of the period.
+- [capacity-counter-inside-a-failure-signal-pins-the-check](capacity-counter-inside-a-failure-signal-pins-the-check.md) — ⚠️ a BY-DESIGN counter in a failure signal pins the check unhealthy, and suppression then eats every REAL failure after it.
+- [cursor-restart-on-full-page-pins-the-rotation](cursor-restart-on-full-page-pins-the-rotation.md) — ⚠️ (I shipped it) `covered >= page.length` reads a FULL page as the LAST page, so the sweep never leaves page one.
+- [bounded-read-must-publish-its-coverage-latency](bounded-read-must-publish-its-coverage-latency.md) — bounding an O(N) sweep buys a new blind spot (coverage latency); and skipping a no-op write kills whoever inferred freshness from its mtime.
+- [composed-guard-arm-unreachable-under-its-own-precondition](composed-guard-arm-unreachable-under-its-own-precondition.md) — ⚠️ feeding a 3-valued grader a verdict-derived input makes one return value unreachable; the arm never fires and every positive test still passes.
 - [seam-carries-the-claim-and-drops-the-money-field](seam-carries-the-claim-and-drops-the-money-field.md) — ⚠️ a params/prose no-disagree seam still shipped `effect: null` on bill-raising calls; guard the DERIVATION, not the seam.
 - [resolution-predicate-inherits-its-reason-sets-coverage](resolution-predicate-inherits-its-reason-sets-coverage.md) — ⚠️ "no reason in S is owed" used as "RESOLVED" silences every emit-state S doesn't cover.
 - [destructive-rederivation-outruns-the-grace-it-races](destructive-rederivation-outruns-the-grace-it-races.md) — ⚠️ a 5-min sweep destroys a record 6x before a 30-min grace can contradict it.
