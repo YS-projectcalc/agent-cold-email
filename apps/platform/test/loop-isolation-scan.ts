@@ -178,6 +178,12 @@ export const ALLOWED_UNISOLATED_LOOPS: { file: string; header: string; reason: s
     reason: "builds one batch of prepared statements for a single atomic swap-in — chunking, not independent per-entry items",
   },
   {
+    file: "apps/platform/src/ofac/sdn-list.ts",
+    header: "for (let i = 0; i < keys.firstTokens.length; i += LOOKUP_TOKENS_PER_STATEMENT)",
+    reason:
+      "S9's screening lookup — identical shape to the swap-in loop above: it only BUILDS prepared statements in memory (what trips the lexical `.prepare(` detector), with no await and no durable write per item. The single read is one env.DB.batch() after the loop, so there is no per-item failure to isolate and nothing behind an item to starve",
+  },
+  {
     file: "apps/platform/src/engine/remove-intents.ts",
     header: "for (let i = 0; i < targets.length; i += RELEASE_INTENT_CHUNK_SIZE)",
     reason:

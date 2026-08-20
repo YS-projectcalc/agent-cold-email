@@ -23,6 +23,8 @@
 import { CapacityPendingError, operatorNotifiedClause, type Notified } from "@coldstart/shared";
 import { RealClock } from "../clock.js";
 import type { Env } from "../env.js";
+import { RESERVE_REAP_BATCH } from "../admin/sweep-budget.js";
+import { sweepDeadlineOf, sweepTenants, type SweepScope } from "../admin/tenant-slice.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
@@ -40,7 +42,39 @@ export type SpendKind = "mailbox" | "warmup" | "prewarm" | "domain";
 // biased because the exact InboxKit credit->$ rate is UNVERIFIED until a real
 // top-up (prewarm research §2); a conservative overestimate can only over-
 // restrict, never over-spend.
-const DEFAULT_SPEND_CEILING_CENTS = 15000; // $150/mo — ~2x the pilot's expected spend
+// THE BLAST-RADIUS BOUND, AS A FORMULA (founder ruling 2026-08-18: the flat
+// $150 "is the deliberate pilot blast-radius bound — its Train-6 remedy = scale
+// it with paying-tenant count"). A flat pilot figure is a PLATFORM-WIDE cap, so
+// at 690¢/mailbox it stopped every tenant's provisioning at ~21 mailboxes for
+// the whole month (scale-readiness-audit-2026-08-17.md S2) — a growth ceiling
+// disguised as a safety bound.
+//
+//   ceiling = PLATFORM_BASE + PER_PAYING_TENANT x paying tenants
+//
+// PLATFORM_BASE covers what is owed no matter how many customers exist (the
+// InboxKit base subscription, ~$39, plus headroom). PER_PAYING_TENANT covers ONE
+// customer's whole first-month provisioning, which is where a customer's vendor
+// spend is concentrated: this ledger counts provision-time reserves, so an
+// existing customer adds ~nothing in later months (N-PC-1, ga-gates-design-
+// review-2026-07-23.md). Derived from this file's own cost table at a generous
+// ordinary shape — 3 domains + 9 mailboxes = 3x1500 + 9x690 = 10,710¢ — then
+// rounded UP to 12,000¢, keeping the original overestimate bias.
+//
+// A customer who provisions far past that ordinary shape (the Scale tier admits
+// 18 domains / 60 mailboxes ≈ 68,400¢) still trips the gate. That is the bound
+// DOING ITS JOB: it fails gracefully into capacity_pending with a founder alert,
+// never into vendor spend, and the founder raises the knob deliberately.
+//
+// THE COUNT IS OPERATOR-DECLARED (`PAYING_TENANT_COUNT`), not queried. There is
+// no maintained cross-tenant count of currently-paying tenants to read:
+// `tenants_index.plan` is written once at signup and never updated (db.ts — the
+// INSERT is its only writer), and `stripe_customer_index` is append-only and
+// many-customers-to-one-tenant, so counting it would RATCHET UP with churn and
+// silently widen the blast radius over time. An explicit knob can only widen when
+// a human widens it, which is the correct direction for a money guard.
+const PLATFORM_BASE_CENTS = 6000; // $60 — InboxKit base sub (~$39) + headroom, independent of customer count
+const PER_PAYING_TENANT_CENTS = 12000; // $120 — one customer's first-month provisioning, overestimate-biased
+const DEFAULT_PAYING_TENANTS = 1; // the pilot today; the founder raises this as customers land
 const DEFAULT_COST_MAILBOX_CENTS = 690; // slot amortized ($39/10) + $3/mo warmup add-on
 const DEFAULT_COST_DOMAIN_CENTS = 1500; // .com registration ceiling
 const DEFAULT_COST_PREWARM_MAILBOX_CENTS = 900; // prewarm top tier (Instant-Start SKU)
@@ -48,11 +82,27 @@ const DEFAULT_INBOXKIT_PLAN_SLOTS = 10; // the purchased InboxKit Professional p
 
 // A 'reserved' entry older than this is presumed orphaned by a crash between
 // reserve and commit/release (design NB-2) and is reclaimed by the scheduled()
-// reaper. Sized well above the longest legitimate provision run (single-digit
-// minutes per the idempotency 'pending' TTL, engine/idempotency.ts) so a live
+// reaper. Sized well above the longest legitimate provision run so a live
 // in-flight reservation is never reaped, yet far under a day so a genuinely
 // leaked reservation frees promptly.
-const RESERVE_REAP_TTL_MS = 15 * 60 * 1000;
+//
+// RAISED WITH THE CLAIM TTL IT IS SIZED AGAINST (N7's knock-on, wave-b1 gate).
+// This used to say "single-digit minutes per the idempotency 'pending' TTL" and
+// sit at 15 min. That TTL has been re-derived to 30 min now that the S3 retry
+// adds up to 20s of serialized backoff per vendor call
+// (engine/idempotency.ts), so 15 min would have put the reaper INSIDE the
+// longest legitimate run — making the H7 path below ("entry was resolved out
+// from under a successful commit") an ordinary event on slow-but-healthy
+// sagas instead of the incident it is written as. Nothing would over-spend
+// (`committed_cents` is still incremented and the entry record restored), but
+// `reserved_cents` double-decrements into its MAX(0,...) clamp and an
+// error-level reconciliation log fires on a working provision — which is how
+// an operator learns to ignore that line.
+//
+// 45 min = 1.5x the re-derived 30-min bound, still ~32x under a day.
+// `spend-ceiling.test.ts` pins the ordering so the two cannot drift again: the
+// reaper must always outlive the claim.
+export const RESERVE_REAP_TTL_MS = 45 * 60 * 1000;
 
 function parsePositiveInt(raw: string | null | undefined, fallback: number): number {
   if (raw == null) return fallback;
@@ -60,9 +110,16 @@ function parsePositiveInt(raw: string | null | undefined, fallback: number): num
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
-/** The per-calendar-month spend ceiling (founder Q1 ruling: per-calendar-month, base sub included, default $150). */
+/**
+ * The per-calendar-month spend ceiling (founder Q1 ruling: per-calendar-month,
+ * base sub included). `SPEND_CEILING_CENTS` remains the ABSOLUTE override — an
+ * operator who names a number gets exactly it — and in its absence the bound is
+ * derived from the declared paying-tenant count (see the formula above), so
+ * growth raises the ceiling instead of hitting it.
+ */
 export function spendCeilingCents(env: Env): number {
-  return parsePositiveInt(env.SPEND_CEILING_CENTS, DEFAULT_SPEND_CEILING_CENTS);
+  const payingTenants = parsePositiveInt(env.PAYING_TENANT_COUNT, DEFAULT_PAYING_TENANTS);
+  return parsePositiveInt(env.SPEND_CEILING_CENTS, PLATFORM_BASE_CENTS + PER_PAYING_TENANT_CENTS * payingTenants);
 }
 
 /** The InboxKit plan's slot capacity (G4). Founder raises it after a plan upgrade — no automatic vendor plan purchase. */
@@ -161,20 +218,84 @@ async function currentSlotsUsed(db: D1Database): Promise<number> {
  * OPS_ALERT_EMAIL and swallows every send failure. A customer told a human is
  * on it stops escalating; that is the whole cost of the claim being decorative.
  */
+/**
+ * The ceiling currently STORED for this period — what `withSpendCeiling`'s
+ * atomic reserve actually gates on, which is not necessarily what the env says
+ * right now.
+ *
+ * A RAISE IS DURABLE FOR THE CALENDAR MONTH (N1). `ceiling_cents` has exactly
+ * two writers, both in `withSpendCeiling`: the `INSERT OR IGNORE` seed and the
+ * raise-only reconcile (`WHERE period_key = ? AND ceiling_cents < ?`). Nothing
+ * anywhere lowers it — there is no lowering statement and no admin route — so a
+ * mistyped `PAYING_TENANT_COUNT` that lands on ONE provisioning call raises the
+ * live month's bound until the 1st, and putting the knob back does not walk it
+ * back. Raise-only is correct for its purpose (a lowered bound could sit under
+ * reserved+committed and block every remaining provision on a number nobody
+ * saw), but the irreversibility is the part that was undocumented.
+ *
+ * THE MANUAL LOWERING PATH, since there is no supported one:
+ *
+ *   wrangler d1 execute coldstart-platform-db --remote \
+ *     --command "UPDATE vendor_spend_ledger SET ceiling_cents = <cents> WHERE period_key = '<YYYY-MM>'"
+ *
+ * Check `reserved_cents + committed_cents` first — setting the ceiling below
+ * that total blocks all further provisioning for the month without refunding
+ * anything already spent. An admin route for this is on the ROADMAP.
+ */
+async function readInForceCeilingCents(ctx: TenantContext, now: Date): Promise<number | null> {
+  try {
+    const row = await ctx.env.DB.prepare(`SELECT ceiling_cents FROM vendor_spend_ledger WHERE period_key = ?`)
+      .bind(periodKey(now.getTime()))
+      .first<{ ceiling_cents: number }>();
+    return row?.ceiling_cents ?? null;
+  } catch (err) {
+    // The alert must still go out; an unreadable row just means we report the
+    // configured number alone rather than both.
+    console.error("capacity-pending alert: could not read the in-force ceiling", err);
+    return null;
+  }
+}
+
 async function alertCapacityPending(
   ctx: TenantContext,
   reason: "spend_ceiling" | "slot_capacity",
-  detail: { kind: SpendKind; estCents: number; ceilingCents: number; planSlots: number; slotsUsed: number },
+  detail: {
+    kind: SpendKind;
+    estCents: number;
+    ceilingCents: number;
+    /** The ceiling the GATE actually used — `vendor_spend_ledger.ceiling_cents`
+     * for this period, which is raise-only and so can be HIGHER than the
+     * configured number above (N1). Null when the row could not be read. */
+    inForceCeilingCents: number | null;
+    planSlots: number;
+    slotsUsed: number;
+  },
   mailer: OpsMailer,
 ): Promise<Notified> {
   if (!ctx.env.OPS_ALERT_EMAIL) return { delivered: false, why: "dark_channel" };
+  // N2 — the growth knob is PAYING_TENANT_COUNT, not SPEND_CEILING_CENTS.
+  // This line used to instruct the latter, which is the ABSOLUTE OVERRIDE
+  // (`spendCeilingCents`): an operator following the old instruction would
+  // freeze the ceiling at a literal and the per-paying-tenant scaling would
+  // never apply again — re-creating the growth-ceiling-disguised-as-a-safety-
+  // bound that this formula exists to remove. Read at exactly the moment
+  // provisioning is blocked, i.e. when it is most likely to be obeyed.
   const action =
     reason === "slot_capacity"
       ? `slot capacity reached (${detail.slotsUsed}/${detail.planSlots}) — upgrade the InboxKit plan and raise INBOXKIT_PLAN_SLOTS`
-      : `spend ceiling reached (ceiling ${detail.ceilingCents}¢/mo) — raise SPEND_CEILING_CENTS or upgrade InboxKit`;
+      : `spend ceiling reached — raise PAYING_TENANT_COUNT to match the customers you now have (the ceiling scales with it). ` +
+        `SPEND_CEILING_CENTS is an absolute override: setting it FREEZES the ceiling at that literal and the per-tenant scaling stops applying`;
+  // BOTH numbers, because they can differ and the operator needs the one the
+  // gate used. `ceiling_cents` is raise-only within a period, so a number
+  // configured earlier this month is still in force even after the config came
+  // back down.
+  const ceilingLine =
+    detail.inForceCeilingCents !== null && detail.inForceCeilingCents !== detail.ceilingCents
+      ? `Ceiling IN FORCE this period: ${detail.inForceCeilingCents}¢/mo (configured right now: ${detail.ceilingCents}¢/mo — the in-force number is higher because a raise is durable for the calendar month).`
+      : `Ceiling: ${detail.ceilingCents}¢/mo.`;
   const text =
     `Tenant ${ctx.tenantId} hit a provisioning capacity gate on a '${detail.kind}' spend (est ${detail.estCents}¢).\n\n` +
-    `${action}.\n\nThe tenant is held in 'capacity_pending' (no charge, no provisioning) and a later provision retries once you raise the limit.`;
+    `${ceilingLine}\n\n${action}.\n\nThe tenant is held in 'capacity_pending' (no charge, no provisioning) and a later provision retries once you raise the limit.`;
   try {
     await mailer.send({
       to: ctx.env.OPS_ALERT_EMAIL,
@@ -196,11 +317,15 @@ async function rejectCapacity(
   mailer: OpsMailer,
 ): Promise<never> {
   const transitioned = setCapacityPendingMarker(ctx);
+  // N1 — read the ceiling THE GATE ACTUALLY USED, not just the configured one.
+  // Only on the rejection path, so it costs a D1 read exactly when provisioning
+  // is already blocked and an operator is about to be told a number.
+  const inForceCeilingCents = transitioned ? await readInForceCeilingCents(ctx, new Date()) : null;
   // Only the FIRST rejection of an episode alerts; a later one is deliberately
   // withheld because an earlier alert stands — which is a reason the customer
   // sentence must be able to say, and could not while it was a constant.
   const notified: Notified = transitioned
-    ? await alertCapacityPending(ctx, reason, detail, mailer)
+    ? await alertCapacityPending(ctx, reason, { ...detail, inForceCeilingCents }, mailer)
     : { delivered: false, why: "suppressed_cooldown" };
   // CUSTOMER-FACING (error-response.ts returns this message verbatim in the 409
   // body), so it names neither the provider nor our internal capacity numbers.
@@ -276,6 +401,23 @@ export async function withSpendCeiling<T>(
        VALUES (?, 0, 0, ?, ?)`,
     )
     .bind(pk, ceilingCents, now)
+    .run();
+  // ...and CARRY A RAISE INTO THE MONTH ALREADY IN PROGRESS. The reserve below
+  // gates on the ROW's ceiling_cents, which `INSERT OR IGNORE` only ever writes
+  // at the month's FIRST spend — so raising the configured ceiling did nothing
+  // until the 1st, and `alertCapacityPending`'s own instruction ("raise
+  // SPEND_CEILING_CENTS ... a retry will succeed once the limit is raised") was
+  // false for up to a month. That is the exact window in which it is read: the
+  // alert only fires because provisioning is already blocked.
+  //
+  // RAISE-ONLY, deliberately. Lowering a live month's stored ceiling could put it
+  // UNDER reserved+committed, which would not claw anything back (the spend is
+  // already made) but would block every remaining provision on numbers the
+  // operator never saw — so a reduction takes effect at the next period, where it
+  // bounds a month that has spent nothing yet.
+  await db
+    .prepare(`UPDATE vendor_spend_ledger SET ceiling_cents = ?, updated_at = ? WHERE period_key = ? AND ceiling_cents < ?`)
+    .bind(ceilingCents, now, pk, ceilingCents)
     .run();
   await db.prepare(`INSERT OR IGNORE INTO vendor_slot_state (id, slots_used, updated_at) VALUES (1, 0, ?)`).bind(now).run();
 
@@ -414,25 +556,49 @@ export async function withSpendCeiling<T>(
 export async function reapStaleReservations(
   env: Env,
   nowMs: number,
-): Promise<{ reaped: number; releasedCents: number; errors: number }> {
+  scope: SweepScope = {},
+): Promise<{ reaped: number; releasedCents: number; errors: number; deferred: number }> {
   const cutoff = nowMs - RESERVE_REAP_TTL_MS;
+  // BOUNDED, and through the same primitive every other fan-out leg uses
+  // (NEW-1, round 2 of docs/adversarial/wave-b1-scale-monitoring-gate-2026-08-20.md).
+  // This read had no LIMIT and its loop had no deadline, at 2-3 subrequests a
+  // row, running AHEAD of the cursor commit, the send pipeline, the signal
+  // report and the heartbeat. Executed by the gate: 300 orphans => ~901
+  // subrequests in one leg, against a budgeted tick of 592. It is B1's class,
+  // one leg over, and it was pre-existing — which is precisely why the guard
+  // that should have caught it (`sweep-budget.test.ts`) had to stop being a
+  // tautology in the same commit.
   const stale = await env.DB.prepare(
-    `SELECT id, period_key, kind, est_cents FROM vendor_spend_entries WHERE status = 'reserved' AND created_at < ?`,
+    `SELECT id, period_key, kind, est_cents FROM vendor_spend_entries
+      WHERE status = 'reserved' AND created_at < ?
+      ORDER BY created_at ASC
+      LIMIT ?`,
   )
-    .bind(cutoff)
+    .bind(cutoff, RESERVE_REAP_BATCH)
     .all<{ id: string; period_key: string; kind: string; est_cents: number }>();
 
+  const byId = new Map(stale.results.map((row) => [row.id, row]));
   let reaped = 0;
   let releasedCents = 0;
-  let errors = 0;
-  for (const row of stale.results) {
-    try {
+
+  // OLDEST FIRST + a self-draining population: a reaped entry leaves
+  // `status = 'reserved'`, so the next tick's batch is the next 25. Nothing can
+  // sit at the head forever the way a rotation can.
+  //
+  // The tick's DEADLINE but NOT its rotation accumulator — this leg iterates
+  // ledger entries, not the tenant slice, so how many it visited says nothing
+  // about how far the tenant rotation got (admin/tenant-slice.ts).
+  const swept = await sweepTenants(
+    [...byId.keys()],
+    sweepDeadlineOf(scope.fanout),
+    async (entryId) => {
+      const row = byId.get(entryId) as { id: string; period_key: string; kind: string; est_cents: number };
       const flip = await env.DB.prepare(
         `UPDATE vendor_spend_entries SET status = 'released', updated_at = ? WHERE id = ? AND status = 'reserved'`,
       )
         .bind(nowMs, row.id)
         .run();
-      if ((flip.meta.changes ?? 0) === 0) continue; // committed/released concurrently — leave the counters untouched
+      if ((flip.meta.changes ?? 0) === 0) return; // committed/released concurrently — leave the counters untouched
       await env.DB.prepare(
         `UPDATE vendor_spend_ledger SET reserved_cents = MAX(0, reserved_cents - ?), updated_at = ? WHERE period_key = ?`,
       )
@@ -445,16 +611,15 @@ export async function reapStaleReservations(
       }
       reaped++;
       releasedCents += row.est_cents;
-    } catch (err) {
-      // One row's transient D1 failure must never abort reaping the rest of
-      // the batch — the row stays 'reserved' and is retried next tick (audit
-      // class-sweep sibling fix, 2026-08-06, mirrors runDunningSweep's
-      // per-tenant try/catch).
-      errors++;
-      console.error(`reapStaleReservations: failed to reap entry ${row.id}`, err);
-    }
-  }
-  return { reaped, releasedCents, errors };
+    },
+    // One row's transient D1 failure must never abort reaping the rest of
+    // the batch — the row stays 'reserved' and is retried next tick (audit
+    // class-sweep sibling fix, 2026-08-06, mirrors runDunningSweep's
+    // per-tenant try/catch).
+    (entryId, err) => console.error(`reapStaleReservations: failed to reap entry ${entryId}`, err),
+  );
+
+  return { reaped, releasedCents, errors: swept.errors, deferred: swept.deferred };
 }
 
 /**

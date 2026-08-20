@@ -13,8 +13,10 @@ import { escapeHtml } from "../html-escape.js";
 import { BUDGET_EXPIRED, rotationOffset, withItemBudget } from "../isolated-loop.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import { newId } from "../schema.js";
-import { countSupportTicketsByStatus, countTerminatedTenants, hasDunningEventForCycle, insertDunningEventIfNew, listAllTenantIds } from "./db.js";
+import { countSupportTicketsByStatus, countTerminatedTenants, hasDunningEventForCycle, insertDunningEventIfNew } from "./db.js";
 import { decideDunningAction } from "./dunning.js";
+import { CRON_PERIOD_MS, SEND_PIPELINE_LEG_DEADLINE_MS, SEND_PIPELINE_TENANT_BUDGET_MS } from "./sweep-budget.js";
+import { countTenants, resolveSweepTenants, sweepTenants, type SweepScope } from "./tenant-slice.js";
 
 export interface DunningSweepResult {
   tenantId: string;
@@ -31,6 +33,10 @@ export interface DunningSweepSummary {
    * etc). Never aborts the sweep for the rest — mirrors the 3 sibling sweeps
    * below (audit F1, 2026-08-05). */
   errors: number;
+  /** Tenants this call deliberately did NOT reach, because the tick's shared
+   * fan-out deadline arrived first. A capacity number, never an error — see
+   * admin/sweep-signals.ts (scale audit S4). */
+  deferred: number;
 }
 
 /** D2 dunning sweep — scans every tenant, actions only the 'past_due' ones,
@@ -42,16 +48,18 @@ export async function runDunningSweep(
   env: Env,
   nowMs: number,
   mailer: OpsMailer = createOpsMailer(env),
+  scope: SweepScope = {},
 ): Promise<DunningSweepSummary> {
-  const tenantIds = await listAllTenantIds(env);
+  const tenantIds = await resolveSweepTenants(env, scope);
   const results: DunningSweepResult[] = [];
-  let errors = 0;
 
-  for (const tenantId of tenantIds) {
-    try {
+  const swept = await sweepTenants(
+    tenantIds,
+    scope.fanout,
+    async (tenantId) => {
       const stub = env.TENANT.get(env.TENANT.idFromName(tenantId));
       const summary = await stub.opsSummary(nowMs);
-      if (summary.billingState !== "past_due") continue;
+      if (summary.billingState !== "past_due") return;
 
       const cycle = summary.billingFailureCount;
       // A5: a permanent decline code makes this suspend immediately, regardless
@@ -102,16 +110,17 @@ export async function runDunningSweep(
         applied = await recordEvent();
       }
       results.push({ tenantId, cycle, action, applied });
-    } catch (err) {
-      // One tenant's failure must never abort the sweep for every other
-      // tenant, nor (via runScheduledOpsSweep) every other cron leg — mirrors
-      // the 3 sibling sweeps below (audit F1, 2026-08-05).
-      errors++;
-      console.error(`dunning sweep failed for tenant ${tenantId}`, err);
-    }
-  }
+    },
+    (tenantId, err) => console.error(`dunning sweep failed for tenant ${tenantId}`, err),
+  );
 
-  return { scannedTenants: tenantIds.length, pastDueTenants: results.length, results, errors };
+  return {
+    scannedTenants: swept.visited,
+    pastDueTenants: results.length,
+    results,
+    errors: swept.errors,
+    deferred: swept.deferred,
+  };
 }
 
 /**
@@ -179,29 +188,31 @@ async function trySendNotice(mailer: OpsMailer, msg: { to: string; subject: stri
 export interface DeliverabilitySweepAllSummary {
   tenantsSwept: number;
   errors: number;
+  deferred: number;
 }
 
-/** Runs the deliverability monitor->decide->act loop for EVERY tenant — the cron lane (no send scheduling, that's tick()/B2). */
-export async function runDeliverabilitySweepAllTenants(env: Env): Promise<DeliverabilitySweepAllSummary> {
-  const tenantIds = await listAllTenantIds(env);
-  let errors = 0;
-  for (const tenantId of tenantIds) {
-    try {
-      const stub = env.TENANT.get(env.TENANT.idFromName(tenantId));
-      await stub.deliverabilitySweep();
-    } catch (err) {
-      // One tenant's failure must not abort the sweep for every other tenant.
-      errors++;
-      console.error(`deliverability sweep failed for tenant ${tenantId}`, err);
-    }
-  }
-  return { tenantsSwept: tenantIds.length, errors };
+/** Runs the deliverability monitor->decide->act loop for every tenant IN SCOPE
+ * — the cron lane (no send scheduling, that's tick()/B2). The cron hands it the
+ * tick's bounded slice (admin/tenant-slice.ts); an on-demand caller passes
+ * nothing and gets a bounded full scan. */
+export async function runDeliverabilitySweepAllTenants(env: Env, scope: SweepScope = {}): Promise<DeliverabilitySweepAllSummary> {
+  const tenantIds = await resolveSweepTenants(env, scope);
+  const swept = await sweepTenants(
+    tenantIds,
+    scope.fanout,
+    async (tenantId) => {
+      await env.TENANT.get(env.TENANT.idFromName(tenantId)).deliverabilitySweep();
+    },
+    (tenantId, err) => console.error(`deliverability sweep failed for tenant ${tenantId}`, err),
+  );
+  return { tenantsSwept: swept.visited, errors: swept.errors, deferred: swept.deferred };
 }
 
 export interface WarmupCancelSweepAllSummary {
   tenantsSwept: number;
   cancelled: number;
   errors: number;
+  deferred: number;
 }
 
 /**
@@ -219,21 +230,19 @@ export interface WarmupCancelSweepAllSummary {
  * One tenant's failure never aborts the sweep for the rest, and the per-tenant
  * sweep itself grades each mailbox independently and never throws.
  */
-export async function runWarmupCancelSweepAllTenants(env: Env): Promise<WarmupCancelSweepAllSummary> {
-  const tenantIds = await listAllTenantIds(env);
+export async function runWarmupCancelSweepAllTenants(env: Env, scope: SweepScope = {}): Promise<WarmupCancelSweepAllSummary> {
+  const tenantIds = await resolveSweepTenants(env, scope);
   let cancelled = 0;
-  let errors = 0;
-  for (const tenantId of tenantIds) {
-    try {
-      const stub = env.TENANT.get(env.TENANT.idFromName(tenantId));
-      const result = await stub.warmupCancelSweep();
+  const swept = await sweepTenants(
+    tenantIds,
+    scope.fanout,
+    async (tenantId) => {
+      const result = await env.TENANT.get(env.TENANT.idFromName(tenantId)).warmupCancelSweep();
       cancelled += result.cancelled;
-    } catch (err) {
-      errors++;
-      console.error(`warmup cancel sweep failed for tenant ${tenantId}`, err);
-    }
-  }
-  return { tenantsSwept: tenantIds.length, cancelled, errors };
+    },
+    (tenantId, err) => console.error(`warmup cancel sweep failed for tenant ${tenantId}`, err),
+  );
+  return { tenantsSwept: swept.visited, cancelled, errors: swept.errors, deferred: swept.deferred };
 }
 
 export interface ProvisioningReconcileSweepSummary {
@@ -248,6 +257,8 @@ export interface ProvisioningReconcileSweepSummary {
   skippedNoSpec: number;
   /** Per-tenant reconcile failures (a deferred domain, or a wedged DO) — never aborts the sweep. */
   errors: number;
+  /** Tenants left for a later tick by the shared fan-out deadline (capacity, not failure). */
+  deferred: number;
 }
 
 /**
@@ -271,7 +282,7 @@ export function provisioningReconcileArmed(env: { PROVISIONING_RECONCILE_ENABLED
  * domains to completion against its own storage; one tenant's failure never
  * aborts the sweep for the rest.
  */
-export async function runProvisioningReconcileAllTenants(env: Env): Promise<ProvisioningReconcileSweepSummary> {
+export async function runProvisioningReconcileAllTenants(env: Env, scope: SweepScope = {}): Promise<ProvisioningReconcileSweepSummary> {
   const empty: ProvisioningReconcileSweepSummary = {
     disabled: false,
     tenantsSwept: 0,
@@ -279,6 +290,7 @@ export async function runProvisioningReconcileAllTenants(env: Env): Promise<Prov
     completed: 0,
     skippedNoSpec: 0,
     errors: 0,
+    deferred: 0,
   };
   if (!provisioningReconcileArmed(env)) {
     // Shipped default — no deploy, no code change arms it; a `wrangler secret put`
@@ -287,29 +299,30 @@ export async function runProvisioningReconcileAllTenants(env: Env): Promise<Prov
     return { ...empty, disabled: true };
   }
 
-  const tenantIds = await listAllTenantIds(env);
-  const summary: ProvisioningReconcileSweepSummary = { ...empty, tenantsSwept: tenantIds.length };
-  for (const tenantId of tenantIds) {
-    try {
-      const stub = env.TENANT.get(env.TENANT.idFromName(tenantId));
-      const result = await stub.provisioningReconcileSweep();
+  const tenantIds = await resolveSweepTenants(env, scope);
+  const summary: ProvisioningReconcileSweepSummary = { ...empty };
+  const swept = await sweepTenants(
+    tenantIds,
+    scope.fanout,
+    async (tenantId) => {
+      const result = await env.TENANT.get(env.TENANT.idFromName(tenantId)).provisioningReconcileSweep();
       summary.reconciled += result.reconciled;
       summary.completed += result.completed;
       summary.skippedNoSpec += result.skippedNoSpec;
       summary.errors += result.errors;
-    } catch (err) {
-      // One tenant's failure must never abort the sweep for every other tenant,
-      // nor (via runScheduledOpsSweep) every other cron leg.
-      summary.errors++;
-      console.error(`provisioning reconcile sweep failed for tenant ${tenantId}`, err);
-    }
-  }
+    },
+    (tenantId, err) => console.error(`provisioning reconcile sweep failed for tenant ${tenantId}`, err),
+  );
+  summary.tenantsSwept = swept.visited;
+  summary.errors += swept.errors;
+  summary.deferred = swept.deferred;
   return summary;
 }
 
 export interface WebhookDeliverySweepSummary {
   tenantsSwept: number;
   errors: number;
+  deferred: number;
 }
 
 /**
@@ -320,49 +333,20 @@ export interface WebhookDeliverySweepSummary {
  * ladder, so this cron cadence is the delivery clock. Idempotent (only due rows
  * fire); one tenant's failure never aborts the sweep for the rest.
  */
-export async function runWebhookDeliveriesAllTenants(env: Env): Promise<WebhookDeliverySweepSummary> {
-  const tenantIds = await listAllTenantIds(env);
-  let errors = 0;
-  for (const tenantId of tenantIds) {
-    try {
-      const stub = env.TENANT.get(env.TENANT.idFromName(tenantId));
-      await stub.runWebhookDeliveries();
-    } catch (err) {
-      errors++;
-      console.error(`webhook delivery sweep failed for tenant ${tenantId}`, err);
-    }
-  }
-  return { tenantsSwept: tenantIds.length, errors };
+export async function runWebhookDeliveriesAllTenants(env: Env, scope: SweepScope = {}): Promise<WebhookDeliverySweepSummary> {
+  const tenantIds = await resolveSweepTenants(env, scope);
+  const swept = await sweepTenants(
+    tenantIds,
+    scope.fanout,
+    async (tenantId) => {
+      await env.TENANT.get(env.TENANT.idFromName(tenantId)).runWebhookDeliveries();
+    },
+    (tenantId, err) => console.error(`webhook delivery sweep failed for tenant ${tenantId}`, err),
+  );
+  return { tenantsSwept: swept.visited, errors: swept.errors, deferred: swept.deferred };
 }
 
 // --- Wave-2 §5: the send-pipeline leg (the auto-send driver) ---------------
-
-/**
- * How long ONE tenant's poll+tick pair may occupy the leg. Rung 3 of the
- * ordering ladder documented in vendors/real/email-port.ts — it MUST exceed
- * ENGINE_REQUEST_TIMEOUT_MS (120s), or a tenant behind a slow-but-alive engine
- * is abandoned having completed zero work on every single cycle, forever
- * (adversary round-2, R5). Read that comment before changing this.
- *
- * The pair shares ONE budget, per the design. Consequence, stated rather than
- * hidden: against a WEDGED engine a tenant's poll can consume the whole budget
- * and its tick never runs — but a wedged engine is exactly the state in which
- * the tick could not have sent anything either, so nothing is lost that was
- * otherwise available.
- */
-export const SEND_PIPELINE_TENANT_BUDGET_MS = 135_000;
-
-/**
- * The whole leg's wall-clock ceiling, checked BETWEEN tenants. Converts "the
- * tenants behind a stalled one never run" into "some tenants this cycle, all
- * tenants across cycles" (with the rotation below). True worst case is this
- * plus one tenant budget — 285s, under the 300s cron period, which is what
- * keeps a wedged engine from making every sweep overlap the next.
- */
-export const SEND_PIPELINE_LEG_DEADLINE_MS = 150_000;
-
-/** The `[triggers] crons` period this leg is sized against (5 minutes). */
-export const CRON_PERIOD_MS = 300_000;
 
 export interface SendPipelineSweepSummary {
   tenantsScanned: number;
@@ -415,6 +399,11 @@ export async function runSendPipelineAllTenants(
   env: Env,
   nowMs: number = new RealClock().now(),
   opts: { tenantBudgetMs?: number; legDeadlineMs?: number } = {},
+  // Only `tenantIds` is honoured. This leg runs AFTER the fan-out phase and
+  // owns the rest of the cron period by design (sweep-budget.ts derives the
+  // fan-out deadline as exactly what is left over after this leg's two bounds),
+  // so applying the fan-out deadline here would deduct the same time twice.
+  scope: Pick<SweepScope, "tenantIds"> = {},
 ): Promise<SendPipelineSweepSummary> {
   const empty: SendPipelineSweepSummary = {
     tenantsScanned: 0,
@@ -437,7 +426,7 @@ export async function runSendPipelineAllTenants(
     return { ...empty, disabled: true };
   }
 
-  const tenantIds = await listAllTenantIds(env);
+  const tenantIds = await resolveSweepTenants(env, scope);
   const summary: SendPipelineSweepSummary = { ...empty, tenantsScanned: tenantIds.length };
   if (tenantIds.length === 0) return summary; // R6 zero-guard: `% 0` is NaN
 
@@ -489,7 +478,20 @@ export async function runSendPipelineAllTenants(
 
 export interface OpsDigest {
   windowHours: number;
-  tenants: { total: number; activeByPlan: Record<string, number> };
+  /**
+   * `total` is EVERY tenant in the control-plane index; `scanned` is how many
+   * this pass actually reached.
+   *
+   * They differ whenever the cron hands this a bounded slice (scale audit S1),
+   * and publishing both is the point: a monitoring read that shows only the
+   * numerator lets a partial pass be read as the whole truth
+   * (docs/adversarial/class-sweep-watch-completeness-2026-08-17.md). Every
+   * aggregate below `scanned` is summed over the SCANNED tenants only.
+   */
+  tenants: { total: number; scanned: number; activeByPlan: Record<string, number> };
+  /** True iff `scanned === total` — the one flag a consumer needs to know
+   * whether a zero below means "none" or "none among the ones I looked at". */
+  complete: boolean;
   mrrCents: number;
   totalUsageCents: number;
   /** Item 3d (docs/adversarial/class-sweep-vendor-truth-2026-08-18.md, D8) —
@@ -508,10 +510,21 @@ export interface OpsDigest {
   /** H-alert (pipeline F5) — mailboxes across all tenants whose engine
    * credential push has never landed; they cannot send or poll yet. */
   pendingCredentialPushes: number;
-  support: { open: number; escalated: number };
+  /** Ticket counts WITH the unfiltered `total` they were drawn from — see
+   * `countSupportTicketsByStatus`. `open + escalated + closed !== total` means a
+   * status exists that neither this rollup nor the support digest's ticket list
+   * accounts for. */
+  support: { open: number; escalated: number; closed: number; total: number };
   pastDueCount: number;
-  /** D5 lifecycle health — canceled/terminated/disputed tenant counts + total annual-domain liability (integer cents). */
-  lifecycle: { canceled: number; terminated: number; disputed: number; annualDomainLiabilityCents: number };
+  /** D5 lifecycle health — canceled/terminated/disputed tenant counts + total annual-domain liability (integer cents).
+   *
+   * `unbucketed` is the DENOMINATOR GUARD on the if-ladder above it
+   * (docs/adversarial/class-sweep-watch-completeness-2026-08-17.md, platform
+   * IN member 4): `billing_state` carries no CHECK constraint, so a value
+   * nobody accounted for used to fall into no bucket at all — the tenant still
+   * counted in `tenants.total` and then vanished from every lifecycle number
+   * the founder reads, silently. Non-zero raises a `watchdogAlerts` line. */
+  lifecycle: { canceled: number; terminated: number; disputed: number; annualDomainLiabilityCents: number; unbucketed: number };
   /** C6 — total durable waitlist leads (adversarial panel-03 finding #9: owner visibility into the funnel). */
   waitlist: { count: number };
   watchdogAlerts: string[];
@@ -521,23 +534,37 @@ export interface OpsDigest {
   errors: number;
 }
 
+/**
+ * Every `billing_state` the lifecycle rollup below has a line for, INCLUDING
+ * the two it deliberately says nothing about ('none' — never subscribed;
+ * 'active' — the paying norm, counted by `activeByPlan`). Anything else is
+ * `lifecycle.unbucketed`.
+ *
+ * A SET rather than an `else` on the if-ladder: the column carries no CHECK
+ * constraint (schema.ts:17, `DEFAULT 'none'`), so the only thing standing
+ * between "someone added a state" and "that tenant left every number the
+ * founder reads" is this enumeration and the alert it raises.
+ */
+const LIFECYCLE_BUCKETED_BILLING_STATES = new Set(["none", "active", "past_due", "canceling", "canceled", "disputed"]);
+
 /** D6 — the owner's single cross-tenant business-health rollup (SPEC.md §0.10). */
-export async function buildOpsDigest(env: Env, nowMs: number, windowHours: number): Promise<OpsDigest> {
+export async function buildOpsDigest(env: Env, nowMs: number, windowHours: number, scope: SweepScope = {}): Promise<OpsDigest> {
   const sinceMs = nowMs - windowHours * 60 * 60 * 1000;
-  const tenantIds = await listAllTenantIds(env);
+  const total = await countTenants(env);
+  const tenantIds = await resolveSweepTenants(env, scope);
   const summaries: TenantOpsSummary[] = [];
-  let errors = 0;
-  for (const id of tenantIds) {
-    try {
+  const swept = await sweepTenants(
+    tenantIds,
+    scope.fanout,
+    async (id) => {
       summaries.push(await env.TENANT.get(env.TENANT.idFromName(id)).opsSummary(sinceMs));
-    } catch (err) {
-      // One tenant's failure must never zero out the digest for every other
-      // tenant, nor 500 the on-demand GET /admin/ops/digest route (audit
-      // class-sweep sibling fix, 2026-08-06).
-      errors++;
-      console.error(`ops digest: opsSummary failed for tenant ${id}`, err);
-    }
-  }
+    },
+    // One tenant's failure must never zero out the digest for every other
+    // tenant, nor 500 the on-demand GET /admin/ops/digest route (audit
+    // class-sweep sibling fix, 2026-08-06).
+    (id, err) => console.error(`ops digest: opsSummary failed for tenant ${id}`, err),
+  );
+  const errors = swept.errors;
 
   const activeByPlan: Record<string, number> = {};
   let mrrCents = 0;
@@ -550,6 +577,7 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
   let pendingCredentialPushes = 0;
   let canceledCount = 0;
   let disputedCount = 0;
+  let unbucketedCount = 0;
   let annualDomainLiabilityCents = 0;
   // Item 3d (docs/adversarial/class-sweep-vendor-truth-2026-08-18.md, D8) —
   // the real cross-tenant count, replacing the hardcoded literal below.
@@ -564,6 +592,11 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
     // both count as lifecycle-canceled for the owner's view.
     if (s.billingState === "canceling" || s.billingState === "canceled") canceledCount++;
     if (s.billingState === "disputed") disputedCount++;
+    // The ELSE of the whole ladder, counted rather than dropped. 'none' and
+    // 'active' are the two states this rollup deliberately has no line for
+    // (they are the healthy default and the paying norm); ANY other value is a
+    // tenant that exists and appears in no lifecycle number at all.
+    if (!LIFECYCLE_BUCKETED_BILLING_STATES.has(s.billingState)) unbucketedCount++;
     annualDomainLiabilityCents += s.annualDomainLiabilityCents;
     pausedMailboxesTotal += s.deliverability.pausedMailboxes;
     burningDomainsTotal += s.deliverability.burningDomains;
@@ -613,10 +646,34 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
       `${gaveUpWarmupCancels} warmup-pool cancellation(s) GAVE UP after retries — those InboxKit subscriptions may still be billing; verify in the vendor console`,
     );
   }
+  const unaccountedTickets = support.total - (support.open + support.escalated + support.closed);
+  if (unaccountedTickets > 0) {
+    watchdogAlerts.push(
+      `${unaccountedTickets} support ticket(s) carry a status this rollup and GET /admin/support/digest both ignore — ` +
+        `they are in no list and no count. Add the status to admin/db.ts's countSupportTicketsByStatus and to the digest's WHERE clause.`,
+    );
+  }
+  if (unbucketedCount > 0) {
+    watchdogAlerts.push(
+      `${unbucketedCount} tenant(s) carry a billing_state this digest has no bucket for — they are counted in tenants.total and in NO lifecycle number. ` +
+        `Add the new state to LIFECYCLE_BUCKETED_BILLING_STATES (admin/ops-sweep.ts) and give it a line.`,
+    );
+  }
+  const complete = swept.visited >= total;
+  if (!complete) {
+    // The denominator, ON THE WIRE and in the prose. Every zero above is
+    // "none among the tenants this pass reached", and a reader who only sees
+    // the numerator cannot tell the difference.
+    watchdogAlerts.push(
+      `PARTIAL PASS: ${swept.visited} of ${total} tenant(s) scanned this cycle (the cron sweeps a bounded slice — admin/sweep-budget.ts). ` +
+        `Every count in this digest is over those ${swept.visited}; a zero is not evidence of a platform-wide zero.`,
+    );
+  }
 
   return {
     windowHours,
-    tenants: { total: tenantIds.length, activeByPlan },
+    tenants: { total, scanned: swept.visited, activeByPlan },
+    complete,
     mrrCents,
     totalUsageCents,
     provisioningFailureCount,
@@ -625,7 +682,13 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
     pendingCredentialPushes,
     support,
     pastDueCount,
-    lifecycle: { canceled: canceledCount, terminated: terminatedCount, disputed: disputedCount, annualDomainLiabilityCents },
+    lifecycle: {
+      canceled: canceledCount,
+      terminated: terminatedCount,
+      disputed: disputedCount,
+      annualDomainLiabilityCents,
+      unbucketed: unbucketedCount,
+    },
     waitlist: { count: waitlistCount },
     watchdogAlerts,
     errors,

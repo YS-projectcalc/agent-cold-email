@@ -46,10 +46,27 @@ import type { BuyDispatchRow } from "./provision-intents.js";
  * How long the provider gets to make a dispatched buy visible before its absence
  * from the mailbox list counts as proof that nothing was purchased.
  *
- * This number is the whole money guard, so it is sized like one: generously, at
- * the same 15 minutes engine/spend-ceiling.ts's reaper calls "well above the
- * longest legitimate provision run". Too long only delays a wedged tenant's
- * recovery; too short buys a second mailbox the customer already owns.
+ * This number is the whole money guard, so it is sized like one: generously,
+ * ABOVE the longest legitimate provision run. Too long only delays a wedged
+ * tenant's recovery; too short buys a second mailbox the customer already owns
+ * — an over-spend, which is the direction that must never be the cheap one.
+ *
+ * RESIZED WITH THE RUN IT IS SIZED AGAINST (NEW-3, round 2 of
+ * docs/adversarial/wave-b1-scale-monitoring-gate-2026-08-20.md). It was 15
+ * minutes, quoting engine/spend-ceiling.ts's reaper — and N7 re-derived that
+ * "longest legitimate run" to 30 minutes (the S3 bounded retry adds up to 20s
+ * of serialized backoff per vendor call) and moved the reaper to 45. That left
+ * this guard at HALF the window it explicitly claims to exceed: a buy
+ * dispatched inside a legitimately-long saga could be judged "absent, so
+ * nothing was purchased" and re-bought. Latent at the pilot (9 mailboxes is
+ * ~3 min of retry sleep) and it arms at Scale-tier fleet sizes with sustained
+ * vendor 429s — which is exactly the shape of thing that is cheap now and
+ * expensive later.
+ *
+ * 45 minutes, matching the reaper, so the two "presumed dead" cutoffs stay one
+ * convention. `idempotency-collapse-disclosure.test.ts` pins
+ * `ABSENCE_MIN_AGE_MS > REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS` so this
+ * cannot silently fall behind the claim TTL again.
  *
  * UNVERIFIED against the live provider: its buy endpoint answers "scheduled" and
  * this platform's own state mapping reads a listed-but-inactive mailbox as
@@ -57,7 +74,7 @@ import type { BuyDispatchRow } from "./provision-intents.js";
  * belt-and-braces. That inference has not been confirmed against a live account,
  * which is exactly why the window is not tuned down.
  */
-export const ABSENCE_MIN_AGE_MS = 15 * 60 * 1000;
+export const ABSENCE_MIN_AGE_MS = 45 * 60 * 1000;
 
 /**
  * The in-call re-poll before declaring a mailbox absent. Deliberately the same

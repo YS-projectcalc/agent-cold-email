@@ -1,4 +1,4 @@
-import { runInDurableObject } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import {
   domainDnsResult,
@@ -168,6 +168,17 @@ describe("T2/IN-5 — one dead mailbox address must not starve the addresses beh
     expect(result).toBeInstanceOf(VendorError);
     expect((result as VendorError).retryable).toBe(false);
     expect(await readActions(tenantId)).toContainEqual({ action: "MAILBOX_SLOT_FAILED", target: "sender11@slotco0.com" });
+
+    // AND IT REACHES AN OPERATOR (docs/adversarial/
+    // wave-1-2-integration-gate-2026-08-18.md §6). Only ONE failure is rethrown
+    // to the caller, so every OTHER isolated slot in a batch was previously
+    // visible in nothing but the customer's own activity feed — each one a paid
+    // vendor unit with no working mailbox behind it. REDS on the old code: no
+    // watchtower row was ever written for this.
+    const slotCheck = await env.DB.prepare(
+      `SELECT status FROM watchtower_state WHERE check_name = 'mailbox_slot_failed:sender11@slotco0.com'`,
+    ).first<{ status: string }>();
+    expect(slotCheck?.status).toBe("unhealthy");
   }, 30_000);
 });
 
@@ -242,5 +253,13 @@ describe("T1 — one dead ordinal must not starve the ordinals behind it", () =>
     expect((result as VendorError).retryable).toBe(false);
     // ...and the healthy ordinal's work still landed.
     expect(await readMailboxEmails(tenantId)).toEqual(["sender21@holcotwo1.com"]);
+
+    // AND THE DEAD ORDINAL REACHES AN OPERATOR. A half-completed ordinal is a
+    // PAID domain with no working mail on it; before this it existed only as a
+    // customer-visible activity row (wave-1-2 integration gate §6).
+    const ordinalCheck = await env.DB.prepare(
+      `SELECT status FROM watchtower_state WHERE check_name = 'domain_ordinal_failed:holcotwo0.com'`,
+    ).first<{ status: string }>();
+    expect(ordinalCheck?.status).toBe("unhealthy");
   }, 30_000);
 });

@@ -112,6 +112,42 @@ describe("B2 — request-level idempotency (Idempotency-Key)", () => {
   });
 });
 
+// The replay-site collapse stamp (docs/adversarial/wave-a-trains-3-4-gate-
+// 2026-08-20.md, the RULING). A replayed response IS a collapse — provenance.ts
+// defines `deduplicated` on the RESPONSE, "was this produced fresh, or is it an
+// earlier one handed back?" — so the single replay site discloses it.
+//
+// The stamp is DELIBERATELY conditional on the recorded payload already carrying
+// the field, which is the one thing a generic `T` replay site can know about its
+// own type: the recording IS the serialization of what `fn` returned, so the
+// field is present exactly when the call site's return type is `Collapsed<T>`.
+// Stamping unconditionally would invent a field on `launch_campaign` and
+// `setup_infrastructure`, whose published DTOs do not declare it — a wire shape
+// no schema, tool description or dashboard type expects.
+describe("the request-idempotency replay discloses itself as a collapse", () => {
+  it("does NOT add `deduplicated` to a replayed response whose type never declared it", async () => {
+    const { tenantId, token } = await setupReadyTenant("No Stamp Co", "nostamp.com");
+    const body = JSON.stringify({
+      name: "once",
+      offer: "x",
+      leads: [{ email: "lead@nostamp-leads.com", firstName: "L", company: "Co" }],
+      sequence: ONE_STEP,
+      stopOnReply: true,
+    });
+    const headers = { "Idempotency-Key": "no-stamp-k1" };
+
+    const r1 = await api<Record<string, unknown>>("/campaigns", { method: "POST", token, headers, body });
+    const r2 = await api<Record<string, unknown>>("/campaigns", { method: "POST", token, headers, body });
+
+    // A genuine replay: same campaign, no second row.
+    expect(r2.body.campaignId).toBe(r1.body.campaignId);
+    expect(await rowCount(tenantId, `SELECT COUNT(*) as n FROM campaigns`)).toBe(1);
+    // ...and the response is byte-identical to the recording, with no invented field.
+    expect("deduplicated" in r2.body).toBe(false);
+    expect(r2.body).toEqual(r1.body);
+  });
+});
+
 // B3 — even WITHOUT a request idempotency key, a retried manual reply with the
 // same body reuses a stable vendor key (content hash), so it can't double-send.
 describe("B3 — manual reply vendor key is stable (no duplicate send on retry without a key)", () => {

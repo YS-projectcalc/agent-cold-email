@@ -16,14 +16,45 @@ const REQUEST_IDEMPOTENCY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 // + setDns) and PER mailbox (provision + startWarmup, + recordUsage on paid
 // tiers) sequentially, up to the Scale tier's cap of 18 domains / 60
 // mailboxes (packages/shared/src/pricing.ts) — up to ~156 sequential real
-// vendor calls in one call to fn(). Even at a pessimistic several seconds
-// per real registrar/mailbox-vendor API round trip, that whole chain
-// finishes in low single-digit minutes; 10 minutes leaves multiples of
-// headroom so no legitimate in-flight claim is ever reclaimed out from under
-// it, while staying ~4300x shorter than REQUEST_IDEMPOTENCY_TTL_MS above, so
-// a genuinely dead claim (crashed DO) unblocks a retry promptly instead of
-// waiting anywhere near the 30-day full-eviction horizon.
-const REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS = 10 * 60 * 1000;
+// vendor calls in one call to fn().
+//
+// RE-DERIVED WITH THE RETRY TERM (N7, docs/adversarial/
+// wave-b1-scale-monitoring-gate-2026-08-20.md). The original derivation was
+// "several seconds per round trip x 156 = low single-digit minutes, so 10
+// minutes leaves multiples of headroom" — and it was written before the S3
+// bounded retry existed. `InboxKitClient` now retries a 429 up to
+// INBOXKIT_MAX_ATTEMPTS (3) with waits capped at MAX_RETRY_WAIT_MS (10s), and
+// it SERIALIZES the whole attempt sequence including its backoff on a
+// per-instance queue. So each vendor call can now cost up to
+// (3 - 1) x 10s = 20s of pure sleep on top of its round trips:
+//
+//   base chain              ~156 calls x several seconds   = low single-digit minutes
+//   retry term, realistic   ~156 calls x one 429-then-success (~10s) = ~26 min
+//   ------------------------------------------------------------------------
+//   worst realistic total                                  ~30 min
+//
+// The old 10 minutes no longer covers that, so it is raised to 30. Past the
+// TTL a concurrent same-key retry takes the "presumed dead" branch, re-stamps
+// the claim and runs the saga ALONGSIDE the original — which the per-intent
+// layers underneath (ordinal-derived domain intents, address-derived
+// `provision:` keys, the spend reserve) stop from double-buying, but which
+// still burns reservations and re-fires one-shot alerts for no reason.
+//
+// THE COST OF RAISING IT, stated: a genuinely dead claim (crashed DO) now
+// blocks a same-key retry for 30 minutes instead of 10. That is acceptable
+// precisely because the durable intent rows make the eventual resume cheap
+// (it resumes at the wait, never at the buy) and the caller gets a RETRYABLE
+// RequestInProgressError meanwhile, not a failure. Still ~1400x shorter than
+// REQUEST_IDEMPOTENCY_TTL_MS above.
+//
+// The absolute worst case (every one of 156 calls exhausting all 3 attempts,
+// ~52 min of sleep alone) is deliberately NOT covered: it needs a vendor
+// rate-limiting essentially every call for the better part of an hour, in
+// which case the saga is failing for reasons a claim TTL cannot help with.
+// EXPORTED so `spend-ceiling.test.ts` can pin the one cross-module invariant
+// these two constants share: the stale-reserve reaper must outlive the longest
+// legitimate claim, or it reaps live reservations.
+export const REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS = 30 * 60 * 1000;
 
 /** Per-call-site options — see `recordedIsNonTerminal`. */
 export interface RequestIdempotencyOptions<T> {
@@ -44,6 +75,43 @@ export interface RequestIdempotencyOptions<T> {
    * has aged out of REQUEST_IDEMPOTENCY_TTL_MS.
    */
   recordedIsNonTerminal?: (recorded: T) => boolean;
+}
+
+/**
+ * THE REPLAY IS ITSELF A COLLAPSE, and this is the one place that can say so
+ * (docs/adversarial/wave-a-trains-3-4-gate-2026-08-20.md, the RULING).
+ *
+ * `Collapsed<T>`'s flag is defined on the RESPONSE — packages/shared/src/
+ * provenance.ts: "Was this response produced fresh, or is it an earlier one
+ * handed back?" — and names the failure it exists to prevent: a collapse
+ * returned byte-identically to a real admission, so an agent in a loop cannot
+ * tell that its second request was absorbed. A replay is exactly that. The
+ * call sites compute the flag from their OWN collapse layer (an already-recorded
+ * intent, an already-sent content hash) and structurally cannot see this one:
+ * when the replay fires, their `fn` never runs at all.
+ *
+ * WHY THE PRESENCE CHECK RATHER THAN AN UNCONDITIONAL STAMP. `T` is generic
+ * here, so the type is not available to branch on — but the RECORDED PAYLOAD is,
+ * and it answers the same question exactly. The row holds the serialization of
+ * whatever `fn` returned, so a boolean `deduplicated` is present in it precisely
+ * when that call site's return type is `Collapsed<T>`: today `reply`
+ * (engine/threads.ts) and `remove_mailboxes` (engine/billing.ts). Stamping
+ * unconditionally would mint the field on `launch_campaign`,
+ * `setup_infrastructure` and `provision:` responses, whose DTOs, tool
+ * descriptions and openapi schemas never declared it — inventing wire shape at a
+ * money-path wrapper, which is the opposite of a disclosure.
+ *
+ * The third `Collapsed<T>` consumer, `contact_operator`, does not route through
+ * this wrapper (its collapse is message-level dedup, not request-level), so it is
+ * unaffected — its own flag already covers the only layer it has.
+ *
+ * `true` is the only value ever written: this runs only on the replay branch, so
+ * the response IS a handed-back earlier one. A recorded `true` stays `true`.
+ */
+function discloseCollapse<T>(recorded: T): T {
+  if (typeof recorded !== "object" || recorded === null) return recorded;
+  if (typeof (recorded as { deduplicated?: unknown }).deduplicated !== "boolean") return recorded;
+  return { ...recorded, deduplicated: true };
 }
 
 /**
@@ -128,7 +196,7 @@ export async function withRequestIdempotency<T>(
       // Under the Settled contract a 'done' row is terminal by construction, so
       // this replays. The predicate is asked only about rows written BEFORE
       // that contract existed — see RequestIdempotencyOptions.
-      if (!(opts?.recordedIsNonTerminal?.(recorded) ?? false)) return recorded;
+      if (!(opts?.recordedIsNonTerminal?.(recorded) ?? false)) return discloseCollapse(recorded);
       // A pre-contract row recording work that was never finished. Re-claim IN
       // PLACE, synchronously, before any await below — the same "one input-gate
       // turn" guarantee the fresh-claim INSERT and the stale-claim reclaim rely

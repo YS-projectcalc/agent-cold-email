@@ -33,6 +33,37 @@ export interface MatchedSdnEntry {
 
 const MIN_SUBSET_MATCH_TOKENS = 2;
 
+/**
+ * The D1 lookup keys that select every entry which COULD satisfy the two rules
+ * above — S9's narrowing (docs/adversarial/scale-readiness-audit-2026-08-17.md).
+ *
+ * THIS LIVES BESIDE THE RULES ON PURPOSE. It is only sound as long as it is
+ * derived from them, and a third rule added above without a matching key here
+ * would not fail loudly — it would silently stop pulling the rows that rule
+ * needs, and a sanctions matcher's silent failure direction is a MISS. The
+ * narrowing is deliberately a SUPERSET: `matchAgainstSdn` still applies the real
+ * rules to whatever comes back, so being too generous costs rows, never verdicts.
+ *
+ *  - `exactNames` (rule 1) — an exact match is on the WHOLE normalized name, so
+ *    the candidate's own normalized text is the only value that can hit.
+ *  - `firstTokens` (rule 2) — a subset match needs EVERY token of the SDN name
+ *    to be in the candidate's token set, so in particular its FIRST one must be.
+ *    Selecting on the first token is therefore necessary-but-not-sufficient,
+ *    which is exactly the safe direction. Rule 2 also requires >= 2 tokens, so
+ *    these only ever need to reach multi-token names.
+ */
+export function sdnLookupKeys(candidates: ScreenCandidate[]): { exactNames: string[]; firstTokens: string[] } {
+  const exactNames = new Set<string>();
+  const firstTokens = new Set<string>();
+  for (const candidate of candidates) {
+    const normalized = normalizeName(candidate.text);
+    if (normalized.length === 0) continue;
+    exactNames.add(normalized);
+    for (const token of tokenize(normalized)) firstTokens.add(token);
+  }
+  return { exactNames: [...exactNames], firstTokens: [...firstTokens] };
+}
+
 export function matchAgainstSdn(candidates: ScreenCandidate[], entries: SdnEntryRow[]): MatchedSdnEntry[] {
   const matches: MatchedSdnEntry[] = [];
 

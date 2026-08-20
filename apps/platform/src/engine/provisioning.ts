@@ -12,7 +12,9 @@ import {
   type SetupInfrastructureInput,
 } from "@coldstart/shared";
 import { newId } from "../schema.js";
+import { domainOrdinalFailedCheckName } from "../admin/watchtower.js";
 import { logAction } from "./deliverability-actions.js";
+import { alertIsolatedFailures } from "./isolated-failure-alerts.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { TenantContext } from "../tenant-context.js";
 import { customerSafeVendorDetail, customerSafeVendorFailure, logVendorFailure } from "../vendor-failure.js";
@@ -709,6 +711,20 @@ export async function runSetupInfrastructure(
   } catch (syncErr) {
     console.error(`setup_infrastructure: mailbox quantity sync failed for tenant ${ctx.tenantId}`, syncErr);
   }
+
+  // THE OPS-SIDE PATH (wave-1-2 integration gate §6). Exactly one of these
+  // failures reaches the caller below; every other isolated ordinal was
+  // previously recorded in the customer's activity feed and nowhere an operator
+  // reads. A half-completed ordinal is a PAID domain with no working mail
+  // infrastructure on it. The aborting failure is skipped by
+  // `alertIsolatedFailures` — a spend-ceiling breach and an unarmed registrar
+  // are tenant-global and already have their own one-shot alerts.
+  await alertIsolatedFailures(ctx, outcome, {
+    checkName: (item) => domainOrdinalFailedCheckName(inFlightByOrdinal.get(item.domainIndex) ?? item.domain),
+    detail: (item) =>
+      `domain setup for ordinal ${item.domainIndex} (${inFlightByOrdinal.get(item.domainIndex) ?? item.domain}) could not be completed. ` +
+      `The other ordinals were still attempted. If the domain was already bought, it is paid for with no working mail on it until this is finished by hand.`,
+  });
 
   // Report the ABORT CAUSE over an earlier ordinal's ordinary failure
   // (2026-08-18 fix, symmetric with mailbox-provisioning.ts's per-slot loop —

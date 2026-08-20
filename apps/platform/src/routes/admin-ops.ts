@@ -3,12 +3,14 @@ import { TerminateInput } from "@coldstart/shared";
 import { getTenantIndexById } from "../admin/db.js";
 import { buildOpsDigest, runDunningSweep } from "../admin/ops-sweep.js";
 import { terminateTenantForAbuse } from "../admin/terminate.js";
-import { readAllCheckRows } from "../admin/watchtower.js";
+import { CHECK_RETENTION_MS, readCheckRows, readPresentCheckNames } from "../admin/watchtower.js";
+import { expectedCheckRoster } from "../admin/watchtower-roster.js";
+import { readSweepFreshness } from "../admin/watchtower-infra.js";
 import { CRON_SWEEP_CHECK, D1_CHECK } from "../admin/watchtower-alerts.js";
 import { RealClock } from "../clock.js";
-import { listWaitlistEmails } from "../db.js";
+import { countWaitlistEmails, listWaitlistEmails } from "../db.js";
 import type { Env } from "../env.js";
-import { parseJsonBody } from "../validate.js";
+import { parseIntQueryParam, parseJsonBody } from "../validate.js";
 
 // Item 3e (docs/adversarial/class-sweep-vendor-truth-2026-08-18.md, D7) — the
 // checks GET /admin/ops/checks structurally cannot report (they live in
@@ -51,7 +53,7 @@ export const adminOpsRoute = new Hono<{ Bindings: Env }>()
   })
   // Founder ORDER 2026-08-14 (ROADMAP.md ## Open) — the operator's own Claude
   // watch polls per-check state instead of parsing OPS_ALERT_EMAIL alerts.
-  // READ-ONLY (`readAllCheckRows` is a pure SELECT on `watchtower_state`, the
+  // READ-ONLY (`readCheckRows` is a pure SELECT on `watchtower_state`, the
   // same table `reconcileAlerts` writes) — this route never calls
   // reconcileAlerts/decideAlert, so it cannot touch alert emission, dedup
   // state or check registration. Unhealthy checks first; `?unhealthy=1`
@@ -62,32 +64,103 @@ export const adminOpsRoute = new Hono<{ Bindings: Env }>()
   // (`../watchtower-do.ts:39-42`, 2026-08-06 alerting audit B1/B2 — a check
   // ON D1 cannot itself be stored IN D1) and NEVER appear here. A consumer
   // MUST pair this endpoint with `GET /status` (`./status.ts`), which
-  // surfaces both as a 503 `degraded`. Per-row `updatedAt` staleness is this
-  // endpoint's own dead-cron tell: a dead cron stops writing entirely, so
+  // surfaces both as a 503 `degraded`. A dead cron stops writing entirely, so
   // this route keeps serving a frozen, healthy-looking snapshot rather than
-  // ever going empty or erroring.
+  // ever going empty or erroring — which is why the dead-cron tell is the
+  // explicit `sweepAgeSeconds` below and NOT per-row `updatedAt` freshness
+  // (that inference is doubly dead now: the sweep skips no-op writes, and a
+  // paged read cannot see the row whose mtime you were reasoning about).
   //
-  // No cap/truncation today (YAGNI, CLAUDE.md rule i): at real scale the
-  // table holds hundreds of rows. Growth is monotonic (rows are flipped
-  // healthy, never DELETEd) — that's the already-open `watchtower_state`
-  // unbounded-growth ledger item (ROADMAP.md ## Open, 2026-08-09 wave-3 gate
-  // NB-2); when that item is closed, this endpoint inherits whatever bound
-  // it lands on.
+  // TWO INDEPENDENT BOUNDS, and both are needed. Rows are RETIRED (scale audit
+  // S5): a check healthy for `CHECK_RETENTION_MS` is DELETEd by the sweep, so
+  // the per-entity families no longer grow with the platform's lifetime count
+  // of entities that ever alerted. That is narrower than it used to claim —
+  // retirement skips UNHEALTHY rows, and the three one-shot `*_FAILED`
+  // families have no clearer yet (N4), so their rows persist and the unhealthy
+  // set grows monotonically with real provisioning failures. Retention also
+  // bounds only by TIME, and a platform
+  // can hold far more than a page of checks inside one window. An incident is
+  // exactly when it does. So the READ is bounded too (S8, `?limit=` clamped to
+  // the same default/max every other admin list read uses), and both bounds are
+  // published: `retentionMs` says a row you saw last month may be gone, and
+  // `total`/`truncated` say whether the rows you are holding are all of them.
+  //
+  // THE ROSTER IS THE DENOMINATOR (docs/adversarial/
+  // class-sweep-watch-completeness-2026-08-17.md). Two of the always-on checks
+  // are skip-dark — `engine` when ENGINE_BASE_URL is unset, the two InboxKit
+  // ones when the vendor is unarmed — and a check that is SKIPPED writes no row
+  // at all. Absence then reads as health on every downstream surface, so an env
+  // var lost in a deploy silently deletes a check from the monitored set.
+  // `expected` says what should be here and `missing` names what is not.
+  //
+  // `sweepAgeSeconds` is the DEAD-CRON TELL, published rather than inferred.
+  // Consumers used to derive it from per-row `updatedAt` freshness, which was
+  // only ever true because SOME row happened to be re-written every tick; the
+  // sweep now skips a write for a check whose state and detail are unchanged
+  // (S5), so that inference is gone.
+  //
+  // WHAT IT ACTUALLY MEANS (N9, wave-b1 gate — the previous sentence here said
+  // "every completed sweep stamps it unconditionally", which is wrong):
+  // `watchtower_cursor.last_sweep_ts` has exactly one writer,
+  // `recordWatchtowerCompleted`, and it runs INSIDE the watchtower leg — which
+  // `runLeg` can swallow. So this age means "the WATCHTOWER LEG last
+  // completed", not "the cron last fired"; the unconditional signal is the
+  // DO-side heartbeat, which this endpoint cannot serve (it is the store a D1
+  // outage is reported through). The error direction is safe in both cases — a
+  // dead cron always reads stale, and a broken watchtower leg also reads stale,
+  // which over-reports rather than under-reports — which is why publishing it
+  // here is right. But an operator reasoning from it at 3am should know that a
+  // stale value can mean "the watchtower leg is throwing" as well as "the cron
+  // is dead", and should pair it with `GET /status`.
+  // `?unhealthy=1` STILL RETURNS EVERY UNHEALTHY ROW, up to the clamp — the
+  // filter is applied in SQL, and the page order puts unhealthy rows first in
+  // the unfiltered read too, so a broken check can never be buried behind a
+  // page of healthy ones. Past the clamp (>200 unhealthy checks, or >`?limit=`
+  // up to 1000) the most-recently-changed are returned first and
+  // `truncated: true` with `total` says exactly how many were left out: the
+  // operator loses ROWS, never the COUNT.
+  //
+  // `unhealthyCount` keeps its original meaning — the whole store, never this
+  // page's share — because the ops watch polls it against a known baseline and
+  // silently redefining a number a monitor compares against is the defect class
+  // this endpoint exists to guard.
   .get("/admin/ops/checks", async (c) => {
     const onlyUnhealthy = c.req.query("unhealthy") === "1";
-    const rows = await readAllCheckRows(c.env);
-    const unhealthyCount = rows.filter((r) => !r.healthy).length;
-    const checks = (onlyUnhealthy ? rows.filter((r) => !r.healthy) : rows)
-      // Stable sort (V8/ES2019+): unhealthy first, healthy after, each group
-      // keeping the D1 read's own order.
-      .sort((a, b) => Number(a.healthy) - Number(b.healthy));
-    return c.json({ checks, unhealthyCount, excludesDoStoreChecks: DO_STORE_ONLY_CHECKS });
+    const expected = expectedCheckRoster(c.env);
+    const [page, freshness, present] = await Promise.all([
+      readCheckRows(c.env, { limit: parseIntQueryParam(c.req.query("limit")), onlyUnhealthy }),
+      readSweepFreshness(c.env, new RealClock().now()),
+      // Asked of the TABLE, not of the page: deriving `missing` from a page
+      // would report every expected check that fell past the LIMIT as absent.
+      readPresentCheckNames(c.env, expected),
+    ]);
+    const total = onlyUnhealthy ? page.unhealthyTotal : page.total;
+    return c.json({
+      checks: page.rows,
+      count: page.rows.length,
+      total,
+      truncated: page.rows.length < total,
+      unhealthyCount: page.unhealthyTotal,
+      expected,
+      missing: expected.filter((name) => !present.has(name)),
+      excludesDoStoreChecks: DO_STORE_ONLY_CHECKS,
+      sweepAgeSeconds: freshness.ageSeconds,
+      sweepStale: freshness.stale,
+      retentionMs: CHECK_RETENTION_MS,
+    });
   })
   // C6 — the owner's durable waitlist export (adversarial panel-03 finding #9:
   // the funnel had no owner-retrieval path). Ordered newest-first.
+  //
+  // `count` USED TO BE `entries.length` — a page relabelled as a total. The
+  // page is capped at 1000 (db.ts's listWaitlistEmails), so past 1000 leads it
+  // reported `count: 1000` as the platform's waitlist size with no truncation
+  // signal, while the real total sat one function away in `countWaitlistEmails`
+  // (the digest already used it). Now `count` is the total, `entries` is the
+  // page, and `truncated` says whether they differ.
   .get("/admin/ops/waitlist", async (c) => {
-    const entries = await listWaitlistEmails(c.env);
-    return c.json({ count: entries.length, entries });
+    const [entries, count] = await Promise.all([listWaitlistEmails(c.env), countWaitlistEmails(c.env)]);
+    return c.json({ count, returned: entries.length, truncated: entries.length < count, entries });
   })
   // D5 — abuse offboarding: the terminal rung of the AUP consequence ladder
   // (site/aup.html §7). Immediately suspends + reclaims the tenant's infra (the

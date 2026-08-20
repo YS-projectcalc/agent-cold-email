@@ -109,6 +109,12 @@ declare global {
       // Values are strings (wrangler `[vars]`); parsed to ints with the
       // documented defaults when unset/blank.
       SPEND_CEILING_CENTS?: string;
+      // Drives the spend ceiling's per-paying-tenant formula when
+      // SPEND_CEILING_CENTS is unset (engine/spend-ceiling.ts). Same
+      // NOT-`// spend-arming` reasoning as the block above: it BOUNDS spend, and
+      // it is operator-declared because no maintained cross-tenant count of
+      // currently-paying tenants exists to read (see that file's formula note).
+      PAYING_TENANT_COUNT?: string;
       COST_MAILBOX_CENTS?: string;
       COST_DOMAIN_CENTS?: string;
       COST_PREWARM_MAILBOX_CENTS?: string;

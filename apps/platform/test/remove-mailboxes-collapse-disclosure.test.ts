@@ -184,27 +184,39 @@ describe("B1 — a retry that actually released something is never reported as a
     // THE FINDING: work happened, so this is NOT a replay.
     expect(second.body.deduplicated).toBe(false);
 
-    // CALL 3 — now genuinely a no-op re-run: every member is already released.
+    // CALL 3 — the same key again, still INSIDE the 30-day window.
     //
-    // The ageout is REQUIRED to reach it, and that is worth stating. Call 2
-    // finished with `failedCount: 0`, so it is terminal and its response is
-    // recorded — a third same-key call inside the 30-day window REPLAYS that
-    // stored response and never re-enters `removeMailboxes` at all. The flag
-    // sees the INTENT layer only; the idempotency layer collapses ABOVE it,
-    // invisibly, handing back the recording's own `deduplicated: false`
-    // (per provenance.ts the field is defined on the RESPONSE, so a replayed
-    // response carrying the original flag is a known gap — benign here because
-    // the counts are absolute and accurate; the generic fix is stamping
-    // `deduplicated: true` at the single replay site in engine/idempotency.ts,
-    // routed to the Wave B alert-state increment). Only once the claim ages
-    // out does `fn` re-run and find there is nothing left to do.
-    await ageOutRequestClaims(tenantId);
+    // This never re-enters `removeMailboxes` at all. Call 2 finished with
+    // `failedCount: 0`, so it is terminal and its response was recorded;
+    // `withRequestIdempotency` replays that recording. There are TWO collapse
+    // layers here and `intent.replayed` only ever sees the lower one, so this
+    // used to hand back the recording's own `deduplicated: false` — a response
+    // byte-identical to call 2, which really did destroy a mailbox.
+    //
+    // engine/idempotency.ts now stamps the upper layer: a replayed response
+    // whose recorded payload CARRIES the field is a collapse, and says so. Per
+    // provenance.ts the flag is defined on the RESPONSE ("was this produced
+    // fresh, or is it an earlier one handed back?"), which is exactly what a
+    // replay is.
     const attemptsBeforeThird = attempts.length;
     const third = await removeN(token, 3, "downgrade-straggler");
     expect(third.body.releasedCount).toBe(3);
     expect(third.body.failedCount).toBe(0);
-    expect(attempts.length).toBe(attemptsBeforeThird); // zero vendor calls
+    expect(attempts.length).toBe(attemptsBeforeThird); // zero vendor calls — a pure replay
     expect(await liveMailboxes(tenantId)).toBe(1);
     expect(third.body.deduplicated).toBe(true);
+
+    // CALL 4 — after the 30-day ageout the claim is gone, so `fn` genuinely
+    // re-runs and finds every member already released. A DIFFERENT mechanism
+    // (the intent layer) reaching the same honest answer, which is why both
+    // layers need the disclosure.
+    await ageOutRequestClaims(tenantId);
+    const attemptsBeforeFourth = attempts.length;
+    const fourth = await removeN(token, 3, "downgrade-straggler");
+    expect(fourth.body.releasedCount).toBe(3);
+    expect(fourth.body.failedCount).toBe(0);
+    expect(attempts.length).toBe(attemptsBeforeFourth); // zero vendor calls
+    expect(await liveMailboxes(tenantId)).toBe(1);
+    expect(fourth.body.deduplicated).toBe(true);
   });
 });

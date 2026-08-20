@@ -167,6 +167,36 @@ describe("failing-by-construction — a new check cannot inherit an unchosen pol
     // `watchtower-channel-routing.test.ts`).
     "customer_progress_operator:": 2,
     "customer_progress_agent:": 2,
+    // Scale audit S4/S11 + sweep-completeness W-M1/W-M4 — the three checks this
+    // wave added, each stated here rather than inherited.
+    //
+    // CORRECTED BY N5 (wave-b1 gate). This table previously classified all
+    // three as debounced, on the argument that neither coverage nor delivery
+    // sits on the founder's 10-15 minute paging ceiling. That was wrong about
+    // `alert_delivery` — a check that means "we could not reach you" is the
+    // most time-critical one there is, not the least — and wrong about the
+    // arithmetic for both: streak-damping THEN debouncing puts the first email
+    // at tick 4, i.e. 20 min, which is the number `cron_legs`' own exemption
+    // exists to avoid.
+    //
+    // N5 — EXEMPT, for the same reason cron_legs is: both are already damped by
+    // gradeSweepStreak over LEG_ALERT_AFTER_SWEEPS ticks, so a second debounce
+    // puts the first email at 20 min. `alert_delivery` says "we could not reach
+    // you"; delaying that one is the worst trade on the board.
+    sweep_coverage: 1,
+    alert_delivery: 1,
+    // Wave-1-2 integration gate §6 — the three isolated-loop failures that
+    // reached no watchtower check. ONE-SHOT, exactly like the two mailbox
+    // event reports above: they are raised once by the loop that gave up, and
+    // nothing ever re-observes them, so a debounce would be permanent silence
+    // on money that keeps being spent.
+    "mailbox_release_failed:": 1,
+    "domain_ordinal_failed:": 1,
+    "mailbox_slot_failed:": 1,
+    // Reported by scheduled.ts from OUTSIDE the leg, once per tick, undamped —
+    // so the debounce is the only thing standing between a single flaky
+    // WatchtowerDO RPC and an email.
+    sweep_signals: 2,
   };
 
   function declaredCheckNames(source: string): string[] {

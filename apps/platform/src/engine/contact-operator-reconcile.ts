@@ -23,21 +23,27 @@ import { revokeAdmission } from "./contact-operator-guard.js";
 
 /**
  * How old an agent_contact_log admission must be before this sweep will
- * touch it. Sized the same way this codebase's other two "presumed dead"
- * reapers are: engine/idempotency.ts's
- * REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS (10 min, sized against
- * setup_infrastructure's own worst case — up to ~156 sequential real vendor
- * calls) and engine/spend-ceiling.ts's RESERVE_REAP_TTL_MS (15 min,
- * explicitly modeled on the idempotency value with margin). contactOperator's
- * own compensable window (contact-operator.ts:82-110) is far shorter than
- * either precedent's worst case: exactly one D1 read
- * (lookupTenantContactEmail) then one D1 write (insertSupportTicket), no
- * vendor round trips, no loop — normally low milliseconds, pathologically a
- * handful of seconds under D1 contention. Reusing spend-ceiling's own
- * 15-minute value, rather than inventing a third constant for the same
- * class of guarantee, keeps ONE "presumed-dead" cutoff convention across
- * this cron's two reapers, and it carries far more relative headroom here
- * than it does for spend-ceiling's own up-to-156-vendor-call chain.
+ * touch it.
+ *
+ * SIZED ON THIS SWEEP'S OWN COMPENSABLE WINDOW, which is what actually
+ * justifies it: `contactOperator`'s window (contact-operator.ts) is exactly one
+ * D1 read (lookupTenantContactEmail) then one D1 write (insertSupportTicket) —
+ * no vendor round trips, no loop, no retry ladder. Normally low milliseconds,
+ * pathologically a handful of seconds under D1 contention. 15 minutes is
+ * therefore three orders of magnitude of headroom over the thing it must not
+ * cut short, and it stays correct independently of what any other reaper does.
+ *
+ * IT NO LONGER CLAIMS A SHARED CONVENTION (NEW-3, round 2 of docs/adversarial/
+ * wave-b1-scale-monitoring-gate-2026-08-20.md). This used to justify itself as
+ * "reusing spend-ceiling's own 15-minute value... keeps ONE 'presumed-dead'
+ * cutoff convention across this cron's two reapers", citing
+ * REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS at 10 min and RESERVE_REAP_TTL_MS at
+ * 15. Both moved (30 and 45) when N7 re-derived the longest legitimate
+ * provisioning run WITH the S3 retry term, so the convention is broken and the
+ * rationale was false. No functional defect — those two are sized against a
+ * ~156-vendor-call saga and this is sized against two D1 statements, which is
+ * why they SHOULD differ — but a sentence claiming a convention that does not
+ * exist is how the next reader "restores consistency" by moving the wrong one.
  */
 export const ISOLATE_DEATH_REAP_TTL_MS = 15 * 60 * 1000;
 

@@ -19,7 +19,7 @@ import { mintTenant, seedBenignSdnList, signup, tenantStub } from "./helpers.js"
 // evictDurableObject, so the constructor genuinely re-runs) and the Stripe
 // checkout webhook — never a hand-built harness around the migration function.
 
-const PENDING_CLAIM_TTL_MS = 10 * 60 * 1000; // engine/idempotency.ts's stale-claim window
+import { REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS as PENDING_CLAIM_TTL_MS } from "../src/engine/idempotency.js"; // the real stale-claim window, not a copy of it
 
 interface ProfileRow {
   plan: string;
@@ -267,12 +267,18 @@ async function seedUnmigratedPaidTenant(
     // Demo seed row: terminalized, not shifted.
     insertSend("ss_demo", "cmp_demo", "pending", frozenNow + 7200_000, null);
 
-    // --- idempotency: a 'pending' claim stamped 20 virtual minutes ago. Under a
-    // future-frozen clock `realNow - created_at` is negative, so it is BELOW the
-    // 10-minute stale-claim TTL and the key is wedged forever.
+    // --- idempotency: a 'pending' claim stamped comfortably PAST the stale-claim
+    // TTL in virtual time. Under a future-frozen clock `realNow - created_at` is
+    // negative, so it reads as BELOW the TTL and the key is wedged forever;
+    // after the migration rebases it, it must read as reclaimable.
+    //
+    // The age is DERIVED from the constant, not written as a number: it was
+    // "20 minutes" against a 10-minute TTL, and N7's raise to 30 minutes made
+    // that seed land INSIDE the window — the assertion below then failed for a
+    // reason that had nothing to do with clock rebasing.
     sql.exec(
       `INSERT INTO request_idempotency (key, status, created_at) VALUES ('setup:wedged', 'pending', ?)`,
-      frozenNow - 20 * 60 * 1000,
+      frozenNow - PENDING_CLAIM_TTL_MS * 2,
     );
     // A recorded outcome carries its response — the table's CHECK makes a 'done'
     // row with no body unrepresentable (schema.ts, cached-terminal member 10).

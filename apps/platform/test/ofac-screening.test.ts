@@ -221,7 +221,7 @@ describe("G1b — SDN list-unavailable recovery sweep", () => {
     await withTenantContext(tenantId, (ctx) => screenTenant(ctx, { trigger: "checkout" }));
 
     const outcome = await rescreenListUnavailableReviews(env);
-    expect(outcome).toEqual({ attempted: 0, rescreened: 0, errors: 0 });
+    expect(outcome).toEqual({ attempted: 0, rescreened: 0, errors: 0, deferred: 0 });
     expect((await getScreeningReview(env, tenantId))?.listVersion).toBe(LIST_UNAVAILABLE_VERSION); // untouched
   });
 
@@ -233,7 +233,7 @@ describe("G1b — SDN list-unavailable recovery sweep", () => {
     const listVersion = await seedSdnList(30_000_000); // benign list, this brand doesn't match anything in it
 
     const outcome = await rescreenListUnavailableReviews(env);
-    expect(outcome).toEqual({ attempted: 1, rescreened: 1, errors: 0 });
+    expect(outcome).toEqual({ attempted: 1, rescreened: 1, errors: 0, deferred: 0 });
 
     const row = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
       state.storage.sql.exec<{ screening_status: string; screening_list_version: string | null }>(
@@ -254,7 +254,7 @@ describe("G1b — SDN list-unavailable recovery sweep", () => {
     const listVersion = await seedSdnList(31_000_000); // this fixture's list DOES contain a match for this brand
 
     const outcome = await rescreenListUnavailableReviews(env);
-    expect(outcome).toEqual({ attempted: 1, rescreened: 1, errors: 0 });
+    expect(outcome).toEqual({ attempted: 1, rescreened: 1, errors: 0, deferred: 0 });
 
     const row = await runInDurableObject(tenantStub(tenantId), async (_i, state) =>
       state.storage.sql.exec<{ screening_status: string; screening_list_version: string | null }>(
@@ -280,7 +280,7 @@ describe("G1b — SDN list-unavailable recovery sweep", () => {
     // The review row's status flipped to 'cleared' by the admin action, so
     // listPendingScreeningReviews (status='pending' only) no longer returns
     // it — nothing to attempt.
-    expect(outcome).toEqual({ attempted: 0, rescreened: 0, errors: 0 });
+    expect(outcome).toEqual({ attempted: 0, rescreened: 0, errors: 0, deferred: 0 });
   });
 
   // Adversary re-attack (2026-07-23) on the N-OF-1 self-heal: the sweep reads

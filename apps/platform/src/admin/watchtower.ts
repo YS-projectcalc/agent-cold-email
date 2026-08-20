@@ -19,7 +19,10 @@
 
 import type { Notified, RecoveryBasis } from "@coldstart/shared";
 import { isLifecycleFrozen } from "../engine/billing-state.js";
-import { listAllTenantIds } from "./db.js";
+import { countTenants, resolveSweepTenants, sweepTenants, type SweepScope } from "./tenant-slice.js";
+import { DEFAULT_ADMIN_LIST_LIMIT, MAX_ADMIN_LIST_LIMIT } from "./db.js";
+import { expectedCheckRoster } from "./watchtower-roster.js";
+import { clampListLimit } from "../validate.js";
 import type { Env } from "../env.js";
 import { isPaidPlan } from "@coldstart/shared";
 import {
@@ -43,10 +46,14 @@ import {
   CUSTOMER_PROGRESS_OPERATOR_CHECK,
   D1_CHECK,
   DOMAIN_DNS_AGING_CHECK,
+  DOMAIN_ORDINAL_FAILED_CHECK,
   DOMAIN_ORPHAN_CHECK,
+  FAILURE_SIGNALS_CHECK,
   MAILBOX_ORPHAN_CHECK,
   MAILBOX_PROVISIONING_CHECK,
   MAILBOX_REBUY_CHECK,
+  MAILBOX_RELEASE_FAILED_CHECK,
+  MAILBOX_SLOT_FAILED_CHECK,
   SEND_STARVED_CHECK,
   TENANT_DO_WEDGED_CHECK,
   type AlertOutcome,
@@ -107,6 +114,21 @@ export function domainDnsAgingCheckName(domain: string): string {
   return `${DOMAIN_DNS_AGING_CHECK}${domain}`;
 }
 
+/** ONE mailbox the vendor would not release — still live, still billing. */
+export function mailboxReleaseFailedCheckName(email: string): string {
+  return `${MAILBOX_RELEASE_FAILED_CHECK}${email}`;
+}
+
+/** ONE domain ordinal whose setup could not be completed. */
+export function domainOrdinalFailedCheckName(domain: string): string {
+  return `${DOMAIN_ORDINAL_FAILED_CHECK}${domain}`;
+}
+
+/** ONE mailbox slot whose provision could not be completed. */
+export function mailboxSlotFailedCheckName(email: string): string {
+  return `${MAILBOX_SLOT_FAILED_CHECK}${email}`;
+}
+
 // --- Health probes -------------------------------------------------------
 
 /**
@@ -118,7 +140,7 @@ export function domainDnsAgingCheckName(domain: string): string {
  * else could still be probed, and the D1-backed scans are skipped. Its caller
  * routes the `d1` result through a store that does not depend on D1.
  */
-export async function evaluateHealthChecks(env: Env, nowMs: number): Promise<CheckResult[]> {
+export async function evaluateHealthChecks(env: Env, nowMs: number, scope: SweepScope = {}): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
 
   // D1 reachable (the same SELECT 1 the public /status route uses).
@@ -160,7 +182,7 @@ export async function evaluateHealthChecks(env: Env, nowMs: number): Promise<Che
   // `d1` result above is the honest, complete report of that state.
   if (!d1Healthy) return results;
 
-  results.push(...(await scanTenants(env, nowMs)));
+  results.push(...(await scanTenants(env, nowMs, scope)));
   return results;
 }
 
@@ -207,13 +229,14 @@ async function probeDurableObjectStorage(env: Env): Promise<CheckResult> {
  * signals, its credential-push checks and its starvation check in a single
  * pass, leaving the only paying customer unmonitored and unmentioned.
  */
-async function scanTenants(env: Env, nowMs: number): Promise<CheckResult[]> {
+async function scanTenants(env: Env, nowMs: number, scope: SweepScope): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   const sinceMs = nowMs - FAILURE_SIGNAL_WINDOW_MS;
   let failed = 0;
   let complaints = 0;
 
-  const tenantIds = await listAllTenantIds(env);
+  const tenantTotal = await countTenants(env);
+  const tenantIds = await resolveSweepTenants(env, scope);
   // One read of every check name the state machine has ever recorded. The
   // per-entity checks below use it to stay SILENT about entities they never
   // alerted on (a "healthy" row per mailbox per tenant would bury the handful
@@ -222,9 +245,10 @@ async function scanTenants(env: Env, nowMs: number): Promise<CheckResult[]> {
   // RECOVERY email for one they did.
   const reported = await readReportedCheckNames(env);
 
-  for (const tenantId of tenantIds) {
-    const wedgedName = tenantDoWedgedCheckName(tenantId);
-    try {
+  const swept = await sweepTenants(
+    tenantIds,
+    scope.fanout,
+    async (tenantId) => {
       const s = await env.TENANT.get(env.TENANT.idFromName(tenantId)).opsSummary(sinceMs);
       failed += s.failureSignalsInWindow.failed;
       complaints += s.failureSignalsInWindow.complaints;
@@ -234,14 +258,20 @@ async function scanTenants(env: Env, nowMs: number): Promise<CheckResult[]> {
           owedMaxMs: customerProgressOwedMaxMs(env),
         }),
       );
-      if (reported.has(wedgedName)) {
-        // reobserved: this line is inside the try where the opsSummary RPC
+      if (reported.has(tenantDoWedgedCheckName(tenantId))) {
+        // reobserved: this line is inside the callback where the opsSummary RPC
         // actually returned, so the positive claim was just proven.
-        results.push({ name: wedgedName, healthy: true, detail: `Tenant ${tenantId} (${s.brand}) is answering again.`, basis: "reobserved" });
+        results.push({
+          name: tenantDoWedgedCheckName(tenantId),
+          healthy: true,
+          detail: `Tenant ${tenantId} (${s.brand}) is answering again.`,
+          basis: "reobserved",
+        });
       }
-    } catch (err) {
+    },
+    (tenantId, err) => {
       results.push({
-        name: wedgedName,
+        name: tenantDoWedgedCheckName(tenantId),
         healthy: false,
         detail:
           `Tenant ${tenantId}'s Durable Object threw instead of answering opsSummary: ${errMsg(err)}. ` +
@@ -249,19 +279,49 @@ async function scanTenants(env: Env, nowMs: number): Promise<CheckResult[]> {
           `starvation) and is skipped by the dunning, deliverability, digest and send-pipeline sweeps as well — it is not sending, ` +
           `and nothing else will say so.`,
       });
-    }
-  }
+    },
+  );
 
   // Global failure-signal roll-up. `null` = inside the dead band: report
   // nothing, which leaves the check's state (and its cooldown) untouched.
-  const grade = gradeFailureSignals(failed, complaints);
+  //
+  // A PARTIAL SCAN MAY NOT CLEAR IT (scale audit S1 x the watch-completeness
+  // class). `gradeFailureSignals` answers `true` only on a genuinely clean
+  // window — but "clean" is now clean ACROSS THE TENANTS THIS TICK REACHED,
+  // and the cron reaches a bounded slice. A `true` from a partial scan would
+  // send a RECOVERED email for failures still sitting in the un-scanned
+  // remainder. The UNHEALTHY direction is unaffected: a failure seen anywhere
+  // is a failure platform-wide, whatever else went unread.
+  //
+  // ...BUT THE HOLD IS ONLY OWED WHILE AN EPISODE IS OPEN (N3, docs/adversarial/
+  // wave-b1-scale-monitoring-gate-2026-08-20.md). The thing a partial scan must
+  // not do is send a false RECOVERED, and `decideAlert` only composes one when
+  // an episode was ANNOUNCED — a healthy observation on an already-healthy
+  // check emails nothing at all. Holding in that case bought no safety and cost
+  // the check its existence: above one slice `scanComplete` is permanently
+  // false, so a healthy platform emitted NO `failure_signals` observation ever,
+  // nothing created the row, and `GET /admin/ops/checks` reported it `missing`
+  // forever — on the guard whose stated purpose is catching a check that
+  // silently left the monitored set.
+  //
+  // So: a partial scan reports UNHEALTHY freely (a failure seen anywhere is a
+  // failure), reports HEALTHY only while the check is not currently unhealthy
+  // (refreshing a row rather than claiming a recovery), and still HOLDS the one
+  // case that matters — a partial clean window against an open episode. The
+  // detail string names the scanned-vs-total scope either way, so the row never
+  // claims more than it saw.
+  const scanComplete = swept.visited >= tenantTotal;
+  const observed = gradeFailureSignals(failed, complaints);
+  const holdWouldHideRecovery = observed === true && !scanComplete && (await readCheckStatus(env, FAILURE_SIGNALS_CHECK)) === "unhealthy";
+  const grade = holdWouldHideRecovery ? null : observed;
   if (grade !== null) {
     const windowMin = Math.round(FAILURE_SIGNAL_WINDOW_MS / 60000);
+    const scanScope = scanComplete ? `all ${tenantTotal} tenant(s)` : `${swept.visited} of ${tenantTotal} tenant(s) scanned this cycle`;
     const failureDetail = grade
-      ? `no failed sends or complaints in the last ${windowMin} min`
-      : `${failed} terminal-failed send(s) + ${complaints} complaint(s) in the last ${windowMin} min, across all tenants`;
+      ? `no failed sends or complaints in the last ${windowMin} min, across ${scanScope}`
+      : `${failed} terminal-failed send(s) + ${complaints} complaint(s) in the last ${windowMin} min, across ${scanScope}`;
     results.push({
-      name: "failure_signals",
+      name: FAILURE_SIGNALS_CHECK,
       // reobserved: the healthy claim is a freshly counted window, not an
       // entity dropping out of a filter.
       ...(grade ? { healthy: true as const, basis: "reobserved" as const } : { healthy: false as const }),
@@ -670,7 +730,8 @@ export async function reconcileAlerts(
 
   for (const result of results) {
     try {
-      const prev = stateByName.get(result.name) ?? null;
+      const persisted = stateByName.get(result.name);
+      const prev = persisted?.state ?? null;
       const policy = policyFor(result.name);
       const transition = decideAlert(prev, result.healthy, nowMs, policy);
 
@@ -717,13 +778,16 @@ export async function reconcileAlerts(
       // the backoff compares against `lastAlertTs`, which is always set once
       // `alertCount > 0`. An earlier `sinceTs` therefore accelerates no email —
       // it only makes "unhealthy since" report the truth about the stall.
-      const siblingState = sibling !== null ? normalizeAlertState(stateByName.get(sibling) ?? null) : null;
+      const siblingState = sibling !== null ? normalizeAlertState(stateByName.get(sibling)?.state ?? null) : null;
       const stallOnsetTs =
         !result.healthy && siblingState !== null && siblingState.status === "unhealthy"
           ? Math.min(decided.sinceTs, siblingState.sinceTs)
           : decided.sinceTs;
       const state = stallOnsetTs < decided.sinceTs ? { ...decided, sinceTs: stallOnsetTs } : decided;
-      await upsertWatchtowerState(env, { name: result.name, state, detail: result.detail, nowMs });
+      // S5 — a tick that changed nothing writes nothing. See `isSteadyState`.
+      if (!isSteadyState(persisted, state, result.detail)) {
+        await upsertWatchtowerState(env, { name: result.name, state, detail: result.detail, nowMs });
+      }
 
       // I15 (§7.12) — the one-shot continuity nudge.
       //
@@ -780,8 +844,8 @@ export async function reconcileAlerts(
  * The `d1` result is reconciled FIRST and through a store that is not D1, and
  * a D1 outage returns right there: everything below reads the table that is
  * down, and attempting it would only trade one email for ten stack traces. */
-export async function runWatchtower(env: Env, mailer: OpsMailer, nowMs: number): Promise<AlertOutcome[]> {
-  const results = await evaluateHealthChecks(env, nowMs);
+export async function runWatchtower(env: Env, mailer: OpsMailer, nowMs: number, scope: SweepScope = {}): Promise<AlertOutcome[]> {
+  const results = await evaluateHealthChecks(env, nowMs, scope);
   const d1 = results.find((r) => r.name === D1_CHECK) as CheckResult;
 
   const outcomes: AlertOutcome[] = [await reconcileD1Alert(env, mailer, d1, nowMs)];
@@ -865,56 +929,273 @@ export interface WatchtowerCheckRow {
   updatedAt: number;
 }
 
-/**
- * Every persisted check row, unfiltered — for `GET /admin/ops/checks`
- * (`../routes/admin-ops.ts`), the operator's own agent polling per-check
- * health instead of parsing `OPS_ALERT_EMAIL` alerts. Pure SELECT: it shares
- * `watchtower_state` with `reconcileAlerts` but never writes to it, so this
- * read path cannot affect alert emission, dedup state or the 6h cooldown.
- */
-export async function readAllCheckRows(env: Env): Promise<WatchtowerCheckRow[]> {
-  const result = await env.DB.prepare(
-    `SELECT check_name, status, since_ts, last_alert_ts, last_detail, updated_at FROM watchtower_state`,
-  ).all<{
-    check_name: string;
-    status: "healthy" | "unhealthy";
-    since_ts: number;
-    last_alert_ts: number | null;
-    last_detail: string;
-    updated_at: number;
-  }>();
-  return result.results.map((row) => ({
-    name: row.check_name,
-    healthy: row.status === "healthy",
-    detail: row.last_detail,
-    sinceTs: row.since_ts,
-    lastAlertTs: row.last_alert_ts,
-    updatedAt: row.updated_at,
-  }));
+/** One PAGE of check rows, with the totals it was drawn from. */
+export interface WatchtowerCheckPage {
+  rows: WatchtowerCheckRow[];
+  /** Every row in the table, whatever this page's filter was. */
+  total: number;
+  /** Every UNHEALTHY row in the table — never this page's share of them. */
+  unhealthyTotal: number;
 }
 
-async function readWatchtowerState(env: Env): Promise<Map<string, AlertState>> {
+/**
+ * One bounded page of persisted check rows, PLUS the totals it came from — for
+ * `GET /admin/ops/checks` (`../routes/admin-ops.ts`), the operator's own agent
+ * polling per-check health instead of parsing `OPS_ALERT_EMAIL` alerts. Pure
+ * SELECT: it shares `watchtower_state` with `reconcileAlerts` but never writes
+ * to it, so this read path cannot affect alert emission, dedup state or the 6h
+ * cooldown.
+ *
+ * S8 (docs/adversarial/scale-readiness-audit-2026-08-17.md) — this was the last
+ * unbounded cross-tenant operator read: no LIMIT, no cursor, no truncation, over
+ * a table the S5 retirement bounds only by TIME (a platform can hold more than
+ * a page of checks inside one retention window, and an incident is exactly when
+ * it does).
+ *
+ * THE PAGE AND ITS DENOMINATOR COME OUT TOGETHER, deliberately: a caller cannot
+ * obtain the rows without also obtaining the numbers that say whether they are
+ * all of them. That is the whole watch-completeness lesson applied to its own
+ * fix — bounding a read without publishing what it was bounded from just moves
+ * the blind spot.
+ *
+ * TWO SEPARATE MECHANISMS KEEP A BROKEN CHECK ON PAGE ONE, and they cover
+ * different reads — worth stating precisely, because each one alone looks
+ * sufficient:
+ *
+ *  - the ORDER BY sorts unhealthy first, which is what the UNFILTERED read
+ *    depends on. Without it, a page of healthy checks with newer `since_ts`
+ *    buries every broken one past the LIMIT. (Executed: dropping the
+ *    `(status = 'healthy') ASC` term reds `admin-ops-checks.test.ts`.)
+ *  - the WHERE is what makes `?unhealthy=1` a filtered READ rather than a
+ *    filtered PAGE. Given the ordering above the two happen to agree on which
+ *    rows come back, so this is not load-bearing for correctness today — what
+ *    it buys is not materialising a page of healthy rows only to discard them,
+ *    and a `count` that needs no post-filtering. Stated rather than dressed up
+ *    as the guard.
+ *
+ * The clamp can only cost you unhealthy rows once there are MORE unhealthy rows
+ * than the clamp, and `unhealthyTotal` + the route's `truncated` say so
+ * explicitly when it happens.
+ *
+ * The order is also TOTAL (`since_ts DESC, check_name ASC` after the status
+ * term): without a total order a LIMIT returns whatever the index walk
+ * produces, so successive polls could disagree about which rows exist and a
+ * watch that diffs pages would see phantom appearances and disappearances.
+ */
+export async function readCheckRows(
+  env: Env,
+  opts: { limit?: number; onlyUnhealthy?: boolean } = {},
+): Promise<WatchtowerCheckPage> {
+  const limit = clampListLimit(opts.limit, DEFAULT_ADMIN_LIST_LIMIT, MAX_ADMIN_LIST_LIMIT);
+  const [totals, page] = await Promise.all([
+    env.DB.prepare(
+      `SELECT COUNT(*) as total, SUM(CASE WHEN status = 'unhealthy' THEN 1 ELSE 0 END) as unhealthy FROM watchtower_state`,
+    ).first<{ total: number | null; unhealthy: number | null }>(),
+    env.DB.prepare(
+      `SELECT check_name, status, since_ts, last_alert_ts, last_detail, updated_at
+         FROM watchtower_state
+        ${opts.onlyUnhealthy ? `WHERE status = 'unhealthy'` : ``}
+        ORDER BY (status = 'healthy') ASC, since_ts DESC, check_name ASC
+        LIMIT ?`,
+    )
+      .bind(limit)
+      .all<{
+        check_name: string;
+        status: "healthy" | "unhealthy";
+        since_ts: number;
+        last_alert_ts: number | null;
+        last_detail: string;
+        updated_at: number;
+      }>(),
+  ]);
+
+  return {
+    rows: page.results.map((row) => ({
+      name: row.check_name,
+      healthy: row.status === "healthy",
+      detail: row.last_detail,
+      sinceTs: row.since_ts,
+      lastAlertTs: row.last_alert_ts,
+      updatedAt: row.updated_at,
+    })),
+    total: totals?.total ?? 0,
+    unhealthyTotal: totals?.unhealthy ?? 0,
+  };
+}
+
+/**
+ * Which of `names` currently have a row — the ROSTER lookup, asked directly of
+ * the table rather than inferred from a page.
+ *
+ * `missing` (the roster denominator this endpoint publishes) used to be derived
+ * from the full unfiltered read, which was correct only because that read was
+ * unbounded. Deriving it from a PAGE instead would name every expected check
+ * that fell past the LIMIT as absent — turning the guard against a silently
+ * deleted check into a generator of false ones, on exactly the surface an
+ * operator trusts to tell them what is not being watched.
+ *
+ * Bounded by the caller's own list: `expectedCheckRoster` returns a
+ * code-defined roster (single digits today), comfortably inside D1's 100
+ * bound-parameter ceiling per statement.
+ */
+export async function readPresentCheckNames(env: Env, names: readonly string[]): Promise<Set<string>> {
+  if (names.length === 0) return new Set();
   const result = await env.DB.prepare(
-    `SELECT check_name, status, since_ts, last_alert_ts, unhealthy_obs, alert_count FROM watchtower_state`,
+    `SELECT check_name FROM watchtower_state WHERE check_name IN (${names.map(() => "?").join(", ")})`,
+  )
+    .bind(...names)
+    .all<{ check_name: string }>();
+  return new Set(result.results.map((row) => row.check_name));
+}
+
+/** The persisted state PLUS the detail it was written with — `reconcileAlerts`
+ * needs both to tell a genuine no-op tick from one that changed something. */
+interface PersistedCheck {
+  state: AlertState;
+  detail: string;
+}
+
+async function readWatchtowerState(env: Env): Promise<Map<string, PersistedCheck>> {
+  const result = await env.DB.prepare(
+    `SELECT check_name, status, since_ts, last_alert_ts, last_detail, unhealthy_obs, alert_count FROM watchtower_state`,
   ).all<{
     check_name: string;
     status: "healthy" | "unhealthy";
     since_ts: number;
     last_alert_ts: number | null;
+    last_detail: string | null;
     unhealthy_obs: number;
     alert_count: number;
   }>();
-  const map = new Map<string, AlertState>();
+  const map = new Map<string, PersistedCheck>();
   for (const row of result.results) {
     map.set(row.check_name, {
-      status: row.status,
-      sinceTs: row.since_ts,
-      lastAlertTs: row.last_alert_ts,
-      unhealthyObs: row.unhealthy_obs,
-      alertCount: row.alert_count,
+      state: {
+        status: row.status,
+        sinceTs: row.since_ts,
+        lastAlertTs: row.last_alert_ts,
+        unhealthyObs: row.unhealthy_obs,
+        alertCount: row.alert_count,
+      },
+      detail: row.last_detail ?? "",
     });
   }
   return map;
+}
+
+/**
+ * Is this tick's outcome byte-identical to what is already stored?
+ *
+ * S5 (scale audit), MEASURED: every entity that has ever alerted re-emits a
+ * healthy `CheckResult` on EVERY tick — the per-entity clear loops in
+ * `sendPipelineChecks` iterate `reported`, not the unhealthy set — and each one
+ * used to cost an `upsertWatchtowerState` D1 write. Probed at one mailbox + one
+ * domain: `{"seededEntityResultsPerTick":[2,2,2,2,2],"watchtowerWritesOver5Ticks":20}`.
+ * That cost is additive to the per-tenant fan-out and grows with the platform's
+ * LIFETIME count of entities that ever hit an alert.
+ *
+ * Skipping the write changes nothing an alert consumer reads except
+ * `updated_at`, which stops advancing for a check that has nothing new to say.
+ * That mattered — `updated_at` freshness was the de-facto dead-cron tell for
+ * `GET /admin/ops/checks` — so that route now serves `sweepAgeSeconds` from
+ * `watchtower_cursor` instead, a signal the sweep writes UNCONDITIONALLY. The
+ * tell is published rather than inferred from a side effect nobody declared.
+ */
+function isSteadyState(prev: PersistedCheck | undefined, next: AlertState, detail: string): boolean {
+  if (!prev) return false;
+  return (
+    prev.detail === detail &&
+    prev.state.status === next.status &&
+    prev.state.sinceTs === next.sinceTs &&
+    prev.state.lastAlertTs === next.lastAlertTs &&
+    prev.state.unhealthyObs === next.unhealthyObs &&
+    prev.state.alertCount === next.alertCount
+  );
+}
+
+/**
+ * How long a check must have been HEALTHY before its row is retired.
+ *
+ * Long enough that the row is still there for an operator reading
+ * `GET /admin/ops/checks` after an incident, short enough that the per-entity
+ * families do not accumulate for the platform's lifetime.
+ *
+ * NOT "the table no longer grows", which is what this used to claim (N4,
+ * docs/adversarial/wave-b1-scale-monitoring-gate-2026-08-20.md). Retirement
+ * deletes `status = 'healthy'` rows ONLY — correctly, since `since_ts` on an
+ * unhealthy row means "unhealthy since" and the same predicate would delete
+ * exactly the longest-running incidents. The three one-shot families this wave
+ * introduced (`mailbox_release_failed:`, `domain_ordinal_failed:`,
+ * `mailbox_slot_failed:`) have three producers and, grepped, ZERO clearers:
+ * nothing anywhere ever reports those names healthy, so their rows are
+ * immortal by construction and this GC never touches them. Executed by the
+ * gate: `10-YEAR-OLD one-shots: retired=1 rowsLeft=3 unhealthyLeft=3`.
+ *
+ * OWED, and deliberately NOT invented here: a clearing path for those three.
+ * One-shot semantics are the frozen alert-state design's territory (§7.3's
+ * `recoverAfter: 1` does not help — recovery needs a healthy observation and no
+ * producer emits one), and guessing at a clearer in this lane would put a
+ * second opinion about one-shot lifecycle into the codebase a week before the
+ * increment that owns it lands. Tracked on the ROADMAP under the alert-state
+ * increment. Until then the growth is bounded by real provisioning/teardown
+ * FAILURES, not by tenant count, and it is visible: those rows are unhealthy,
+ * so they sit at the top of `GET /admin/ops/checks` where an operator can see
+ * the queue lengthening. Retirement is what stops S5's
+ * other half: the ownership sets the per-entity clears test against
+ * (`provisionedDomains`, `mailboxProvenance`, `mailboxIntentEmails`) carry NO
+ * released/status filter by design — that is what lets a stale alert clear
+ * instead of pinning unhealthy forever — so a churned customer's entities keep
+ * emitting a clear result on every tick, for life. Once the row is gone they
+ * are not in `reported`, so nothing emits for them at all.
+ */
+export const CHECK_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Delete check rows that have been healthy for the whole retention window.
+ *
+ * ONLY `status='healthy'`: an unhealthy row is a live incident and `since_ts`
+ * on it means "unhealthy since", so the same predicate would delete exactly the
+ * longest-running problems. Retiring a healthy row is also alert-neutral — the
+ * check's next unhealthy observation reads `prev = null`, which
+ * `decideAlert` already treats identically to `prev = healthy` (a fresh
+ * episode, debounced by the check's own policy), and `readCheckStatus`'s one
+ * consumer (engine/mailbox-acquisition.ts) branches on `!== "unhealthy"`, which
+ * `null` and `"healthy"` both satisfy.
+ *
+ * NEVER A ROSTER MEMBER (N3, docs/adversarial/wave-b1-scale-monitoring-gate-
+ * 2026-08-20.md). Retirement and the roster denominator composed into a lie:
+ * `expectedCheckRoster` lists the always-on checks and `GET /admin/ops/checks`
+ * reports any of them without a row as `missing` — the guard whose whole stated
+ * purpose is to catch "an env var lost in a deploy DELETED a check from the
+ * monitored set". Retiring one of those rows manufactures exactly that symptom
+ * with no cause. Executed by the gate:
+ *
+ *   MISSING after one retireHealthyCheckRows: ["do_storage","failure_signals",
+ *     "cron_legs","sweep_coverage","sweep_signals","alert_delivery"]
+ *
+ * Four of the six were rewritten later in the same tick and so had no observable
+ * gap; `do_storage` and `failure_signals` are written BEFORE retirement runs and
+ * carried a one-cron-period false `missing` every 7 days.
+ *
+ * Excluding them costs nothing S5 was for. S5 bounds the PER-ENTITY families —
+ * `domain_dns_aging:`, `cred_push_aging:`, `mailbox_orphan:` — which are
+ * unbounded in COUNT because they grow with every entity the platform has ever
+ * held. The roster is a code-defined, single-digit set. And it stays
+ * self-correcting: the roster is computed from `env`, so a check that genuinely
+ * goes away (ENGINE_BASE_URL unset ⇒ no `engine`) drops out of the roster and
+ * its stale row becomes retirable again on the very next tick.
+ */
+export async function retireHealthyCheckRows(env: Env, nowMs: number): Promise<{ retired: number }> {
+  const roster = expectedCheckRoster(env);
+  const result = await env.DB.prepare(
+    `DELETE FROM watchtower_state
+      WHERE status = 'healthy'
+        AND since_ts <= ?
+        AND check_name NOT IN (${roster.map(() => "?").join(", ") || "''"})`,
+  )
+    .bind(nowMs - CHECK_RETENTION_MS, ...roster)
+    .run();
+  return { retired: result.meta.changes ?? 0 };
 }
 
 async function upsertWatchtowerState(

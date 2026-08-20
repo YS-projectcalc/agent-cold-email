@@ -25,9 +25,11 @@
 import { RealClock } from "./clock.js";
 import type { Env } from "./env.js";
 import { buildOpsDigest, runDeliverabilitySweepAllTenants, runDunningSweep, runProvisioningReconcileAllTenants, runSendPipelineAllTenants, runWarmupCancelSweepAllTenants, runWebhookDeliveriesAllTenants } from "./admin/ops-sweep.js";
-import { runWatchtower } from "./admin/watchtower.js";
-import { reportSweepSignals } from "./admin/sweep-signals.js";
+import { retireHealthyCheckRows, runWatchtower } from "./admin/watchtower.js";
+import { reportSweepSignals, reportSweepSignalsHealth } from "./admin/sweep-signals.js";
 import { recordSweepHeartbeat } from "./admin/watchtower-infra.js";
+import { SWEEP_FANOUT_DEADLINE_MS } from "./admin/sweep-budget.js";
+import { commitSweepCursor, newSweepFanout, readTenantSlice, type SweepScope } from "./admin/tenant-slice.js";
 import { createOpsMailer, type OpsMailer } from "./ops-mail/ops-mailer.js";
 import { reapStaleReservations } from "./engine/spend-ceiling.js";
 import { maybeRefreshSdnList } from "./ofac/sdn-refresh.js";
@@ -58,15 +60,31 @@ async function runLeg<T>(name: string, fallback: T, fn: () => Promise<T>): Promi
  * `runWatchtower` take one: it is how a test asserts what the sweep actually
  * emailed rather than that its code looks right. Production passes nothing and
  * gets the real (or dark) channel.
+ *
+ * `sliceLimit` is the same seam for the SCALE property (S1): the claim is that
+ * one tick's DO-RPC cost stops growing with the tenant count, and asserting it
+ * at the shipped slice would mean seeding a hundred Durable Objects per
+ * assertion. Shrinking the slice tests the same arithmetic at a size a test can
+ * afford — exactly what `tenantBudgetMs` / `legDeadlineMs` already do for the
+ * send pipeline's wall-clock bounds. Production passes nothing.
  */
-export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer } = {}): Promise<void> {
+export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer; sliceLimit?: number } = {}): Promise<void> {
   const now = new RealClock().now();
   const mailer = opts.mailer ?? createOpsMailer(env);
 
-  const deliverability = await runLeg("deliverability", null, () => runDeliverabilitySweepAllTenants(env));
-  const dunning = await runLeg("dunning", null, () => runDunningSweep(env, now, mailer));
-  const digest = await runLeg("digest", null, () => buildOpsDigest(env, now, 24));
-  const watchtower = await runLeg("watchtower", null, () => runWatchtower(env, mailer, now));
+  // SCALE AUDIT S1/S6 — the ONE bounded tenant window every per-tenant leg
+  // below shares this tick, and the wall-clock ceiling they all check between
+  // tenants. Reading it can fail (D1), and a failed read must not take the
+  // tick down: an empty slice means the fan-out legs no-op and the watchtower's
+  // own `d1` check reports the outage, which is the correct division of labour.
+  const slice = await runLeg("tenantSlice", null, () => readTenantSlice(env, opts.sliceLimit));
+  const fanout = newSweepFanout(new RealClock().now(), SWEEP_FANOUT_DEADLINE_MS);
+  const scope: SweepScope = { tenantIds: slice?.ids ?? [], fanout };
+
+  const deliverability = await runLeg("deliverability", null, () => runDeliverabilitySweepAllTenants(env, scope));
+  const dunning = await runLeg("dunning", null, () => runDunningSweep(env, now, mailer, scope));
+  const digest = await runLeg("digest", null, () => buildOpsDigest(env, now, 24, scope));
+  const watchtower = await runLeg("watchtower", null, () => runWatchtower(env, mailer, now, scope));
   // Warmup-pool auto-cancel at ramp completion (founder ruling 2026-08-02,
   // ROADMAP.md:25). BELOW runWatchtower per this file's own ordering rule —
   // the health/alerting legs come first so a slow vendor lane can never delay
@@ -77,16 +95,16 @@ export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer 
   // Its own lane rather than part of the tick: the tick now DOES run from this
   // cron (below), but the warmup sweep must keep running for every tenant,
   // including the ones the send-pipeline's activation predicate skips.
-  const warmupCancel = await runLeg("warmupCancel", null, () => runWarmupCancelSweepAllTenants(env));
+  const warmupCancel = await runLeg("warmupCancel", null, () => runWarmupCancelSweepAllTenants(env, scope));
   // Outbound webhook delivery pump — the cron is the retry-queue wake
   // (ROADMAP.md WIN-THE-COMPARISON (d)). Last so a webhook fan-out failure
   // can't delay the health/dunning/watchtower legs above.
-  const webhooks = await runLeg("webhooks", null, () => runWebhookDeliveriesAllTenants(env));
+  const webhooks = await runLeg("webhooks", null, () => runWebhookDeliveriesAllTenants(env, scope));
   // GA gate G2 (design NB-2) — reclaim vendor-spend reservations orphaned by a
   // crash between reserve and commit/release, so leaked reservations can't
   // silently shrink the effective ceiling. Its own concern (D1 account
   // ledger), so it can't delay the health/dunning/watchtower legs.
-  const spendReservations = await runLeg("spendReservations", null, () => reapStaleReservations(env, now));
+  const spendReservations = await runLeg("spendReservations", null, () => reapStaleReservations(env, now, scope));
   // G1a — once-daily SDN (OFAC) list refresh, piggybacked on this same 5-min
   // cron (design ga-gates-design-2026-07-22.md §G1a line 49) rather than a
   // second `[triggers] crons` entry. Self-contained: its own internal guard
@@ -97,7 +115,7 @@ export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer 
   // tenant fail-closed to 'review' ONLY because no list had loaded yet at
   // screening time, now that a refresh above may have just loaded one. Cheap
   // no-op whenever no list is available or nothing is stuck.
-  const sdnRecovery = await runLeg("sdnRecovery", null, () => rescreenListUnavailableReviews(env));
+  const sdnRecovery = await runLeg("sdnRecovery", null, () => rescreenListUnavailableReviews(env, scope));
   // C3 part d — the out-of-band provisioning reconcile: finish every tenant's
   // dns_status 'pending' setup domain so a benign propagation wait completes
   // without an agent retry. DARK unless PROVISIONING_RECONCILE_ENABLED is armed
@@ -106,29 +124,92 @@ export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer 
   // makes vendor calls / mailbox spend, so a stall here must never delay the
   // founder learning the platform is unhealthy) and ABOVE the send pipeline
   // (that one carries the wall-clock budget and must run last).
-  const provisioningReconcile = await runLeg("provisioningReconcile", null, () => runProvisioningReconcileAllTenants(env));
+  const provisioningReconcile = await runLeg("provisioningReconcile", null, () => runProvisioningReconcileAllTenants(env, scope));
+
+  // THE ROTATION ADVANCES HERE, on the FAN-OUT legs' own progress and nothing
+  // else's (admin/tenant-slice.ts's commitSweepCursor explains why the minimum
+  // is the only safe cursor). Before the send pipeline deliberately: that leg
+  // carries the rest of the period and its own deadline, so letting it decide
+  // where the next tick resumes would let one slow engine pin the rotation.
+  // Wrapped in an object, not returned bare: `runLeg`'s fallback is `null` and
+  // `collectLegSignals` reads `null` as "this leg threw" — while a SUCCESSFUL
+  // commit legitimately returns `null` (the rotation restarting at the head).
+  // A bare return would report a healthy wrap as a leg failure on every
+  // rotation boundary.
+  const sweepCursor = await runLeg("sweepCursor", null, async () => ({
+    cursor: slice ? await commitSweepCursor(env, slice, fanout.leastVisited ?? slice.ids.length, now) : null,
+  }));
+
+  // S5 — retire check rows that have been healthy long enough to have said
+  // everything they had to say. Without this, `watchtower_state` grows for the
+  // platform's lifetime and every row in it re-emits a result (and a D1 write)
+  // on every tick, forever, INCLUDING for customers who churned months ago.
+  const retireChecks = await runLeg("retireChecks", null, () => retireHealthyCheckRows(env, now));
   // WAVE 2 — the auto-send driver: poll then tick, for every tenant whose DO
   // says it may (admin/ops-sweep.ts). LAST on purpose. It is the only leg that
   // sends customer mail and the only one carrying a wall-clock budget, so a
   // stalled engine consumes leg time that no other concern was waiting on —
   // every health, billing and alerting leg above has already completed by the
   // time this one starts.
-  const sendPipeline = await runLeg("sendPipeline", null, () => runSendPipelineAllTenants(env, now));
+  const sendPipeline = await runLeg("sendPipeline", null, () => runSendPipelineAllTenants(env, now, {}, { tenantIds: scope.tenantIds }));
 
-  const legs = { deliverability, dunning, digest, watchtower, warmupCancel, webhooks, spendReservations, sdnRefresh, sdnRecovery, provisioningReconcile, sendPipeline };
+  const legs = {
+    tenantSlice: slice,
+    deliverability,
+    dunning,
+    digest,
+    watchtower,
+    warmupCancel,
+    webhooks,
+    spendReservations,
+    sdnRefresh,
+    sdnRecovery,
+    provisioningReconcile,
+    sweepCursor,
+    retireChecks,
+    sendPipeline,
+  };
 
   // Audit 2026-08-06 (NB-2/NB-3, table row 4) — every leg above already counts
   // its own failures and `runLeg` already catches a leg-level throw; until now
   // all of it ended in the log line below and reached no human. Routed through
   // the SAME throttled state machine as every other check, and damped over
   // consecutive ticks so an intermittent leg cannot flap.
-  const signalAlerts = await runLeg("sweepSignals", null, () => reportSweepSignals(env, mailer, { legs, digest }, now));
+  const signalAlerts = await runLeg("sweepSignals", null, () =>
+    reportSweepSignals(env, mailer, { legs, digest, coverage: slice }, now),
+  );
+
+  // W-M4 (docs/adversarial/sweep-completeness-pass-2026-08-17.md) — the
+  // ALERTING leg reporting on ITSELF, which it structurally could not do: the
+  // `legs` bag is built above it, so a `reportSweepSignals` that threw on every
+  // tick (its first act is a cross-DO `gradeSweepStreak` RPC) was logged,
+  // swallowed and reported by nobody — total, permanent, silent loss of every
+  // leg signal while the heartbeat below kept the dead-man green.
+  //
+  // Reported from OUT HERE, after the leg, by code that cannot be the thing
+  // that failed. It writes straight to `watchtower_state` via `reportCheck`,
+  // which never throws, so it stays honest whenever D1 is up — and when D1 is
+  // the thing that is down, the `d1` check (DO-backed) is the one that says so.
+  await runLeg<void>("sweepSignalsSelfReport", undefined, () =>
+    reportSweepSignalsHealth(env, mailer, signalAlerts !== null, now),
+  );
 
   // The dead-man's heartbeat (BLOCKING-2). LAST, and its own leg: it is the
   // claim "this tick ran to completion", so it must not be written by any leg
   // that could still be skipped, and it must be written even when legs above
   // failed — a D1 outage is not a dead cron, and the alarm must not say it is.
+  //
+  // It is REACHABLE at any tenant count now (scale audit S1): every leg above
+  // is bounded by the tick's slice, so nothing between here and the top of the
+  // sweep grows with N and starves this write.
   await runLeg<void>("heartbeat", undefined, () => recordSweepHeartbeat(env, now));
 
-  console.log("scheduled ops sweep", JSON.stringify({ ...legs, signalAlerts }));
+  console.log(
+    "scheduled ops sweep",
+    JSON.stringify({
+      ...legs,
+      signalAlerts,
+      slice: slice ? { scanned: slice.ids.length, total: slice.total, coverageTicks: slice.coverageTicks } : null,
+    }),
+  );
 }

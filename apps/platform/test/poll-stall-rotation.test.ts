@@ -15,7 +15,7 @@ import { describe, expect, it } from "vitest";
 import type { EmailPort, PollResult } from "@coldstart/shared";
 import { runPollInbox } from "../src/engine/reply-processor.js";
 import { runTick } from "../src/engine/tick.js";
-import { CRON_PERIOD_MS } from "../src/admin/ops-sweep.js";
+import { CRON_PERIOD_MS } from "../src/admin/sweep-budget.js";
 import { signup, tenantStub, withTenantContext } from "./helpers.js";
 
 const WEDGED = "a-wedged@stall.test";

@@ -21,11 +21,22 @@ const SENT_MESSAGE_KEY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
  * second send and nothing said. The key encoded text identity; it never encoded
  * intent-to-send-again.
  *
- * 10 minutes is this codebase's own existing answer to "how long might one
- * logical attempt still be being retried" (REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS,
- * engine/idempotency.ts). Inside it the B3/NB4 guarantee is untouched — a
- * retried no-key reply after a dropped response still replays rather than
- * double-sending. Outside it, a repeat is treated as what it is.
+ * 10 minutes is sized on ITS OWN merits: the thing this window has to cover is
+ * a client retrying a reply whose RESPONSE was dropped, which is a matter of
+ * seconds to a minute, not of provisioning-saga length. Inside it the B3/NB4
+ * guarantee is untouched — a retried no-key reply after a dropped response
+ * still replays rather than double-sending. Outside it, a repeat is treated as
+ * what it is.
+ *
+ * IT NO LONGER CLAIMS TO BE DERIVED FROM THE IDEMPOTENCY CLAIM TTL (NEW-3,
+ * round 2 of the wave-b1 gate). It used to say "10 minutes is this codebase's
+ * own existing answer to how long one logical attempt might still be being
+ * retried (REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS)" — and that answer is now
+ * 30 minutes. The number here is still right; the derivation was the problem,
+ * because the next reader told to "make these consistent" would either widen
+ * this window — reopening the Monday/Thursday double-collapse it exists to fix
+ * — or narrow the claim TTL, reopening N7. Both directions are wrong, so the
+ * two constants are deliberately independent and each states its own reason.
  */
 const CONTENT_HASH_REPLAY_WINDOW_MS = 10 * 60 * 1000;
 
