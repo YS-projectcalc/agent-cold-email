@@ -115,7 +115,7 @@
   <p>List every campaign for the tenant with id, name, status, and event counts (sent/reply/bounce/...) — no per-campaign lookup needed. No parameters.</p>
 
   <h3><code>metrics</code></h3>
-  <p>Account-wide deliverability + warmup health. No parameters.</p>
+  <p>Account-wide outcome totals across all campaigns (sent, reply, bounce, complaint, unsubscribe, failed, soft_bounce). No parameters. For warmup/deliverability health, use <code>infrastructure_status</code>.</p>
 
   <h3><code>activity</code></h3>
   <p>Unified, chronological activity feed merging campaign events (sent/reply/bounce/...) with deliverability control-loop actions (pause/throttle/...).</p>
@@ -181,12 +181,12 @@
   <pre><code>{ id?: string (1-200 chars) }   // omit to list every subscription</code></pre>
 
   <h3><code>configure_webhook</code></h3>
-  <p>Create, update, or delete an outbound webhook subscription — push <code>reply</code>, <code>bounce</code>, <code>soft_bounce</code>, and <code>complaint</code> events (HMAC-SHA256 signed, header <code>X-Coldrig-Signature</code>) to your own HTTPS endpoint. URLs must be https and resolve to a public host.</p>
+  <p>Create, update, or delete an outbound webhook subscription — push <code>reply</code>, <code>bounce</code>, <code>soft_bounce</code>, <code>complaint</code>, and <code>unsubscribe</code> events (HMAC-SHA256 signed, header <code>X-Coldrig-Signature</code>) to your own HTTPS endpoint. URLs must be https and resolve to a public host.</p>
   <pre><code>{
   action: "create" | "update" | "delete",
   id?: string,                    // required for update/delete
   url?: string,                   // required for create; optional on update
-  eventTypes?: ("reply" | "bounce" | "soft_bounce" | "complaint")[],  // required for create; 1-4 items
+  eventTypes?: ("reply" | "bounce" | "soft_bounce" | "complaint" | "unsubscribe")[],  // required for create; 1-5 items
   secret?: string (16-200 chars), // omit on create to auto-generate; set to rotate
   active?: boolean                // default true
 }</code></pre>

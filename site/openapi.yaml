@@ -201,6 +201,54 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /remove-mailboxes:
+    post:
+      operationId: remove_mailboxes
+      tags: [infrastructure]
+      summary: Downgrade — release the N newest live mailboxes and lower the billed quantity.
+      description: >
+        Releases `count` MORE mailboxes than are currently released (RELATIVE,
+        not a target fleet size) and syncs the lower Stripe quantity
+        (proration_behavior 'none' — no mid-cycle credit; the lower price
+        takes effect at the next renewal, minimum 5 mailboxes / $99).
+        `acknowledged: true` is the quoted, irreversible-this-cycle consent
+        this call requires.
+
+
+        A keyed call's FIRST attempt resolves and records WHICH mailboxes to
+        release; every later call under the SAME Idempotency-Key can only
+        ever finish that recorded set, whatever `count` it sends — a genuine
+        second downgrade needs a NEW key. `releasedCount` can be less than
+        the requested `count`: `failedCount` names how many the provider
+        refused (still live, still billed) and `unreleased` lists those
+        addresses — read them before concluding a downgrade landed. A 409
+        means a release is already running for this account.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [count, acknowledged]
+              properties:
+                count: { type: integer, minimum: 1, maximum: 60, description: How many MORE mailboxes to release. }
+                acknowledged: { type: boolean, enum: [true], description: Quoted, irreversible-this-cycle consent. }
+      responses:
+        '200':
+          description: Release outcome (partial or complete — see `failedCount`/`unreleased`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoveMailboxesResult'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/RequestInProgress'
+
   /campaigns:
     post:
       operationId: launch_campaign
@@ -331,7 +379,7 @@ paths:
     get:
       operationId: metrics
       tags: [account]
-      summary: Account-wide deliverability + warmup health.
+      summary: Account-wide outcome totals across all campaigns (sent, reply, bounce, complaint, unsubscribe, failed, soft_bounce).
       responses:
         '200':
           description: Metrics snapshot.
@@ -822,7 +870,7 @@ paths:
       tags: [webhooks]
       summary: Create an outbound webhook subscription.
       description: >
-        Push reply, bounce, soft_bounce, and complaint events to your own
+        Push reply, bounce, soft_bounce, complaint, and unsubscribe events to your own
         HTTPS endpoint instead of polling GET /activity. Deliveries are
         signed `X-Coldrig-Signature: sha256=HMAC-SHA256(secret, raw body)`.
         URLs must be https and resolve to a public host — private/link-
@@ -1972,8 +2020,8 @@ components:
 
     WebhookEventType:
       type: string
-      enum: [reply, bounce, soft_bounce, complaint]
-      description: "reply = genuine reply; bounce = HARD (permanent) bounce; soft_bounce = transient bounce; complaint = spam complaint."
+      enum: [reply, bounce, soft_bounce, complaint, unsubscribe]
+      description: "reply = genuine reply; bounce = HARD (permanent) bounce; soft_bounce = transient bounce; complaint = spam complaint; unsubscribe = typed unsubscribe-link click."
 
     WebhookCreateInput:
       type: object
@@ -2227,6 +2275,26 @@ components:
         provisionedAfter: { type: integer, description: Live provisioned mailbox count after this operation. }
         projectedMonthlyCents: { type: integer, description: Projected monthly on the $49 + $10/mailbox curve (min 5), folding any checkout discount. }
         formula: { type: string }
+
+    RemoveMailboxesResult:
+      type: object
+      description: >
+        `releasedCount` is what COMPLETED this call and can be less than the
+        requested `count`; `failedCount` names how many the provider refused
+        (STILL LIVE, still billed) and `unreleased` lists those addresses
+        (length === failedCount). `billing` is the projected monthly after
+        the release (the lower count, floored at $99).
+      required: [releasedCount, failedCount, unreleased, billing]
+      properties:
+        releasedCount: { type: integer }
+        failedCount: { type: integer }
+        unreleased:
+          type: array
+          items: { type: string }
+        billing:
+          $ref: '#/components/schemas/MailboxBilling'
+        nextSteps:
+          $ref: '#/components/schemas/NextSteps'
 
     ManagedMailboxesResult:
       type: object

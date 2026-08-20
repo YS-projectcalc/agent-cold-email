@@ -130,7 +130,7 @@ export const ConfigureWebhookInput = z
       .min(1)
       .max(WEBHOOK_EVENT_TYPES.length)
       .optional()
-      .describe("Required for create: which events to push (reply | bounce | soft_bounce | complaint)."),
+      .describe("Required for create: which events to push (reply | bounce | soft_bounce | complaint | unsubscribe)."),
     secret: z.string().min(16).max(200).optional().describe("Optional signing secret (>=16 chars). Omit on create to have one generated; pass on update to rotate."),
     active: z.boolean().optional().describe("Optional. On update, active:true re-enables an auto-disabled subscription; active:false pauses delivery."),
     note: z.string().max(2000).optional().describe("Ignored placeholder for symmetry; webhooks record no provenance note."),
