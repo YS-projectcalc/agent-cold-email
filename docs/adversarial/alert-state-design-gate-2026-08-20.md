@@ -774,3 +774,168 @@ counter, exemption, ruling and ordering subsections. The delta is small:
 12 (§4 polarity), 13 (cap-then-ladder over 30 days), 14 (B6 four-step continuity), 15a–e (the budget's
 five arms) and 16 (`send_starved:` inertness) are the ones that must red before they green; item 17
 (dead-man + continuity cross-clear, unedited) is the regression floor.
+
+---
+---
+
+# ROUND 4 (FINAL) — gate on design v4
+
+## VERDICT: **SHIP**
+
+The one remaining clause is closed, both notes are answered with reasoning rather than assertion, and
+nothing outside the scoped diff moved. Every blocking finding from four rounds is closed and
+re-verified by simulation against the revised machine, not against the design's assurances.
+
+**The design is FROZEN pending the founder's [RATIFY] number** (§9.13). No further gate round is owed.
+
+### Grounding
+
+| Item | Value |
+|---|---|
+| Ref | main `baa23c5091fa7d4ec35ecaff5f19da0f7f2e5228` (v3 + gate round 3 committed), so v4 was again reviewed as a true diff: **84 lines changed, 67 insertions / 17 deletions**. |
+| Target | v4, uncommitted working tree, **831 lines / 63.9 KB**. Complete — §9.13 ends cleanly, no truncation. |
+| Source drift | `git diff f222afc..HEAD -- apps/ packages/` still **empty** across all four rounds, so every cite and every simulation baseline from rounds 1–3 remains valid. |
+| Method | The round-3 model re-run on arm 15b's exact pinned fixture under all three readings, plus a rename sweep and a diff-scope audit. |
+
+---
+
+## The four items
+
+### 1 · `saturated` reads either counter — CLOSED
+
+§1.2's derivation cell now reads **"EITHER counter at its cap — total ≥ `MAX_ANNOUNCEMENT_EMAILS_PER_DAY`
+or per-entity ≥ `MAX_PER_ENTITY_ANNOUNCEMENTS_PER_DAY`"**, with the round-3 evidence inline. §5.5's
+counter section carries it as a standalone bullet, and ordering (iii) — the sub-cap that caused the
+regression — now carries a back-pointer naming the coupling it creates. Fixing the clause in the
+place that *reads* it and annotating the place that *caused* it is the right shape; a future edit to
+the sub-cap now meets the reason it cannot move alone.
+
+Re-run on the pure per-entity 7-day storm: **8 delivered** — one confirm plus the daily ladder,
+exactly what §5.5 claims.
+
+### 2 · Arm 15b's fixture — CLOSED, and it reds where it must
+
+§6.15b now pins the fixture to **100 `tenant_do_wedged:` instances with no global family alerting**,
+asserts 8 delivered, and states why a mixed-family fixture would certify the defect instead of
+catching it. Simulated on that exact fixture:
+
+| Reading | `alert_budget_exceeded` delivered | peak total-in-24 h |
+|---|---|---|
+| v2 (the check was itself budgeted) | **0** | 15/20 |
+| v3 (`saturated` = total counter alone) | **0** | 15/20 |
+| **v4 (either counter)** | **8** | 15/20 |
+
+The arm reds at 0 on **both** historical defects and greens at 8 on the fix. That is the property a
+regression test owes: it must fail on every shape the bug ever took, not just the most recent one.
+
+### 3 · Exempt sends and ring slots — CLOSED, and the reasoning is sound
+
+Ruling: **exempt sends do not consume ring slots and are not recorded.** The reason given is the
+right one — a send that consumed budget would not be exempt, and a 100-item
+`mailbox_release_failed:` batch (group 2, deliberately unbounded) would otherwise silence every
+ordinary announcement for the day, inverting the exemptions' whole purpose.
+
+I attacked the direction rather than the reasoning, because "does not consume" makes the total counter
+under-read real inbox volume. The design handles both costs, and the first one is load-bearing enough
+to verify: **whenever a send is denied, `saturated` is true.** Admission is
+`total < 20 && (!perEntity || perEntity < 15)`; denial is therefore `total ≥ 20 ∨ (perEntity ∧ pe ≥ 15)`,
+and `saturated` is `total ≥ 20 ∨ pe ≥ 15`. Denial implies saturation, exactly — the counters that
+GATE are the counters OBSERVED. Simulated over 7 days: **0 ticks where a send was denied while
+`saturated` was false** under v4, against 672 such ticks under both defective readings. Under-reading
+can no longer hide suppression.
+
+The residual direction — exempt traffic itself is unbounded and invisible to the counter — is not new
+and is not smuggled: §5.5 states it as group 2's residual, §7.8 routes the mitigation to the lane that
+owns the producer as an open ask, and §9.13's founder figure says "plus the exempt families" out loud.
+
+### 4 · §9.13 in inbox units — CLOSED
+
+The constant is renamed `MAX_ALERT_EMAILS_PER_DAY` → **`MAX_ANNOUNCEMENT_EMAILS_PER_DAY`** (and the
+sub-cap correspondingly), with the reason stated as this repo's own claim-drift class: a constant
+whose name overstates its guarantee. §9.13's ask is now the arithmetic the inbox sees rather than the
+constant, with what is bought and what is given up both stated.
+
+Arithmetic checked: 20 announcements + up to 20 recoveries + up to 2 budget-exceeded = **~42/day
+theoretical**; **~30/day measured** matches my round-3 figure of 15 announcements + 15 recoveries in a
+pure per-entity storm (the sub-cap binds at 15); **2/day today** matches the ratified baseline. The
+"up to 2/day" for `alert_budget_exceeded` is a safe over-statement — its DEBOUNCED ladder measured
+8 emails over 7 days, ≈1.1/day.
+
+### Diff scope — nothing else moved
+
+The 84 changed lines touch exactly: the v4 changelog block, §1.2's one row, §5.5's counter section,
+§5.5 ordering (iii), one added row in §5.5's ceiling table, §5.5's residual paragraph, §6.15b, and
+§9.13. §0–§4, §7, §8 and test-plan items 1–14, 15a, 15c–e, 16 and 17 are untouched. The ceiling
+table's existing rows are unchanged; only a row was added.
+
+**Rename sweep is clean.** The only two surviving occurrences of the old constant names are the two
+deliberate rename-notes (the v4 changelog row and §5.5's "Renamed from" sentence); all seven
+functional sites use the new names. A half-swept rename is the failure mode here and it did not occur.
+
+---
+
+## Round-4 attacks that FAILED
+
+- **Under-reading hides suppression.** Refuted by the denial ⟹ saturated invariant above — 0
+  violating ticks over 7 days.
+- **A stale reference to a renamed constant.** Grepped both old names across all 831 lines; only the
+  two rename-notes remain.
+- **An unscoped edit riding along in a "one clause" revision.** Read the whole 84-line diff; every
+  hunk maps to one of the four items or to the renames.
+- **§9.13's arithmetic overstating the guarantee in the founder's favour.** Re-derived all three
+  figures independently (42 theoretical, 30 measured, 2 today); each matches, and the
+  `alert_budget_exceeded` allowance is conservative.
+- **The exempt-batch residual being newly introduced.** It is pre-disclosed in §5.5, routed in §7.8,
+  and named in §9.13. Not a new finding.
+
+## UNVERIFIABLE (carried across all four rounds, unchanged)
+
+- The live 2-Mordy-domains baseline — no prod access. *Resolves with:* `GET /admin/ops/checks?unhealthy=1`.
+- `tenant_do_wedged:`'s real production duty cycle — mechanism and multiplier proved, rate not observed.
+- §7's composition claims are stated against `scalemon` at `67f3535`, a real commit that is not merged;
+  that lane moved twice during this review. **Re-verify §7 at merge**, per the design's own instruction.
+
+---
+
+## CONSOLIDATED BUILD BRIEF
+
+Everything below is IN the design; this is the index a builder works from, not a list of gaps.
+
+**Constraints — rounds 1–3, all landed:**
+
+| # | Constraint | Where in the design |
+|---|---|---|
+| 1 | §4's U-2 guard is `holdGrade === false`, not `&& holding` | §4 |
+| 2 | Phase-2 precedence is LADDER-FIRST; the cap falls through, never terminal | §1.4 table rows 1–4 |
+| 3 | `cap > max(\|declared space\|)` — cap 5, max 4 across 25 families | §1.2, §1.4 |
+| 4 | IN-9 is INERT for `send_starved:` — a ruling, pinned, not a bug | §3.2, §8 |
+| 5 | Blast radius is per-inbox-per-day over the per-entity instance count | §5.2, §5.5 |
+| 6 | Onset adoption gated on `siblingState.healthyObs === 0` | §3.1 |
+| 7 | All four `AlertAction` read sites edited together; the silent `default` becomes exhaustive | §3.5 |
+| 8 | No SDN ledger until P0 delivery-outcome plumbing lands | §2.4 |
+| 9 | Six arriving families, classified; re-read the lane at merge | §7.3 |
+| 10 | `realertCount` split off `alertCount` — escalations are rung-neutral | §1.4 |
+| 11 | Ring of timestamps, not `{windowStartMs, count}` | §5.5 counter |
+| 12 | Recoveries EXEMPT — no budget decision may block an episode close | §5.5 ruling |
+| 13 | `alert_budget_exceeded` is exemption group 3 | §5.5 exemptions |
+| 14 | 15/5 reserved split for the global and monitor families | §5.5 ordering (iii) |
+
+**Round-4 delta (this round):**
+
+| # | Constraint | Where |
+|---|---|---|
+| 15 | `saturated` reads EITHER counter at its cap | §1.2 row, §5.5 counter, §5.5 ordering (iii) |
+| 16 | Arm 15b's fixture is a PURE per-entity storm asserting 8 delivered | §6.15b |
+| 17 | Exempt sends do not consume and are not recorded in the ring | §5.5 counter |
+| 18 | Constants renamed to say ANNOUNCEMENTS; §9.13 stated in inbox units | §5.5, §9.13 |
+
+**Test floor — §6 items 1–17 as written.** Must RED before they GREEN: 12 (§4 polarity), 13
+(cap-then-ladder over 30 days), 14 (B6's four-step continuity), 15a–15e (the budget's five arms), 16
+(`send_starved:` inertness). Regression floor, must pass **unedited**: 17 —
+`watchtower-deadman.test.ts` and the continuity cross-clear tests.
+
+**Merge order:** after `feat/scale-monitoring-2026-08-20`. Re-pick migration numbers from
+`ls apps/platform/migrations | tail -1` at build time; re-verify §7 against the lane's merged state.
+
+**Gate on:** §9 items 1–12, all satisfiable against the final table (25 families, max 4, cap 5).
+Item 13 is the founder's, not the builder's.

@@ -15,6 +15,19 @@ non-blocking). §-numbering is preserved so the gate's per-§ rulings still map.
 | Line-reference policy (gate: the lane is moving) | Every reference below is anchored on a **function or exported constant name plus the behaviour asserted**, with the line number as a convenience only. A builder who finds the line moved should grep the name; if the *behaviour* moved, that is a finding, not a typo. |
 | Verified against v1's own claims | 19 baseline families (`EXPECTED_CONFIRM_OBSERVATIONS`) + 3 arriving in `scalemon` = **22**; `NEXT_STEP_REASONS` = 12 (`packages/shared/src/next-steps.ts`); `waitingOn` = `"operator" \| "customer_billing" \| null`; `0019_sweep_cursor.sql` exists untracked in the lane. |
 
+## What changed in v4 (gate round 3 — 1 blocking + 2 notes, all inside §5.5)
+
+Round 3 accepted v3's NEW-2 refutation and closed NEW-2/3/4/5. It found that **v3's own NEW-5 fix
+reopened NEW-1 by a new route** — the last fix was the prime suspect, and it had reopened the
+adjacent fix's case. v4 is scoped to that clause and the two notes; nothing else moved.
+
+| Gate item | Where | Shape of the answer |
+|---|---|---|
+| **BLOCKING** the per-entity sub-cap holds the total counter at 15/20, so `saturated` (keyed to "the rolling-window counter", singular) never fires in a pure per-entity storm — 0 sent over 7 days | §1.2 row, §5.5 counter + ordering (iii) | `saturated` reads **EITHER counter at its cap**; the sub-cap now carries a pointer to the coupling it creates |
+| Arm 15b could not have caught it | §6.15b | Fixture pinned to a **PURE per-entity** storm, asserting **8 delivered**, reds at 0 on both defective readings |
+| NB: exempt sends and ring slots undecided | §5.5 counter | **They do not consume and are not recorded** — reasoned from what an exemption is for, with both costs of that answer handled rather than accepted |
+| NB: the constant bounds announcements while the founder counts emails (30.0/day measured against a constant named 20) | §5.5 throughout, §9.13 | Constant **renamed** `MAX_ALERT_EMAILS_PER_DAY` → `MAX_ANNOUNCEMENT_EMAILS_PER_DAY` (a name that overstates its guarantee is this repo's claim-drift class), and §9.13's ask restated in inbox units |
+
 ## What changed in v3 (gate round 2 — 2 blocking + 3 NB, all inside §5.5)
 
 Round 2 verified all six round-1 fixes closed by re-simulation and retracted its own N2. The two new
@@ -119,7 +132,7 @@ more.
 | `mailbox_slot_failed:` ✱ (arriving) | `buy_threw` \| `paid_no_infra` | as above | 2 |
 | `d1`, `engine`, `do_storage` | `down` | — | 1 |
 | `send_starved:`, `cred_push_aging:`, `mailbox_orphan:`, `domain_orphan:` | `starved` / `aging` / `orphaned` / `orphaned` | — | 1 |
-| `alert_budget_exceeded` (new, §5.5) | `saturated` | the rolling-window counter | 1 |
+| `alert_budget_exceeded` (new, §5.5) | `saturated` | **EITHER counter at its cap** — total ≥ `MAX_ANNOUNCEMENT_EMAILS_PER_DAY` **or** per-entity ≥ `MAX_PER_ENTITY_ANNOUNCEMENTS_PER_DAY`. Not the total alone: in a pure per-entity storm the sub-cap binds first and the total peaks at 15/20, so a total-only reading never fires (gate round 3, 0 sent over 7 days) | 1 |
 | `cron_sweep` (dead-man) | `stale` | — | 1, **hard-exempt from the escape entirely** |
 
 **max(\|declared space\|) = 4.** Three v1 spaces were narrowed, each with a stated loss:
@@ -498,15 +511,33 @@ right thing, plus a bound that holds regardless.**
 
 #### The counter
 
-- **`MAX_ALERT_EMAILS_PER_DAY = 20`**, held in WatchtowerDO storage — the right home: watchtower
-  control state, strongly consistent, readable during a D1 outage (so the `d1` check's own alert is
-  counted). One RPC per email actually sent, not per check.
+- **`MAX_ANNOUNCEMENT_EMAILS_PER_DAY = 20`**, held in WatchtowerDO storage — the right home:
+  watchtower control state, strongly consistent, readable during a D1 outage (so the `d1` check's own
+  alert is counted). One RPC per email actually sent, not per check. **Renamed from
+  `MAX_ALERT_EMAILS_PER_DAY` (round-3 NB):** it bounds ANNOUNCEMENTS, and recoveries plus the exempt
+  families are alert emails it does not bound — a constant whose name overstates its own guarantee is
+  the claim-drift class this repo sweeps for, and the name is free to fix at design time.
 - **A ring of send timestamps, not `{windowStartMs, count}` (NEW-3).** Two fields express a
   *tumbling* window that resets on a boundary, which permits 20 sends at T+23.9 h and 20 more at
   T+24.1 h — 40 emails in a 0.20 h span while every stated gate still passes. The counter is a
-  bounded ring of at most `MAX_ALERT_EMAILS_PER_DAY` timestamps; the count is "entries newer than
-  `nowMs - 24 h`". 20 numbers, exact for arbitrary spans, and it makes §9.8's number true as written
-  rather than true-per-window.
+  bounded ring of at most `MAX_ANNOUNCEMENT_EMAILS_PER_DAY` timestamps; the count is "entries newer
+  than `nowMs - 24 h`". 20 numbers, exact for arbitrary spans, and it makes §9.8's number true as
+  written rather than true-per-window.
+- **SATURATION IS EITHER COUNTER AT ITS CAP** — total ≥ 20 **or** per-entity ≥ 15. This is what
+  `alert_budget_exceeded` observes, and it is not a detail: with the §5.5 ordering rule (iii)
+  sub-cap in place, a *pure* per-entity storm (§5.5's own flagship row — 100 tenants, correlated DO
+  flap, every contending family per-entity) pins the total at 15 of 20 forever, so a total-only
+  reading of `saturated` never fires while 85 of 100 instances are being suppressed. Round 3
+  simulated all three readings over 7 days: total-only **0 sent**, either-counter **8 sent**
+  (one confirm plus the daily ladder, which is what this section claims), any-withholding **336**.
+- **Exempt sends do NOT consume ring slots, and are not recorded in the ring.** Reasoned, not
+  assumed: a send that consumed budget would not be exempt — it would convert un-suppressible
+  traffic into suppression pressure on ordinary announcements, so a 100-item `mailbox_release_failed:`
+  batch (group 2, deliberately unbounded) would silence every other announcement for the day, which
+  inverts the exemptions' purpose. The two costs of "no" are both handled rather than accepted: the
+  total counter under-reads real inbox volume, which (a) can no longer hide suppression, because
+  `saturated` also reads the per-entity counter, and (b) is why the founder-facing figure is stated
+  in EMAIL units as a formula (§9.13) rather than read off this constant.
 
 #### Exemptions (three groups, each with its own reason)
 
@@ -573,11 +604,12 @@ that is what decides it.
   (a repeat that says nothing new). `recovered` does not appear because it is exempt.
 - **(iii) A RESERVED SLICE for the monitor's own checks.** Documenting NEW-5's gap is not enough,
   because it is the same cluster NEW-1 silences: per-entity families may consume at most
-  **`MAX_PER_ENTITY_ALERTS_PER_DAY = 15`** of the 20, leaving **5 reserved** for the global platform
+  **`MAX_PER_ENTITY_ANNOUNCEMENTS_PER_DAY = 15`** of the 20, leaving **5 reserved** for the global platform
   and monitor families (`cron_legs`, `sweep_coverage`, `sweep_signals`, `alert_delivery`, `d1`,
   `engine`, `do_storage`, `failure_signals`, `vendor_wallet`, `warmup_*`). Two counters in one DO
   record, and it makes the cross-batch ordering gap harmless without needing ordering to cross
-  batches at all.
+  batches at all. **This sub-cap is why `saturated` must read either counter** — it keeps the total
+  below its own threshold in exactly the storm the budget exists for (see the counter section).
 
 #### The resulting property
 
@@ -597,12 +629,14 @@ ceiling.)
 | Pathological (all 1,400 per-entity instances flapping) | ~1,866/day (gate-simulated) | **≤ 20/day announcements**, of which ≤15 per-entity |
 | The day a 7-day storm clears | — | **≤ 140 recoveries, once** (≤ announcements made) |
 | Rolling-window boundary probe (NEW-3) | 40 in 0.20 h | **≤ 20 in any 24 h span** |
+| Sustained churn, what the INBOX actually holds | — | **~30/day measured** (15 announcements + 15 recoveries in a pure per-entity storm), **≤ 42/day theoretical** + exempt traffic — see §9.13 |
 
 **Residual, and the number is founder policy.** A daily ceiling means some announcements are delayed
 for hours, and under a saturated day a new non-exempt incident is announced only when it wins the
 ordering. The dead-man, the money-bearing one-shots and the budget-exceeded report always get
-through, and no incident is ever left un-closed. **`MAX_ALERT_EMAILS_PER_DAY = 20` (and its 15/5
-split) is [RATIFY:founder]** — it changes what the founder can expect from the channel, and per
+through, and no incident is ever left un-closed. **`MAX_ANNOUNCEMENT_EMAILS_PER_DAY = 20` (and its
+15/5 split) is [RATIFY:founder], and §9.13 states the ask in INBOX units rather than in this
+constant** — it changes what the founder can expect from the channel, and per
 project law a cadence change goes through the policy table, not a hot patch.
 
 *Rejected alternative:* per-family roll-up of `tenant_do_wedged:` into a global count-banded check.
@@ -653,8 +687,13 @@ Items 1-11 are v1's, unchanged unless noted. 12-16 are the gate's test floor.
     only proven if each of its parts is proven separately:
     - **15a volume** — ≤20 announcements in any rolling 24 h with §5.5 armed; ~114/day without it
       (the gate's measured number), so the budget is load-bearing rather than decorative.
-    - **15b `alert_budget_exceeded` is DELIVERED during a saturated day** (NEW-1). RED on the v2
-      exempt list, where it sent 0 and withheld 2015.
+    - **15b `alert_budget_exceeded` is DELIVERED during a saturated day** (NEW-1). **The fixture must
+      be a PURE per-entity storm** — 100 `tenant_do_wedged:` instances, no global family alerting —
+      because that is the only shape in which the per-entity sub-cap binds while the total counter
+      sits at 15/20. Assert **8 delivered** over 7 days (one confirm plus the daily ladder). It reds
+      at **0** on both defective readings: v2's (the check was itself budgeted) and v3's (`saturated`
+      read the total counter alone). A mixed-family fixture certifies the defect instead of catching
+      it — the exact failure mode test 15 was split into arms to avoid.
     - **15c recovery storm** (NEW-2) — 100 simultaneous recoveries: assert every episode CLOSES in
       the tick it recovers (zero checks reading `status='unhealthy'` while healthy — v2's budgeted
       reading gives up to 100 for 4.0 days), and assert recovery emails ≤ announcements made.
@@ -775,7 +814,18 @@ has not committed, so this is a moving target — re-verify at merge).
 11. The property fuzz reports zero violations of §6.10's three invariants.
 12. Full battery + typecheck quoted with real (non-piped) exit codes on the MERGED tree, after the
     scale-monitoring lane lands.
-13. **[RATIFY:founder]** `MAX_ALERT_EMAILS_PER_DAY = 20`, split 15 per-entity / 5 reserved for the
-    global and monitor families — a daily ceiling that DELAYS (never deletes) non-exempt
-    announcements, never delays an episode close, and never suppresses the report that it is
-    suppressing. Put the number to the founder only after NEW-1 and NEW-2 are built, not before.
+13. **[RATIFY:founder] — stated in INBOX units, because that is what the founder counts.** The
+    mechanism's constant is `MAX_ANNOUNCEMENT_EMAILS_PER_DAY = 20` (split 15 per-entity / 5 reserved
+    for the global and monitor families), but that constant bounds **announcements**, not emails. The
+    ask must be the arithmetic the inbox sees:
+
+    > **On a bad day: up to ~20 announcement emails, plus up to the same number of recovery emails
+    > (each recovery is owed only for an announcement that already went out), plus the exempt
+    > families — the cron dead-man, the money-bearing one-shot failures, and up to 2/day telling you
+    > alerts are being withheld. In sustained churn that measured ~30/day and is bounded at ~42/day
+    > plus exempt traffic; today, with one tenant, it is 2/day and nothing binds.**
+
+    What is bought for that: no incident is ever left un-closed, no episode close is ever delayed,
+    and the platform always tells you when it is withholding. What is given up: on a saturated day a
+    new non-exempt incident is announced only when it wins the ordering. **Put the number to the
+    founder only after NEW-1 and NEW-2 are built, not before.**
