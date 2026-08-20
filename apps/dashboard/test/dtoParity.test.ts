@@ -94,7 +94,59 @@ const PARITY_CASES: ParityCase[] = [
   { dashboardName: "AckMessageResult", platformFile: "tenant-messages.ts", platformName: "AckMessageResult" },
 ];
 
+/**
+ * Types in `api/types.ts` that are deliberately NOT diffed, each with the reason
+ * it is out of this guard's reach. NB2 (docs/adversarial/wave-a-trains-3-4-gate-
+ * 2026-08-20.md): the companion assertion below forces every export to be either
+ * a PARITY_CASE or a named member here, so an 18th hand-mirrored DTO cannot land
+ * unguarded — which is exactly the drift C-M1 was opened for.
+ */
+const NOT_MIRRORED: Readonly<Record<string, string>> = {
+  // A narrower client VIEW by design, not a claimed full mirror: SetupPage only
+  // needs domains/mailboxes/mailboxHealth/sendReady, and W-M5 routes message
+  // rendering through GET /messages rather than widening this (CLAUDE.md rule i).
+  InfrastructureStatus: "deliberate narrower client view",
+  // Wire shapes with no same-named platform interface to diff against — the same
+  // reach limit as G1's literal-field `extra` tools.
+  SignupResult: "no same-named server interface",
+  LoginRequestResult: "no same-named server interface",
+  LoginConsumeResult: "no same-named server interface",
+  RotateTokenResult: "no same-named server interface",
+  ReplyResult: "no same-named server interface",
+  RevConflictBody: "no same-named server interface",
+  CheckoutResult: "no same-named server interface",
+  // A string-literal union, not a mirrored object shape.
+  ActivationSurfaceState: "string-literal union, not a mirror",
+};
+
 describe("dashboard DTO <-> platform interface field parity (C-M1)", () => {
+  // THE ADDITIVE HALF (NB2). Without this, PARITY_CASES is a hand-maintained
+  // list and a newly hand-mirrored DTO simply never gets diffed — the guard
+  // stays green while the exact drift it exists to catch walks in. Mirrors its
+  // sibling G1's "tool 29 can't land without a map entry"
+  // (apps/platform/test/tool-claim-binding.test.ts).
+  //
+  // When this reddens: either add a PARITY_CASE (if the new type mirrors a
+  // platform interface) or add it to NOT_MIRRORED WITH THE REASON. Do not
+  // delete the assertion.
+  it("every exported type in api/types.ts is either diffed or a NAMED exclusion (an 18th DTO can't land unguarded)", async () => {
+    const dashboardSrc = await readFile(join(here, "..", "src", "api", "types.ts"), "utf8");
+    const exported = [...dashboardSrc.matchAll(/^export (?:interface|type) (\w+)/gm)].map((m) => m[1]!);
+    expect(exported.length, "types.ts exports nothing — the regex or the file moved").toBeGreaterThan(0);
+
+    const covered = new Set(PARITY_CASES.map((c) => c.dashboardName));
+    const unaccounted = exported.filter((name) => !covered.has(name) && !(name in NOT_MIRRORED));
+    expect(
+      unaccounted,
+      `add a PARITY_CASE for these, or name them in NOT_MIRRORED with a reason: ${unaccounted.join(", ")}`,
+    ).toEqual([]);
+
+    // The exclusion list must not rot either: a name that no longer exists is a
+    // stale excuse that would silently cover a future type of the same name.
+    const stale = Object.keys(NOT_MIRRORED).filter((name) => !exported.includes(name));
+    expect(stale, `NOT_MIRRORED names types that no longer exist: ${stale.join(", ")}`).toEqual([]);
+  });
+
   it.each(PARITY_CASES)("api/types.ts's $dashboardName has the SAME fields as engine/$platformFile's $platformName", async ({ dashboardName, platformFile, platformName }) => {
     const dashboardSrc = await readFile(join(here, "..", "src", "api", "types.ts"), "utf8");
     const platformSrc = await readFile(join(platformEngineDir, platformFile), "utf8");

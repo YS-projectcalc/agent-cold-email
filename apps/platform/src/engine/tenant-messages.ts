@@ -281,15 +281,23 @@ function toTenantMessage(row: TenantMessageRow): TenantMessage {
  *
  * OPERATOR FIRST, then newest first (F9, docs/adversarial/
  * agent-channel-product-audit-2026-08-17.md). A plain newest-first cap of 5 is
- * displaceable by our own system churn: `emitTenantMessage`'s dedup branch
- * RE-STAMPS `created_at` on every re-trigger, so a tenant with five or more
- * domains each refreshing a per-domain `retry_setup` pushes a human operator's
- * reply out of the preview entirely — while infrastructure_status's tool
- * description tells the agent to "poll this alongside the mailbox fields so you
- * never miss one". A system message is machine-regenerated on the next call; an
- * operator's reply is written once by a human and is the only thing here that
- * cannot be reconstructed, so it outranks. list_messages (below) is the surface
- * for acked history — this preview never shows it.
+ * displaceable by our own system churn: a tenant with five or more domains, each
+ * emitting its own per-domain `retry_setup`, fills the preview with system rows
+ * and pushes a human operator's reply out of it entirely — while
+ * infrastructure_status's tool description tells the agent to "poll this
+ * alongside the mailbox fields so you never miss one". A system message is
+ * machine-regenerated on the next call; an operator's reply is written once by a
+ * human and is the only thing here that cannot be reconstructed, so it outranks.
+ * list_messages (below) is the surface for acked history — this preview never
+ * shows it.
+ *
+ * NB4 (docs/adversarial/wave-a-trains-3-4-gate-2026-08-20.md): this used to
+ * justify itself with `emitTenantMessage`'s dedup branch RE-STAMPING
+ * `created_at` on every re-trigger. IN-3 removed that re-stamp in the same wave
+ * — `created_at` is immutable now and recurrence lives in `last_occurred_at` —
+ * so that mechanism is gone. The DECISION is unchanged and still right, because
+ * a burst of genuinely NEW per-domain rows displaces a cap-5 newest-first
+ * preview on its own, without any re-stamping.
  */
 export function listSurfacedTenantMessages(ctx: TenantContext): TenantMessage[] {
   const now = ctx.clock.now();

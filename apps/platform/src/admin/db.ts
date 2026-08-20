@@ -258,8 +258,19 @@ export async function insertEnforcementActionIfNew(
   // which admin-terminate.test.ts pins as false on a repeat) are all unchanged —
   // only the silent loss goes.
   //
-  // Bounded by DISTINCT reasons, not by call volume: an admin double-clicking
-  // terminate re-sends the same reason and appends nothing.
+  // BOUNDED BY CONSECUTIVE-DISTINCT REASONS, not by distinct reasons (NB3,
+  // docs/adversarial/wave-a-trains-3-4-gate-2026-08-20.md — the original comment
+  // here claimed the stronger bound and was wrong). The comparison below looks
+  // at the LAST recorded reason only, so an admin double-clicking terminate with
+  // the same reason appends nothing, but reasons alternating A, B, A, B… append
+  // on every call.
+  //
+  // Left as-is deliberately rather than half-fixed. A true distinct-reason bound
+  // needs a per-episode ANNOUNCED SET rather than a two-state comparison, which
+  // is the identical shape as — and is being designed alongside — the deferred
+  // IN-17 alert-state work in the Wave B increment. Reachability here is one
+  // human behind ADMIN_TOKEN appending to a D1 TEXT column, so the honest
+  // comment is the fix for now and the mechanism moves with its sibling.
   const existing = await env.DB.prepare(
     `SELECT reason, evidence_json FROM enforcement_actions WHERE tenant_id = ? AND action = ?`,
   )

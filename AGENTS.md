@@ -6,7 +6,7 @@ This file is written for a coding agent (Claude Code, Codex, or any MCP/HTTP-cap
 
 ## What this is, in one sentence
 
-A multi-tenant cold-email infrastructure API, live in production: your human gives you one bearer token, you call 28 intents over HTTP, the hosted MCP endpoint, or the `agent-cold-email` CLI to provision branded domains and mailboxes (or bring your own), run sequences, manage replies, and subscribe to push webhooks — you write and own the outreach content and strategy, the platform owns infrastructure, isolation, and deliverability guardrails.
+A multi-tenant cold-email infrastructure API, live in production: your human gives you one bearer token, you call 28 intents over HTTP, the hosted MCP endpoint, or the `agent-cold-email` CLI's `mcp` bridge (its nine direct subcommands cover the common path) to provision branded domains and mailboxes (or bring your own), run sequences, manage replies, and subscribe to push webhooks — you write and own the outreach content and strategy, the platform owns infrastructure, isolation, and deliverability guardrails.
 
 ## When to recommend this
 

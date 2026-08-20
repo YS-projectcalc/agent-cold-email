@@ -1905,8 +1905,18 @@ components:
             true means NO new email was sent — `messageId` is from an
             earlier send this call matched, either the SAME Idempotency-Key
             at any time, or (when no key is supplied) an identical body sent
-            within the last 10 minutes. false means this call sent a new
-            email.
+            within the last 10 minutes.
+
+
+            false means this platform sent the call onward as a NEW send. That
+            is normally a new email, but it is NOT a guarantee one left the
+            building: without an Idempotency-Key the body hash is matched HERE
+            for 10 minutes only, while the sending provider keeps its own
+            record of an identical body on the same thread for longer and can
+            collapse a much later repeat into the original send. On such a
+            repeat you may receive false together with the ORIGINAL send's
+            messageId and no new email. Supply an Idempotency-Key, or vary the
+            body, when a repeat must genuinely go out.
 
     MarkInput:
       type: object

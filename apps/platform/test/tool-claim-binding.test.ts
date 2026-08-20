@@ -229,6 +229,52 @@ describe("tool-claim-binding — G1 response-field binding", () => {
     const unknown = claimed.filter((f) => !declared.includes(f));
     expect(unknown, `${name} claims field(s) not on its declared result type: ${unknown.join(", ")}`).toEqual([]);
   });
+
+  // NB5, docs/adversarial/wave-a-trains-3-4-gate-2026-08-20.md — THE FENCE.
+  //
+  // `extra:` is the one input to this guard with NO independent oracle. Every
+  // `sources:` entry is checked against real parsed source, but an `extra:`
+  // field is just a name someone typed: nothing here verifies the tool ever
+  // actually returns it. So a bogus field added to a description AND to `extra`
+  // is green by construction — the guard would certify its own escape hatch.
+  //
+  // This snapshot is the fence. It is not coverage theater: it makes `extra:`
+  // APPEND-ONLY-WITH-REVIEW, so a new entry cannot land silently. When this test
+  // reddens, do NOT just paste the new name in — go read the tool's real return
+  // site and confirm the field is genuinely returned there, then add it here
+  // with that call site noted. The gate did exactly that audit for every entry
+  // below and all of them resolve.
+  it("the extra-field escape hatch matches its reviewed inventory (see the fence note)", () => {
+    const actual = Object.fromEntries(
+      Object.entries(RESULT_TYPES)
+        .filter(([, entry]) => (entry.extra ?? []).length > 0)
+        .map(([name, entry]) => [name, [...entry.extra!].sort()]),
+    );
+    expect(actual).toEqual({
+      launch_campaign: ["campaignId"], // routes/campaigns.ts
+      campaign_results: ["campaignId"], // routes/campaigns.ts
+      reply: ["code", "deduplicated", "error", "messageId", "reason", "retryable"].sort(), // threads.ts + error-response.ts
+      mark: ["marked"], // routes/inbox.ts
+      pause: ["paused"], // routes/campaigns.ts
+      pause_all: ["pausedAll"], // routes/campaigns.ts:35
+      remove_mailboxes: ["deduplicated"], // billing.ts
+      configure_dashboard: ["currentLayout", "currentRev"].sort(), // error-response.ts:34,135
+      configure_byo_domain: ["formula", "projectedMonthlyCents", "provisionedAfter"].sort(), // MailboxBilling, billing.ts:986
+      contact_operator: ["deduplicated"], // contact-operator.ts
+    });
+  });
+
+  // `deduplicated` is the Collapsed<T> disclosure, and it is `extra` on every
+  // tool that carries it because the flag is added by the Collapsed<T> wrapper
+  // rather than declared on the wrapped interface. Pinning the exact set keeps
+  // a FOURTH tool from quietly claiming the flag without wiring it.
+  it("declares `deduplicated` on exactly the three Collapsed<T> tools", () => {
+    const withFlag = Object.entries(RESULT_TYPES)
+      .filter(([, entry]) => (entry.extra ?? []).includes("deduplicated"))
+      .map(([name]) => name)
+      .sort();
+    expect(withFlag).toEqual(["contact_operator", "remove_mailboxes", "reply"]);
+  });
 });
 
 // --- G2 — enumeration binding (highest yield per the sweep) -----------------

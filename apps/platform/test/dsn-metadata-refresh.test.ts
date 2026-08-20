@@ -103,21 +103,34 @@ describe("IN-14 — a second DSN for the same send refreshes the record it canno
 // The other half of the fix: live code with no production driver is 100% green
 // and 100% dead. Both DSN paths must actually ask for the refresh.
 describe("IN-14 wiring — the bounce and complaint paths opt in", () => {
+  // NB6 (docs/adversarial/wave-a-trains-3-4-gate-2026-08-20.md): this used fixed
+  // 400/600-character windows and checked only the FIRST reply block. The
+  // character bounds fail in the safe direction (a grown literal reads as a
+  // missing opt-in) but they are guesswork, and a SECOND reply block would have
+  // gone unchecked entirely. Both are now exact: each call's arguments are
+  // sliced to the literal's real closing line, and every reply block is asserted.
+  const callArgs = (block: string): string => {
+    const end = /^\s*\}\);/m.exec(block);
+    return end ? block.slice(0, end.index) : block;
+  };
+
   it("every recordEventIfNew call in reply-processor for a DSN type sets refreshMetadataOnRepeat", () => {
-    // Each `recordEventIfNew({...})` block in the file, with its type field.
-    const blocks = replyProcessorSource.split("recordEventIfNew(ctx, {").slice(1);
+    const blocks = replyProcessorSource.split("recordEventIfNew(ctx, {").slice(1).map(callArgs);
     expect(blocks.length).toBeGreaterThanOrEqual(4); // reply, hard bounce, soft bounce, complaint
 
-    const dsnBlocks = blocks.filter((b) => /type: "(bounce|soft_bounce|complaint)"/.test(b.slice(0, 400)));
+    const dsnBlocks = blocks.filter((b) => /type: "(bounce|soft_bounce|complaint)"/.test(b));
     expect(dsnBlocks).toHaveLength(3);
     for (const block of dsnBlocks) {
-      expect(block.slice(0, 600)).toMatch(/refreshMetadataOnRepeat:\s*true/);
+      expect(block).toMatch(/refreshMetadataOnRepeat:\s*true/);
     }
 
     // ...and the reply path must NOT, since a re-polled reply is byte-identical
-    // and there is nothing later or truer to learn from it.
-    const replyBlocks = blocks.filter((b) => /type: "reply"/.test(b.slice(0, 400)));
-    expect(replyBlocks).toHaveLength(1);
-    expect(replyBlocks[0]!.slice(0, 600)).not.toMatch(/refreshMetadataOnRepeat/);
+    // and there is nothing later or truer to learn from it. Asserted on EVERY
+    // reply block, so a second one cannot slip in unchecked.
+    const replyBlocks = blocks.filter((b) => /type: "reply"/.test(b));
+    expect(replyBlocks.length).toBeGreaterThanOrEqual(1);
+    for (const block of replyBlocks) {
+      expect(block).not.toMatch(/refreshMetadataOnRepeat/);
+    }
   });
 });
