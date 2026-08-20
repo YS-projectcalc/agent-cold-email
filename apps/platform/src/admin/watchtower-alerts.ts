@@ -148,6 +148,11 @@ export const CRON_SWEEP_CHECK = "cron_sweep";
 export const CRON_LEGS_CHECK = "cron_legs";
 export const D1_CHECK = "d1";
 
+/** The cross-tenant failure roll-up. A constant because THREE places now agree
+ * on the spelling — the producer, the roster, and the partial-scan hold that
+ * has to read its own current status (N3). */
+export const FAILURE_SIGNALS_CHECK = "failure_signals";
+
 /**
  * The sweep's coverage check (scale audit S4 + S11). SEPARATE from `cron_legs`
  * on purpose: `skippedForLegDeadline` used to be folded into the same
@@ -256,6 +261,23 @@ export function policyFor(checkName: string): AlertPolicy {
   // breach the founder's 10-15 min ceiling. The requirement the ruling asks for
   // is already satisfied — twice over — before the result reaches the machine.
   if (checkName === CRON_LEGS_CHECK) return IMMEDIATE_ALERT_POLICY;
+
+  // N5 (docs/adversarial/wave-b1-scale-monitoring-gate-2026-08-20.md) — the two
+  // checks damped by the SAME `gradeSweepStreak` as `cron_legs` above, for the
+  // same reason its exemption exists. Both are graded over
+  // LEG_ALERT_AFTER_SWEEPS consecutive bad ticks before they are reported at
+  // all; debouncing them again puts the first email at tick 4 (20 min, 25 with
+  // a missed tick) — the exact number that exemption's comment names as the
+  // breach. `alert_delivery` is the check that says "we could not reach you",
+  // which is the worst one in the platform to delay.
+  //
+  // `sweep_signals` is deliberately NOT here: scheduled.ts reports it once per
+  // tick with NO upstream damping, so the debounce is the only thing standing
+  // between one flaky WatchtowerDO RPC and an email.
+  //
+  // The frozen alert-state design owns the final assignment (§7.3 -> §3.3);
+  // this closes the interim under-specification rather than pre-empting it.
+  if (checkName === SWEEP_COVERAGE_CHECK || checkName === ALERT_DELIVERY_CHECK) return IMMEDIATE_ALERT_POLICY;
 
   // ONE-SHOT event reports (`reportCheck`, from engine/mailbox-acquisition.ts).
   // Nothing re-observes these: they are raised once by whatever hit the

@@ -80,11 +80,27 @@ const DEFAULT_INBOXKIT_PLAN_SLOTS = 10; // the purchased InboxKit Professional p
 
 // A 'reserved' entry older than this is presumed orphaned by a crash between
 // reserve and commit/release (design NB-2) and is reclaimed by the scheduled()
-// reaper. Sized well above the longest legitimate provision run (single-digit
-// minutes per the idempotency 'pending' TTL, engine/idempotency.ts) so a live
+// reaper. Sized well above the longest legitimate provision run so a live
 // in-flight reservation is never reaped, yet far under a day so a genuinely
 // leaked reservation frees promptly.
-const RESERVE_REAP_TTL_MS = 15 * 60 * 1000;
+//
+// RAISED WITH THE CLAIM TTL IT IS SIZED AGAINST (N7's knock-on, wave-b1 gate).
+// This used to say "single-digit minutes per the idempotency 'pending' TTL" and
+// sit at 15 min. That TTL has been re-derived to 30 min now that the S3 retry
+// adds up to 20s of serialized backoff per vendor call
+// (engine/idempotency.ts), so 15 min would have put the reaper INSIDE the
+// longest legitimate run — making the H7 path below ("entry was resolved out
+// from under a successful commit") an ordinary event on slow-but-healthy
+// sagas instead of the incident it is written as. Nothing would over-spend
+// (`committed_cents` is still incremented and the entry record restored), but
+// `reserved_cents` double-decrements into its MAX(0,...) clamp and an
+// error-level reconciliation log fires on a working provision — which is how
+// an operator learns to ignore that line.
+//
+// 45 min = 1.5x the re-derived 30-min bound, still ~32x under a day.
+// `spend-ceiling.test.ts` pins the ordering so the two cannot drift again: the
+// reaper must always outlive the claim.
+export const RESERVE_REAP_TTL_MS = 45 * 60 * 1000;
 
 function parsePositiveInt(raw: string | null | undefined, fallback: number): number {
   if (raw == null) return fallback;
@@ -200,20 +216,84 @@ async function currentSlotsUsed(db: D1Database): Promise<number> {
  * OPS_ALERT_EMAIL and swallows every send failure. A customer told a human is
  * on it stops escalating; that is the whole cost of the claim being decorative.
  */
+/**
+ * The ceiling currently STORED for this period — what `withSpendCeiling`'s
+ * atomic reserve actually gates on, which is not necessarily what the env says
+ * right now.
+ *
+ * A RAISE IS DURABLE FOR THE CALENDAR MONTH (N1). `ceiling_cents` has exactly
+ * two writers, both in `withSpendCeiling`: the `INSERT OR IGNORE` seed and the
+ * raise-only reconcile (`WHERE period_key = ? AND ceiling_cents < ?`). Nothing
+ * anywhere lowers it — there is no lowering statement and no admin route — so a
+ * mistyped `PAYING_TENANT_COUNT` that lands on ONE provisioning call raises the
+ * live month's bound until the 1st, and putting the knob back does not walk it
+ * back. Raise-only is correct for its purpose (a lowered bound could sit under
+ * reserved+committed and block every remaining provision on a number nobody
+ * saw), but the irreversibility is the part that was undocumented.
+ *
+ * THE MANUAL LOWERING PATH, since there is no supported one:
+ *
+ *   wrangler d1 execute coldstart-platform-db --remote \
+ *     --command "UPDATE vendor_spend_ledger SET ceiling_cents = <cents> WHERE period_key = '<YYYY-MM>'"
+ *
+ * Check `reserved_cents + committed_cents` first — setting the ceiling below
+ * that total blocks all further provisioning for the month without refunding
+ * anything already spent. An admin route for this is on the ROADMAP.
+ */
+async function readInForceCeilingCents(ctx: TenantContext, now: Date): Promise<number | null> {
+  try {
+    const row = await ctx.env.DB.prepare(`SELECT ceiling_cents FROM vendor_spend_ledger WHERE period_key = ?`)
+      .bind(periodKey(now.getTime()))
+      .first<{ ceiling_cents: number }>();
+    return row?.ceiling_cents ?? null;
+  } catch (err) {
+    // The alert must still go out; an unreadable row just means we report the
+    // configured number alone rather than both.
+    console.error("capacity-pending alert: could not read the in-force ceiling", err);
+    return null;
+  }
+}
+
 async function alertCapacityPending(
   ctx: TenantContext,
   reason: "spend_ceiling" | "slot_capacity",
-  detail: { kind: SpendKind; estCents: number; ceilingCents: number; planSlots: number; slotsUsed: number },
+  detail: {
+    kind: SpendKind;
+    estCents: number;
+    ceilingCents: number;
+    /** The ceiling the GATE actually used — `vendor_spend_ledger.ceiling_cents`
+     * for this period, which is raise-only and so can be HIGHER than the
+     * configured number above (N1). Null when the row could not be read. */
+    inForceCeilingCents: number | null;
+    planSlots: number;
+    slotsUsed: number;
+  },
   mailer: OpsMailer,
 ): Promise<Notified> {
   if (!ctx.env.OPS_ALERT_EMAIL) return { delivered: false, why: "dark_channel" };
+  // N2 — the growth knob is PAYING_TENANT_COUNT, not SPEND_CEILING_CENTS.
+  // This line used to instruct the latter, which is the ABSOLUTE OVERRIDE
+  // (`spendCeilingCents`): an operator following the old instruction would
+  // freeze the ceiling at a literal and the per-paying-tenant scaling would
+  // never apply again — re-creating the growth-ceiling-disguised-as-a-safety-
+  // bound that this formula exists to remove. Read at exactly the moment
+  // provisioning is blocked, i.e. when it is most likely to be obeyed.
   const action =
     reason === "slot_capacity"
       ? `slot capacity reached (${detail.slotsUsed}/${detail.planSlots}) — upgrade the InboxKit plan and raise INBOXKIT_PLAN_SLOTS`
-      : `spend ceiling reached (ceiling ${detail.ceilingCents}¢/mo) — raise SPEND_CEILING_CENTS or upgrade InboxKit`;
+      : `spend ceiling reached — raise PAYING_TENANT_COUNT to match the customers you now have (the ceiling scales with it). ` +
+        `SPEND_CEILING_CENTS is an absolute override: setting it FREEZES the ceiling at that literal and the per-tenant scaling stops applying`;
+  // BOTH numbers, because they can differ and the operator needs the one the
+  // gate used. `ceiling_cents` is raise-only within a period, so a number
+  // configured earlier this month is still in force even after the config came
+  // back down.
+  const ceilingLine =
+    detail.inForceCeilingCents !== null && detail.inForceCeilingCents !== detail.ceilingCents
+      ? `Ceiling IN FORCE this period: ${detail.inForceCeilingCents}¢/mo (configured right now: ${detail.ceilingCents}¢/mo — the in-force number is higher because a raise is durable for the calendar month).`
+      : `Ceiling: ${detail.ceilingCents}¢/mo.`;
   const text =
     `Tenant ${ctx.tenantId} hit a provisioning capacity gate on a '${detail.kind}' spend (est ${detail.estCents}¢).\n\n` +
-    `${action}.\n\nThe tenant is held in 'capacity_pending' (no charge, no provisioning) and a later provision retries once you raise the limit.`;
+    `${ceilingLine}\n\n${action}.\n\nThe tenant is held in 'capacity_pending' (no charge, no provisioning) and a later provision retries once you raise the limit.`;
   try {
     await mailer.send({
       to: ctx.env.OPS_ALERT_EMAIL,
@@ -235,11 +315,15 @@ async function rejectCapacity(
   mailer: OpsMailer,
 ): Promise<never> {
   const transitioned = setCapacityPendingMarker(ctx);
+  // N1 — read the ceiling THE GATE ACTUALLY USED, not just the configured one.
+  // Only on the rejection path, so it costs a D1 read exactly when provisioning
+  // is already blocked and an operator is about to be told a number.
+  const inForceCeilingCents = transitioned ? await readInForceCeilingCents(ctx, new Date()) : null;
   // Only the FIRST rejection of an episode alerts; a later one is deliberately
   // withheld because an earlier alert stands — which is a reason the customer
   // sentence must be able to say, and could not while it was a constant.
   const notified: Notified = transitioned
-    ? await alertCapacityPending(ctx, reason, detail, mailer)
+    ? await alertCapacityPending(ctx, reason, { ...detail, inForceCeilingCents }, mailer)
     : { delivered: false, why: "suppressed_cooldown" };
   // CUSTOMER-FACING (error-response.ts returns this message verbatim in the 409
   // body), so it names neither the provider nor our internal capacity numbers.

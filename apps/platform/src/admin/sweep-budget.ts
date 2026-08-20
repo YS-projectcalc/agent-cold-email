@@ -80,17 +80,72 @@ export const SWEEP_SUBREQUEST_BUDGET = 1000;
 export const SWEEP_BUDGET_FRACTION = 0.6;
 
 /**
- * Subrequests one tick spends that do NOT scale with the tenant slice: the
- * D1 reads/writes each leg makes once (tenant list, cursor, watchtower state,
- * support/waitlist counts, the sweep heartbeat), the DO-storage and
- * rate-limiter canary probes, the vendor checks, and the screening-recovery
- * leg (bounded by the pending-review queue, not by tenant count).
+ * Subrequests one tick spends that do NOT scale with the tenant slice AND do
+ * not fan out over any other population: the D1 reads/writes each leg makes
+ * once (tenant list, cursor, watchtower state, support/waitlist counts, the
+ * sweep heartbeat), and the DO-storage / rate-limiter canary probes and vendor
+ * checks.
  *
  * The audit MEASURED this at 29 on the real sweep. Rounded up to leave room for
  * the checks this wave adds rather than pinning the measurement itself, which
  * would red on every new probe.
+ *
+ * IT NO LONGER CLAIMS TO COVER THE SCREENING-RECOVERY LEG. It used to — the
+ * docstring said "and the screening-recovery leg (bounded by the pending-review
+ * queue, not by tenant count)" — while that leg was separately capped at 500
+ * items costing two subrequests each. 1,000 subrequests, unmodelled, on top of a
+ * 599-subrequest tick, against a budget of 1,000. B1 (docs/adversarial/
+ * wave-b1-scale-monitoring-gate-2026-08-20.md): past the cap `runLeg` swallows
+ * the budget-exhaustion throw and every leg after it dies silently — the cursor
+ * commit, the retirement, the send pipeline, the signal report, and the
+ * dead-man heartbeat. The dead-man then pages "cron STOPPED" about a cron that
+ * is running, which is verbatim the failure this whole wave exists to remove.
+ *
+ * "Bounded by a population that is not the tenant count" is NOT the same as
+ * "small". Any leg with its own fan-out gets its own term below and is summed
+ * into `SWEEP_FIXED_SUBREQUESTS`; `sweep-budget.test.ts` asserts that sum is
+ * closed, so the next such leg cannot be waved through in a docstring.
  */
-export const SWEEP_FIXED_SUBREQUESTS = 60;
+export const SWEEP_FIXED_OVERHEAD_SUBREQUESTS = 60;
+
+/**
+ * Subrequests ONE screening-recovery item costs: the `rescreenIfListUnavailable`
+ * DO RPC, plus — on `status === "clear"`, which that leg's own comment calls
+ * "the common case" — the `resolveScreeningReview` D1 write.
+ */
+export const SCREENING_RECOVERY_SUBREQUESTS_PER_ITEM = 2;
+
+/**
+ * How many sentinel-held tenants ONE tick may re-screen.
+ *
+ * A DRAIN RATE, not a page. The population is transient by construction
+ * (tenants screened fail-closed only because no SDN list had loaded yet), it
+ * is self-draining (a re-screen either clears the row or re-versions it, and
+ * either way the row leaves this leg's `LIST_UNAVAILABLE_VERSION`-narrowed
+ * query), and the leg runs every 5 minutes — so a backlog of 500 drains in
+ * ~100 minutes while costing this tick a bounded 50 subrequests.
+ *
+ * Chosen small ON PURPOSE: a recovery backlog is a rare event, and the tenant
+ * slice this term is subtracted from is what every tick pays. Trading 5 tenants
+ * off the permanent slice to drain a rare backlog twice as fast is the wrong
+ * way round. `ofac/screening-recovery.ts` imports THIS constant rather than
+ * declaring its own — the two living in different files, in different lanes,
+ * is exactly how B1 happened.
+ */
+export const SCREENING_RECOVERY_BATCH = 25;
+
+/** The screening-recovery leg's whole worst-case per-tick cost. */
+export const SCREENING_RECOVERY_SUBREQUESTS = SCREENING_RECOVERY_BATCH * SCREENING_RECOVERY_SUBREQUESTS_PER_ITEM;
+
+/**
+ * Everything one tick spends that the tenant slice does not: the fixed overhead
+ * plus every leg that fans out over a population of its own.
+ *
+ * The slice derivation subtracts THIS. A leg with its own fan-out that is not
+ * summed in here is a leg the slice arithmetic is silently wrong about, which is
+ * the whole of B1.
+ */
+export const SWEEP_FIXED_SUBREQUESTS = SWEEP_FIXED_OVERHEAD_SUBREQUESTS + SCREENING_RECOVERY_SUBREQUESTS;
 
 /**
  * DO RPCs ONE tenant costs across ALL legs in a single tick, worst case.

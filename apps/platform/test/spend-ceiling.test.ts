@@ -417,3 +417,57 @@ describe("releaseMailboxSlots — teardown decrements the account slot counter",
     });
   });
 });
+
+// N1 + N2 (docs/adversarial/wave-b1-scale-monitoring-gate-2026-08-20.md) — the
+// two things the capacity alert said wrong, at the one moment it is read: when
+// provisioning is already blocked and the operator is about to act on it.
+describe("the capacity alert instructs the right knob and reports the ceiling actually in force", () => {
+  it("names PAYING_TENANT_COUNT, and warns that SPEND_CEILING_CENTS freezes the formula", async () => {
+    const { tenantId } = await mintTenant("Knob Instruction Co", "managed");
+    const mailer = new SandboxOpsMailer();
+    await realCtx(tenantId, async (ctx) => {
+      const pk = periodKey(ctx.clock.now());
+      // The month is spent, not the ceiling mis-set: seeding a LOW ceiling
+      // cannot produce a rejection, because the raise-only reconcile lifts the
+      // row to the configured bound before the reserve runs (the mid-month
+      // raise this file already pins). Exhausting the room is what blocks it.
+      await ctx.env.DB.prepare(
+        `INSERT OR REPLACE INTO vendor_spend_ledger (period_key, reserved_cents, committed_cents, ceiling_cents, updated_at) VALUES (?, ?, 0, ?, ?)`,
+      )
+        .bind(pk, 17_999, 18_000, ctx.clock.now())
+        .run();
+      await withSpendCeiling(ctx, "domain", async () => "bought", mailer).catch(() => undefined);
+    });
+
+    expect(mailer.sent).toHaveLength(1);
+    const text = mailer.sent[0]!.text;
+    // REDS on the old code, which read "raise SPEND_CEILING_CENTS or upgrade
+    // InboxKit" — the knob that turns the per-paying-tenant scaling OFF.
+    expect(text).toContain("raise PAYING_TENANT_COUNT");
+    expect(text).toContain("FREEZES the ceiling");
+  });
+
+  it("reports the IN-FORCE ceiling when it differs from the configured one", async () => {
+    const { tenantId } = await mintTenant("In Force Ceiling Co", "managed");
+    const mailer = new SandboxOpsMailer();
+    await realCtx(tenantId, async (ctx) => {
+      const pk = periodKey(ctx.clock.now());
+      // A ceiling raised earlier this month, well ABOVE the configured bound and
+      // still too small for this spend. Raise-only means the configured number
+      // can never walk it back — which is the part that was undocumented.
+      await ctx.env.DB.prepare(
+        `INSERT OR REPLACE INTO vendor_spend_ledger (period_key, reserved_cents, committed_cents, ceiling_cents, updated_at) VALUES (?, ?, 0, ?, ?)`,
+      )
+        .bind(pk, 99_999, 100_000, ctx.clock.now())
+        .run();
+      await withSpendCeiling(ctx, "domain", async () => "bought", mailer).catch(() => undefined);
+    });
+
+    expect(mailer.sent).toHaveLength(1);
+    const text = mailer.sent[0]!.text;
+    // REDS on the old code: only the CONFIGURED number appeared, and an
+    // operator reading it would compute the wrong headroom.
+    expect(text).toContain("Ceiling IN FORCE this period: 100000¢/mo");
+    expect(text).toContain("a raise is durable for the calendar month");
+  });
+});

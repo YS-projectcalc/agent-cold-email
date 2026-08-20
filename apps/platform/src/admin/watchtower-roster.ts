@@ -20,6 +20,13 @@
 // import the whole D1 state machine to ask one question.
 
 import type { Env } from "../env.js";
+import {
+  ALERT_DELIVERY_CHECK,
+  CRON_LEGS_CHECK,
+  FAILURE_SIGNALS_CHECK,
+  SWEEP_COVERAGE_CHECK,
+  SWEEP_SIGNALS_CHECK,
+} from "./watchtower-alerts.js";
 import { vendorChecksArmed } from "./watchtower-vendor.js";
 
 /**
@@ -35,7 +42,7 @@ import { vendorChecksArmed } from "./watchtower-vendor.js";
  * absence is the healthy state, not a gap.
  */
 export function expectedCheckRoster(env: Env): string[] {
-  const roster = ["do_storage", "failure_signals", "cron_legs", "sweep_coverage", "sweep_signals", "alert_delivery"];
+  const roster = ["do_storage", FAILURE_SIGNALS_CHECK, CRON_LEGS_CHECK, SWEEP_COVERAGE_CHECK, SWEEP_SIGNALS_CHECK, ALERT_DELIVERY_CHECK];
   // Both conditional checks are listed EXACTLY when their dependency is
   // configured, which is what makes "missing" mean something: an unset
   // ENGINE_BASE_URL removes the expectation as well as the check, and a set one

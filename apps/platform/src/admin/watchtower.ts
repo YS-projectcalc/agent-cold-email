@@ -21,6 +21,7 @@ import type { Notified, RecoveryBasis } from "@coldstart/shared";
 import { isLifecycleFrozen } from "../engine/billing-state.js";
 import { countTenants, resolveSweepTenants, sweepTenants, type SweepScope } from "./tenant-slice.js";
 import { DEFAULT_ADMIN_LIST_LIMIT, MAX_ADMIN_LIST_LIMIT } from "./db.js";
+import { expectedCheckRoster } from "./watchtower-roster.js";
 import { clampListLimit } from "../validate.js";
 import type { Env } from "../env.js";
 import { isPaidPlan } from "@coldstart/shared";
@@ -47,6 +48,7 @@ import {
   DOMAIN_DNS_AGING_CHECK,
   DOMAIN_ORDINAL_FAILED_CHECK,
   DOMAIN_ORPHAN_CHECK,
+  FAILURE_SIGNALS_CHECK,
   MAILBOX_ORPHAN_CHECK,
   MAILBOX_PROVISIONING_CHECK,
   MAILBOX_REBUY_CHECK,
@@ -290,9 +292,28 @@ async function scanTenants(env: Env, nowMs: number, scope: SweepScope): Promise<
   // send a RECOVERED email for failures still sitting in the un-scanned
   // remainder. The UNHEALTHY direction is unaffected: a failure seen anywhere
   // is a failure platform-wide, whatever else went unread.
+  //
+  // ...BUT THE HOLD IS ONLY OWED WHILE AN EPISODE IS OPEN (N3, docs/adversarial/
+  // wave-b1-scale-monitoring-gate-2026-08-20.md). The thing a partial scan must
+  // not do is send a false RECOVERED, and `decideAlert` only composes one when
+  // an episode was ANNOUNCED — a healthy observation on an already-healthy
+  // check emails nothing at all. Holding in that case bought no safety and cost
+  // the check its existence: above one slice `scanComplete` is permanently
+  // false, so a healthy platform emitted NO `failure_signals` observation ever,
+  // nothing created the row, and `GET /admin/ops/checks` reported it `missing`
+  // forever — on the guard whose stated purpose is catching a check that
+  // silently left the monitored set.
+  //
+  // So: a partial scan reports UNHEALTHY freely (a failure seen anywhere is a
+  // failure), reports HEALTHY only while the check is not currently unhealthy
+  // (refreshing a row rather than claiming a recovery), and still HOLDS the one
+  // case that matters — a partial clean window against an open episode. The
+  // detail string names the scanned-vs-total scope either way, so the row never
+  // claims more than it saw.
   const scanComplete = swept.visited >= tenantTotal;
   const observed = gradeFailureSignals(failed, complaints);
-  const grade = scanComplete || observed === false ? observed : null;
+  const holdWouldHideRecovery = observed === true && !scanComplete && (await readCheckStatus(env, FAILURE_SIGNALS_CHECK)) === "unhealthy";
+  const grade = holdWouldHideRecovery ? null : observed;
   if (grade !== null) {
     const windowMin = Math.round(FAILURE_SIGNAL_WINDOW_MS / 60000);
     const scanScope = scanComplete ? `all ${tenantTotal} tenant(s)` : `${swept.visited} of ${tenantTotal} tenant(s) scanned this cycle`;
@@ -300,7 +321,7 @@ async function scanTenants(env: Env, nowMs: number, scope: SweepScope): Promise<
       ? `no failed sends or complaints in the last ${windowMin} min, across ${scanScope}`
       : `${failed} terminal-failed send(s) + ${complaints} complaint(s) in the last ${windowMin} min, across ${scanScope}`;
     results.push({
-      name: "failure_signals",
+      name: FAILURE_SIGNALS_CHECK,
       // reobserved: the healthy claim is a freshly counted window, not an
       // entity dropping out of a filter.
       ...(grade ? { healthy: true as const, basis: "reobserved" as const } : { healthy: false as const }),
@@ -1096,8 +1117,30 @@ function isSteadyState(prev: PersistedCheck | undefined, next: AlertState, detai
  * How long a check must have been HEALTHY before its row is retired.
  *
  * Long enough that the row is still there for an operator reading
- * `GET /admin/ops/checks` after an incident, short enough that the table does
- * not accumulate for the platform's lifetime. Retirement is what stops S5's
+ * `GET /admin/ops/checks` after an incident, short enough that the per-entity
+ * families do not accumulate for the platform's lifetime.
+ *
+ * NOT "the table no longer grows", which is what this used to claim (N4,
+ * docs/adversarial/wave-b1-scale-monitoring-gate-2026-08-20.md). Retirement
+ * deletes `status = 'healthy'` rows ONLY — correctly, since `since_ts` on an
+ * unhealthy row means "unhealthy since" and the same predicate would delete
+ * exactly the longest-running incidents. The three one-shot families this wave
+ * introduced (`mailbox_release_failed:`, `domain_ordinal_failed:`,
+ * `mailbox_slot_failed:`) have three producers and, grepped, ZERO clearers:
+ * nothing anywhere ever reports those names healthy, so their rows are
+ * immortal by construction and this GC never touches them. Executed by the
+ * gate: `10-YEAR-OLD one-shots: retired=1 rowsLeft=3 unhealthyLeft=3`.
+ *
+ * OWED, and deliberately NOT invented here: a clearing path for those three.
+ * One-shot semantics are the frozen alert-state design's territory (§7.3's
+ * `recoverAfter: 1` does not help — recovery needs a healthy observation and no
+ * producer emits one), and guessing at a clearer in this lane would put a
+ * second opinion about one-shot lifecycle into the codebase a week before the
+ * increment that owns it lands. Tracked on the ROADMAP under the alert-state
+ * increment. Until then the growth is bounded by real provisioning/teardown
+ * FAILURES, not by tenant count, and it is visible: those rows are unhealthy,
+ * so they sit at the top of `GET /admin/ops/checks` where an operator can see
+ * the queue lengthening. Retirement is what stops S5's
  * other half: the ownership sets the per-entity clears test against
  * (`provisionedDomains`, `mailboxProvenance`, `mailboxIntentEmails`) carry NO
  * released/status filter by design — that is what lets a stale alert clear
@@ -1118,10 +1161,39 @@ export const CHECK_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
  * episode, debounced by the check's own policy), and `readCheckStatus`'s one
  * consumer (engine/mailbox-acquisition.ts) branches on `!== "unhealthy"`, which
  * `null` and `"healthy"` both satisfy.
+ *
+ * NEVER A ROSTER MEMBER (N3, docs/adversarial/wave-b1-scale-monitoring-gate-
+ * 2026-08-20.md). Retirement and the roster denominator composed into a lie:
+ * `expectedCheckRoster` lists the always-on checks and `GET /admin/ops/checks`
+ * reports any of them without a row as `missing` — the guard whose whole stated
+ * purpose is to catch "an env var lost in a deploy DELETED a check from the
+ * monitored set". Retiring one of those rows manufactures exactly that symptom
+ * with no cause. Executed by the gate:
+ *
+ *   MISSING after one retireHealthyCheckRows: ["do_storage","failure_signals",
+ *     "cron_legs","sweep_coverage","sweep_signals","alert_delivery"]
+ *
+ * Four of the six were rewritten later in the same tick and so had no observable
+ * gap; `do_storage` and `failure_signals` are written BEFORE retirement runs and
+ * carried a one-cron-period false `missing` every 7 days.
+ *
+ * Excluding them costs nothing S5 was for. S5 bounds the PER-ENTITY families —
+ * `domain_dns_aging:`, `cred_push_aging:`, `mailbox_orphan:` — which are
+ * unbounded in COUNT because they grow with every entity the platform has ever
+ * held. The roster is a code-defined, single-digit set. And it stays
+ * self-correcting: the roster is computed from `env`, so a check that genuinely
+ * goes away (ENGINE_BASE_URL unset ⇒ no `engine`) drops out of the roster and
+ * its stale row becomes retirable again on the very next tick.
  */
 export async function retireHealthyCheckRows(env: Env, nowMs: number): Promise<{ retired: number }> {
-  const result = await env.DB.prepare(`DELETE FROM watchtower_state WHERE status = 'healthy' AND since_ts <= ?`)
-    .bind(nowMs - CHECK_RETENTION_MS)
+  const roster = expectedCheckRoster(env);
+  const result = await env.DB.prepare(
+    `DELETE FROM watchtower_state
+      WHERE status = 'healthy'
+        AND since_ts <= ?
+        AND check_name NOT IN (${roster.map(() => "?").join(", ") || "''"})`,
+  )
+    .bind(nowMs - CHECK_RETENTION_MS, ...roster)
     .run();
   return { retired: result.meta.changes ?? 0 };
 }

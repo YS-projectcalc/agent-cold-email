@@ -1,6 +1,14 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:test";
-import { CHECK_RETENTION_MS, readReportedCheckNames, reconcileAlerts, retireHealthyCheckRows } from "../src/admin/watchtower.js";
+import {
+  CHECK_RETENTION_MS,
+  evaluateHealthChecks,
+  readReportedCheckNames,
+  reconcileAlerts,
+  retireHealthyCheckRows,
+} from "../src/admin/watchtower.js";
+import { expectedCheckRoster } from "../src/admin/watchtower-roster.js";
+import { adminApi, mintTenant } from "./helpers.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
 import type { CheckResult } from "../src/admin/watchtower-alerts.js";
 
@@ -134,5 +142,106 @@ describe("S5b — a check that has been healthy long enough is retired", () => {
     expect(mailer.sent).toEqual([]);
     await reconcileAlerts(env, mailer, [{ name, healthy: false, detail: "waiting again" }], T0 + 300_000);
     expect(mailer.sent.map((m) => m.subject)).toEqual(["[coldrig] Mailbox credentials back@example.com: UNHEALTHY"]);
+  });
+});
+
+// N3 (docs/adversarial/wave-b1-scale-monitoring-gate-2026-08-20.md) — S5's
+// retirement and S8's roster denominator composed into a lie, PROVED by the
+// gate with two probes:
+//
+//   present BEFORE retire=6  retired=6  present AFTER=0
+//   MISSING after one retireHealthyCheckRows: ["do_storage","failure_signals",
+//     "cron_legs","sweep_coverage","sweep_signals","alert_delivery"]
+//
+// Two independent causes, and both needed fixing. Retirement DELETED rows whose
+// absence the roster reports as a defect; and above one slice `scanComplete` is
+// permanently false, so a healthy platform emitted no `failure_signals`
+// observation at all and nothing ever created the row in the first place.
+describe("N3 — retirement and the roster denominator cannot manufacture a false `missing`", () => {
+  async function seedHealthyLongAgo(name: string) {
+    await env.DB.prepare(
+      `INSERT INTO watchtower_state (check_name, status, since_ts, last_alert_ts, last_detail, updated_at, unhealthy_obs, alert_count)
+       VALUES (?, 'healthy', ?, NULL, 'ok', ?, 0, 0)`,
+    )
+      .bind(name, T0 - CHECK_RETENTION_MS - 1, T0)
+      .run();
+  }
+
+  it("never retires a roster member, and still retires the per-entity families S5 exists for", async () => {
+    for (const name of expectedCheckRoster(env)) await seedHealthyLongAgo(name);
+    await seedHealthyLongAgo("domain_dns_aging:churned.example.com");
+    await seedHealthyLongAgo("cred_push_aging:churned@example.com");
+
+    const { retired } = await retireHealthyCheckRows(env, T0);
+
+    // REDS on the old code: retired === roster.length + 2, and every roster
+    // member's row was gone.
+    expect(retired).toBe(2);
+    for (const name of expectedCheckRoster(env)) expect(await rowOf(name)).not.toBeNull();
+    expect(await rowOf("domain_dns_aging:churned.example.com")).toBeNull();
+  });
+
+  it("GET /admin/ops/checks reports nothing missing after a retirement pass", async () => {
+    for (const name of expectedCheckRoster(env)) await seedHealthyLongAgo(name);
+    await retireHealthyCheckRows(env, T0);
+
+    const { body } = await adminApi<{ missing: string[] }>("/admin/ops/checks");
+    // REDS on the old code with the gate's exact list.
+    expect(body.missing).toEqual([]);
+  });
+
+  it("a roster member that leaves the roster becomes retirable again", async () => {
+    // The self-correcting half: `engine` is only expected while ENGINE_BASE_URL
+    // is set, so a genuinely departed check does not get protected forever.
+    await seedHealthyLongAgo("engine");
+    const darkEnv = { ...env, ENGINE_BASE_URL: undefined } as unknown as typeof env;
+    expect(expectedCheckRoster(darkEnv)).not.toContain("engine");
+
+    await retireHealthyCheckRows(darkEnv, T0);
+    expect(await rowOf("engine")).toBeNull();
+  });
+});
+
+describe("N3 — a PARTIAL scan still gives failure_signals a row, without ever claiming a recovery", () => {
+  beforeEach(async () => {
+    await env.DB.prepare("DELETE FROM tenants_index").run();
+  });
+
+  it("writes the row on a partial scan of a clean platform, scoped honestly", async () => {
+    const a = await mintTenant("Partial Scan A", "managed");
+    await mintTenant("Partial Scan B", "managed");
+
+    // One of two tenants — `scanComplete` false, window clean.
+    await reconcileAlerts(env, new SandboxOpsMailer(), await evaluateHealthChecks(env, T0, { tenantIds: [a.tenantId] }), T0);
+
+    const row = await rowOf("failure_signals");
+    // REDS on the old code: the hold suppressed the observation entirely, so no
+    // producer ever created this row above one slice.
+    expect(row?.status).toBe("healthy");
+    expect(row?.last_detail).toContain("1 of 2 tenant(s) scanned this cycle");
+  });
+
+  it("still HOLDS a partial clean window while an episode is open — no false RECOVERED", async () => {
+    const a = await mintTenant("Hold Scan A", "managed");
+    await mintTenant("Hold Scan B", "managed");
+    const mailer = new SandboxOpsMailer();
+
+    // Announce an episode the normal way (two consecutive unhealthy observations).
+    for (const at of [T0, T0 + 300_000]) {
+      await reconcileAlerts(env, mailer, [{ name: "failure_signals", healthy: false, detail: "3 terminal-failed send(s)" }], at);
+    }
+    expect(mailer.sent.map((m) => m.subject)).toEqual(["[coldrig] Failure signals: UNHEALTHY"]);
+
+    // A partial scan now sees a clean window — which proves nothing about the
+    // tenants it did not read.
+    await reconcileAlerts(
+      env,
+      mailer,
+      await evaluateHealthChecks(env, T0 + 600_000, { tenantIds: [a.tenantId] }),
+      T0 + 600_000,
+    );
+
+    expect(mailer.sent.map((m) => m.subject)).toEqual(["[coldrig] Failure signals: UNHEALTHY"]);
+    expect((await rowOf("failure_signals"))?.status).toBe("unhealthy");
   });
 });

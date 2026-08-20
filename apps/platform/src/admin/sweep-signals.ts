@@ -248,6 +248,35 @@ export function collectLegSignals(legs: Record<string, unknown>): LegSignals {
 export const COVERAGE_TICKS_ALERT_AFTER = 12;
 
 /**
+ * How much DEFERRED work in one tick is worth telling the founder about.
+ *
+ * N6 (docs/adversarial/wave-b1-scale-monitoring-gate-2026-08-20.md): this arm
+ * had no threshold at all. ONE tenant clipped on ONE leg, on three consecutive
+ * ticks, tripped the same check whose sibling arm waits for a full rotation to
+ * take an hour — roughly a 15x mismatch in sensitivity, and because
+ * `decideAlert` suppresses inside an announced episode, the noisy arm would
+ * keep the quiet one (the one that means "go build the read-model") from ever
+ * producing its own alert. That is the S4 defect reproduced inside the check S4
+ * created, in miniature.
+ *
+ * ONE SLICE'S WORTH OF LEG-VISITS, chosen to align the two arms in the only
+ * terms they share — how much work a tick is losing. `signals.deferred` sums
+ * across legs, so a handful of tenants clipped on a few legs stays well under
+ * it, and the rotation reaches those tenants on the next tick, which is the
+ * designed behaviour and not a condition. At or above one slice the tick is
+ * losing the equivalent of a whole slice of work every cycle, which is when
+ * coverage genuinely degrades rather than merely wobbles.
+ *
+ * A CALIBRATION JUDGEMENT, not a measurement — stated because the alternative
+ * (a fraction of the tenant count) compares a per-leg sum against a per-tenant
+ * quantity, and the two are not in the same units. If real DO latency turns out
+ * to be well above `ASSUMED_DO_RPC_MS` the fan-out deadline will bind on every
+ * full slice and this will fire, which is the correct outcome: at that point
+ * the slice is mis-sized and the operator needs to know.
+ */
+export const DEFERRED_LEG_VISITS_ALERT_AFTER = SWEEP_TENANT_SLICE;
+
+/**
  * Turn one tick's sweep output into founder alerts. Returns the reconciled
  * outcomes so the sweep's log line records what it decided.
  *
@@ -291,7 +320,8 @@ export async function reportSweepSignals(
   // ticks to reach every tenant, or the tick's own deadlines are deferring work
   // inside the slice it did choose.
   const coverage = input.coverage;
-  const coverageBad = signals.deferred > 0 || (coverage !== null && coverage.coverageTicks > COVERAGE_TICKS_ALERT_AFTER);
+  const coverageBad =
+    signals.deferred >= DEFERRED_LEG_VISITS_ALERT_AFTER || (coverage !== null && coverage.coverageTicks > COVERAGE_TICKS_ALERT_AFTER);
   const coverageGrade = await watchtowerStub(env).gradeSweepStreak(SWEEP_COVERAGE_CHECK, coverageBad);
   if (coverageGrade !== null) {
     const rotation =
@@ -316,7 +346,8 @@ export async function reportSweepSignals(
               `NOTHING IS FAILING — every tenant is still reached, just later. What degrades is DETECTION LATENCY: a stuck ` +
               `tenant, a dead domain or a starved send queue is now noticed a rotation late rather than within a cron period. ` +
               `The fix is the D1/Analytics read-model (admin/README.md), not a bigger slice — the slice is bounded by the ` +
-              `invocation's subrequest budget, and raising it past that is what used to make the dead-man heartbeat vanish.`,
+              `invocation's subrequest budget — WITH every leg that fans out over a population of its own counted against it ` +
+              `(admin/sweep-budget.ts) — and raising it past that is what used to make the dead-man heartbeat vanish.`,
           },
     );
   }

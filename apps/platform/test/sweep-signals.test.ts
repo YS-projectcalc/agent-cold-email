@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
-import { collectLegSignals, reportSweepSignals, reportSweepSignalsHealth, COVERAGE_TICKS_ALERT_AFTER } from "../src/admin/sweep-signals.js";
+import {
+  collectLegSignals,
+  reportSweepSignals,
+  reportSweepSignalsHealth,
+  COVERAGE_TICKS_ALERT_AFTER,
+  DEFERRED_LEG_VISITS_ALERT_AFTER,
+} from "../src/admin/sweep-signals.js";
 import type { OpsDigest } from "../src/admin/ops-sweep.js";
 import type { TenantSlice } from "../src/admin/tenant-slice.js";
 import { watchtowerStub } from "../src/admin/watchtower-infra.js";
@@ -339,24 +345,40 @@ describe("sweep_coverage — the bounded sweep's own coverage latency", () => {
     expect(legSubjects(mailer)).toEqual([]);
   });
 
+  // N6 (wave-b1 gate) — the deferral arm is THRESHOLDED now. It used to trip on
+  // `deferred > 0`: one tenant clipped on one leg, on three consecutive ticks,
+  // firing the same check whose sibling arm waits for a full rotation to take
+  // an hour. And because `decideAlert` suppresses inside an announced episode,
+  // the noisy arm kept the quiet one — the one that means "go build the
+  // read-model" — from ever producing its own alert.
+  it("ignores a handful of deferred leg-visits — the rotation reaches them next tick", async () => {
+    const mailer = new SandboxOpsMailer();
+    const barelyDeferring = { sendPipeline: { errors: 0, budgetExpiries: 0, skippedForLegDeadline: 1 } };
+    for (let i = 0; i < LEG_ALERT_AFTER_SWEEPS + 2; i++) {
+      await reportSweepSignals(env, mailer, { legs: barelyDeferring, digest: null, coverage: sliceWith({ total: 40 }) }, T0 + i * 300_000);
+    }
+    // REDS on the unthresholded arm, which alerted here.
+    expect(subjectsFor(mailer, "Ops sweep coverage").filter((s) => s.includes("UNHEALTHY"))).toEqual([]);
+  });
+
   it("reports the deferral under its OWN name, with the rotation arithmetic", async () => {
     const mailer = new SandboxOpsMailer();
-    const deferring = { sendPipeline: { errors: 0, budgetExpiries: 0, skippedForLegDeadline: 40 } };
-    // LEG_ALERT_AFTER_SWEEPS damps the OBSERVATION; the check's own debounced
-    // policy then needs a second REPORTED observation, so this is 4 ticks
-    // (20 min) rather than cron_legs' 3. Deliberate — see watchtower-policy.test.ts.
-    for (let i = 0; i < LEG_ALERT_AFTER_SWEEPS + 1; i++) {
+    const deferring = { sendPipeline: { errors: 0, budgetExpiries: 0, skippedForLegDeadline: DEFERRED_LEG_VISITS_ALERT_AFTER } };
+    // N5 — EXACTLY the same tick count as cron_legs (3 = 15 min). This check is
+    // damped upstream by gradeSweepStreak and then EXEMPT from the transition
+    // debounce, so it does not page at 20 min. Reds on the debounced policy.
+    for (let i = 0; i < LEG_ALERT_AFTER_SWEEPS; i++) {
       await reportSweepSignals(env, mailer, { legs: deferring, digest: null, coverage: sliceWith({ total: 40 }) }, T0 + i * 300_000);
     }
     expect(subjectsFor(mailer, "Ops sweep coverage")).toEqual(["[coldrig] Ops sweep coverage: UNHEALTHY"]);
     expect(mailer.sent[0]!.text).toContain("NOTHING IS FAILING");
-    expect(mailer.sent[0]!.text).toContain("sendPipeline.skippedForLegDeadline=40");
+    expect(mailer.sent[0]!.text).toContain(`sendPipeline.skippedForLegDeadline=${DEFERRED_LEG_VISITS_ALERT_AFTER}`);
   });
 
   it("fires on rotation length alone, with no deferral and no error anywhere", async () => {
     const mailer = new SandboxOpsMailer();
     const slow = sliceWith({ total: 5_000, coverageTicks: COVERAGE_TICKS_ALERT_AFTER + 1 });
-    for (let i = 0; i < LEG_ALERT_AFTER_SWEEPS + 1; i++) {
+    for (let i = 0; i < LEG_ALERT_AFTER_SWEEPS; i++) {
       await reportSweepSignals(env, mailer, { legs: CLEAN, digest: null, coverage: slow }, T0 + i * 300_000);
     }
     expect(subjectsFor(mailer, "Ops sweep coverage")).toEqual(["[coldrig] Ops sweep coverage: UNHEALTHY"]);
@@ -383,7 +405,9 @@ describe("alert_delivery — an alert that was OWED and did not arrive", () => {
         { name: "engine", action: "realerted", emailSent: false, why: "send_failed" },
       ],
     };
-    for (let i = 0; i < LEG_ALERT_AFTER_SWEEPS + 1; i++) {
+    // N5 — 3 ticks (15 min), not 4. "We could not reach you" is the worst check
+    // in the platform to delay, and it is already streak-damped upstream.
+    for (let i = 0; i < LEG_ALERT_AFTER_SWEEPS; i++) {
       await reportSweepSignals(env, mailer, { legs, digest: null, coverage: null }, T0 + i * 300_000);
     }
     expect(subjectsFor(mailer, "Founder alert delivery")).toEqual(["[coldrig] Founder alert delivery: UNHEALTHY"]);

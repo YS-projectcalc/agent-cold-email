@@ -16,14 +16,45 @@ const REQUEST_IDEMPOTENCY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 // + setDns) and PER mailbox (provision + startWarmup, + recordUsage on paid
 // tiers) sequentially, up to the Scale tier's cap of 18 domains / 60
 // mailboxes (packages/shared/src/pricing.ts) — up to ~156 sequential real
-// vendor calls in one call to fn(). Even at a pessimistic several seconds
-// per real registrar/mailbox-vendor API round trip, that whole chain
-// finishes in low single-digit minutes; 10 minutes leaves multiples of
-// headroom so no legitimate in-flight claim is ever reclaimed out from under
-// it, while staying ~4300x shorter than REQUEST_IDEMPOTENCY_TTL_MS above, so
-// a genuinely dead claim (crashed DO) unblocks a retry promptly instead of
-// waiting anywhere near the 30-day full-eviction horizon.
-const REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS = 10 * 60 * 1000;
+// vendor calls in one call to fn().
+//
+// RE-DERIVED WITH THE RETRY TERM (N7, docs/adversarial/
+// wave-b1-scale-monitoring-gate-2026-08-20.md). The original derivation was
+// "several seconds per round trip x 156 = low single-digit minutes, so 10
+// minutes leaves multiples of headroom" — and it was written before the S3
+// bounded retry existed. `InboxKitClient` now retries a 429 up to
+// INBOXKIT_MAX_ATTEMPTS (3) with waits capped at MAX_RETRY_WAIT_MS (10s), and
+// it SERIALIZES the whole attempt sequence including its backoff on a
+// per-instance queue. So each vendor call can now cost up to
+// (3 - 1) x 10s = 20s of pure sleep on top of its round trips:
+//
+//   base chain              ~156 calls x several seconds   = low single-digit minutes
+//   retry term, realistic   ~156 calls x one 429-then-success (~10s) = ~26 min
+//   ------------------------------------------------------------------------
+//   worst realistic total                                  ~30 min
+//
+// The old 10 minutes no longer covers that, so it is raised to 30. Past the
+// TTL a concurrent same-key retry takes the "presumed dead" branch, re-stamps
+// the claim and runs the saga ALONGSIDE the original — which the per-intent
+// layers underneath (ordinal-derived domain intents, address-derived
+// `provision:` keys, the spend reserve) stop from double-buying, but which
+// still burns reservations and re-fires one-shot alerts for no reason.
+//
+// THE COST OF RAISING IT, stated: a genuinely dead claim (crashed DO) now
+// blocks a same-key retry for 30 minutes instead of 10. That is acceptable
+// precisely because the durable intent rows make the eventual resume cheap
+// (it resumes at the wait, never at the buy) and the caller gets a RETRYABLE
+// RequestInProgressError meanwhile, not a failure. Still ~1400x shorter than
+// REQUEST_IDEMPOTENCY_TTL_MS above.
+//
+// The absolute worst case (every one of 156 calls exhausting all 3 attempts,
+// ~52 min of sleep alone) is deliberately NOT covered: it needs a vendor
+// rate-limiting essentially every call for the better part of an hour, in
+// which case the saga is failing for reasons a claim TTL cannot help with.
+// EXPORTED so `spend-ceiling.test.ts` can pin the one cross-module invariant
+// these two constants share: the stale-reserve reaper must outlive the longest
+// legitimate claim, or it reaps live reservations.
+export const REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS = 30 * 60 * 1000;
 
 /** Per-call-site options — see `recordedIsNonTerminal`. */
 export interface RequestIdempotencyOptions<T> {

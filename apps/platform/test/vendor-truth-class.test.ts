@@ -19,6 +19,7 @@ import {
 import { toErrorResponse } from "../src/error-response.js";
 import { EngineMailboxClient } from "../src/engine/engine-mailbox-client.js";
 import { billableMailboxCount, releaseMailboxes } from "../src/engine/lifecycle.js";
+import { REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS } from "../src/engine/idempotency.js";
 import { mailboxIntentKey } from "../src/engine/provision-intents.js";
 import { findAdoptableDomain, runSetupInfrastructure } from "../src/engine/provisioning.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
@@ -173,7 +174,12 @@ function crashAfterWarmupEnrolment(tenantId: string, email: string, intentKey: s
     s.storage.sql.exec(`UPDATE mailbox_intents SET status = 'bought' WHERE email = ?`, email);
     s.storage.sql.exec(
       `UPDATE request_idempotency SET status = 'pending', response_json = NULL, created_at = ? WHERE key = ?`,
-      Date.now() - 11 * 60 * 1000,
+      // Just past the stale-claim window, DERIVED from the constant: the point
+      // of this fixture is that attempt 2 takes the presumed-dead reclaim path
+      // and re-enters the saga. A hard-coded age silently stops doing that the
+      // moment the TTL moves (it did — N7 raised it 10 min -> 30 min), and the
+      // test then passes for the wrong reason or fails for a fake one.
+      Date.now() - (REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS + 60_000),
       `provision:${intentKey}`,
     );
   });

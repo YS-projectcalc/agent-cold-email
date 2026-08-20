@@ -28,9 +28,24 @@ import { RealClock } from "../clock.js";
 import { coverageTicks, SWEEP_TENANT_SLICE } from "./sweep-budget.js";
 
 /**
- * One tick's fan-out phase: the shared wall-clock ceiling every per-tenant leg
- * checks between tenants, plus the accumulator that says how far the LEAST
- * covered of them got.
+ * The tick's shared wall-clock ceiling, and NOTHING else.
+ *
+ * SPLIT OUT of `SweepFanout` deliberately (B1's fix round). A leg that iterates
+ * a population which is NOT the tenant slice — the screening-recovery leg
+ * drains sentinel-held review rows — still needs the deadline, but must never
+ * touch the rotation accumulator: its `visited` count says nothing about how
+ * far the tenant rotation got, and feeding it in would advance the cursor by
+ * however many tenants happened to be stuck on the sentinel. One type carrying
+ * both facts is how that mistake gets made silently.
+ */
+export interface SweepDeadline {
+  readonly startedAt: number;
+  readonly deadlineMs: number;
+}
+
+/**
+ * One tick's tenant fan-out phase: the shared deadline above, PLUS the
+ * accumulator that says how far the LEAST covered slice leg got.
  *
  * `leastVisited` is written by `sweepTenants` and read once, by
  * `commitSweepCursor`. It is state rather than a return value because the legs
@@ -40,14 +55,29 @@ import { coverageTicks, SWEEP_TENANT_SLICE } from "./sweep-budget.js";
  * distinguish "swept zero tenants" from "never ran", and getting that wrong
  * pins the rotation on its first slice forever.
  */
-export interface SweepFanout {
-  readonly startedAt: number;
-  readonly deadlineMs: number;
+export interface SweepFanout extends SweepDeadline {
   leastVisited: number | null;
 }
 
 export function newSweepFanout(startedAt: number, deadlineMs: number): SweepFanout {
   return { startedAt, deadlineMs, leastVisited: null };
+}
+
+/**
+ * The same tick's deadline WITHOUT the rotation accumulator — what a leg that
+ * fans out over its own population passes to `sweepTenants`.
+ *
+ * A function rather than a spread at the call site so the stripping is one
+ * named, greppable act: `{ ...fanout }` would still carry `leastVisited` and
+ * would compile.
+ */
+export function sweepDeadlineOf(fanout: SweepDeadline | undefined): SweepDeadline | undefined {
+  return fanout && { startedAt: fanout.startedAt, deadlineMs: fanout.deadlineMs };
+}
+
+/** Does this deadline also accumulate the tenant rotation's progress? */
+function isSweepFanout(deadline: SweepDeadline): deadline is SweepFanout {
+  return "leastVisited" in deadline;
 }
 
 /**
@@ -201,7 +231,7 @@ export interface TenantSweepResult {
  */
 export async function sweepTenants(
   tenantIds: readonly string[],
-  fanout: SweepFanout | undefined,
+  fanout: SweepDeadline | undefined,
   fn: (tenantId: string) => Promise<void>,
   onError: (tenantId: string, err: unknown) => void,
 ): Promise<TenantSweepResult> {
@@ -227,6 +257,11 @@ export async function sweepTenants(
     visited++;
   }
 
-  if (fanout) fanout.leastVisited = fanout.leastVisited === null ? visited : Math.min(fanout.leastVisited, visited);
+  // Only a leg iterating THE TENANT SLICE may move the rotation cursor. A leg
+  // with its own population passes `sweepDeadlineOf(...)`, which has no
+  // accumulator to write into.
+  if (fanout && isSweepFanout(fanout)) {
+    fanout.leastVisited = fanout.leastVisited === null ? visited : Math.min(fanout.leastVisited, visited);
+  }
   return { visited, deferred, errors };
 }

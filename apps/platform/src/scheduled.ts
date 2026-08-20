@@ -115,7 +115,7 @@ export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer;
   // tenant fail-closed to 'review' ONLY because no list had loaded yet at
   // screening time, now that a refresh above may have just loaded one. Cheap
   // no-op whenever no list is available or nothing is stuck.
-  const sdnRecovery = await runLeg("sdnRecovery", null, () => rescreenListUnavailableReviews(env));
+  const sdnRecovery = await runLeg("sdnRecovery", null, () => rescreenListUnavailableReviews(env, scope));
   // C3 part d — the out-of-band provisioning reconcile: finish every tenant's
   // dns_status 'pending' setup domain so a benign propagation wait completes
   // without an agent retry. DARK unless PROVISIONING_RECONCILE_ENABLED is armed

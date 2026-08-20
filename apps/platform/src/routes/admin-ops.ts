@@ -73,8 +73,12 @@ export const adminOpsRoute = new Hono<{ Bindings: Env }>()
   //
   // TWO INDEPENDENT BOUNDS, and both are needed. Rows are RETIRED (scale audit
   // S5): a check healthy for `CHECK_RETENTION_MS` is DELETEd by the sweep, so
-  // the table no longer grows with the platform's lifetime count of entities
-  // that ever alerted — but retention bounds it only by TIME, and a platform
+  // the per-entity families no longer grow with the platform's lifetime count
+  // of entities that ever alerted. That is narrower than it used to claim —
+  // retirement skips UNHEALTHY rows, and the three one-shot `*_FAILED`
+  // families have no clearer yet (N4), so their rows persist and the unhealthy
+  // set grows monotonically with real provisioning failures. Retention also
+  // bounds only by TIME, and a platform
   // can hold far more than a page of checks inside one window. An incident is
   // exactly when it does. So the READ is bounded too (S8, `?limit=` clamped to
   // the same default/max every other admin list read uses), and both bounds are
@@ -93,8 +97,21 @@ export const adminOpsRoute = new Hono<{ Bindings: Env }>()
   // Consumers used to derive it from per-row `updatedAt` freshness, which was
   // only ever true because SOME row happened to be re-written every tick; the
   // sweep now skips a write for a check whose state and detail are unchanged
-  // (S5), so that inference is gone. This number comes from
-  // `watchtower_cursor`, which every completed sweep stamps unconditionally.
+  // (S5), so that inference is gone.
+  //
+  // WHAT IT ACTUALLY MEANS (N9, wave-b1 gate — the previous sentence here said
+  // "every completed sweep stamps it unconditionally", which is wrong):
+  // `watchtower_cursor.last_sweep_ts` has exactly one writer,
+  // `recordWatchtowerCompleted`, and it runs INSIDE the watchtower leg — which
+  // `runLeg` can swallow. So this age means "the WATCHTOWER LEG last
+  // completed", not "the cron last fired"; the unconditional signal is the
+  // DO-side heartbeat, which this endpoint cannot serve (it is the store a D1
+  // outage is reported through). The error direction is safe in both cases — a
+  // dead cron always reads stale, and a broken watchtower leg also reads stale,
+  // which over-reports rather than under-reports — which is why publishing it
+  // here is right. But an operator reasoning from it at 3am should know that a
+  // stale value can mean "the watchtower leg is throwing" as well as "the cron
+  // is dead", and should pair it with `GET /status`.
   // `?unhealthy=1` STILL RETURNS EVERY UNHEALTHY ROW, up to the clamp — the
   // filter is applied in SQL, and the page order puts unhealthy rows first in
   // the unfiltered read too, so a broken check can never be buried behind a
