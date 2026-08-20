@@ -434,3 +434,239 @@ and none is a regression introduced here. Two specifics worth recording:
   `apps/<name>`.
 - Read `git diff base HEAD -- .claude/agent-memory` first. The builder's own committed memory named
   the mechanism behind NB3 in this very wave.
+
+---
+---
+
+# ROUND 2 — the fix round
+
+**Date:** 2026-08-20
+**Target:** same worktree, branch `integrate/wave-a-2026-08-20`, HEAD `8582c3d` (single commit
+`8582c3d` on `7f1b50c`). Ground re-derived: `git rev-parse HEAD` =
+`8582c3d036641f672e67f64714e82d74431b567d`, tree clean.
+**Diff reviewed:** `7f1b50c..8582c3d` — 10 files, +290/−25.
+**Scored against the FIXED round-1 checklist** (B1 + NB1-NB6 + the AGENTS.md ruling). Anything found
+outside that list is reported separately as NEW with no verdict weight.
+
+## VERDICT: **SHIP** — all 8 checklist items closed. 0 blocking, 0 new non-blocking.
+
+## Battery — re-run by me, real exit codes
+
+| Leg | Result | Δ vs round 1 |
+|---|---|---|
+| typecheck (root, 5 workspaces) | **exit 0** | — |
+| platform | **223 files / 2156 passed / 1 skipped — exit 0** | **+3 tests** |
+| dashboard | **31 files / 165 passed — exit 0** | **+1 test** |
+
+The deltas reconcile exactly against the diff: +2 in `tool-claim-binding.test.ts` (the `extra`
+snapshot fence and the three-Collapsed-tools pin), +1 in
+`remove-mailboxes-collapse-disclosure.test.ts` (the B1 member), +1 in `dtoParity.test.ts` (the
+additive fence). `dsn-metadata-refresh.test.ts` was modified, not added, which is why it contributes
+0. Engine and CLI were not re-run: the diff touches neither, and `git diff 7f1b50c..8582c3d --
+apps/engine packages/` is empty.
+
+## Regression sweep of the fix — the whole commit is two executable lines
+
+Filtering the source diff to non-comment lines
+(`git diff 7f1b50c..8582c3d -- 'apps/*/src/**' | grep -v '^[+-]\s*//'`) yields **exactly three
+hunks**: the two `billing.ts` lines and the `reply` tool description string. `tenant-messages.ts`
+(NB4) and `admin/db.ts` (NB3) are **comment-only**. So the entire behavioural surface of this fix is:
+
+```
+-  await releaseMailboxes(ctx, { ids: stillLiveTargets(ctx, targets).map((t) => t.mailboxId) });
++  const outcome = await releaseMailboxes(ctx, { ids: ... });
+-    deduplicated: intent.replayed,
++    deduplicated: intent.replayed && outcome.releasedCount === 0,
+```
+
+**Exception paths are unchanged:** no `try`/`catch` was introduced; if `releaseMailboxes` throws, the
+assignment never happens and the throw propagates exactly as before. Binding a return value cannot
+alter control flow. I did not take this on inspection — see B1 below, where the byte-identical
+re-run produced identical counts, identical vendor calls and an identical live count.
+
+## Checklist items
+
+### B1 — CLOSED. Re-ran my round-1 probe **byte-identically**; only the flag moved.
+
+Same probe file, same fixture, same fleet:
+
+```
+round 1 (7f1b50c)   CALL 2: released=3 failed=0 unreleased=[] deduplicated=true
+round 2 (8582c3d)   CALL 2: released=3 failed=0 unreleased=[] deduplicated=false
+both rounds         release calls to vendor: [m5, m4, m3, m3]
+both rounds         live mailboxes after call 2 = 2 (started at 5)
+```
+
+This is the cleanest possible closure signal: the healing retry still does exactly the same
+irreversible work, and now reports it as fresh. Call 1 (`released=2 failed=1`) still reports
+`false`. The fix uses the value that was being discarded, which is what round 1 named.
+
+The committed regression test (`remove-mailboxes-collapse-disclosure.test.ts`, the new B1 describe
+block) is a genuine member rather than a restatement: it drives the real HTTP route, breaks the
+cached sandbox bundle's `release` through a live-read `Set` so the vendor can heal mid-run, and
+asserts real vendor work happened (`attempts.length` grew) alongside the flag. It is the
+partial-failure fixture the file was missing.
+
+### NB1 — CLOSED by disclosure. Every clause of the new prose verified against the code.
+
+`mcp/tools.ts` (reply) and `site/openapi.yaml`'s `ReplyResult` now carry the same qualifier, and the
+old false bound (*"matched for 10 minutes only"*, stated as if it were the whole story) is gone.
+Checked clause by clause:
+
+- *"with NO idempotencyKey the body hash is only matched here for 10 minutes"* — TRUE:
+  `CONTENT_HASH_REPLAY_WINDOW_MS`, and the window is consulted only when `!callerKeyed`.
+- *"while the sending provider keeps its own record … for longer"* — TRUE: at epoch 0 the vendor key
+  IS the bare lookup key, and `apps/engine/src/store.ts`'s `sends` map has no prune path.
+- *"you may get `deduplicated: false` with the ORIGINAL send's messageId and no new email"* — this is
+  verbatim what my round-1 probe measured (`SAME_MESSAGE_ID_AS_DAY0=true`, `dedup=false`, zero new
+  sent events).
+- *"PASS AN IDEMPOTENCYKEY, or vary the body"* — both escapes genuinely work: a fresh caller key
+  makes `keyBasis = k:<key>`, and a varied body makes a new hash; either produces a vendor key never
+  spent, so the send goes out.
+
+The field still returns `false` on that path — the builder chose disclosure over changing the value,
+which is what the NON-BLOCKING checklist item asked for ("qualify the claim"). The root shape round 1
+named (the port returns no vendor-side-collapse signal) is untouched and remains the real fix.
+
+### NB2 — CLOSED. My round-1 attack now reds, and I exercised BOTH halves of the new fence.
+
+- **My verbatim planted DTO** (`export interface WebhookSummary { id; bogusFieldThatDoesNotExistOnTheServer }`)
+  → **RED**: *"add a PARITY_CASE for these, or name them in NOT_MIRRORED with a reason: WebhookSummary"*.
+- **Staleness half** — I checked this separately rather than assuming it was reachable, because a
+  rename reds via the *first* assertion and would leave the second untested. A pure **deletion** of an
+  excluded type (`RevConflictBody`) → **RED** on the intended assertion: *"NOT_MIRRORED names types
+  that no longer exist: RevConflictBody"*. Not dead code.
+
+`NOT_MIRRORED` is a named, reasoned escape hatch (same shape as G1's `extra`) rather than a hole: a
+future mirrored DTO can only bypass the diff by someone writing a false reason next to its name.
+
+### NB3 — CLOSED, and the right call. The comment now states the true bound
+
+(*"BOUNDED BY CONSECUTIVE-DISTINCT REASONS, not by distinct reasons … reasons alternating A, B, A,
+B… append on every call"*) and explicitly declines a half-fix, routing the mechanism to Wave B
+**alongside IN-17** on the grounds that both need the same per-episode announced set. That is exactly
+the coupling round 1 flagged — the builder's own deferral memo and this site are one class — and
+correcting the false invariant while moving the mechanism with its sibling is the proportionate
+answer for a path reachable only by one human behind `ADMIN_TOKEN`.
+
+### NB4 — CLOSED. The dead mechanism is removed from the justification and the decision is preserved
+
+with its real reason (*"a burst of genuinely NEW per-domain rows displaces a cap-5 newest-first
+preview on its own, without any re-stamping"*), plus an explicit note of what IN-3 changed. This is
+the decision/reason split round 1 asked for.
+
+### NB5 — CLOSED as fenced, and the fence is honest about what it is not.
+
+The snapshot test makes `extra:` append-only-with-review, and its own note says so: *"It is not
+coverage theater … When this test reddens, do NOT just paste the new name in — go read the tool's
+real return site."* It does **not** add an independent oracle, and does not claim to. Verified it
+binds: I added `"totallyBogusField"` to `mark`'s `extra` → **RED**. The companion pin (`deduplicated`
+declared on exactly `contact_operator`, `remove_mailboxes`, `reply`) is a real constraint — a fourth
+tool cannot claim the flag without wiring it. Given `extra` exists only because `Collapsed<T>` is
+applied at the call site rather than in the interface, a review gate is the proportionate control.
+
+### NB6 — CLOSED. The guesswork character windows are gone
+
+(`callArgs` slices each call to its real closing `});`, falling back to the whole block — the safe
+direction), and **every** reply block is now asserted rather than `replyBlocks[0]`. Verified it still
+binds: removing the complaint path's `refreshMetadataOnRepeat: true` → **RED** on the intended
+assertion.
+
+### AGENTS.md:9 — CLOSED. Now reads *"the `agent-cold-email` CLI's `mcp` bridge (its nine direct
+
+subcommands cover the common path)"*, which matches `packages/cli/src/index.ts`'s nine REST
+subcommands plus `mcp`, and `commands/mcp.ts`'s own header.
+
+---
+
+## RULING — the in-window replay flag (the builder's disclosed wrinkle)
+
+**Their reasoning is wrong; their decision to ship is right. Rule the two separately.**
+
+I did not take the wrinkle on description — I drove it, and on a case their test does not cover: the
+**happy path**, no failure anywhere, which is the far more common shape.
+
+```
+live at start = 4
+CALL 1 (fresh):            released=2 failed=0 dedup=false     live after = 2
+claims: [... {"key":"remove_mailboxes:happy-key","status":"done"}]
+CALL 2 (in-window replay): released=2 failed=0 dedup=false     live after = 2
+BYTE-IDENTICAL TO CALL 1 = true
+```
+
+So the canonical dropped-response retry — the entire reason idempotency keys exist — returns a
+response byte-identical to the original, `deduplicated: false` included, having done nothing.
+`deduplicated: true` is reachable on `remove_mailboxes` only after the 30-day claim ageout, which is
+why the builder's test has to age the claim out to produce it.
+
+**On the reasoning.** *"A true statement about the replayed call"* is not what the field means.
+`packages/shared/src/provenance.ts:55-62` defines it on the RESPONSE — *"Was this response produced
+fresh, or is it an earlier one handed back?"* — and names the exact failure it exists to prevent:
+*"The sites that lack it return a collapse byte-identically to a real admission, so an agent in a loop
+cannot tell that its second, genuinely different request was absorbed."* Call 2 is a collapse
+returned byte-identically to a real admission. By the published contract the honest value is `true`.
+The builder's sentence describes a different field ("did the underlying operation do work"), which is
+what B1 correctly made it mean *at the intent layer* — but there are two collapse layers here and the
+flag only sees the lower one. **This justification should not be recorded in-code as settled
+reasoning, because it is what the next edit will build on.**
+
+**On the decision.** Ship it anyway, for three reasons I verified rather than assumed:
+
+1. **It is pre-existing and untouched by this fix.** Under the old `deduplicated: intent.replayed`,
+   call 1 recorded `false` and call 2 replayed that same recording. The value on this path is
+   identical before and after. The fix strictly closed the false-`true` direction and introduced
+   nothing.
+2. **The direction is benign for state, wrong only for provenance.** Unlike B1 — which mis-described
+   *new irreversible work* — the counts here are absolute and accurate. An agent reading call 2
+   forms a CORRECT model of the fleet (2 released, 2 live) and cannot be driven to double-act,
+   because `count` is resolved against the recorded intent, not applied relative to this call.
+3. **The clean fix is generic and belongs one layer up, not here.** The replay site is a single
+   place — `engine/idempotency.ts:126-127`, `const recorded = JSON.parse(existing.response_json)` —
+   where stamping `deduplicated: true` on any replayed response that carries the field would fix all
+   three `Collapsed<T>` consumers at once. That is a change to the money-path idempotency wrapper and
+   does not belong in an end-of-wave patch.
+
+**What is required now:** replace the in-code justification with the accurate statement (the flag
+reports collapse at the intent layer only; the request-idempotency layer collapses above it and is
+invisible to it), and route the generic stamp to Wave B alongside the IN-17/NB3 increment. This is a
+disclosure correction, not a code change, and it does not gate the ship.
+
+---
+
+## Attacks that FAILED in round 2
+
+- **The fix changed behaviour beyond the flag.** Refuted two ways: mechanically (the non-comment
+  source diff is three hunks, two of them the flag) and by execution (my byte-identical re-run
+  produced the same `releasedCount`/`failedCount`/`unreleased`, the same four vendor release calls,
+  and the same 5→2 live count).
+- **`releasedCount === 0` is the wrong predicate — a call could do work while releasing zero.** The
+  only other side effect on the path is `syncMailboxQuantity`, which is set-to-N and self-idempotent,
+  so a replay's sync is a no-op in effect. `releasedCount` is the only quantity that changes state
+  irreversibly.
+- **The `NOT_MIRRORED` staleness assertion is dead code** (it is masked by the unaccounted assertion
+  on a rename). Refuted by finding the input that reaches it — a pure deletion — and watching it fire.
+- **The new fences don't actually bind.** All four planted defects reddened: unlisted DTO, deleted
+  excluded type, bogus `extra` entry, removed DSN opt-in.
+- **The new `reply` prose is reassuring but false.** Every clause checks out against the code, and the
+  two escapes it recommends genuinely work.
+- **NB6's `callArgs` regex mis-slices.** `/^\s*\}\);/m` cannot match a nested literal's `},` close, so
+  it lands on the call's own terminator; with no match it returns the whole block, which is the
+  pre-fix (safe-direction) behaviour.
+
+## NEW — out of scope, no verdict weight
+
+- **N1 — the in-window replay flag.** Covered in full by the ruling above. Pre-existing, benign
+  direction, generic fix belongs at `engine/idempotency.ts:126-127`. Wave B.
+- **N2 — the `syncMailboxQuantity` disposition is CORRECT but its stated REASON is false.** The
+  builder reported it as not-same-class because *"failures throw"*. They do not:
+  `billing.ts:922-925` **catches** a Stripe failure, logs
+  `"stripe mailbox quantity sync failed (non-fatal — the reconcile sweep will retry)"`, and returns
+  `{ pushed: false }`. So a discarded return value CAN hide a failed push. The disposition
+  nevertheless stands, on grounds I verified rather than the ones given: the customer-facing
+  `billing` field is `buildMailboxBilling(ctx, provisionedMailboxCount(ctx))`, a projection off local
+  rows that never claims Stripe accepted anything; `mailbox_qty_synced` is deliberately **not**
+  advanced on failure (`billing.ts:920` is inside the success branch); `tenant-do.ts:1442` re-pushes
+  on drift; and `next-steps.ts:702` surfaces `billed_quantity_drift` to the customer. The residual —
+  a failed downgrade push leaves the customer billed at the old higher quantity until reconcile —
+  is real, money-direction, pre-existing, and already has a detector. Worth correcting the sentence.
+
