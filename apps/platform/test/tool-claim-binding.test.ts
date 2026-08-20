@@ -337,3 +337,36 @@ describe("tool-claim-binding — G4 openapi <-> registry coverage", () => {
     expect(uncovered, `openapi.yaml has no operation for: ${uncovered.join(", ")}`).toEqual([]);
   });
 });
+
+// --- IN-19 / IN-20 (docs/adversarial/class-sweep-dedup-semantics-2026-08-17.md)
+// — claim-surface members of the dedup/collapse class, not new guard rules.
+// IN-19: infrastructure_status's messages[] claimed an unconditional
+// completeness guarantee ("so you never miss one") over what is, by
+// construction, a LIMIT-5 view — the operator-first sort protects ONE
+// eviction scenario (system churn displacing a human reply), not the
+// general case (a 6th genuinely distinct unacked message of either kind can
+// still fall off this preview). IN-20: contact_operator's dedup-retry prose
+// framed the (body,urgency) collapse as unconditionally "safe" — the code
+// DOES guarantee identical text within the window returns the same ticketId
+// with no second ticket/alert, but that is a TEXT match, not an intent
+// match: a genuinely NEW message with coincidentally-identical wording
+// collapses the same way, silently, which "is safe" does not disclose.
+// Deliberately prose-only — no `deduplicated` field is asserted anywhere
+// here; that lands with its type change from the sibling lane.
+describe("tool-claim-binding — IN-19/IN-20 dedup-semantics claim fixes", () => {
+  it("infrastructure_status never claims unconditional completeness over its capped messages[] preview", () => {
+    const desc = MCP_TOOLS.find((t) => t.name === "infrastructure_status")!.description;
+    expect(desc, "infrastructure_status still claims 'you never miss one' over a LIMIT-5 view").not.toMatch(/you never miss one/i);
+  });
+
+  it("contact_operator's dedup-retry prose never frames the (body,urgency) collapse as unconditionally 'safe'", () => {
+    const toolsDesc = MCP_TOOLS.find((t) => t.name === "contact_operator")!.description;
+    expect(toolsDesc, "mcp/tools.ts's contact_operator still says 'is safe'").not.toMatch(/within an hour is safe/i);
+    expect(openapiYaml, "openapi.yaml's contact_operator still says 'is safe'").not.toMatch(/within an hour is safe/i);
+  });
+
+  it("contact_operator's dedup-retry prose discloses it is a TEXT match, not an intent match (a same-wording NEW message also collapses)", () => {
+    const toolsDesc = MCP_TOOLS.find((t) => t.name === "contact_operator")!.description;
+    expect(toolsDesc, "mcp/tools.ts's contact_operator doesn't disclose the text-vs-intent limitation").toMatch(/text match, not an intent match/i);
+  });
+});
