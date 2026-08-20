@@ -381,3 +381,193 @@ mail DNS"). §4 credits itself with fixing the analogous display defect; §3 cre
   shape, asserting `maybeEmitContinuityNudge` is reached with a NEW onset (constraint 6).
 - `watchtower-deadman.test.ts` and the continuity cross-clear tests pass **unedited** (already in §9.6
   — keep it).
+
+---
+---
+
+# ROUND 2 — gate on design v2
+
+## VERDICT: **SHIP-AFTER-FIXES** — all 6 round-1 blockers CLOSED, all 7 NBs addressed; **2 NEW BLOCKING**, both inside §5.5, the mechanism v2 introduced to close B5
+
+Scored against round 1's FIXED checklist, which is fully satisfied. The two new blockers are reported
+separately and carry no re-score of the old items — they are defects in new material, not a moved
+goalpost.
+
+### Grounding
+
+| Item | Value |
+|---|---|
+| Ref | main `fd8afcaaadf51d981fc50a9c949a38ffbddf735f`. The only commit since round 1 is this gate doc itself; `git diff f222afc..HEAD -- apps/ packages/` is **empty**, so every round-1 line cite and the simulation baseline still resolve. |
+| Target | `docs/research/alert-state-design-2026-08-20.md`, uncommitted working-tree revision, **658 lines / 48 KB**. Read in full; it is complete (clean §9 item 13, no truncation, no mid-edit markers). |
+| `scalemon` | Now **committed at `67f3535`** ("scale: bound the cron sweep's per-tick fan-out and split capacity from failure"), 3 modified + 2 untracked test files. v2's §7 claims re-verified against that commit directly, not against v2's summary. |
+| Method | The round-1 model rebuilt for v2's machine (ladder-first phase 2, `realertCount` split, `holding` preserving `realertCount`, `holdGrade === false`, `healthyObs === 0` adoption gate, §5.5 budget). 14 scenarios. Every number below is printed output. |
+
+---
+
+## The six blockers — re-simulated
+
+| # | Fix in v2 | Re-simulation | Ruling |
+|---|---|---|---|
+| **B1** | §4 polarity → `holdGrade === false` | 300 ticks of a sustained sub-threshold rate (`failed=2`/hr): **v1 form fires 0**, **v2 form fires 157**, first at tick 143 ≈ **12 h**, matching `SUSTAINED_HOLD_TICKS = 144`. | **CLOSED** |
+| **B2** | §1.4 phase-2 stated **ladder-first**; cap is a fall-through, not terminal | Episode at the cap, 30 days unhealthy, fresh key every tick: **30 emails** (v1's escape-first gave 5). Only `realerted` and `suppressed_key_cap` appear — the ladder survives the cap. | **CLOSED** |
+| **B3** | §1.2 every space narrowed to ≤ 4; invariant tightened to `cap > max` | Summed the v2 table's 24 rows: **max = 4, cap = 5, `cap > max` true**. `cron_legs` combinatorial→3, `customer_progress_*` 12→4, `failure_signals` 5→4, and SDN removed from the table (deferred). §9.3 is now satisfiable. | **CLOSED** |
+| **B4** | §3.2 ruled **INERT**, alternative costed and rejected, root cause named as a §8 non-goal | Drain alternation, 24 ticks: HEAD 0 emails, v2 0 emails — unchanged, and now *stated* as unchanged. §5.2's table row corrected to flapper-reachable **no**. Test 16 pins it so a later "fix" is deliberate. | **CLOSED as a ruling** |
+| **B5** | §5 rewritten with honest per-inbox-per-day arithmetic + new §5.5 daily budget | 100 `tenant_do_wedged:` instances at 50% duty, 7 days: **114.3 emails/day uncapped**, **20.0/day with the budget armed**. 1,400 pathological instances: **1,866/day uncapped → 20.0/day capped**. Bounded, and the design's own ~100 / ~1,400 estimates are honest (slightly conservative). | **CLOSED** — but see NEW-1..3 |
+| **B6** | §3.1 gates onset adoption on `siblingState.healthyObs === 0` | **Both directions checked.** Zero-nudge: sibling in `holding` reads `healthyObs = 1` → adoption **blocked** → new episode keeps onset `T+10min` → **nudge fires**. Duplicate: same-tick blame flip, abandoned sibling reads `healthyObs = 0` (an unhealthy observation resets it) → adoption **fires** → onset `T0` → `T0 >= T0` → **no second nudge**. | **CLOSED, both directions** |
+
+**N1 (ladder rung), re-simulated because it is the subtlest of the seven.** The `alertCount` →
+`realertCount` split is byte-identical to the shipped ladder: 60 h sustained gives
+`alerted@0.08h realerted@6.08h realerted@30.08h realerted@54.08h` at **both** HEAD and v2. With an
+escalation injected at tick 3, v2 gives `alerted@0.08h escalated@0.25h realerted@6.25h …` — the 6 h
+rung **survives**, which is exactly what v1 deleted. The claimed equivalence `realertCount >= 1` ⟺
+today's `alertCount >= 2` holds, and the `realert_count = 1 WHERE alert_count >= 2` backfill preserves
+each in-flight episode's rung.
+
+**N2 — I was wrong, and v2 is right.** My round-1 finding said the `*_FAILED` trio were activity-row
+action strings and not check names, and that all three arriving families were `gradeSweepStreak`-damped.
+Verified at `67f3535`: `engine/isolated-failure-alerts.ts` exists and `policyFor` now has an
+`IMMEDIATE_ALERT_POLICY` branch for all three `*_FAILED` prefixes — they DID arrive as check families,
+so **six** arrive, not three. And `sweep_signals` is **not** streak-damped: it goes through
+`reportCheck` on a per-tick boolean and its own docstring states DEBOUNCED is the deliberate choice.
+My claim was one family too broad. v2's correction is accurate on both counts and I accept it.
+
+**N3–N7.** `0020` plus a re-pick-at-build-time rule (and `0019_sweep_cursor.sql` is now tracked at
+`67f3535`, so `0020` is currently right). SDN ledger deferred behind a stated P0/P1 with IN-17's own
+site named as an explicit scope cut. All four `AlertAction` read sites enumerated, with the silent
+`default` becoming an exhaustiveness check. `last_detail` preserved while holding, and the alternative
+(`status = 'recovering'`) rejected with a named blast radius. Cite corrected. All addressed.
+
+**N4's partial refutation of my §0 ruling — accepted.** I ruled §0 "not upheld for SDN". v2 argues the
+coupling is about episodes churning on *ambiguous* clears, and SDN's clear is a measurement, not a
+filter departure. Checked the producers: `sdn-refresh.ts:63` emits `success: true` only after
+`entries.length` is known, and `sdn-ingest.ts:138` passes `outcome.ok`. A list that loaded and parsed
+is a real measurement. The refutation is fair; it is also moot, since §2.4 defers the SDN ledger
+entirely.
+
+**Unprompted improvement worth recording.** v1 carried 29 bare `file.ts:NNN` citations; **v2 carries
+zero** — every reference is anchored on a function or exported-constant name plus the asserted
+behaviour, with a stated policy that a moved line is a typo and moved *behaviour* is a finding. I did
+not ask for this; it is the right response to a lane that moved twice mid-review.
+
+---
+
+## NEW (round 2) — §5.5, the replacement mechanism
+
+§5.5 is the only genuinely new machinery in v2. Per standing discipline the re-review budget goes to
+the replacement, not to re-deriving the closures.
+
+### NEW-1 · BLOCKING · `alert_budget_exceeded` is subject to the budget it announces, so it can never send
+
+§5.5: *"The overflow is itself announced through one check, `alert_budget_exceeded`, on the ordinary
+DEBOUNCED policy — so a permanently-over-budget platform costs 1 confirm + 1/day."*
+
+The exempt list is explicit and closed: `cron_sweep` plus the money-bearing one-shots
+(`mailbox_provisioning:`, `mailbox_rebuy:`, the three `*_failed:` prefixes).
+**`alert_budget_exceeded` is not in it** — and it goes unhealthy exactly when the budget is full, so
+its own `alerted` transition is withheld by the condition it exists to report.
+
+**Simulated** (budget 20, 100-instance correlated storm, 7 days): ordinary alerts sent 140;
+`alert_budget_exceeded` emails **sent 0, withheld 2015**. The stated property is false and the failure
+is silent — the founder is never told the channel is rate-limited. Since §5.5's whole argument for
+accepting withheld alerts is that the overflow stays visible, the visibility mechanism being
+self-suppressing is load-bearing, not cosmetic.
+
+This is the repo's own recorded class (an alarm that depends on what it monitors) arriving through new
+machinery. The fix is one line in the exempt list; the design shipping with the property asserted and
+false is what makes it blocking.
+
+### NEW-2 · BLOCKING · The budget's treatment of `recovered` is undecided, and both readings cost
+
+§5.5's priority ordering names `alerted` > `escalated` > `realerted`. **`recovered` appears nowhere**,
+and the exemptions are by family, not by action. Both readings have a real cost:
+
+- **If recoveries are budgeted:** `withheldAlertState`'s recovery arm returns `previous ?? next` — the
+  *whole* previous state — so a budget-withheld recovery reverts `healthyObs` too and the episode never
+  closes. Simulated: 100 simultaneous recoveries at budget 20 take **4.0 days** to drain, with up to
+  **100 checks reading `status='unhealthy'` while actually healthy** the entire time. That is the
+  surface the 2-hourly watch cron polls as `?unhealthy=1` against a known baseline of two rows
+  (`HANDOFF.md`), so it converts a volume problem into a false-alarm problem on the operator's own
+  detector.
+- **If recoveries are exempt:** the 1,400-instance recovery storm is unbounded, which defeats the
+  per-day property §5.5 exists to establish.
+
+§5.5's own headline scenario — a correlated 100-tenant DO flap — produces exactly this on the way out.
+The design owes the ruling, and whichever way it goes needs a line in §5.5 and an arm in test 15.
+
+### NEW-3 · NON-BLOCKING · `{windowStartMs, count}` is a tumbling window, not the rolling one it is called
+
+Two fields cannot express a rolling 24 h count; they express a window that resets when
+`now - windowStartMs >= DAY`. Simulated 20 sends at T=23.9 h and 20 more at T=24.1 h: **40 emails
+delivered inside a 0.20 h span**. §9.8 gates on "≤22 emails/inbox/day", which holds per tumbling
+window and not for arbitrary 24 h spans. Either fix the window shape (a small ring of timestamps) or
+restate the gated number as ≤2× the budget.
+
+### NEW-4 · NON-BLOCKING · §5.5 introduces a 23rd family that §1.2, §3.3 and §9.2 do not cover
+
+`alert_budget_exceeded` has no row in §1.2's key table and no row in §3.3's policy table, so §6.9's
+failing-by-construction guard — which §9.2 gates on — reds until it gets both. Worth naming because
+§4 rejects alternative (c) partly on the grounds that *"it adds a 23rd family, a second
+episode/cooldown pair and a permanent `watchtower_state` row"*, and §5.5 then adds precisely that,
+unremarked. The guard catches it at build time; the inconsistency in the reasoning is the finding.
+
+### NEW-5 · NON-BLOCKING · Family round-robin cannot cross batches, and the monitor's own checks are in the last batch
+
+§5.5 rule (i) orders round-robin across families, which can only apply within one `reconcileAlerts`
+call. There are three separate entry points, in this order (`scheduled.ts` at `67f3535`):
+`runWatchtower` at `:87` (the 100-instance per-tenant batch), then `reportSweepSignals` at `:179` and
+`reportSweepSignalsHealth` at `:194`. So a `tenant_do_wedged:` storm in the first batch can exhaust the
+budget before `cron_legs`, `sweep_coverage`, `alert_delivery` and `sweep_signals` are ever offered a
+slot — the monitor-the-monitor checks, and the same cluster NEW-1 silences.
+
+Rule (i)'s *stated* goal survives: `d1` is decided in `reconcileD1Alert` at the top of `runWatchtower`,
+before the tenant loop, so a simultaneous D1 outage does stay audible. The gap is the sweep's own
+checks, not `d1`.
+
+---
+
+## Round-2 attacks that FAILED
+
+- **B1's stated interaction.** v2 claims a `grade === false` tick clears the hold streak so dead-band ⇄
+  over-threshold oscillation never accumulates 144. Simulated (1 tick in 10 over threshold): the
+  sustained arm fired **0** times across 300 ticks while the real-signal arm emitted 30. Correct, and
+  correctly disclosed as acceptable.
+- **B2's cap fall-through vs the ledger.** Checked that a `realerted` tick appending a novel key cannot
+  double-count or skip the cap — row 1's "append if novel and under cap" and row 3's fall-through are
+  consistent; `suppressed_key_cap` and `realerted` are the only two actions the 30-day run produces.
+- **B6's duplicate direction.** I specifically hunted for a case where the `healthyObs === 0` gate lets
+  a *continuous* stall re-nudge. It cannot: any unhealthy observation resets `healthyObs` to 0, so a
+  sibling carrying a live stall always passes the gate and its onset is always inherited. Held.
+- **B6 and a re-stall inside `holding`.** X unhealthy → holding → unhealthy again: the episode never
+  closed, so `sinceTs` is still `T0` and no second nudge is owed. Correct without needing the gate.
+- **The budget and the `alertCount > 0` recovery gate.** A budget-withheld *confirming* alert leaves
+  `alertCount` at 0, so the episode is never "announced" and owes no recovery email when it clears.
+  Symmetric and inherited free from the shipped withheld path. Held.
+- **Digest channel double-charging.** `customer_progress_agent:` renders no email (`alertEmailFor`
+  returns null for `channel: "digest"`), so it cannot consume budget. Held.
+- **v2's N2 correction.** I tried to defend my round-1 claim and could not — `policyFor` at `67f3535`
+  has the three `*_FAILED` branches and `sweep_signals` is genuinely not streak-damped. Refuted
+  myself; recorded above.
+- **v2's §0/SDN partial refutation.** Read both producers rather than accepting the argument. It holds.
+
+## UNVERIFIABLE (carried, unchanged)
+
+- The live 2-Mordy-domains baseline — no prod access. *Resolves with:* `GET /admin/ops/checks?unhealthy=1`.
+- `tenant_do_wedged:`'s real duty cycle — mechanism and multiplier proved, rate not observed.
+- §7 is stated against `67f3535`, which is a real commit but not merged; the lane may move again.
+
+## What the BUILD BRIEF must now carry (delta only)
+
+Round 1's 10 constraints and 7 test-floor items all survived into §6 (items 12–17) and §9 (items 3–10);
+nothing from round 1 needs restating. Add:
+
+1. Put `alert_budget_exceeded` in §5.5's exempt list, and make test 15 assert it is **delivered** during
+   a saturated day. Without that assertion the check is decorative (NEW-1).
+2. Rule on `recovered` under the budget, state it in §5.5's priority ordering, and give test 15 a
+   recovery-storm arm asserting the chosen behaviour (NEW-2).
+3. Fix the window shape or restate §9.8's number as ≤2× budget (NEW-3).
+4. Give `alert_budget_exceeded` a §1.2 key space and a §3.3 policy row (NEW-4).
+5. State where the budget ordering is applied, and acknowledge that the sweep's own checks run in a
+   later batch than the tenant scan (NEW-5).
+6. `MAX_ALERT_EMAILS_PER_DAY = 20` stays **[RATIFY:founder]** — correctly flagged by the design; it
+   changes what the founder can expect from the channel, and NEW-1/NEW-2 should be fixed before the
+   number is put to them.
