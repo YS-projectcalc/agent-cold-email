@@ -1,0 +1,12 @@
+# Superseded `ROADMAP.md ## Now` entry — Wave A (trains 3+4)
+
+Kept verbatim for provenance. This was the sole `## Now` line before the Wave B.1 (scale +
+monitoring, trains 5+6 core) bookkeeping pass on 2026-08-20 replaced it — Wave B.1 shipped to
+production the same day, superseding Wave A as the live deploy narrative. Wave A's own content
+(merge `2c07add`, dashboard rebuild `69ec655`, Worker `a74ae0ab-14ae-42cb-8bff-31ef247c2831`,
+gate `docs/adversarial/wave-a-trains-3-4-gate-2026-08-20.md`) is unchanged and still live in
+`HANDOFF.md`'s "Where we are right now" item 2 and `MEMORY.md`'s 2026-08-20 milestone line.
+
+---
+
+- [ ] 2026-08-20 [ORDER] **WAVE A (TRAINS 3+4) SHIPPED TO PRODUCTION 2026-08-20** — lanes `feat/claim-truth-2026-08-19` (train 3) + `feat/dedup-semantics-2026-08-19` (train 4), folded on `integrate/wave-a-2026-08-20`, merged `2c07add`, dashboard bundle rebuild `69ec655` (current `main` HEAD = `origin/main`). Gate `docs/adversarial/wave-a-trains-3-4-gate-2026-08-20.md`: r1 FAIL (1 BLOCKING — B1, `remove_mailboxes` reported `deduplicated: true` on a call that released real mailboxes — the wave's own headline field lying on the money path; +6 non-blocking) → fix `8582c3d` → r2 SHIP (0 blocking, 0 new). Battery green at merged HEAD: typecheck 0; platform 223f/2156p/1skip; dashboard 31f/165p; engine 17f+2s/144p+4s; cli 12/12. Deployed: Worker `a74ae0ab-14ae-42cb-8bff-31ef247c2831` both hosts, site Pages `8a8333f0`. Full evidence + non-blocking routing folded into the 2026-08-17 [ORDER] TRAIN 1-6 entry below (TRAIN 3/4 now marked SHIPPED there). **NOW = WAVE B in flight** (dispatched 2026-08-20, right after Wave A's deploy): TRAIN 5 (monitoring denominators) + TRAIN 6 (scale wave) split into a watchtower-seam lane (worktree `scalemon`, branch `feat/scale-monitoring-2026-08-20` — S1/S4/S5/S6/S10/S11 + train-5 members) and a disjoint-modules lane (worktree `scalemodules`, branch `feat/scale-modules-2026-08-20` — S3/S7/S8 + 3 promoted admin-read-endpoint bugs/S9 + the spend-ceiling remedy + the generic `deduplicated` stamp at `engine/idempotency.ts:126-127`, wave-A r2 gate ruling), plus an alert-state design increment running parallel (per-episode announced-set + materiality keys, folds IN-9/10/11/12/17 + U-2 + NB3-mechanism — its BUILD waits for the watchtower lane). msgchannel Inc4 (email mirror) queued behind Wave B. `## Now` is this single item only.
