@@ -122,6 +122,23 @@ describe("S1 — the per-tick DO fan-out no longer grows with the tenant count",
     expect(typeof heartbeat).toBe("number");
   }, 60_000);
 
+  // W-M4's WIRING, asserted against the real entry point rather than the
+  // function. A check whose only caller is one a test invokes directly is 100%
+  // green and 100% dead; `sweep_signals` exists specifically because the leg it
+  // reports on runs in production and nothing observed it there.
+  it("the real cron tick reports the alerting leg's OWN health (W-M4 wiring)", async () => {
+    await seedTenantIndexRows(SLICE);
+    await runScheduledOpsSweep(env, { mailer: new SandboxOpsMailer(), sliceLimit: SLICE });
+    vi.restoreAllMocks();
+
+    const row = await env.DB.prepare(`SELECT status FROM watchtower_state WHERE check_name = 'sweep_signals'`).first<{ status: string }>();
+    expect(row?.status).toBe("healthy");
+    // And the cursor leg really committed, so the rotation is driven by
+    // production and not only by readTenantSlice's own tests.
+    const cursor = await env.DB.prepare(`SELECT id FROM sweep_cursor WHERE id = 1`).first();
+    expect(cursor).not.toBeNull();
+  }, 60_000);
+
   it("rotates: consecutive ticks sweep DIFFERENT tenants and eventually cover them all", async () => {
     await seedTenantIndexRows(SLICE * 3);
     const seen = new Set<string>();

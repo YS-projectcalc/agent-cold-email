@@ -40,11 +40,22 @@ closed (401 on every call) rather than falling open. Set it via
   escalate / suspend, mirroring `../engine/deliverability.ts`'s
   monitor-decide-act shape.
 - `db.ts` — D1 helpers for the control-plane tables
-  (`migrations/0002_admin_ops.sql`): `support_tickets`, `dunning_events`,
-  plus `listAllTenantIds` (the D1 tenants_index id list that drives every
-  cross-tenant sweep/digest). Also owns the G1 `screening_reviews` queue
+  (`migrations/0002_admin_ops.sql`): `support_tickets`, `dunning_events`.
+  Also owns the G1 `screening_reviews` queue
   (`migrations/0012_sdn_screening.sql`) — `upsertScreeningReview`/
   `listPendingScreeningReviews`/`getScreeningReview`/`resolveScreeningReview`.
+- `sweep-budget.ts` — the cron tick's BUDGET ARITHMETIC (pure): the
+  subrequest ceiling, the derived fan-out wall-clock deadline, and the tenant
+  slice both of them size. Every number is derived rather than chosen, so
+  raising one constant cannot silently break the invariant another depends on
+  (`test/sweep-budget.test.ts`).
+- `tenant-slice.ts` — the bounded tenant window that arithmetic produces: the
+  keyset cursor read/commit and `sweepTenants`, the one isolated per-tenant
+  loop the six fan-out legs share.
+- `watchtower-roster.ts` — which always-on checks a completed sweep is
+  EXPECTED to have written a row for, given this environment's config. The
+  denominator `GET /admin/ops/checks` publishes so a skip-dark check that
+  vanished with a lost env var is visible instead of merely absent.
 - `terminate.ts` — the shared D5 "suspend + reclaim infra + lock the
   control-plane token + log an enforcement_actions row" sequence, extracted
   from the terminate route so G1b's screening-`reject` path
@@ -122,17 +133,41 @@ the control-plane index (`tenants_index` — token->tenant + a plan/status
 mirror captured AT SIGNUP, which can go stale after a checkout upgrade or
 Stripe webhook — see `../db.ts`). So every sweep/digest here:
 
-1. Reads the tenant **id list** from D1 (`listAllTenantIds`) — the one thing
-   D1 is trusted for.
-2. For each id, calls that tenant's own DO stub's `opsSummary()` RPC
-   (`../engine/ops-summary.ts`) to get the AUTHORITATIVE plan/billing/usage/
-   deliverability state — never reads another tenant's SqlStorage directly.
+1. Reads a **bounded slice** of the tenant id list from D1
+   (`tenant-slice.ts`) — the one thing D1 is trusted for.
+2. For each id in that slice, calls that tenant's own DO stub's `opsSummary()`
+   RPC (`../engine/ops-summary.ts`) to get the AUTHORITATIVE plan/billing/
+   usage/deliverability state — never reads another tenant's SqlStorage
+   directly.
 
-This is a per-request RPC fan-out over every tenant — **acceptable at
-test-mode scale** (ROADMAP.md), not the long-term design: ARCHITECTURE.md #3
-already names the scale path as a D1/Analytics read-model fed by Queues
-(cross-tenant reporting + the abuse-aggregation loop), which is where this
-moves once tenant count makes a full fan-out slow.
+### Why a slice, and what it costs
+
+The cron used to fan every leg out over the WHOLE index on every tick: a
+measured 8.0 DO RPCs per tenant, `subrequests(N) ~= 8N + 29`, crossing 1,000 at
+N = 122 (`docs/adversarial/scale-readiness-audit-2026-08-17.md`, S1). Above
+that the invocation's subrequest budget ran out mid-sweep and every remaining
+leg threw instantly into `runLeg`'s catch — including the dead-man heartbeat,
+which is deliberately LAST because it means "this tick ran to completion". The
+platform then paged the founder that the scheduler was dead while what had
+actually stopped was automatic sending.
+
+`sweep-budget.ts` derives one tenant slice per tick from two independent
+ceilings (the invocation's subrequest budget, and the wall clock the 300s cron
+period has left after the send pipeline's own bounds). `tenant-slice.ts`
+keyset-pages the index against a persisted cursor that advances only as far as
+the LEAST-covered leg got, so every leg still reaches every tenant — just
+across `ceil(total / slice)` ticks rather than every tick.
+
+That coverage latency is the price, and it is PUBLISHED rather than emergent:
+the `sweep_coverage` watchtower check reports the rotation length and alerts
+once a full pass takes longer than an hour. When it fires, the answer is the
+D1/Analytics read-model ARCHITECTURE.md #3 already names as the scale path —
+NOT a bigger slice, which is bounded by the subrequest budget and is what used
+to make the heartbeat vanish.
+
+An on-demand caller (`POST /admin/ops/dunning-sweep`, `GET /admin/ops/digest`)
+passes no slice and gets a bounded full scan, with `tenants.scanned` beside
+`tenants.total` so a capped pass can never read as a complete one.
 
 ## What's built now, dark until the owner onboards the domain
 

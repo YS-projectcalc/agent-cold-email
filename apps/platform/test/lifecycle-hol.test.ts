@@ -9,6 +9,7 @@
 // restarted from zero and re-died at the same domain, forever.
 
 import { describe, expect, it } from "vitest";
+import { env } from "cloudflare:test";
 import {
   VendorError,
   type CancelWarmupResult,
@@ -147,6 +148,18 @@ describe("IN-3 — one unreleasable mailbox must not leave the mailboxes behind 
       // ...and it is loud, not silent: an unreleased mailbox bills on both sides.
       expect(actionsFor(ctx, "MAILBOX_RELEASE_FAILED")).toEqual(["head@stuck.com"]);
     });
+
+    // AND IT REACHES AN OPERATOR (docs/adversarial/
+    // wave-1-2-integration-gate-2026-08-18.md §6). The activity row above is
+    // CUSTOMER-visible and nothing else read it: the mailbox stays live at the
+    // vendor, stays counted against the plan slot, and keeps costing money on
+    // both sides until a human releases it. Nothing in the platform said so.
+    const check = await env.DB.prepare(
+      `SELECT status, last_detail FROM watchtower_state WHERE check_name = 'mailbox_release_failed:head@stuck.com'`,
+    ).first<{ status: string; last_detail: string }>();
+    // REDS on the old code: no such row was ever written.
+    expect(check?.status).toBe("unhealthy");
+    expect(check?.last_detail).toContain("STILL LIVE");
   });
 });
 
