@@ -373,3 +373,248 @@ it is the sentence an operator will reason from at 3 a.m.
    the 2-row baseline is no longer valid; `count`/`total`/`truncated`/`missing`/`retentionMs` are new
    fields; and `missing` will report roster members during retirement windows (N3). `unhealthyCount`
    deliberately keeps its whole-store meaning — that one did NOT change under the watch.
+
+---
+---
+
+# ROUND 2 — the fix round (2026-08-20)
+
+**Ground ref** worktree `.claude/worktrees/integrate-waveb`, branch `integrate/wave-b1-2026-08-20`,
+`git rev-parse HEAD` = **`a6a0b0b`**, parent **`7241a57`** (the round-1 ref), working tree CLEAN.
+One commit, 21 files, +838/−97. Review diff `7241a57..a6a0b0b`.
+
+> Grounding note: my first `rev-parse` this round returned `6930581` because a shell `cd` from round 1
+> had persisted into the MAIN checkout. Re-grounded explicitly inside the worktree before reading a
+> line of the diff. Worth recording — a review of the wrong checkout is a false ground, and the only
+> thing that catches it is running `rev-parse` and *reading the answer*.
+
+## VERDICT: **SHIP** — all 10 round-1 checklist items CLOSED. 4 NEW findings, reported separately.
+
+Per convergence discipline the verdict is scored against the round-1 checklist only. The NEW items
+below are not folded into it; two of them matter and are called out with a recommendation.
+
+## Battery — re-run by me at `a6a0b0b`
+
+| suite | result | exit |
+|---|---|---|
+| `npm run typecheck` (root) | clean | **0** |
+| `apps/platform` vitest | **233 files / 2261 passed / 1 skipped** | **0** |
+| `apps/engine` vitest | 153 passed / 4 skipped | **0** |
+| `apps/dashboard` vitest | passed | **0** |
+| `packages/cli` | 12 pass / 0 fail | **0** |
+
+Delta reconciles to the diff: **+1 file** (`idempotency-collapse-disclosure.test.ts`) and **+19 tests**
+= 6 (that new file) + 5 (the B1 describe in `sweep-budget.test.ts`) + 8 across
+`spend-ceiling` / `sweep-signals` / `watchtower-policy` / `watchtower-retention`. The three
+`clock-migration` / `ofac-screening` / `vendor-truth-class` files were modified, not added, and
+contribute 0 — which is what makes the count check meaningful.
+
+## Checklist — every item re-derived or executed
+
+**B1 — CLOSED.** Re-derived the arithmetic myself rather than accepting it:
+`60 + 25×2 = 110`; `slice = min(floor((600−110)/11), floor(15000/225)) = min(44, 66) = 44`;
+`tick = 11×44 + 110 = 594 ≤ 600`; tail reserve `1000 − 594 = 406 > 0`. The leg imports
+`SCREENING_RECOVERY_BATCH` from the budget file instead of declaring its own. The three attacks the
+brief asked for, **executed**:
+```
+(a) leastVisited afterSliceLeg=4 afterRecoveryLeg=4 cursor=ten_003
+(b) expired deadline => visited=1 deferred=3 seen=["a"]
+```
+(a) the stripped-deadline leg cannot move the rotation accumulator — the cursor still advanced by the
+full slice (`ten_003`), not by the recovery leg's one item. (b) the shared deadline still binds it
+(first item always attempted, remainder deferred). (c) grepped every `sweepTenants(` call site:
+**exactly one** passes `sweepDeadlineOf(...)` (screening-recovery) and **seven** pass `scope.fanout`
+(dunning, deliverability, digest, watchtower, warmupCancel, webhooks, provisioningReconcile) — no
+slice leg lost its accumulator contribution. `sweepDeadlineOf` builds a fresh two-field object and
+`isSweepFanout` tests `"leastVisited" in deadline`, so the stripping is sound by construction.
+
+**N1 — CLOSED.** `readInForceCeiling` added; the alert now prints BOTH numbers when they differ, and
+the "higher" wording is always correct (the raise-only UPDATE runs before the reserve, so the stored
+row is provably ≥ configured at the moment `rejectCapacity` fires). The manual lowering path — the
+thing that was undocumented — is now a literal `wrangler d1 execute` command in the docstring, with
+the instruction to check `reserved_cents + committed_cents` first.
+
+**N2 — CLOSED.** The alert now says *"raise PAYING_TENANT_COUNT to match the customers you now have
+(the ceiling scales with it). SPEND_CEILING_CENTS is an absolute override: setting it FREEZES the
+ceiling at that literal and the per-tenant scaling stops applying."*
+
+**N3 — CLOSED, both halves, all three round-1 probes re-run against the fix:**
+```
+roster=6 retired=1 MISSING=[]
+engine: pinnedRetired=0 present=true | darkRetired=1 present=false
+partial scan: noEpisode emits=true openEpisode emits=false
+```
+Round 1 listed all six roster members as `missing`; now zero — and S5 still collects the per-entity
+row (`retired=1`), so the exclusion costs nothing retirement was for. The self-correcting claim is
+TRUE by execution: with `ENGINE_BASE_URL` set the `engine` row is pinned, unset it leaves the roster
+and is collected on the very next tick. The `NOT IN` binds ≤10 params, far inside D1's 100.
+
+On the brief's attack against the narrowing: an unhealthy observation bypasses the hold entirely
+(`observed === false` is never held), so a failure sitting in the **unscanned** portion is reported on
+the tick its slice is scanned — within one rotation, i.e. the published `coverageTicks` bound. **No
+false-RECOVERED path exists on any branch**: `decideAlert` composes `recovered` only from an announced
+episode, and in exactly that state `readCheckStatus` returns `'unhealthy'` so the hold fires. The
+PENDING-unhealthy case is byte-identical to pre-fix behaviour. The fix touches only the
+`status='healthy'` branch, which is the narrowest correct cut.
+
+**N4 — correctly NOT fixed, and the claims corrected instead.** The `CHECK_RETENTION_MS` docstring and
+the `/admin/ops/checks` route comment now say "the per-entity families", not "the table", and both
+carry the executed evidence. The ROADMAP `[ORDER]` line exists (item 9), quotes
+`10-YEAR-OLD one-shots: retired=1 rowsLeft=3 unhealthyLeft=3`, cites this gate, and states plainly why
+inventing a clearer in this lane would be worse than the growth. I agree with the disposition: a
+second opinion about one-shot lifecycle a week before the increment that owns it is the worse trade.
+
+**N5 — CLOSED.** `policyFor` now routes `sweep_coverage` and `alert_delivery` to `IMMEDIATE`.
+Sanity-checked the `sweep_signals` exception the brief asked about: `reportSweepSignalsHealth` calls
+`reportCheck` **directly**, with no `gradeSweepStreak` in front of it — so unlike its two siblings it
+has no upstream damping, and the debounce really is the only thing between one flaky WatchtowerDO RPC
+(`reportSweepSignals`' first act is a cross-DO call, so a flake makes the leg throw and
+`signalAlerts === null`) and an email. The reasoning is sound and the asymmetry is correct.
+
+**N6 — CLOSED, with a residual.** `DEFERRED_LEG_VISITS_ALERT_AFTER = SWEEP_TENANT_SLICE`. The boundary,
+derived: `budgetExpiries + skippedForLegDeadline + tenantsRan + errors = slice`, so a **fully** wedged
+engine yields `deferred = 44 = slice` and trips exactly at the threshold, while **one** healthy tenant
+in the slice yields 43 and is silent. See NEW-4.
+
+**N7 — CLOSED on the arithmetic, incomplete on the sweep.** The re-derivation is right
+(156 calls × one 429-then-success ≈ 10 s = ~26 min → 30 min; the 52-min all-attempts-exhausted case
+explicitly excluded with a reason). The cross-module invariant is now pinned by a real test
+(`RESERVE_REAP_TTL_MS > REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS`, and ≥ 1.5×). No customer-visible
+string states a stale duration — `RequestInProgressError`'s message is "retry shortly", and the
+`remove_mailboxes` 409 guidance is duration-free. But the consumer grep the brief asked for turns up
+**three** sites still describing the pre-fix world — see NEW-3.
+
+**N8** — unchanged, no fix expected this round; remains the ROADMAP-grade item with its stated
+arming point (~50 paying tenants).
+
+**N9 — CLOSED.** The false sentence is gone and replaced with the honest semantics, including the
+3 a.m. guidance to pair it with `GET /status`.
+
+## NEW findings (round 2, outside the checklist — no verdict weight)
+
+### NEW-1 · B1's CLASS is still open: `reapStaleReservations` is an unbounded fan-out ahead of the dead-man — PROVED
+`engine/spend-ceiling.ts:559` reads `SELECT ... FROM vendor_spend_entries WHERE status = 'reserved' AND
+created_at < ?` with **no LIMIT**, then loops it with **no deadline and no `sweepTenants`**, spending 2
+subrequests per row (the status flip + the ledger UPDATE) and **3** when `kind = 'mailbox'` (+ the slot
+UPDATE). It runs at `scheduled.ts:107` — ahead of `sdnRecovery`, the cursor commit, the retirement, the
+send pipeline, the signal report and the **heartbeat**. It has **zero terms** in
+`SWEEP_FIXED_SUBREQUESTS`, which is exactly what the fix commit's own new docstring forbids: *"Any leg
+with its own fan-out gets its own term below."* Executed:
+```
+reaper: seeded=300 reaped=300 errors=0 => ~901 Worker subrequests in ONE leg, no cap, no deadline
+```
+901 against a 594-subrequest budgeted tick and a 406-subrequest tail reserve; break-even is ~135
+mailbox-kind orphans. This is **pre-existing** (it predates the wave — my round-1 miss: I enumerated
+the legs and did not open this one) and is not reachable at one paying tenant, which is why it is NEW
+rather than a re-opened B1. Note this wave made the standing population larger as a side effect: N7
+raised `RESERVE_REAP_TTL_MS` 15 → 45 min, so orphans linger 3× longer, and after any outage window the
+first reaping tick faces the whole accumulated set at once. Fix is the same shape as B1's:
+`sweepTenants` + `sweepDeadlineOf(scope.fanout)` + a declared batch and term in the budget file.
+
+### NEW-2 · The guard that was supposed to close B1's class is a tautology — PROVED
+`sweep-budget.test.ts`'s headline assertion is
+`expect(SWEEP_FIXED_SUBREQUESTS).toBe(SWEEP_FIXED_OVERHEAD_SUBREQUESTS + SCREENING_RECOVERY_SUBREQUESTS)`,
+and the source *defines* `SWEEP_FIXED_SUBREQUESTS` as precisely that sum. It is `A === A` and cannot
+fail. Its own comment claims *"a new leg with its own population has to appear here, or this identity
+stops holding and the suite reds."* Planted the exact defect it names — a new 300-item × 3-subrequest
+fan-out leg declared in the budget file and **not** summed in:
+```
+CONTROL: a NEW unaccounted fan-out leg added to the budget file
+ Test Files  1 passed (1)
+      Tests  13 passed (13)
+```
+Green. The guard compares one derivation with itself; it needs an independent oracle — e.g. an
+enumeration of `scheduled.ts`'s leg bag against a declared per-leg cost table, the way
+`sweep-signal-coverage.test.ts` already does for `LEG_SHAPES`. **This is the cheap one to fix now**
+(~5 lines), because it is what will let the next NEW-1 through.
+
+### NEW-3 · The N7 raise was not swept to its consumers — three sites still describe the pre-fix world
+Ordered by severity:
+1. **`engine/mailbox-acquisition.ts:50`, `ABSENCE_MIN_AGE_MS = 15 min` — a MONEY guard, over-spend
+   direction.** Its docstring: *"This number is the whole money guard… sized at the same 15 minutes
+   `engine/spend-ceiling.ts`'s reaper calls 'well above the longest legitimate provision run'"*, and
+   *"too short buys a second mailbox the customer already owns."* This commit re-derived that longest
+   legitimate run to **30 min** and moved the reaper to 45 — leaving this guard at **half** the window
+   it explicitly claims to exceed. A dispatched buy inside a legitimately-long saga can be judged
+   "absent ⇒ nothing was purchased" and re-bought. Latent at the pilot (9 mailboxes ⇒ ~3 min of retry
+   sleep, nowhere near 15) and it needs Scale-tier fleet sizes plus sustained vendor 429s.
+2. **`engine/threads.ts:24`, `CONTENT_HASH_REPLAY_WINDOW_MS = 10 min`** — states its derivation
+   outright: *"10 minutes is this codebase's own existing answer to 'how long might one logical attempt
+   still be being retried' (`REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS`)"*. That answer is now 30. The
+   window is still defensible on its own merits (a dropped-response retry is seconds, not minutes), so
+   the risk is the next edit: "make these consistent" either widens the reply window — reopening the
+   Monday/Thursday double-collapse the 10 min exists to fix — or narrows the claim TTL, reopening N7.
+   Both directions are wrong; the sentence needs to stop claiming the derivation.
+3. **`engine/contact-operator-reconcile.ts:28-30`** — cites both constants by their OLD values ("10
+   min", "15 min") and justifies `ISOLATE_DEATH_REAP_TTL_MS = 15 min` as *"keeps ONE 'presumed-dead'
+   cutoff convention across this cron's two reapers."* That convention is now broken (15 vs 45).
+   No functional defect — the file's own argument (one D1 read + one D1 write, "low milliseconds") is
+   ample at 15 min — but the stated rationale is false as of this commit.
+
+### NEW-4 · N6's threshold trips only when the ENTIRE slice is lost
+`deferred >= 44` with `budgetExpiries + skippedForLegDeadline + tenantsRan + errors = 44`, so 43-of-44
+tenants lost is silent. And a single persistently wedged tenant (`deferred = 1`) now reaches no check
+at all: `send_starved:` requires `eligibleMailboxes === 0` (a slow engine has healthy mailboxes),
+`tenant_do_wedged:` requires `opsSummary` to throw, and `customer_progress_*` is about owed setup
+steps. `sweep-signals.ts`'s module docstring still names *"a wedged engine abandoning every tenant at
+its budget"* as a thing this module makes visible, which is now true only at the boundary. Materially
+softened by the fact that `withItemBudget` abandons the WAIT, not the work — the RPC keeps running and
+its effects are idempotent — so a budget expiry is a latency/observability event, not a stuck tenant.
+The calibration itself is a defensible judgement; the docstring claim and the single-tenant gap are
+what want naming.
+
+## Attacks that FAILED in round 2
+
+- The `SweepDeadline`/`SweepFanout` split, all three ways the brief asked (above) — held by
+  construction and by probe.
+- **The ruling-7 guard is genuinely additive, not decorative.** Planted a 6th
+  `withRequestIdempotency` call site returning a payload with a boolean `deduplicated`:
+  `expected 6 to be 5`, with a message naming the exact hazard. It is a COUNT over the wrapper's call
+  sites, so an added intent cannot slip through. (Residual, minor: it does not catch an existing
+  *non*-collapsed DTO growing a `deduplicated` field later — test 4 re-asserts the hand-list rather
+  than reading the DTOs.)
+- **The three fixture re-derivations are load-bearing, not cosmetic.** Moved the vendor-truth money
+  guard's age from `TTL + 60s` to `TTL − 60s` (inside the window): **red**, `expected [] to include
+  'sender11@warmupcrash0.com'`. So it still exercises the presumed-dead reclaim path at the derived
+  age, which is what the brief asked me to confirm.
+- The N1 alert's "the in-force number is higher" wording cannot be wrong: the raise-only UPDATE runs
+  before the reserve, so `inForce ≥ configured` always holds when `rejectCapacity` fires.
+- `expectedCheckRoster`'s `NOT IN` clause: single-digit roster ⇒ ≤10 bound params, and the
+  `|| "''"` empty-roster fallback is unreachable (the roster always has ≥6 members).
+- No claim-surface change again this round: `git diff --stat 7241a57..a6a0b0b` over `site/`,
+  `packages/`, `apps/dashboard`, `apps/engine` and `wrangler.toml` is **empty**.
+
+## UNVERIFIABLE (carried forward unchanged)
+
+1. `SWEEP_SUBREQUEST_BUDGET = 1000` and whether DO RPCs count toward it — NEW-1's severity is
+   denominated in it. 2. `ASSUMED_DO_RPC_MS = 25`. 3. Live D1 index-build cost for `0020`.
+4. InboxKit's real rate limit / `Retry-After` behaviour — N7's 30-min re-derivation is a bound, not an
+   observation. 5. Real send volume per tenant per day, which sets N8's arming point.
+
+## CONSOLIDATED DEPLOY REQUIREMENTS
+
+1. **Migrations, in order: `0019_sweep_cursor.sql` then `0020_sdn_entries_name_index.sql`.** Both
+   additive and idempotent (`CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`), no
+   destructive DDL, both wired into `test/setup.ts` in the same order. `0020` builds a composite index
+   over ~19k `sdn_entries` rows — one-time, expected trivial, unmeasured against live D1.
+2. **`PAYING_TENANT_COUNT` — optional env var** (`[vars]`, no secret). Unset ⇒ the pilot bound.
+   **FOUNDER-VISIBLE: the default monthly spend ceiling moves $150 → $180** at count = 1. Raise THIS
+   knob as customers land — `SPEND_CEILING_CENTS` is an absolute override that freezes the formula.
+   A raise is durable for the calendar month; the manual lowering command is documented in
+   `spend-ceiling.ts`'s `readInForceCeiling` docstring.
+3. **No site deploy needed.** No `site/`, `packages/`, `apps/dashboard` or `wrangler.toml` change in
+   either round; the changed admin endpoints are operator-only and appear in no published
+   `openapi.yaml` path.
+4. **Ops-watch spec updates** (the cron that polls `?unhealthy=1` + `sweepAgeSeconds` against a 2-row
+   baseline):
+   - the 2-row unhealthy baseline is **void** — the never-clearing `*_FAILED` families make the
+     unhealthy set grow monotonically with real provisioning/teardown failures (N4);
+   - new response fields to consume: `count`, `total`, `truncated`, `expected`, `missing`,
+     `sweepAgeSeconds`, `sweepStale`, `retentionMs`;
+   - `unhealthyCount` deliberately KEEPS its whole-store meaning — do not re-baseline it;
+   - `sweepAgeSeconds` means "the watchtower LEG last completed", not "the cron last fired" — a stale
+     value can mean a throwing watchtower leg; pair it with `GET /status` (N9);
+   - `missing` is now trustworthy on a healthy platform (N3 fixed both the retirement and the
+     partial-scan halves), so a non-empty `missing` is worth paging on.
+5. **Follow-ups before the platform scales** (not deploy blockers): NEW-2 (~5 lines, worth doing now)
+   and NEW-1, then NEW-3's three stale consumers.
