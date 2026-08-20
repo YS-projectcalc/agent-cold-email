@@ -79,10 +79,14 @@ paths:
       tags: [infrastructure]
       summary: Provision branded lookalike domains and mailboxes; start warmup.
       description: >
-        Asynchronous: returns 202 immediately. Poll GET /infrastructure-status
-        for progress. In demo/free plans this runs entirely against a
-        fault-injecting sandbox — no real domain purchase or mailbox
-        provisioning occurs.
+        Domain purchase + DNS + mailbox provisioning + warmup run BEFORE the
+        response, not in the background — a large request can take a while
+        to answer. Returns 202 when work is still owed (a `provisioning`
+        field names which state), 200 when it finished within this call;
+        poll GET /infrastructure-status or re-call this endpoint to progress
+        a `provisioning` outcome. In demo/free plans this runs entirely
+        against a fault-injecting sandbox — no real domain purchase or
+        mailbox provisioning occurs.
 
 
         `domains` covers ordinals 0..domains-1; each ordinal fills to its own
@@ -145,10 +149,13 @@ paths:
       responses:
         '202':
           description: >
-            Provisioning started. Returns { jobId, billing } where `billing`
-            (MailboxBilling) is the SPEC §18 projection for the real
-            post-provision mailbox count. A quoteOnly:true request instead
-            returns 200 with { quoteOnly: true, billing } and provisions nothing.
+            Provisioning started. Returns { jobId, billing } where `jobId` is
+            a correlation id only, not a trackable job handle — there is no
+            job store and no endpoint that accepts it, so do not poll for it
+            or treat its presence as meaningful. `billing` (MailboxBilling)
+            is the SPEC §18 projection for the real post-provision mailbox
+            count. A quoteOnly:true request instead returns 200 with
+            { quoteOnly: true, billing } and provisions nothing.
 
 
             A `provisioning` field is present only when the call returned
@@ -200,6 +207,54 @@ paths:
                   nextSteps: { $ref: '#/components/schemas/NextSteps' }
         '401':
           $ref: '#/components/responses/Unauthorized'
+
+  /remove-mailboxes:
+    post:
+      operationId: remove_mailboxes
+      tags: [infrastructure]
+      summary: Downgrade — release the N newest live mailboxes and lower the billed quantity.
+      description: >
+        Releases `count` MORE mailboxes than are currently released (RELATIVE,
+        not a target fleet size) and syncs the lower Stripe quantity
+        (proration_behavior 'none' — no mid-cycle credit; the lower price
+        takes effect at the next renewal, minimum 5 mailboxes / $99).
+        `acknowledged: true` is the quoted, irreversible-this-cycle consent
+        this call requires.
+
+
+        A keyed call's FIRST attempt resolves and records WHICH mailboxes to
+        release; every later call under the SAME Idempotency-Key can only
+        ever finish that recorded set, whatever `count` it sends — a genuine
+        second downgrade needs a NEW key. `releasedCount` can be less than
+        the requested `count`: `failedCount` names how many the provider
+        refused (still live, still billed) and `unreleased` lists those
+        addresses — read them before concluding a downgrade landed. A 409
+        means a release is already running for this account.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [count, acknowledged]
+              properties:
+                count: { type: integer, minimum: 1, maximum: 60, description: How many MORE mailboxes to release. }
+                acknowledged: { type: boolean, enum: [true], description: Quoted, irreversible-this-cycle consent. }
+      responses:
+        '200':
+          description: Release outcome (partial or complete — see `failedCount`/`unreleased`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoveMailboxesResult'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/RequestInProgress'
 
   /campaigns:
     post:
@@ -331,7 +386,7 @@ paths:
     get:
       operationId: metrics
       tags: [account]
-      summary: Account-wide deliverability + warmup health.
+      summary: Account-wide outcome totals across all campaigns (sent, reply, bounce, complaint, unsubscribe, failed, soft_bounce).
       responses:
         '200':
           description: Metrics snapshot.
@@ -822,7 +877,7 @@ paths:
       tags: [webhooks]
       summary: Create an outbound webhook subscription.
       description: >
-        Push reply, bounce, soft_bounce, and complaint events to your own
+        Push reply, bounce, soft_bounce, complaint, and unsubscribe events to your own
         HTTPS endpoint instead of polling GET /activity. Deliveries are
         signed `X-Coldrig-Signature: sha256=HMAC-SHA256(secret, raw body)`.
         URLs must be https and resolve to a public host — private/link-
@@ -1280,12 +1335,16 @@ paths:
         account: its token is rejected at auth with 401 before this
         endpoint runs. The operator's reply arrives as a message on
         THIS account (poll GET /messages or infrastructure_status's
-        messages[] — there is no separate reply-fetch endpoint). Retrying
-        with the IDENTICAL body AND urgency within an hour is safe: it
-        returns the SAME ticketId and never files a second ticket or sends a
-        second alert, so no Idempotency-Key is needed. Raising the urgency
-        on the same text is an ESCALATION, not a replay, and does file a new
-        ticket. Rate-limited to 5 calls/hour per tenant.
+        messages[] — there is no separate reply-fetch endpoint). Sending the
+        IDENTICAL body AND urgency again within an hour returns the SAME
+        ticketId and never files a second ticket or sends a second alert —
+        no Idempotency-Key is needed to retry a dropped response. This is a
+        TEXT match, not an intent match: a genuinely new message with
+        coincidentally-identical wording collapses into the earlier ticket
+        the same way a deliberate retry does — vary the wording if you have
+        something new to say. Raising the urgency on the same text is an
+        ESCALATION, not a replay, and does file a new ticket. Rate-limited
+        to 5 calls/hour per tenant.
       requestBody:
         required: true
         content:
@@ -1972,8 +2031,8 @@ components:
 
     WebhookEventType:
       type: string
-      enum: [reply, bounce, soft_bounce, complaint]
-      description: "reply = genuine reply; bounce = HARD (permanent) bounce; soft_bounce = transient bounce; complaint = spam complaint."
+      enum: [reply, bounce, soft_bounce, complaint, unsubscribe]
+      description: "reply = genuine reply; bounce = HARD (permanent) bounce; soft_bounce = transient bounce; complaint = spam complaint; unsubscribe = typed unsubscribe-link click."
 
     WebhookCreateInput:
       type: object
@@ -2227,6 +2286,26 @@ components:
         provisionedAfter: { type: integer, description: Live provisioned mailbox count after this operation. }
         projectedMonthlyCents: { type: integer, description: Projected monthly on the $49 + $10/mailbox curve (min 5), folding any checkout discount. }
         formula: { type: string }
+
+    RemoveMailboxesResult:
+      type: object
+      description: >
+        `releasedCount` is what COMPLETED this call and can be less than the
+        requested `count`; `failedCount` names how many the provider refused
+        (STILL LIVE, still billed) and `unreleased` lists those addresses
+        (length === failedCount). `billing` is the projected monthly after
+        the release (the lower count, floored at $99).
+      required: [releasedCount, failedCount, unreleased, billing]
+      properties:
+        releasedCount: { type: integer }
+        failedCount: { type: integer }
+        unreleased:
+          type: array
+          items: { type: string }
+        billing:
+          $ref: '#/components/schemas/MailboxBilling'
+        nextSteps:
+          $ref: '#/components/schemas/NextSteps'
 
     ManagedMailboxesResult:
       type: object

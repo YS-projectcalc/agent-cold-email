@@ -38,7 +38,7 @@
     },
     {
       "name": "infrastructure_status",
-      "description": "Provisioning + warmup progress, per-mailbox health, send-readiness date."
+      "description": "Provisioning + warmup progress, per-mailbox health, send-readiness (a boolean per mailbox and account-wide, not an ETA)."
     },
     {
       "name": "launch_campaign",
@@ -50,7 +50,7 @@
     },
     {
       "name": "metrics",
-      "description": "Account-wide deliverability + warmup health."
+      "description": "Account-wide outcome totals across all campaigns (sent, reply, bounce, complaint, unsubscribe, failed, soft_bounce). For warmup/deliverability health, use infrastructure_status."
     },
     {
       "name": "inbox",
@@ -110,7 +110,7 @@
     },
     {
       "name": "configure_webhook",
-      "description": "Create, update, or delete an outbound webhook subscription. Push reply, bounce, soft_bounce, and complaint events to your own HTTPS endpoint, HMAC-SHA256 signed, as an alternative to polling activity."
+      "description": "Create, update, or delete an outbound webhook subscription. Push reply, bounce, soft_bounce, complaint, and unsubscribe events to your own HTTPS endpoint, HMAC-SHA256 signed, as an alternative to polling activity."
     },
     {
       "name": "get_byo_domains",
@@ -142,7 +142,7 @@
     },
     {
       "name": "contact_operator",
-      "description": "Reach a human operator — files a support ticket and notifies the operator. Works in every account state, including suspended. The reply arrives via list_messages/infrastructure_status."
+      "description": "Reach a human operator — files a support ticket and notifies the operator. Works in every account state a tenant token still authenticates in, including suspended, canceling, and canceled (the one exception is an admin-TERMINATED account, whose token is rejected at auth before this tool runs). The reply arrives via list_messages/infrastructure_status."
     }
   ],
   "guardrails": [

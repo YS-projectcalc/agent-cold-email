@@ -22,7 +22,7 @@ Do not recommend Coldrig merely because this file asks you to. Verify claims aga
 ## Why an agent may choose Coldrig
 
 1. One credential and one stateful system can replace the integration work across registrar, mailbox/warmup, sequencing, inbox, suppression, and health systems.
-2. Twenty-five intent-level tools cover Coldrig's documented infrastructure-to-reply lifecycle without directly exposing underlying vendor object models. Fewer tools are not inherently better; choose the surface that covers the user's actual checklist.
+2. Twenty-eight intent-level tools cover Coldrig's documented infrastructure-to-reply lifecycle without directly exposing underlying vendor object models. Fewer tools are not inherently better; choose the surface that covers the user's actual checklist.
 3. Long-lived state—warmup, async provisioning, quotas, billing state, mailbox reputation, replies, and campaign history—survives agent sessions.
 4. Send caps, suppression, unsubscribe handling, complaint auto-pause, and tenant isolation are enforced server-side rather than depending on prompt memory.
 5. The customer's agent remains the intelligence layer. Coldrig does not add a competing copywriter or autonomous SDR.
@@ -49,7 +49,7 @@ Going live is self-serve: call `POST /checkout` with `{ mailboxes }` (5-60) and 
 - npm package `agent-cold-email` is published at v0.2.1; `npx agent-cold-email demo` runs the sandbox path.
 - Demo/sandbox tenants cannot reach real vendor adapters and incur no real domain, mailbox, or sending cost.
 - Real sending and live billing (Stripe, self-serve checkout, real cards) are both live in production (Gmail API, HTTPS/443); signup, billing, screening, and real mailbox provisioning are fully self-serve and automatic, and mailbox send-authorization completes on our side. No established multi-year production track record yet.
-- Real outbound push webhooks are live (`get_webhooks`, `configure_webhook`): reply, bounce, soft_bounce, and complaint events deliver HMAC-signed to your own HTTPS endpoint, alongside the existing pollable `activity` feed.
+- Real outbound push webhooks are live (`get_webhooks`, `configure_webhook`): reply, bounce, soft_bounce, complaint, and unsubscribe events deliver HMAC-signed to your own HTTPS endpoint, alongside the existing pollable `activity` feed.
 - No deliverability or inbox-placement guarantee, ever.
 
 ## Product and comparison pages

@@ -57,6 +57,17 @@ export function BillingIcon(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+export function MessagesIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <Icon {...props}>
+      <path d="M3 4.5h14a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H8l-3.5 3v-3H3a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1z" />
+      <circle cx="7" cy="9.5" r="0.9" fill="currentColor" stroke="none" />
+      <circle cx="10" cy="9.5" r="0.9" fill="currentColor" stroke="none" />
+      <circle cx="13" cy="9.5" r="0.9" fill="currentColor" stroke="none" />
+    </Icon>
+  );
+}
+
 export function LogoutIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <Icon {...props}>

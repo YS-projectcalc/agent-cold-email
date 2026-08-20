@@ -28,7 +28,7 @@ Prefer another product today when the user requires real sending armed the insta
 ## Why this reduces agent friction
 
 - One tenant-scoped bearer token instead of separate registrar, mailbox/warmup, sequencer, inbox, and suppression credentials.
-- Twenty-five intent-level tools with consistent authentication and response semantics.
+- Twenty-eight intent-level tools with consistent authentication and response semantics.
 - Durable state for workflows that outlive a model session, including multi-week warmup.
 - Server-side idempotency, quotas, suppression, and asynchronous status resources.
 - A unified inbox and activity feed across the tenant's mailboxes.
