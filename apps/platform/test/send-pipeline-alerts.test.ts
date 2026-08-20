@@ -104,12 +104,24 @@ describe("§1c alert — aging credential push", () => {
 
     // 5. The grant lands — the push row itself now reads 'pushed', so the clear
     //    is a RE-OBSERVATION and the founder is told it recovered.
+    //    A `reobserved` clear takes `recoverAfterObservations` observations to
+    //    close the episode (alert-state design §3.1); the first two are silent
+    //    holds and the RECOVERED email itself is unchanged.
     const cleared = summaryWith({ agingPendingPushes: [], credentialPushes: [{ email, status: "pushed" }] }, [email]);
+    for (const offset of [2, 3]) {
+      outcomes = await reconcileAlerts(
+        env,
+        mailer,
+        sendPipelineChecks("ten_x", cleared, await readReportedCheckNames(env)),
+        confirmedAt + WATCHTOWER_COOLDOWN_MS + offset,
+      );
+      expect(outcomes).toEqual([{ name: check, action: "holding", emailSent: false, why: "pending_recovery" }]);
+    }
     outcomes = await reconcileAlerts(
       env,
       mailer,
       sendPipelineChecks("ten_x", cleared, await readReportedCheckNames(env)),
-      confirmedAt + WATCHTOWER_COOLDOWN_MS + 2,
+      confirmedAt + WATCHTOWER_COOLDOWN_MS + 4,
     );
     expect(outcomes).toEqual([{ name: check, action: "recovered", emailSent: true, why: "sent" }]);
     expect(mailer.sent.at(-1)!.subject).toContain("RECOVERED");
@@ -164,12 +176,18 @@ describe("§1c alert — send-starved tenant", () => {
     );
     expect(outcomes).toEqual([{ name: check, action: "suppressed", emailSent: false, why: "suppressed_cooldown" }]);
 
+    // Capacity really came back (`eligibleMailboxes > 0` is the reobserved arm),
+    // so the episode closes after `recoverAfterObservations` clean observations.
     const recovered = summaryWith({ dueNonDemoPendingSends: 7, eligibleMailboxes: 2 });
+    for (const at of [T0 + 900_000, T0 + 1_200_000]) {
+      outcomes = await reconcileAlerts(env, mailer, sendPipelineChecks("ten_starved", recovered, await readReportedCheckNames(env)), at);
+      expect(outcomes).toEqual([{ name: check, action: "holding", emailSent: false, why: "pending_recovery" }]);
+    }
     outcomes = await reconcileAlerts(
       env,
       mailer,
       sendPipelineChecks("ten_starved", recovered, await readReportedCheckNames(env)),
-      T0 + 900_000,
+      T0 + 1_500_000,
     );
     expect(outcomes).toEqual([{ name: check, action: "recovered", emailSent: true, why: "sent" }]);
   });

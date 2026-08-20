@@ -8,7 +8,7 @@ import {
   sendStarvedCheckName,
   tenantDoWedgedCheckName,
 } from "../src/admin/watchtower.js";
-import { decideAlert, type AlertAction, type AlertState } from "../src/admin/watchtower-policy.js";
+import { decideAlert, type AlertAction, type AlertObservation, type AlertState } from "../src/admin/watchtower-policy.js";
 import alertsSource from "../src/admin/watchtower-alerts.ts?raw";
 
 // The founder's 2026-08-16 ruling has ONE hard exemption (the cron dead-man)
@@ -22,13 +22,26 @@ const HOUR = 3_600_000;
 const SWEEP = 300_000;
 const T0 = 1_800_000_000_000;
 
+/**
+ * One observation, as `decideAlert` now takes it (alert-state design §9.1): a
+ * discriminated argument carrying the materiality key on the unhealthy arm.
+ * The drivers below moved to it; every EXPECTATION in this file is unchanged,
+ * which is the point — `realertCount` was split off `alertCount` precisely so
+ * the shipped ladder stays byte-identical (§9.5).
+ *
+ * ONE key throughout, so nothing here ever escalates: this file pins the LADDER,
+ * and a churning key would be testing the escape instead.
+ */
+const BAD: AlertObservation = { healthy: false, materiality: "down" };
+const GOOD: AlertObservation = { healthy: true, basis: "reobserved" };
+
 /** Drive one check through a timeline of (nowMs, healthy) observations and
  * return the action for each — the whole policy, as its observable behaviour. */
 function run(checkName: string, observations: Array<{ at: number; healthy: boolean }>): AlertAction[] {
   const policy = policyFor(checkName);
   let state: AlertState | null = null;
   return observations.map(({ at, healthy }) => {
-    const transition = decideAlert(state, healthy, at, policy);
+    const transition = decideAlert(state, healthy ? GOOD : BAD, at, policy);
     state = transition.next;
     return transition.action;
   });
@@ -40,7 +53,7 @@ function sustained(checkName: string, hours: number): number[] {
   const policy = policyFor(checkName);
   let state: AlertState | null = null;
   for (let at = 0; at <= hours * HOUR; at += SWEEP) {
-    const transition = decideAlert(state, false, T0 + at, policy);
+    const transition = decideAlert(state, BAD, T0 + at, policy);
     state = transition.next;
     if (transition.action === "alerted" || transition.action === "realerted") emailedAt.push(at);
   }
@@ -89,13 +102,23 @@ describe("the debounced default", () => {
     expect(confirmedAt + SWEEP).toBeLessThanOrEqual(15 * 60_000);
   });
 
+  // SPEC CHANGE (IN-9, alert-state design §3.1 + §6.11). The property is
+  // unchanged — a single-observation flap is worth ZERO emails, and `holding` is
+  // as silent as `healthy` was. What changed is that the episode does not CLOSE
+  // on the first clean observation, so the bad observation is not erased: that
+  // erasure is why a fault flapping bad/good never assembled two in a row and
+  // stayed silent forever (24 alternating observations, 0 emails, executed).
+  // The flap still costs nothing, because the episode closes silently three
+  // clean observations later with `alertCount` at 0.
   it("says nothing at all about a single-observation flap", () => {
     expect(
       run(tenantDoWedgedCheckName("ten_flap"), [
         { at: T0, healthy: false },
         { at: T0 + SWEEP, healthy: true },
+        { at: T0 + 2 * SWEEP, healthy: true },
+        { at: T0 + 3 * SWEEP, healthy: true },
       ]),
-    ).toEqual(["pending", "healthy"]);
+    ).toEqual(["pending", "holding", "holding", "healthy"]);
   });
 });
 
@@ -197,6 +220,13 @@ describe("failing-by-construction — a new check cannot inherit an unchosen pol
     // so the debounce is the only thing standing between a single flaky
     // WatchtowerDO RPC and an email.
     sweep_signals: 2,
+    // Alert-state design §3.3 — the alerting channel's own saturation check.
+    // DEBOUNCED deliberately: it is re-observed every tick from the announcement
+    // counter, so one tick that touches the ceiling is a flap worth zero emails
+    // and two consecutive (10 min) is a saturated channel. Its exemption is from
+    // the BUDGET (an alarm may not be budgeted by the budget it announces), not
+    // from the debounce — see `ALERT_FAMILIES`.
+    alert_budget_exceeded: 2,
   };
 
   function declaredCheckNames(source: string): string[] {

@@ -34,8 +34,8 @@ interface ChecksResponse {
 
 const T0 = 1_800_000_000_000;
 
-function unhealthy(name: string, detail = "down"): CheckResult {
-  return { name, healthy: false, detail };
+function unhealthy(name: string, detail = "down", materiality = "down"): CheckResult {
+  return { name, healthy: false, detail, materiality };
 }
 function healthy(name: string, detail = "ok", basis: RecoveryBasis = "reobserved"): CheckResult {
   return { name, healthy: true, detail, basis };

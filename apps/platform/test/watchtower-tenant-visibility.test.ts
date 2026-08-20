@@ -79,7 +79,9 @@ describe("BLOCKING-3 — a wedged tenant DO surfaces by name", () => {
     await runInDurableObject(tenantStub(tenantId), (_instance, state) => {
       state.storage.sql.exec(TENANT_DO_SCHEMA);
     });
-    await runWatchtower(env, mailer, T0 + 4 * 300_000);
+    // Three clean sweeps to confirm the recovery (§3.1) — the tenant answering
+    // once is not yet evidence the wedge is over.
+    for (let i = 4; i <= 6; i++) await runWatchtower(env, mailer, T0 + i * 300_000);
 
     expect(mailer.sent.filter((m) => m.subject.includes(tenantId)).map((m) => m.subject)).toEqual([
       `[coldrig] Tenant state unreachable ${tenantId}: UNHEALTHY`,

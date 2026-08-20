@@ -93,8 +93,10 @@ describe("NB-1 — failure_signals no longer flaps", () => {
     await runWatchtower(env, mailer, T0 + 5 * SWEEP + FAILURE_SIGNAL_WINDOW_MS - SWEEP);
     expect(failureSubjects(mailer)).toHaveLength(1);
 
-    // Past it: the window is clean, so exactly one recovery.
-    await runWatchtower(env, mailer, T0 + 5 * SWEEP + FAILURE_SIGNAL_WINDOW_MS + SWEEP);
+    // Past it: the window is clean, so exactly one recovery — after
+    // `recoverAfterObservations` clean observations confirm it (§3.1). The
+    // property this test is about is EXACTLY ONE, and it still is.
+    for (let i = 1; i <= 3; i++) await runWatchtower(env, mailer, T0 + 5 * SWEEP + FAILURE_SIGNAL_WINDOW_MS + i * SWEEP);
     expect(failureSubjects(mailer)).toEqual([
       "[coldrig] Failure signals: UNHEALTHY",
       "[coldrig] Failure signals: RECOVERED",

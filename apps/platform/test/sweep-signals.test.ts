@@ -415,6 +415,13 @@ describe("alert_delivery — an alert that was OWED and did not arrive", () => {
     expect(mailer.sent[0]!.text).toContain("GET /admin/ops/checks");
   });
 
+  // THE FILTER IS AN ALLOWLIST AND MUST STAY ONE (alert-state design §7.2).
+  // `alert_delivery` counts `dark_channel` / `send_failed` BY NAME, and the
+  // alert-state increment adds three more non-delivery reasons —
+  // `pending_recovery`, `suppressed_key_cap`, `suppressed_daily_budget`. If this
+  // ever became a catch-all ("anything not sent"), the budget's own deliberate
+  // withholding would read as a delivery FAILURE and page the founder about the
+  // mechanism that exists to stop paging them.
   it("a SUPPRESSED or debounced alert is not an undelivered one", async () => {
     const mailer = new SandboxOpsMailer();
     const legs = {
@@ -422,6 +429,10 @@ describe("alert_delivery — an alert that was OWED and did not arrive", () => {
         { name: "do_storage", action: "suppressed", emailSent: false, why: "suppressed_cooldown" },
         { name: "engine", action: "pending", emailSent: false, why: "pending_debounce" },
         { name: "customer_progress_agent:ten_x", action: "alerted", emailSent: false, why: "digest_only" },
+        // The three the alert-state increment adds.
+        { name: "vendor_wallet", action: "holding", emailSent: false, why: "pending_recovery" },
+        { name: "tenant_do_wedged:ten_capped", action: "suppressed", emailSent: false, why: "suppressed_key_cap" },
+        { name: "tenant_do_wedged:ten_budgeted", action: "alerted", emailSent: false, why: "suppressed_daily_budget" },
       ],
     };
     for (let i = 0; i < LEG_ALERT_AFTER_SWEEPS + 1; i++) {
@@ -449,7 +460,14 @@ describe("sweep_signals — the alerting leg's own death", () => {
   it("recovers when it runs again", async () => {
     const mailer = new SandboxOpsMailer();
     for (let i = 0; i < 2; i++) await reportSweepSignalsHealth(env, mailer, false, T0 + i * 300_000);
-    await reportSweepSignalsHealth(env, mailer, true, T0 + 2 * 300_000);
+    // This check is DEBOUNCED on both sides (alert-state design §3.3): it is
+    // reported once per tick with no upstream damping, so its recovery takes
+    // `recoverAfterObservations` clean ticks exactly as its alert takes two bad
+    // ones. The first two clean ticks are silent holds.
+    for (let i = 2; i < 4; i++) await reportSweepSignalsHealth(env, mailer, true, T0 + i * 300_000);
+    expect(subjectsFor(mailer, "Ops sweep signal reporting")).toEqual(["[coldrig] Ops sweep signal reporting: UNHEALTHY"]);
+
+    await reportSweepSignalsHealth(env, mailer, true, T0 + 4 * 300_000);
     expect(subjectsFor(mailer, "Ops sweep signal reporting")).toEqual([
       "[coldrig] Ops sweep signal reporting: UNHEALTHY",
       "[coldrig] Ops sweep signal reporting: RECOVERED",

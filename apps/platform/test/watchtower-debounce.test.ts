@@ -37,8 +37,8 @@ const SWEEP = 300_000;
 const FIRST_REALERT_MS = 6 * 3_600_000;
 const STEADY_REALERT_MS = 24 * 3_600_000;
 
-function unhealthy(name: string, detail = "down"): CheckResult {
-  return { name, healthy: false, detail };
+function unhealthy(name: string, detail = "down", materiality = "down"): CheckResult {
+  return { name, healthy: false, detail, materiality };
 }
 function healthy(name: string, detail = "ok", basis: RecoveryBasis = "reobserved"): CheckResult {
   return { name, healthy: true, detail, basis };
@@ -64,8 +64,22 @@ describe("A — transition debounce (D1-backed store)", () => {
 
     // ...and it is fine again on the very next sweep. The founder never hears
     // about it: no UNHEALTHY, and no RECOVERED for an alert that never went out.
+    //
+    // SPEC CHANGE (alert-state design §3.1): the episode does not CLOSE on that
+    // first clean sweep any more — it goes `holding`, silently, until
+    // `recoverAfterObservations` clean observations confirm the recovery. The
+    // property this test exists for is unchanged and is the assertion below:
+    // ZERO emails. What changed is that the counters are no longer thrown away
+    // by one good tick, which is the whole of IN-9 — see the alternation test.
     const second = await reconcileAlerts(env, mailer, [healthy("do_storage")], T0 + SWEEP);
-    expect(second).toEqual([{ name: "do_storage", action: "healthy", emailSent: false, why: "nothing_owed" }]);
+    expect(second).toEqual([{ name: "do_storage", action: "holding", emailSent: false, why: "pending_recovery" }]);
+    expect(mailer.sent).toEqual([]);
+
+    // Three clean observations later the episode is closed, still silently:
+    // nothing was ever announced, so nothing is owed in either direction.
+    for (let i = 2; i <= 3; i++) await reconcileAlerts(env, mailer, [healthy("do_storage")], T0 + i * SWEEP);
+    const closed = await reconcileAlerts(env, mailer, [healthy("do_storage")], T0 + 4 * SWEEP);
+    expect(closed).toEqual([{ name: "do_storage", action: "healthy", emailSent: false, why: "nothing_owed" }]);
     expect(mailer.sent).toEqual([]);
   });
 
@@ -87,21 +101,48 @@ describe("A — transition debounce (D1-backed store)", () => {
     expect(mailer.sent).toHaveLength(1);
   });
 
-  it("the debounce counts CONSECUTIVE observations — a good sweep in between resets it", async () => {
+  // REWRITTEN AS A SPEC CHANGE (IN-9, alert-state design §3.1 + §6.11).
+  //
+  // This test used to assert the DEFECT. Its own title was the mechanism: "the
+  // debounce counts CONSECUTIVE observations — a good sweep in between resets
+  // it", asserting `mailer.sent` was EMPTY across six sweeps of a fault that was
+  // unhealthy half the time. That is a real, sustained fault that the founder
+  // was never told about, and no length of it would ever have alerted — the
+  // gate executed 24 alternating observations against HEAD and got 0 emails.
+  //
+  // The rule is now the one the already-shipped sibling fix uses one layer down
+  // in `gradeStreak`: "N unhealthy observations NOT YET ANSWERED BY A FULL
+  // RECOVERY RUN". A good tick moves the episode to `holding`; it does not
+  // discard what was already seen. Only a confirmed recovery closes the episode
+  // and zeroes the count, so a genuine once-a-month flake still costs zero
+  // emails (the test above) while an intermittent fault pages inside the
+  // founder's 10-15 minute ceiling.
+  it("an INTERMITTENT fault confirms and alerts — a good sweep no longer erases the bad one", async () => {
     const mailer = new SandboxOpsMailer();
+    const actions: string[] = [];
     // bad, good, bad, good, bad, good — six sweeps of an intermittent blip.
     for (let i = 0; i < 6; i++) {
       const result = i % 2 === 0 ? unhealthy("do_storage") : healthy("do_storage");
-      await reconcileAlerts(env, mailer, [result], T0 + i * SWEEP);
+      const [outcome] = await reconcileAlerts(env, mailer, [result], T0 + i * SWEEP);
+      actions.push(outcome!.action);
     }
-    expect(mailer.sent).toEqual([]);
+
+    // Seen at t=0, held at t=5min, CONFIRMED at t=10min — inside the ceiling.
+    expect(actions).toEqual(["pending", "holding", "alerted", "holding", "suppressed", "holding"]);
+    expect(mailer.sent.map((m) => m.subject)).toEqual(["[coldrig] Durable Object storage: UNHEALTHY"]);
   });
 
   it("a confirmed alert still recovers loudly (the debounce did not mute recovery)", async () => {
     const mailer = new SandboxOpsMailer();
     await reconcileAlerts(env, mailer, [unhealthy("engine")], T0);
     await reconcileAlerts(env, mailer, [unhealthy("engine")], T0 + SWEEP);
-    const recovered = await reconcileAlerts(env, mailer, [healthy("engine")], T0 + 2 * SWEEP);
+    // SPEC CHANGE (§3.1): a `reobserved` clear now needs
+    // `recoverAfterObservations` observations to close the episode. The first
+    // two are silent holds; the third is the recovery, and it is still LOUD.
+    const holding = await reconcileAlerts(env, mailer, [healthy("engine")], T0 + 2 * SWEEP);
+    expect(holding).toEqual([{ name: "engine", action: "holding", emailSent: false, why: "pending_recovery" }]);
+    await reconcileAlerts(env, mailer, [healthy("engine")], T0 + 3 * SWEEP);
+    const recovered = await reconcileAlerts(env, mailer, [healthy("engine")], T0 + 4 * SWEEP);
 
     expect(recovered).toEqual([{ name: "engine", action: "recovered", emailSent: true, why: "sent" }]);
     expect(mailer.sent.map((m) => m.subject)).toEqual([
@@ -132,12 +173,25 @@ describe("A — transition debounce (D1-backed store)", () => {
     await runWatchtower(env, mailer, T0 + SWEEP);
     expect(mailer.sent.filter((m) => m.subject.includes(tenantId))).toEqual([]);
 
-    // ...and the state machine is back to a clean baseline, so a REAL wedge
-    // after this still alerts on its own two observations.
+    // SPEC CHANGE (§3.1): the row is now HOLDING rather than closed — one clean
+    // sweep is not a confirmed recovery. The founder-visible property this test
+    // exists for is the two assertions above (zero emails), and it holds. What
+    // `healthy_obs` buys is the other half of the same defect: the bad
+    // observation is no longer erased, so a fault that flaps rather than staying
+    // down confirms instead of hiding forever.
+    const holding = await env.DB.prepare(`SELECT status, healthy_obs FROM watchtower_state WHERE check_name = ?`)
+      .bind(tenantDoWedgedCheckName(tenantId))
+      .first<{ status: string; healthy_obs: number }>();
+    expect(holding).toMatchObject({ status: "unhealthy", healthy_obs: 1 });
+
+    // Two more clean sweeps and it IS back to a clean baseline.
+    await runWatchtower(env, mailer, T0 + 2 * SWEEP);
+    await runWatchtower(env, mailer, T0 + 3 * SWEEP);
     const row = await env.DB.prepare(`SELECT status FROM watchtower_state WHERE check_name = ?`)
       .bind(tenantDoWedgedCheckName(tenantId))
       .first<{ status: string }>();
     expect(row?.status).toBe("healthy");
+    expect(mailer.sent.filter((m) => m.subject.includes(tenantId))).toEqual([]);
   }, 30_000);
 });
 
