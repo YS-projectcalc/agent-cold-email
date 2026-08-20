@@ -1,6 +1,9 @@
 /// <reference types="vite/client" />
 import { describe, expect, it } from "vitest";
 import recoverySource from "../src/ofac/screening-recovery.ts?raw";
+import reaperSource from "../src/engine/spend-ceiling.ts?raw";
+import budgetSource from "../src/admin/sweep-budget.ts?raw";
+import scheduledSource from "../src/scheduled.ts?raw";
 import {
   ASSUMED_DO_RPC_MS,
   coverageTicks,
@@ -10,6 +13,10 @@ import {
   SWEEP_BUDGET_FRACTION,
   SWEEP_FANOUT_DEADLINE_MS,
   SWEEP_FANOUT_RPCS_PER_TENANT,
+  LEG_SUBREQUEST_COSTS,
+  RESERVE_REAP_BATCH,
+  RESERVE_REAP_SUBREQUESTS,
+  RESERVE_REAP_SUBREQUESTS_PER_ITEM,
   SCREENING_RECOVERY_BATCH,
   SCREENING_RECOVERY_SUBREQUESTS,
   SCREENING_RECOVERY_SUBREQUESTS_PER_ITEM,
@@ -20,6 +27,15 @@ import {
   SWEEP_TENANT_SLICE,
   SWEEP_TICK_SUBREQUESTS,
 } from "../src/admin/sweep-budget.js";
+
+/** The keys of `scheduled.ts`'s own `const legs = { ... }` bag — the SCHEDULER
+ * as the source of truth for what legs exist, independent of what the budget
+ * file believes. Same reader shape as sweep-signal-coverage.test.ts. */
+function legBagKeys(source: string): string[] {
+  const block = source.match(/const legs = \{([\s\S]*?)\n {2}\};/)?.[1];
+  if (!block) throw new Error("could not find the `const legs = {...}` bag in scheduled.ts");
+  return [...block.matchAll(/^\s{4}([a-zA-Z0-9_]+)[,:]/gm)].map((m) => m[1]!);
+}
 
 // SCALE AUDIT S1 + S6 — the arithmetic that bounds one cron tick.
 //
@@ -72,19 +88,81 @@ describe("S6 — the cron period is fully accounted for, by construction", () =>
 // cron that is running. "Bounded by a population that is not the tenant count"
 // is not the same as "small", and a docstring is not an accounting.
 describe("B1 — every leg with its own fan-out is IN the derivation, not waved through in prose", () => {
-  it("the fixed term is a CLOSED sum of its declared parts", () => {
-    // The guard: a new leg with its own population has to appear here, or this
-    // identity stops holding and the suite reds. It is the one assertion that
-    // makes "the accounting is complete" checkable rather than asserted.
-    expect(SWEEP_FIXED_SUBREQUESTS).toBe(SWEEP_FIXED_OVERHEAD_SUBREQUESTS + SCREENING_RECOVERY_SUBREQUESTS);
+  // NEW-2 (gate round 2): the assertion that used to live here was
+  // `SWEEP_FIXED_SUBREQUESTS === OVERHEAD + SCREENING_RECOVERY_SUBREQUESTS`
+  // while the source DEFINED it as exactly that sum — `A === A`, incapable of
+  // failing. The gate planted the precise defect its comment claimed to catch
+  // (a new 300 x 3 fan-out leg declared in the budget file, not summed in) and
+  // the suite stayed green 13/13.
+  //
+  // Two ORACLES replace it, neither of which is the thing it checks:
+  //
+  //  (1) the SCHEDULER's own leg bag vs the per-leg cost table, with the
+  //      columns summing to the two derived constants — three sources that all
+  //      have to agree;
+  //  (2) the budget file's SOURCE TEXT: every declared `*_SUBREQUESTS` term
+  //      must literally appear as an operand of the aggregate, which is what
+  //      catches a term that is declared and then not added.
+
+  it("every leg the scheduler actually runs has a declared cost", () => {
+    const uncosted = legBagKeys(scheduledSource).filter((name) => !(name in LEG_SUBREQUEST_COSTS));
+    expect(
+      uncosted,
+      "a cron leg exists that the budget does not price. If it fans out over the tenant slice give it a " +
+        "`perTenant` cost; if it fans out over a population of its OWN (the screening-recovery reviews, the " +
+        "stale-reserve entries) it needs a declared batch, an `ownFanout` term, and to run through sweepTenants — " +
+        "that is B1 and NEW-1, both of which reached production-shaped code as an unpriced leg.",
+    ).toEqual([]);
+  });
+
+  it("prices no leg the scheduler does not run", () => {
+    const legs = new Set(legBagKeys(scheduledSource));
+    const orphaned = Object.keys(LEG_SUBREQUEST_COSTS).filter((name) => !legs.has(name));
+    expect(orphaned, "LEG_SUBREQUEST_COSTS prices a leg scheduled.ts no longer runs — delete it (CLAUDE.md rule a)").toEqual([]);
+  });
+
+  it("the per-leg costs SUM to the two derived constants — the oracle the tautology was missing", () => {
+    const perTenant = Object.values(LEG_SUBREQUEST_COSTS).reduce((n, leg) => n + leg.perTenant, 0);
+    const ownFanout = Object.values(LEG_SUBREQUEST_COSTS).reduce((n, leg) => n + leg.ownFanout, 0);
+    expect(perTenant, "the per-leg RPC costs no longer add up to SWEEP_RPCS_PER_TENANT").toBe(SWEEP_RPCS_PER_TENANT);
+    expect(
+      ownFanout,
+      "a leg's own fan-out is priced in LEG_SUBREQUEST_COSTS but not summed into SWEEP_FIXED_SUBREQUESTS " +
+        "(or vice versa) — the slice is being derived from a number that does not describe the tick",
+    ).toBe(SWEEP_FIXED_SUBREQUESTS - SWEEP_FIXED_OVERHEAD_SUBREQUESTS);
+  });
+
+  it("every declared subrequest term is an OPERAND of the aggregate, read from the source", () => {
+    // The oracle for the gate's exact plant: a `*_SUBREQUESTS` constant can be
+    // declared in the budget file and simply never added. Comparing computed
+    // values cannot see that; comparing the DEFINITION TEXT can.
+    const aggregate = budgetSource.match(/export const SWEEP_FIXED_SUBREQUESTS\s*=([\s\S]*?);/)?.[1];
+    expect(aggregate, "could not find SWEEP_FIXED_SUBREQUESTS' definition — this guard would be vacuous").toBeTruthy();
+
+    const declared = [...budgetSource.matchAll(/^export const ([A-Z_0-9]*_SUBREQUESTS) =/gm)].map((m) => m[1]!);
+    const aggregates = new Set(["SWEEP_FIXED_SUBREQUESTS", "SWEEP_TICK_SUBREQUESTS", "SWEEP_SUBREQUEST_BUDGET"]);
+    const unsummed = declared.filter((name) => !aggregates.has(name) && !aggregate!.includes(name));
+    expect(
+      unsummed,
+      "a per-leg subrequest term is declared in sweep-budget.ts and never added to SWEEP_FIXED_SUBREQUESTS. " +
+        "The slice is derived by SUBTRACTING that aggregate from the budget, so an unsummed term is spend the " +
+        "tick makes and the arithmetic does not know about — which is exactly how the dead-man heartbeat " +
+        "vanished (B1) and how the stale-reserve reaper spent ~901 subrequests ahead of it (NEW-1).",
+    ).toEqual([]);
   });
 
   it("the screening-recovery leg's worst case is derived from its batch, not chosen separately", () => {
     expect(SCREENING_RECOVERY_SUBREQUESTS).toBe(SCREENING_RECOVERY_BATCH * SCREENING_RECOVERY_SUBREQUESTS_PER_ITEM);
   });
 
-  it("a FULL slice plus a FULL recovery batch still fits the budget — the arithmetic B1 broke", () => {
-    const worstCaseTick = SWEEP_RPCS_PER_TENANT * SWEEP_TENANT_SLICE + SWEEP_FIXED_OVERHEAD_SUBREQUESTS + SCREENING_RECOVERY_SUBREQUESTS;
+  it("a FULL slice plus EVERY leg's own fan-out still fits the budget — the arithmetic B1 broke", () => {
+    // Restated from the parts rather than read off the aggregate, so this stays
+    // an independent statement of the same claim.
+    const worstCaseTick =
+      SWEEP_RPCS_PER_TENANT * SWEEP_TENANT_SLICE +
+      SWEEP_FIXED_OVERHEAD_SUBREQUESTS +
+      SCREENING_RECOVERY_SUBREQUESTS +
+      RESERVE_REAP_SUBREQUESTS;
     expect(worstCaseTick).toBe(SWEEP_TICK_SUBREQUESTS);
     expect(worstCaseTick).toBeLessThanOrEqual(SWEEP_SUBREQUEST_BUDGET * SWEEP_BUDGET_FRACTION);
     // And the tail — the heartbeat, the alert sends, the per-check writes — is
@@ -99,6 +177,19 @@ describe("B1 — every leg with its own fan-out is IN the derivation, not waved 
     const breakEvenItems = Math.floor(tailReserve / SCREENING_RECOVERY_SUBREQUESTS_PER_ITEM);
     expect(SCREENING_RECOVERY_BATCH).toBeLessThanOrEqual(breakEvenItems);
     expect(500).toBeGreaterThan(breakEvenItems);
+  });
+
+  it("the stale-reserve reaper is bounded and priced too (NEW-1 — B1's class, one leg over)", () => {
+    expect(RESERVE_REAP_SUBREQUESTS).toBe(RESERVE_REAP_BATCH * RESERVE_REAP_SUBREQUESTS_PER_ITEM);
+    // It reads a bounded page and runs through the shared primitive with the
+    // tick's deadline — the same two properties B1's fix gave the other leg.
+    expect(reaperSource).toContain("RESERVE_REAP_BATCH");
+    expect(reaperSource).toContain("LIMIT ?");
+    expect(reaperSource).toContain("sweepDeadlineOf(");
+    expect(
+      reaperSource,
+      "the reaper's SELECT lost its bound — it spent ~901 subrequests on 300 orphans, ahead of the heartbeat",
+    ).not.toMatch(/WHERE status = 'reserved' AND created_at < \?\s*`/);
   });
 
   it("the leg takes its cap FROM the budget file — the two lanes cannot re-diverge", () => {

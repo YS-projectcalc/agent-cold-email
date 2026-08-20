@@ -23,6 +23,8 @@
 import { CapacityPendingError, operatorNotifiedClause, type Notified } from "@coldstart/shared";
 import { RealClock } from "../clock.js";
 import type { Env } from "../env.js";
+import { RESERVE_REAP_BATCH } from "../admin/sweep-budget.js";
+import { sweepDeadlineOf, sweepTenants, type SweepScope } from "../admin/tenant-slice.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import { newId } from "../schema.js";
 import type { TenantContext } from "../tenant-context.js";
@@ -554,25 +556,49 @@ export async function withSpendCeiling<T>(
 export async function reapStaleReservations(
   env: Env,
   nowMs: number,
-): Promise<{ reaped: number; releasedCents: number; errors: number }> {
+  scope: SweepScope = {},
+): Promise<{ reaped: number; releasedCents: number; errors: number; deferred: number }> {
   const cutoff = nowMs - RESERVE_REAP_TTL_MS;
+  // BOUNDED, and through the same primitive every other fan-out leg uses
+  // (NEW-1, round 2 of docs/adversarial/wave-b1-scale-monitoring-gate-2026-08-20.md).
+  // This read had no LIMIT and its loop had no deadline, at 2-3 subrequests a
+  // row, running AHEAD of the cursor commit, the send pipeline, the signal
+  // report and the heartbeat. Executed by the gate: 300 orphans => ~901
+  // subrequests in one leg, against a budgeted tick of 592. It is B1's class,
+  // one leg over, and it was pre-existing — which is precisely why the guard
+  // that should have caught it (`sweep-budget.test.ts`) had to stop being a
+  // tautology in the same commit.
   const stale = await env.DB.prepare(
-    `SELECT id, period_key, kind, est_cents FROM vendor_spend_entries WHERE status = 'reserved' AND created_at < ?`,
+    `SELECT id, period_key, kind, est_cents FROM vendor_spend_entries
+      WHERE status = 'reserved' AND created_at < ?
+      ORDER BY created_at ASC
+      LIMIT ?`,
   )
-    .bind(cutoff)
+    .bind(cutoff, RESERVE_REAP_BATCH)
     .all<{ id: string; period_key: string; kind: string; est_cents: number }>();
 
+  const byId = new Map(stale.results.map((row) => [row.id, row]));
   let reaped = 0;
   let releasedCents = 0;
-  let errors = 0;
-  for (const row of stale.results) {
-    try {
+
+  // OLDEST FIRST + a self-draining population: a reaped entry leaves
+  // `status = 'reserved'`, so the next tick's batch is the next 25. Nothing can
+  // sit at the head forever the way a rotation can.
+  //
+  // The tick's DEADLINE but NOT its rotation accumulator — this leg iterates
+  // ledger entries, not the tenant slice, so how many it visited says nothing
+  // about how far the tenant rotation got (admin/tenant-slice.ts).
+  const swept = await sweepTenants(
+    [...byId.keys()],
+    sweepDeadlineOf(scope.fanout),
+    async (entryId) => {
+      const row = byId.get(entryId) as { id: string; period_key: string; kind: string; est_cents: number };
       const flip = await env.DB.prepare(
         `UPDATE vendor_spend_entries SET status = 'released', updated_at = ? WHERE id = ? AND status = 'reserved'`,
       )
         .bind(nowMs, row.id)
         .run();
-      if ((flip.meta.changes ?? 0) === 0) continue; // committed/released concurrently — leave the counters untouched
+      if ((flip.meta.changes ?? 0) === 0) return; // committed/released concurrently — leave the counters untouched
       await env.DB.prepare(
         `UPDATE vendor_spend_ledger SET reserved_cents = MAX(0, reserved_cents - ?), updated_at = ? WHERE period_key = ?`,
       )
@@ -585,16 +611,15 @@ export async function reapStaleReservations(
       }
       reaped++;
       releasedCents += row.est_cents;
-    } catch (err) {
-      // One row's transient D1 failure must never abort reaping the rest of
-      // the batch — the row stays 'reserved' and is retried next tick (audit
-      // class-sweep sibling fix, 2026-08-06, mirrors runDunningSweep's
-      // per-tenant try/catch).
-      errors++;
-      console.error(`reapStaleReservations: failed to reap entry ${row.id}`, err);
-    }
-  }
-  return { reaped, releasedCents, errors };
+    },
+    // One row's transient D1 failure must never abort reaping the rest of
+    // the batch — the row stays 'reserved' and is retried next tick (audit
+    // class-sweep sibling fix, 2026-08-06, mirrors runDunningSweep's
+    // per-tenant try/catch).
+    (entryId, err) => console.error(`reapStaleReservations: failed to reap entry ${entryId}`, err),
+  );
+
+  return { reaped, releasedCents, errors: swept.errors, deferred: swept.deferred };
 }
 
 /**

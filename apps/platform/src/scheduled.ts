@@ -104,7 +104,7 @@ export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer;
   // crash between reserve and commit/release, so leaked reservations can't
   // silently shrink the effective ceiling. Its own concern (D1 account
   // ledger), so it can't delay the health/dunning/watchtower legs.
-  const spendReservations = await runLeg("spendReservations", null, () => reapStaleReservations(env, now));
+  const spendReservations = await runLeg("spendReservations", null, () => reapStaleReservations(env, now, scope));
   // G1a — once-daily SDN (OFAC) list refresh, piggybacked on this same 5-min
   // cron (design ga-gates-design-2026-07-22.md §G1a line 49) rather than a
   // second `[triggers] crons` entry. Self-contained: its own internal guard

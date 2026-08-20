@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 import { describe, expect, it } from "vitest";
 import { REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS } from "../src/engine/idempotency.js";
+import { ABSENCE_MIN_AGE_MS } from "../src/engine/mailbox-acquisition.js";
 import { RESERVE_REAP_TTL_MS } from "../src/engine/spend-ceiling.js";
 import { strippedSource } from "./source-text.js";
 
@@ -88,12 +89,27 @@ describe("ruling 7 — a sixth wrapped intent cannot mint a false disclosure unn
 // — so raising one without the other puts the reaper INSIDE that run and makes
 // spend-ceiling.ts's H7 incident path ("entry was resolved out from under a
 // successful commit") an ordinary event on a slow-but-healthy saga.
-describe("N7 — the stale-reserve reaper must outlive the longest legitimate claim", () => {
-  it("reaps strictly later than a claim is trusted", () => {
+describe("N7 — every 'presumed dead' cutoff must outlive the longest legitimate claim", () => {
+  it("the stale-reserve reaper reaps strictly later than a claim is trusted", () => {
     expect(RESERVE_REAP_TTL_MS).toBeGreaterThan(REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS);
   });
 
   it("keeps real headroom, not a one-millisecond technicality", () => {
     expect(RESERVE_REAP_TTL_MS).toBeGreaterThanOrEqual(REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS * 1.5);
+  });
+
+  // NEW-3 #1 (gate round 2) — the MONEY guard, and the one whose failure
+  // direction is over-spend. `ABSENCE_MIN_AGE_MS` decides when a dispatched buy
+  // that the provider has not listed counts as proof nothing was purchased. Its
+  // docstring claims to exceed "the longest legitimate provision run"; N7 moved
+  // that run to 30 min and left this constant at 15, i.e. HALF the window it
+  // claims to exceed — a buy inside a legitimately-long saga judged absent and
+  // re-bought.
+  it("the absence money guard outlives a legitimate provisioning run", () => {
+    expect(
+      ABSENCE_MIN_AGE_MS,
+      "ABSENCE_MIN_AGE_MS decides that a dispatched buy never happened. Below the claim TTL it can say that " +
+        "about a saga that is still running, and the platform buys the mailbox a second time.",
+    ).toBeGreaterThan(REQUEST_IDEMPOTENCY_PENDING_CLAIM_TTL_MS);
   });
 });

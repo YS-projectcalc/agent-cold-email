@@ -11,6 +11,8 @@ import {
 import type { Env } from "../src/env.js";
 import type { TenantContext } from "../src/tenant-context.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
+import { RESERVE_REAP_BATCH } from "../src/admin/sweep-budget.js";
+import { newSweepFanout } from "../src/admin/tenant-slice.js";
 import { mintTenant, withTenantContext } from "./helpers.js";
 
 // GA gates G0/G2/G4 (ga-gates-design-2026-07-22.md §"Systemic guards") — the
@@ -469,5 +471,94 @@ describe("the capacity alert instructs the right knob and reports the ceiling ac
     // operator reading it would compute the wrong headroom.
     expect(text).toContain("Ceiling IN FORCE this period: 100000¢/mo");
     expect(text).toContain("a raise is durable for the calendar month");
+  });
+});
+
+// NEW-1 (round 2 of docs/adversarial/wave-b1-scale-monitoring-gate-2026-08-20.md)
+// — B1's CLASS, one leg over. This reaper read every stale reservation with no
+// LIMIT and looped it with no deadline, at 2-3 subrequests a row, running AHEAD
+// of the cursor commit, the send pipeline, the signal report and the dead-man
+// heartbeat. Executed by the gate:
+//
+//   reaper: seeded=300 reaped=300 errors=0 => ~901 Worker subrequests in ONE leg
+//
+// against a budgeted tick of 592 and a tail reserve of 408. Pre-existing, and
+// this wave enlarged the standing population as a side effect: N7 raised the
+// reap TTL 15 -> 45 min, so orphans linger 3x longer and the first tick after
+// an outage faces the whole accumulated set at once.
+describe("NEW-1 — the stale-reserve reaper is bounded, and drains across ticks", () => {
+  it("reaps at most RESERVE_REAP_BATCH per tick, oldest first, leaving the rest for the next one", async () => {
+    const now = Date.now();
+    const pk = periodKey(now);
+    const staleAt = now - 60 * 60 * 1000;
+    const seeded = RESERVE_REAP_BATCH + 10;
+
+    await env.DB.prepare(
+      `INSERT INTO vendor_spend_ledger (period_key, reserved_cents, committed_cents, ceiling_cents, updated_at) VALUES (?, ?, 0, 9999999, ?)`,
+    )
+      .bind(pk, 1500 * seeded, staleAt)
+      .run();
+    // 3 bound params a row; D1's ceiling is 100 per statement.
+    const statements = [];
+    for (let i = 0; i < seeded; i += 33) {
+      const chunk = Array.from({ length: Math.min(33, seeded - i) }, (_, j) => i + j);
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO vendor_spend_entries (id, period_key, tenant_id, kind, est_cents, actual_cents, status, created_at, updated_at)
+           VALUES ${chunk.map(() => `(?, '${pk}', 'ten_bulk', 'domain', 1500, NULL, 'reserved', ?, ?)`).join(", ")}`,
+        ).bind(...chunk.flatMap((k) => [`vsp_bulk_${String(k).padStart(3, "0")}`, staleAt + k, staleAt])),
+      );
+    }
+    await env.DB.batch(statements);
+
+    const first = await reapStaleReservations(env, now);
+    // REDS on the unbounded read: it reaped all 35 in one leg.
+    expect(first.reaped).toBe(RESERVE_REAP_BATCH);
+    expect(first.deferred).toBe(0); // bounded by the BATCH, not by a deadline
+
+    // Oldest first: the earliest-created entries went, the newest remain.
+    const left = await env.DB.prepare(
+      `SELECT id FROM vendor_spend_entries WHERE status = 'reserved' AND tenant_id = 'ten_bulk' ORDER BY id`,
+    ).all<{ id: string }>();
+    expect(left.results).toHaveLength(10);
+    expect(left.results[0]!.id).toBe(`vsp_bulk_${String(RESERVE_REAP_BATCH).padStart(3, "0")}`);
+
+    // ...and the population is self-draining: the next tick takes the rest.
+    const second = await reapStaleReservations(env, now);
+    expect(second.reaped).toBe(10);
+    const none = await env.DB.prepare(
+      `SELECT COUNT(*) as n FROM vendor_spend_entries WHERE status = 'reserved' AND tenant_id = 'ten_bulk'`,
+    ).first<{ n: number }>();
+    expect(none?.n).toBe(0);
+  }, 30_000);
+
+  it("stops at the tick's shared fan-out deadline, like every other bounded leg", async () => {
+    const now = Date.now();
+    const pk = periodKey(now);
+    const staleAt = now - 60 * 60 * 1000;
+    await env.DB.prepare(
+      `INSERT INTO vendor_spend_ledger (period_key, reserved_cents, committed_cents, ceiling_cents, updated_at) VALUES (?, 4500, 0, 9999999, ?)`,
+    )
+      .bind(pk, staleAt)
+      .run();
+    for (const id of ["vsp_dl_a", "vsp_dl_b", "vsp_dl_c"]) {
+      await env.DB.prepare(
+        `INSERT INTO vendor_spend_entries (id, period_key, tenant_id, kind, est_cents, actual_cents, status, created_at, updated_at)
+         VALUES (?, ?, 'ten_dl', 'domain', 1500, NULL, 'reserved', ?, ?)`,
+      )
+        .bind(id, pk, staleAt, staleAt)
+        .run();
+    }
+
+    // An already-expired fan-out: the first item is always attempted (so a tick
+    // can never make zero progress), the remainder deferred.
+    const expired = newSweepFanout(Date.now() - 60_000, 1_000);
+    const result = await reapStaleReservations(env, now, { fanout: expired });
+
+    expect(result.reaped).toBe(1);
+    expect(result.deferred).toBe(2);
+    // And it did NOT touch the rotation accumulator — this leg iterates ledger
+    // entries, not the tenant slice.
+    expect(expired.leastVisited).toBeNull();
   });
 });

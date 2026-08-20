@@ -138,6 +138,38 @@ export const SCREENING_RECOVERY_BATCH = 25;
 export const SCREENING_RECOVERY_SUBREQUESTS = SCREENING_RECOVERY_BATCH * SCREENING_RECOVERY_SUBREQUESTS_PER_ITEM;
 
 /**
+ * Subrequests ONE stale-reserve reap costs: the status flip plus the ledger
+ * UPDATE, and a THIRD for a `kind = 'mailbox'` entry (the account slot
+ * counter). Three, because a budget takes the worst case.
+ */
+export const RESERVE_REAP_SUBREQUESTS_PER_ITEM = 3;
+
+/**
+ * How many orphaned reservations ONE tick may reclaim.
+ *
+ * NEW-1 (round 2 of docs/adversarial/wave-b1-scale-monitoring-gate-2026-08-20.md)
+ * — B1's CLASS, still open one leg over. `reapStaleReservations` read
+ * `WHERE status = 'reserved' AND created_at < ?` with no LIMIT and looped it
+ * with no deadline, ahead of everything including the heartbeat. Executed by
+ * the gate: `seeded=300 reaped=300 => ~901 Worker subrequests in ONE leg`,
+ * against a 592-subrequest budgeted tick. Pre-existing — it predates this wave
+ * — but this wave enlarged the standing population as a side effect, because
+ * N7 raised `RESERVE_REAP_TTL_MS` 15 -> 45 min and orphans now linger 3x
+ * longer, so the first tick after an outage window faces the whole set at once.
+ *
+ * A DRAIN RATE like the recovery batch, and the same size for one convention.
+ * Draining slowly is safe in the direction that matters: a stranded reservation
+ * OVER-restricts (it shrinks the effective ceiling), so the cost of taking an
+ * hour to clear 300 of them is a slightly tighter bound meanwhile, never spend
+ * that should have been refused. 25/tick at the 5-minute cadence clears 300 in
+ * an hour.
+ */
+export const RESERVE_REAP_BATCH = 25;
+
+/** The stale-reserve reaper's whole worst-case per-tick cost. */
+export const RESERVE_REAP_SUBREQUESTS = RESERVE_REAP_BATCH * RESERVE_REAP_SUBREQUESTS_PER_ITEM;
+
+/**
  * Everything one tick spends that the tenant slice does not: the fixed overhead
  * plus every leg that fans out over a population of its own.
  *
@@ -145,7 +177,8 @@ export const SCREENING_RECOVERY_SUBREQUESTS = SCREENING_RECOVERY_BATCH * SCREENI
  * summed in here is a leg the slice arithmetic is silently wrong about, which is
  * the whole of B1.
  */
-export const SWEEP_FIXED_SUBREQUESTS = SWEEP_FIXED_OVERHEAD_SUBREQUESTS + SCREENING_RECOVERY_SUBREQUESTS;
+export const SWEEP_FIXED_SUBREQUESTS =
+  SWEEP_FIXED_OVERHEAD_SUBREQUESTS + SCREENING_RECOVERY_SUBREQUESTS + RESERVE_REAP_SUBREQUESTS;
 
 /**
  * DO RPCs ONE tenant costs across ALL legs in a single tick, worst case.
@@ -168,6 +201,49 @@ export const SWEEP_FIXED_SUBREQUESTS = SWEEP_FIXED_OVERHEAD_SUBREQUESTS + SCREEN
  * slice it cannot afford.
  */
 export const SWEEP_RPCS_PER_TENANT = 11;
+
+/**
+ * WHAT EACH CRON LEG COSTS, per leg, as an independent statement of the two
+ * aggregates above.
+ *
+ * NEW-2 (round 2 of the wave-b1 gate) — the guard that was supposed to close
+ * B1's class was a TAUTOLOGY. It asserted
+ * `SWEEP_FIXED_SUBREQUESTS === OVERHEAD + SCREENING_RECOVERY_SUBREQUESTS`
+ * while the source DEFINED `SWEEP_FIXED_SUBREQUESTS` as exactly that sum:
+ * `A === A`, incapable of failing. The gate proved it by planting the precise
+ * defect the guard's own comment claimed to catch — a new 300-item x
+ * 3-subrequest fan-out leg declared in this file and not summed in — and the
+ * suite stayed green, 13/13.
+ *
+ * A guard needs an ORACLE THAT IS NOT THE THING IT CHECKS. This table is that
+ * oracle: it is written per leg, and `sweep-budget.test.ts` asserts (a) every
+ * leg in `scheduled.ts`'s own leg bag appears here, (b) the `perTenant` column
+ * sums to `SWEEP_RPCS_PER_TENANT`, and (c) the `ownFanout` column sums to the
+ * non-overhead part of `SWEEP_FIXED_SUBREQUESTS`. Three different sources —
+ * the scheduler, this table, and the derived constants — have to agree, so no
+ * single edit can move all of them silently.
+ *
+ * `perTenant`: DO RPCs this leg spends per tenant in the slice, worst case.
+ * `ownFanout`: subrequests this leg spends over a population that is NOT the
+ * tenant slice. Non-zero here means the leg needs its own batch and its own
+ * term — which is the whole of B1 and NEW-1.
+ */
+export const LEG_SUBREQUEST_COSTS: Record<string, { perTenant: number; ownFanout: number }> = {
+  tenantSlice: { perTenant: 0, ownFanout: 0 }, // D1 reads only (counted in the overhead)
+  deliverability: { perTenant: 1, ownFanout: 0 }, // deliverabilitySweep
+  dunning: { perTenant: 2, ownFanout: 0 }, // opsSummary + suspendForDunning (past_due only)
+  digest: { perTenant: 1, ownFanout: 0 }, // opsSummary
+  watchtower: { perTenant: 2, ownFanout: 0 }, // opsSummary + maybeEmitContinuityNudge (stalled only)
+  warmupCancel: { perTenant: 1, ownFanout: 0 }, // warmupCancelSweep
+  webhooks: { perTenant: 1, ownFanout: 0 }, // runWebhookDeliveries
+  spendReservations: { perTenant: 0, ownFanout: RESERVE_REAP_SUBREQUESTS }, // NEW-1 — orphaned reservations
+  sdnRefresh: { perTenant: 0, ownFanout: 0 }, // one outbound fetch, once a day (overhead)
+  sdnRecovery: { perTenant: 0, ownFanout: SCREENING_RECOVERY_SUBREQUESTS }, // B1 — sentinel-held reviews
+  provisioningReconcile: { perTenant: 1, ownFanout: 0 }, // provisioningReconcileSweep (dark until armed)
+  sweepCursor: { perTenant: 0, ownFanout: 0 }, // one D1 write (overhead)
+  retireChecks: { perTenant: 0, ownFanout: 0 }, // one D1 DELETE (overhead)
+  sendPipeline: { perTenant: 2, ownFanout: 0 }, // runScheduledPoll + runScheduledTick
+};
 
 /**
  * The same count for the legs that run BEFORE the send pipeline — the ones the

@@ -4,8 +4,23 @@
 // Every cron leg already counts what went wrong — and `runLeg` already catches a
 // leg-level throw. All of it then went into ONE `console.log`/`console.error`
 // line with no reader: a tenant failing every cycle, a wedged engine abandoning
-// every tenant at its budget, or a warmup subscription that may still be billing
+// tenants at their budget, or a warmup subscription that may still be billing
 // incremented a number forever and paged nobody.
+//
+// WHAT THE COVERAGE CHECK DOES AND DOES NOT CATCH (NEW-4, round 2 of
+// docs/adversarial/wave-b1-scale-monitoring-gate-2026-08-20.md). "A wedged
+// engine abandoning EVERY tenant at its budget" is visible — that is
+// `deferred === SWEEP_TENANT_SLICE`, exactly the threshold. But the threshold
+// is calibrated at a full slice, so 43-of-44 tenants lost is silent, and ONE
+// persistently wedged tenant reaches no check at all: `send_starved:` requires
+// zero eligible mailboxes (a slow engine's mailboxes are healthy),
+// `tenant_do_wedged:` requires `opsSummary` to throw, and `customer_progress_*`
+// is about owed setup steps. Materially softened by what a budget expiry
+// actually is — `withItemBudget` abandons the WAIT, not the work; the RPC keeps
+// running and its effects are idempotent — so it is a latency and
+// observability event rather than a stuck tenant. Named here rather than
+// papered over, and carried on the ROADMAP as owed; a per-tenant staleness
+// signal is the alert-state increment's shape, not a threshold tweak.
 //
 // Everything here goes through the SAME throttled state machine as every other
 // check (watchtower_state + reconcileAlerts), never a per-tick send, and every
