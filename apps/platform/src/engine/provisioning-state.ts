@@ -29,6 +29,7 @@
 
 import { domainIntentOrdinal } from "./provision-intents.js";
 import type { TenantContext } from "../tenant-context.js";
+import { clampListLimit, likePrefixPattern } from "../validate.js";
 
 export interface ProvisioningStateDomain {
   domain: string;
@@ -124,8 +125,7 @@ const DEFAULT_PROVISIONING_STATE_LIMIT = 200;
 const MAX_PROVISIONING_STATE_LIMIT = 1000;
 
 function clampLimit(limit: number | undefined): number {
-  if (limit === undefined || !Number.isFinite(limit)) return DEFAULT_PROVISIONING_STATE_LIMIT;
-  return Math.min(Math.max(Math.trunc(limit), 1), MAX_PROVISIONING_STATE_LIMIT);
+  return clampListLimit(limit, DEFAULT_PROVISIONING_STATE_LIMIT, MAX_PROVISIONING_STATE_LIMIT);
 }
 
 interface DomainRow {
@@ -245,17 +245,26 @@ export function getProvisioningStateForOperator(ctx: TenantContext, options: Pro
   // anchor — that IS the tenant scoping, CLAUDE.md rule h). DEFAULT scope is
   // now every prefix; `idempotencyPrefix` narrows it, replicating the OLD
   // hardcoded `LIKE 'setup_infrastructure:%'` exactly when set to that string.
-  const idempotencyRows = options.idempotencyPrefix
+  //
+  // F3 (docs/adversarial/admin-read-endpoints-gate-2026-08-17.md) — the pattern
+  // is ESCAPED, because `LIKE` is a pattern language and this is a PREFIX. `_`
+  // matches any single character, so the bare `setup_infrastructure:%` also
+  // selected `setupXinfrastructure:...`; `%` matches anything, so once the prefix
+  // became caller-supplied a bare `%` selected the whole table. F3 was filed as
+  // latent against a server-side literal — it stopped being latent when the
+  // string became live input (CLAUDE.md rule h).
+  const idempotencyPattern = options.idempotencyPrefix ? likePrefixPattern(options.idempotencyPrefix) : undefined;
+  const idempotencyRows = idempotencyPattern
     ? ctx.sql
         .exec<IdempotencyQueryRow>(
-          `SELECT key, status, created_at FROM request_idempotency WHERE key LIKE ? ORDER BY created_at DESC LIMIT ?`,
-          `${options.idempotencyPrefix}%`,
+          `SELECT key, status, created_at FROM request_idempotency WHERE key LIKE ? ESCAPE '\\' ORDER BY created_at DESC LIMIT ?`,
+          idempotencyPattern,
           limit,
         )
         .toArray()
     : ctx.sql.exec<IdempotencyQueryRow>(`SELECT key, status, created_at FROM request_idempotency ORDER BY created_at DESC LIMIT ?`, limit).toArray();
-  const requestIdempotencyTotal = options.idempotencyPrefix
-    ? ctx.sql.exec<{ n: number }>(`SELECT COUNT(*) as n FROM request_idempotency WHERE key LIKE ?`, `${options.idempotencyPrefix}%`).one().n
+  const requestIdempotencyTotal = idempotencyPattern
+    ? ctx.sql.exec<{ n: number }>(`SELECT COUNT(*) as n FROM request_idempotency WHERE key LIKE ? ESCAPE '\\'`, idempotencyPattern).one().n
     : ctx.sql.exec<{ n: number }>(`SELECT COUNT(*) as n FROM request_idempotency`).one().n;
 
   return {

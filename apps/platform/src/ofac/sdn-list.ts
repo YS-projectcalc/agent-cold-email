@@ -83,24 +83,110 @@ interface SdnEntryD1Row {
   program: string | null;
 }
 
-/** Every entry under one list version — read by the matcher at screen time
- * (design's per-tenant screen is infrequent — checkout/brand-change, not a
- * hot send-path query — so an unindexed full-version scan is acceptable at
- * pilot scale; see the arming-time note in the honesty statement for the
- * scale caveat). */
+/**
+ * Every entry under one list version. Kept as the FULL-SCAN reference read (the
+ * oracle S9's narrowing is tested against, and the ingest-side verification
+ * read); the screening path uses `getSdnEntriesForLookup` below.
+ */
 export async function getActiveSdnEntries(env: Env, listVersion: string): Promise<SdnEntryRow[]> {
   const result = await env.DB.prepare(
     `SELECT uid, name_normalized, tokens_json, entity_type, program FROM sdn_entries WHERE list_version = ?`,
   )
     .bind(listVersion)
     .all<SdnEntryD1Row>();
-  return result.results.map((r) => ({
+  return result.results.map(toSdnEntryRow);
+}
+
+function toSdnEntryRow(r: SdnEntryD1Row): SdnEntryRow {
+  return {
     uid: r.uid,
     nameNormalized: r.name_normalized,
     tokens: JSON.parse(r.tokens_json) as string[],
     entityType: r.entity_type,
     program: r.program,
-  }));
+  };
+}
+
+const SELECT_ENTRY_COLUMNS = `SELECT uid, name_normalized, tokens_json, entity_type, program FROM sdn_entries`;
+
+// D1's REAL per-statement bound-parameter ceiling is 100, not SQLite's ~999
+// (empirically confirmed — see INSERT_BATCH_SIZE above). A first-token range
+// costs TWO params, plus one for list_version, so 40 tokens/statement (81
+// params) stays comfortably inside it.
+const LOOKUP_TOKENS_PER_STATEMENT = 40;
+
+/**
+ * The rows that could match these candidates — S9's index-assisted narrowing
+ * (docs/adversarial/scale-readiness-audit-2026-08-17.md). Replaces pulling all
+ * ~17k rows (and JSON.parse-ing all ~17k `tokens_json` blobs) into Worker CPU on
+ * every signup.
+ *
+ * The keys come from `sdnLookupKeys`, which derives them FROM the match rules —
+ * see that function for why the derivation lives there and why it is deliberately
+ * a superset. `matchAgainstSdn` still decides; this only decides what to read.
+ *
+ * The first-token selection is expressed as an index RANGE rather than a `LIKE`
+ * prefix: names are normalized to `[a-z0-9 ]` only, so every multi-token name
+ * beginning with token `t` sorts inside [`t `, `t!`) — ' ' (0x20) is below every
+ * character a token can contain, and '!' (0x21) is the next code point up. That
+ * reads straight off idx_sdn_entries_version_name, and it cannot be turned into
+ * a pattern by a candidate carrying `%` or `_` (a live concern: the candidate is
+ * tenant-supplied brand/billing text).
+ */
+export async function getSdnEntriesForLookup(
+  env: Env,
+  listVersion: string,
+  keys: { exactNames: string[]; firstTokens: string[] },
+): Promise<SdnEntryRow[]> {
+  const statements: D1PreparedStatement[] = [];
+
+  if (keys.exactNames.length > 0) {
+    const placeholders = keys.exactNames.map(() => "?").join(", ");
+    statements.push(
+      env.DB.prepare(`${SELECT_ENTRY_COLUMNS} WHERE list_version = ? AND name_normalized IN (${placeholders})`).bind(
+        listVersion,
+        ...keys.exactNames,
+      ),
+    );
+  }
+
+  for (let i = 0; i < keys.firstTokens.length; i += LOOKUP_TOKENS_PER_STATEMENT) {
+    const chunk = keys.firstTokens.slice(i, i + LOOKUP_TOKENS_PER_STATEMENT);
+    const ranges = chunk.map(() => "(name_normalized >= ? AND name_normalized < ?)").join(" OR ");
+    const bounds: string[] = [];
+    for (const token of chunk) bounds.push(`${token} `, `${token}!`);
+    statements.push(env.DB.prepare(`${SELECT_ENTRY_COLUMNS} WHERE list_version = ? AND (${ranges})`).bind(listVersion, ...bounds));
+  }
+
+  if (statements.length === 0) return [];
+
+  // One round trip for every chunk, same as the ingest side.
+  const batched = await env.DB.batch<SdnEntryD1Row>(statements);
+  // The exact and range reads legitimately overlap (a single-token candidate
+  // that is also some name's first token), so dedupe on the list's own key.
+  const byUid = new Map<string, SdnEntryRow>();
+  for (const result of batched) {
+    for (const row of result.results) if (!byUid.has(row.uid)) byUid.set(row.uid, toSdnEntryRow(row));
+  }
+  return [...byUid.values()];
+}
+
+/**
+ * Does this list version still have ANY rows?
+ *
+ * Its own question, because the narrowed read above made "zero rows" ambiguous.
+ * `screenTenant`'s TOCTOU guard fails CLOSED on an empty result — a concurrent
+ * `swapInSdnList` can delete the version this screen already read the pointer
+ * for, and clearing a tenant off a list that vanished mid-screen is the wrong
+ * direction for a sanctions gate. Under the full scan, empty could only mean
+ * that. Under a narrowed read, empty is the NORMAL clean-tenant answer, so the
+ * guard has to ask about the list rather than infer from its own filter.
+ */
+export async function sdnVersionHasEntries(env: Env, listVersion: string): Promise<boolean> {
+  const row = await env.DB.prepare(`SELECT 1 as present FROM sdn_entries WHERE list_version = ? LIMIT 1`)
+    .bind(listVersion)
+    .first<{ present: number }>();
+  return row !== null;
 }
 
 /**

@@ -16,6 +16,11 @@ import type { Env } from "../env.js";
 import { LIST_UNAVAILABLE_VERSION } from "./screening.js";
 import { getActiveSdnListVersion } from "./sdn-list.js";
 
+// The most sentinel-held tenants one 5-minute tick will re-screen. Each costs a
+// DO RPC, so this also bounds the leg's fan-out; the population it draws from is
+// transient by construction (see the call site).
+const RECOVERY_BATCH_LIMIT = 500;
+
 export interface SdnListUnavailableRecoverySummary {
   /** How many tenants were still stuck on the sentinel this tick. */
   attempted: number;
@@ -28,8 +33,20 @@ export async function rescreenListUnavailableReviews(env: Env): Promise<SdnListU
   const listVersion = await getActiveSdnListVersion(env);
   if (!listVersion) return { attempted: 0, rescreened: 0, errors: 0 }; // still no list — nothing recoverable yet
 
-  const pending = await listPendingScreeningReviews(env);
-  const stuck = pending.filter((r) => r.listVersion === LIST_UNAVAILABLE_VERSION);
+  // NARROWED IN SQL, not in JS (S8, docs/adversarial/scale-readiness-audit-
+  // 2026-08-17.md). This read is now bounded, and a bound spent on rows this
+  // sweep immediately discards is a bound that silently shortens its REACH: a
+  // tenant held on the sentinel behind a queue of real hits would never be
+  // re-screened, with no error and nothing to alert on. Asking for the sentinel
+  // rows themselves keeps the whole batch usable.
+  //
+  // RECOVERY_BATCH_LIMIT is a pathological-case cap, not a working page: the
+  // sentinel population is only tenants caught in the pre-first-refresh gap, and
+  // this runs every 5 minutes, so a batch drains across ticks.
+  const stuck = await listPendingScreeningReviews(env, {
+    listVersion: LIST_UNAVAILABLE_VERSION,
+    limit: RECOVERY_BATCH_LIMIT,
+  });
 
   let rescreened = 0;
   let errors = 0;

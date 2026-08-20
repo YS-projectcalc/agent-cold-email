@@ -40,7 +40,39 @@ export type SpendKind = "mailbox" | "warmup" | "prewarm" | "domain";
 // biased because the exact InboxKit credit->$ rate is UNVERIFIED until a real
 // top-up (prewarm research §2); a conservative overestimate can only over-
 // restrict, never over-spend.
-const DEFAULT_SPEND_CEILING_CENTS = 15000; // $150/mo — ~2x the pilot's expected spend
+// THE BLAST-RADIUS BOUND, AS A FORMULA (founder ruling 2026-08-18: the flat
+// $150 "is the deliberate pilot blast-radius bound — its Train-6 remedy = scale
+// it with paying-tenant count"). A flat pilot figure is a PLATFORM-WIDE cap, so
+// at 690¢/mailbox it stopped every tenant's provisioning at ~21 mailboxes for
+// the whole month (scale-readiness-audit-2026-08-17.md S2) — a growth ceiling
+// disguised as a safety bound.
+//
+//   ceiling = PLATFORM_BASE + PER_PAYING_TENANT x paying tenants
+//
+// PLATFORM_BASE covers what is owed no matter how many customers exist (the
+// InboxKit base subscription, ~$39, plus headroom). PER_PAYING_TENANT covers ONE
+// customer's whole first-month provisioning, which is where a customer's vendor
+// spend is concentrated: this ledger counts provision-time reserves, so an
+// existing customer adds ~nothing in later months (N-PC-1, ga-gates-design-
+// review-2026-07-23.md). Derived from this file's own cost table at a generous
+// ordinary shape — 3 domains + 9 mailboxes = 3x1500 + 9x690 = 10,710¢ — then
+// rounded UP to 12,000¢, keeping the original overestimate bias.
+//
+// A customer who provisions far past that ordinary shape (the Scale tier admits
+// 18 domains / 60 mailboxes ≈ 68,400¢) still trips the gate. That is the bound
+// DOING ITS JOB: it fails gracefully into capacity_pending with a founder alert,
+// never into vendor spend, and the founder raises the knob deliberately.
+//
+// THE COUNT IS OPERATOR-DECLARED (`PAYING_TENANT_COUNT`), not queried. There is
+// no maintained cross-tenant count of currently-paying tenants to read:
+// `tenants_index.plan` is written once at signup and never updated (db.ts — the
+// INSERT is its only writer), and `stripe_customer_index` is append-only and
+// many-customers-to-one-tenant, so counting it would RATCHET UP with churn and
+// silently widen the blast radius over time. An explicit knob can only widen when
+// a human widens it, which is the correct direction for a money guard.
+const PLATFORM_BASE_CENTS = 6000; // $60 — InboxKit base sub (~$39) + headroom, independent of customer count
+const PER_PAYING_TENANT_CENTS = 12000; // $120 — one customer's first-month provisioning, overestimate-biased
+const DEFAULT_PAYING_TENANTS = 1; // the pilot today; the founder raises this as customers land
 const DEFAULT_COST_MAILBOX_CENTS = 690; // slot amortized ($39/10) + $3/mo warmup add-on
 const DEFAULT_COST_DOMAIN_CENTS = 1500; // .com registration ceiling
 const DEFAULT_COST_PREWARM_MAILBOX_CENTS = 900; // prewarm top tier (Instant-Start SKU)
@@ -60,9 +92,16 @@ function parsePositiveInt(raw: string | null | undefined, fallback: number): num
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
-/** The per-calendar-month spend ceiling (founder Q1 ruling: per-calendar-month, base sub included, default $150). */
+/**
+ * The per-calendar-month spend ceiling (founder Q1 ruling: per-calendar-month,
+ * base sub included). `SPEND_CEILING_CENTS` remains the ABSOLUTE override — an
+ * operator who names a number gets exactly it — and in its absence the bound is
+ * derived from the declared paying-tenant count (see the formula above), so
+ * growth raises the ceiling instead of hitting it.
+ */
 export function spendCeilingCents(env: Env): number {
-  return parsePositiveInt(env.SPEND_CEILING_CENTS, DEFAULT_SPEND_CEILING_CENTS);
+  const payingTenants = parsePositiveInt(env.PAYING_TENANT_COUNT, DEFAULT_PAYING_TENANTS);
+  return parsePositiveInt(env.SPEND_CEILING_CENTS, PLATFORM_BASE_CENTS + PER_PAYING_TENANT_CENTS * payingTenants);
 }
 
 /** The InboxKit plan's slot capacity (G4). Founder raises it after a plan upgrade — no automatic vendor plan purchase. */
@@ -276,6 +315,23 @@ export async function withSpendCeiling<T>(
        VALUES (?, 0, 0, ?, ?)`,
     )
     .bind(pk, ceilingCents, now)
+    .run();
+  // ...and CARRY A RAISE INTO THE MONTH ALREADY IN PROGRESS. The reserve below
+  // gates on the ROW's ceiling_cents, which `INSERT OR IGNORE` only ever writes
+  // at the month's FIRST spend — so raising the configured ceiling did nothing
+  // until the 1st, and `alertCapacityPending`'s own instruction ("raise
+  // SPEND_CEILING_CENTS ... a retry will succeed once the limit is raised") was
+  // false for up to a month. That is the exact window in which it is read: the
+  // alert only fires because provisioning is already blocked.
+  //
+  // RAISE-ONLY, deliberately. Lowering a live month's stored ceiling could put it
+  // UNDER reserved+committed, which would not claw anything back (the spend is
+  // already made) but would block every remaining provision on numbers the
+  // operator never saw — so a reduction takes effect at the next period, where it
+  // bounds a month that has spent nothing yet.
+  await db
+    .prepare(`UPDATE vendor_spend_ledger SET ceiling_cents = ?, updated_at = ? WHERE period_key = ? AND ceiling_cents < ?`)
+    .bind(ceilingCents, now, pk, ceilingCents)
     .run();
   await db.prepare(`INSERT OR IGNORE INTO vendor_slot_state (id, slots_used, updated_at) VALUES (1, 0, ?)`).bind(now).run();
 

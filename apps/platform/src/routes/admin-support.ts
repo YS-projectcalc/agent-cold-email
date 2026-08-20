@@ -6,7 +6,7 @@ import { triageSupportMessage, type SupportTriageResult } from "../admin/support
 import { RealClock } from "../clock.js";
 import type { Env } from "../env.js";
 import { newId } from "../schema.js";
-import { parseJsonBody } from "../validate.js";
+import { parseIntQueryParam, parseJsonBody } from "../validate.js";
 
 // D1 (brief) — AI support triage lane. POST /admin/support/triage classifies
 // + drafts/escalates + logs; GET /admin/support/digest is the owner's pull
@@ -52,7 +52,7 @@ export const adminSupportRoute = new Hono<{ Bindings: Env }>()
   })
   // THE DIGEST PUBLISHES ITS DENOMINATOR (docs/adversarial/
   // class-sweep-watch-completeness-2026-08-17.md). `tickets` is a status
-  // ALLOWLIST (`status IN ('open','escalated')`, no LIMIT) and `counts` used to
+  // ALLOWLIST (`status IN ('open','escalated')`) and `counts` used to
   // hardcode the SAME two statuses — so a consumer cross-checking one against
   // the other got agreement while both were blind, and the list was complete
   // only because nothing in src has ever written `'closed'`.
@@ -62,9 +62,14 @@ export const adminSupportRoute = new Hono<{ Bindings: Env }>()
   // status was added that this endpoint does not list and does not count. That
   // makes the narrowing an assertion failure on the operator's side rather than
   // an absence nobody can see.
+  //
+  // S8 — BOUNDED (`?limit=`, clamped, default 200). `counts` is computed over
+  // the whole table, so it stays the honest denominator when `tickets` is one
+  // page of it: an operator can always tell a short page from an empty queue.
   .get("/admin/support/digest", async (c) => {
+    const limit = parseIntQueryParam(c.req.query("limit"));
     const [tickets, counts] = await Promise.all([
-      listOpenAndEscalatedSupportTickets(c.env),
+      listOpenAndEscalatedSupportTickets(c.env, limit),
       countSupportTicketsByStatus(c.env),
     ]);
     const unaccounted = counts.total - (counts.open + counts.escalated + counts.closed);

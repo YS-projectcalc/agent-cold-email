@@ -16,7 +16,7 @@
 // row), ordinal 1's DNS ready.
 
 import { env, runInDurableObject } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type {
   DomainConnectionType,
   DomainDnsResult,
@@ -243,8 +243,15 @@ async function driveRetry(
   });
 }
 
-/** Sets the account-wide monthly ceiling for the period this test runs in. */
+/**
+ * Sets the account-wide monthly ceiling for the period this test runs in — in
+ * BOTH places that now define one. withSpendCeiling reconciles a stored ceiling
+ * UP to the configured one so a raise lands inside the month the founder is told
+ * to raise it in (engine/spend-ceiling.ts); a lone low row would just be lifted
+ * back to the configured bound.
+ */
 async function setCeilingCents(cents: number): Promise<void> {
+  env.SPEND_CEILING_CENTS = String(cents);
   await env.DB.prepare(
     `INSERT OR REPLACE INTO vendor_spend_ledger (period_key, reserved_cents, committed_cents, ceiling_cents, updated_at)
      VALUES (?, 0, 0, ?, ?)`,
@@ -252,6 +259,11 @@ async function setCeilingCents(cents: number): Promise<void> {
     .bind(periodKey(Date.now()), cents, Date.now())
     .run();
 }
+
+/** Restores the configured ceiling so one test's low bound never leaks into the next. */
+afterEach(() => {
+  delete env.SPEND_CEILING_CENTS;
+});
 
 describe("F1 — a recorded 202 SUCCESS-PENDING outcome must not replay forever", () => {
   it("ARM A: a same-key retry long after the recorded 202 RE-RUNS the saga", async () => {

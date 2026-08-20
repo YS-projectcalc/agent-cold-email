@@ -60,6 +60,24 @@ function removeOne(token: string, idempotencyKey?: string) {
   return removeN(token, 1, idempotencyKey);
 }
 
+/**
+ * A replay hands back the RECORDED response — with exactly one deliberate
+ * difference, which is the point of the whole `Collapsed<T>` field.
+ *
+ * These assertions used to demand BYTE-IDENTITY with the original. That is
+ * precisely the defect the wave-A gate named (docs/adversarial/
+ * wave-a-trains-3-4-gate-2026-08-20.md, the RULING): "a collapse returned
+ * byte-identically to a real admission, so an agent in a loop cannot tell that
+ * its second request was absorbed". `engine/idempotency.ts` now stamps
+ * `deduplicated: true` onto a replayed response that carries the field, so the
+ * ONE thing that may differ is the disclosure that it is a replay. Everything
+ * else — the counts, the billing projection, the unreleased set — must still
+ * match exactly, which is what these tests are really about.
+ */
+function expectReplayOf(replayBody: unknown, recordedBody: Record<string, unknown>): void {
+  expect(replayBody).toEqual({ ...recordedBody, deduplicated: true });
+}
+
 describe("B2 — remove_mailboxes honors the Idempotency-Key it advertises", () => {
   it("a same-key replay returns the recorded response and releases nothing more", async () => {
     const { tenantId, token } = await seedTenant("Replay Remove Co", "replayremove.com");
@@ -72,7 +90,7 @@ describe("B2 — remove_mailboxes honors the Idempotency-Key it advertises", () 
     const replay = await removeOne(token, "downgrade-1");
 
     expect(replay.status).toBe(200);
-    expect(replay.body).toEqual(first.body);
+    expectReplayOf(replay.body, first.body);
     expect(await liveMailboxes(tenantId)).toBe(3);
   });
 
@@ -192,7 +210,7 @@ describe("B3 — a PARTIAL release is never recorded as the finished answer", ()
     expect(await removeClaims(tenantId)).toEqual([{ key: "remove_mailboxes:downgrade-whole", status: "done" }]);
 
     const replay = await removeN(token, 2, "downgrade-whole");
-    expect(replay.body).toEqual(first.body);
+    expectReplayOf(replay.body, first.body);
     // Nothing further was asked of the vendor.
     expect(attempts).toHaveLength(2);
     expect(await liveMailboxEmails(tenantId)).toHaveLength(2);
@@ -261,7 +279,7 @@ describe("N1 — a keyed retry is ABSOLUTE: only the set the first call resolved
     // vendor calls, exactly as a whole release always has.
     const releasesAtFreeze = attempts.length;
     const replay = await removeN(token, 3, "downgrade-absolute");
-    expect(replay.body).toEqual(healed.body);
+    expectReplayOf(replay.body, healed.body);
     expect(attempts).toHaveLength(releasesAtFreeze);
     expect(await liveMailboxes(tenantId)).toBe(12);
   });
@@ -393,7 +411,7 @@ describe("R3-1 — a keyed removeMailboxes at self-serve fleet sizes records the
     // over any re-resolution, so the replay makes zero further vendor calls.
     const replay = await removeN(token, 21, "downgrade-21");
     expect(replay.status).toBe(200);
-    expect(replay.body).toEqual(first.body);
+    expectReplayOf(replay.body, first.body);
     expect(attempts).toHaveLength(21);
   });
 
@@ -417,7 +435,7 @@ describe("R3-1 — a keyed removeMailboxes at self-serve fleet sizes records the
 
     const replay = await removeN(token, 60, "downgrade-60");
     expect(replay.status).toBe(200);
-    expect(replay.body).toEqual(first.body);
+    expectReplayOf(replay.body, first.body);
     expect(attempts).toHaveLength(60);
   });
 });
