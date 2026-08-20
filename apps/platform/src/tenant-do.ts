@@ -360,6 +360,11 @@ export class TenantDO extends DurableObject<Env> {
     this.addColumnIfMissing("ledger_entries", "source_send_id", "TEXT");
     // Content-hash fallback send episodes (IN-7, see schema.ts + engine/threads.ts).
     this.addColumnIfMissing("sent_message_keys", "epoch", "INTEGER NOT NULL DEFAULT 0");
+    // Recurrence time, split out of the now-immutable created_at (IN-3, see
+    // schema.ts + engine/tenant-messages.ts). Nullable ON PURPOSE: a pre-column
+    // row's created_at IS its last-observed time, so readers COALESCE rather
+    // than backfill.
+    this.addColumnIfMissing("tenant_messages", "last_occurred_at", "INTEGER");
     this.addColumnIfMissing("tenant_profile", "billing_state", "TEXT NOT NULL DEFAULT 'none'");
     this.addColumnIfMissing("tenant_profile", "stripe_customer_id", "TEXT");
     this.addColumnIfMissing("tenant_profile", "stripe_subscription_id", "TEXT");

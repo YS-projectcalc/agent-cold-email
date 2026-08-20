@@ -1133,7 +1133,20 @@ CREATE TABLE IF NOT EXISTS tenant_messages (
   action_hint TEXT,
   source TEXT NOT NULL,
   dedup_key TEXT,
+  -- IMMUTABLE: when this condition was FIRST observed. Never re-stamped (IN-3,
+  -- docs/adversarial/class-sweep-dedup-semantics-2026-08-17.md). It is an ORDER
+  -- BY column for both agent read surfaces AND a component of listMessagesPage's
+  -- keyset cursor, so a writer that moves it moves live rows across issued page
+  -- boundaries — measured: a row re-emitted mid-drain was skipped entirely.
   created_at INTEGER NOT NULL,
+  -- When the condition was LAST observed — bumped by emitTenantMessage's dedup
+  -- branch on every re-trigger. Split out of created_at so the two facts stop
+  -- fighting: the customer-continuity wave's min-age expiry gate (NB-3,
+  -- engine/next-steps.ts) needs "time since last observed" so a still-recurring
+  -- failure is never expired, while every sinceMs an agent is shown needs
+  -- "time since first observed". NULL for rows written before this column, for
+  -- which created_at IS the last-observed time — read COALESCE'd, never bare.
+  last_occurred_at INTEGER,
   read_at INTEGER,
   expires_at INTEGER
 );
