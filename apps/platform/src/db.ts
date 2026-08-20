@@ -275,11 +275,24 @@ export async function consumeLoginLink(env: Env, tokenHash: string, consumedAt: 
 /** Persists one waitlist email durably. Idempotent (email is the PK): a repeat
  * signup is a silent no-op, preserving the original createdAt. Returns true iff
  * this call inserted a NEW lead. */
-export async function insertWaitlistEmail(env: Env, email: string, createdAt: number): Promise<boolean> {
-  const result = await env.DB.prepare(`INSERT OR IGNORE INTO waitlist (email, created_at) VALUES (?, ?)`)
+/**
+ * Records a public waitlist signup. INSERT OR IGNORE on the email PK, so a
+ * repeat submission is a no-op.
+ *
+ * RETURNS NOTHING, DELIBERATELY (IN-18, docs/adversarial/class-sweep-dedup-
+ * semantics-2026-08-17.md). Whether the row was new is exactly the fact this
+ * endpoint must not reveal: `POST /api/waitlist` is UNAUTHENTICATED by design
+ * (routes/waitlist.ts), so returning it — the sweep's own G1 "disclose the
+ * collapse" remedy — would turn a marketing form into an email ENUMERATION
+ * ORACLE, one probe per address. The CORS allowlist constrains browsers, not
+ * curl. This is the one member of that sweep where disclosure is the wrong
+ * move, so the value is not produced at all rather than produced and dropped
+ * at the call site where a later edit could "helpfully" forward it.
+ */
+export async function insertWaitlistEmail(env: Env, email: string, createdAt: number): Promise<void> {
+  await env.DB.prepare(`INSERT OR IGNORE INTO waitlist (email, created_at) VALUES (?, ?)`)
     .bind(email, createdAt)
     .run();
-  return (result.meta.changes ?? 0) > 0;
 }
 
 /** Total waitlist leads — surfaced in the owner digest (buildOpsDigest). */

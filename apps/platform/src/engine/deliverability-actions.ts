@@ -113,13 +113,41 @@ function applyThrottle(
 
 function applyPause(ctx: TenantContext, action: Extract<DeliverabilityAction, { type: "PAUSE" }>): void {
   // Idempotent: the conditional guard means re-pausing an already-paused
-  // mailbox writes nothing and logs nothing (panel #2 lesson).
+  // mailbox writes nothing (panel #2 lesson).
   const res = ctx.sql.exec(
     `UPDATE mailboxes SET deliv_status = 'paused' WHERE id = ? AND tenant_id = ? AND deliv_status != 'paused'`,
     action.mailboxId,
     ctx.tenantId,
   );
   if (res.rowsWritten > 0) {
+    logAction(ctx, "PAUSE", action.email, { mailboxId: action.mailboxId, reason: action.reason });
+    return;
+  }
+
+  // ALREADY PAUSED — but a pause carries a REASON, and the status write is not
+  // the only thing that matters (IN-16, docs/adversarial/class-sweep-dedup-
+  // semantics-2026-08-17.md). The conditional UPDATE above doubled as a dedup on
+  // the STATUS, so a second pause for a genuinely different cause (already
+  // paused for a bounce rate, now also for a complaint spike) wrote nothing and
+  // logged nothing. The mailbox was correctly paused either way, but the
+  // activity feed and infrastructure_status answered "why is this paused?" with
+  // a stale first cause and no hint that a second, often more serious one had
+  // been observed at all.
+  //
+  // Only a CHANGED reason is recorded. A repeat of the same reason — the common
+  // case, since the sweep re-evaluates every cycle while the condition holds —
+  // still writes nothing, so this cannot turn the feed into a per-tick log.
+  const lastReason = ctx.sql
+    .exec<{ detail_json: string }>(
+      `SELECT detail_json FROM deliverability_actions
+        WHERE tenant_id = ? AND action = 'PAUSE' AND target = ?
+        ORDER BY rowid DESC LIMIT 1`,
+      ctx.tenantId,
+      action.email,
+    )
+    .toArray()[0];
+  const previous = lastReason ? (JSON.parse(lastReason.detail_json) as { reason?: string }).reason : undefined;
+  if (previous !== action.reason) {
     logAction(ctx, "PAUSE", action.email, { mailboxId: action.mailboxId, reason: action.reason });
   }
 }

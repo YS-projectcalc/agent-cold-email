@@ -164,6 +164,9 @@ function processBounce(ctx: TenantContext, ev: Extract<PolledEvent, { kind: "bou
       threadId: ev.threadId,
       ts: ev.receivedAt,
       metadata: { reason: ev.reason, toEmail: ev.toEmail, severity: "hard" },
+      // IN-14 — a second DSN for this send cannot get its own row (the key is
+      // the ORIGINAL send's id), so let it correct the reason it supersedes.
+      refreshMetadataOnRepeat: true,
     });
     if (!isNew) return false;
     ctx.sql.exec(`UPDATE leads SET global_status = 'bounced' WHERE id = ? AND tenant_id = ?`, ref.lead_id, ctx.tenantId);
@@ -188,6 +191,10 @@ function processBounce(ctx: TenantContext, ev: Extract<PolledEvent, { kind: "bou
     threadId: ev.threadId,
     ts: ev.receivedAt,
     metadata: { reason: ev.reason, toEmail: ev.toEmail, severity: "soft" },
+    // IN-14 — the greylisting case this exists for: 4.4.1 "delayed" then a
+    // later 4.2.2 "mailbox full" on one key. Keep ONE event and one streak
+    // increment, keep the LATER reason.
+    refreshMetadataOnRepeat: true,
   });
   if (!isNew) return false;
 
@@ -240,6 +247,9 @@ function processComplaint(ctx: TenantContext, ev: Extract<PolledEvent, { kind: "
     threadId: ev.threadId,
     ts: ev.receivedAt,
     metadata: { toEmail: ev.toEmail, mailboxEmail: ev.mailboxEmail },
+    // IN-14 — same shape as the bounce paths: an ARF report carries no id of
+    // its own, so a second one for this send can only correct the first.
+    refreshMetadataOnRepeat: true,
   });
   if (!isNew) return false;
 

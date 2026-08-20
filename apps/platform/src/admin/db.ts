@@ -241,7 +241,44 @@ export async function insertEnforcementActionIfNew(
   )
     .bind(params.id, params.tenantId, params.action, params.reason, JSON.stringify(params.evidence), params.ts)
     .run();
-  return (result.meta.changes ?? 0) > 0;
+  if ((result.meta.changes ?? 0) > 0) return true;
+
+  // THE KEY ALREADY HELD A ROW — record the later reason instead of discarding
+  // it (IN-15, docs/adversarial/class-sweep-dedup-semantics-2026-08-17.md).
+  // `UNIQUE(tenant_id, action)` means a tenant terminated, reinstated, then
+  // re-terminated for a DIFFERENT AUP reason kept only the FIRST reason and
+  // evidence — the abuse that actually got them terminated the second time left
+  // no trace anywhere, in the platform's abuse audit trail.
+  //
+  // Accumulated INTO the existing row rather than fixing the key. Dropping a
+  // SQLite constraint needs a full table rebuild, which none of this repo's 18
+  // migrations has ever done, and `countTerminatedTenants` reads
+  // one-row-per-terminated-tenant off exactly this constraint. So the row count,
+  // the constraint and `enforcementLogged`'s meaning ("a NEW row was created",
+  // which admin-terminate.test.ts pins as false on a repeat) are all unchanged —
+  // only the silent loss goes.
+  //
+  // Bounded by DISTINCT reasons, not by call volume: an admin double-clicking
+  // terminate re-sends the same reason and appends nothing.
+  const existing = await env.DB.prepare(
+    `SELECT reason, evidence_json FROM enforcement_actions WHERE tenant_id = ? AND action = ?`,
+  )
+    .bind(params.tenantId, params.action)
+    .first<{ reason: string; evidence_json: string }>();
+  if (!existing) return false;
+
+  const evidence = JSON.parse(existing.evidence_json) as {
+    subsequentActions?: { reason: string; evidence: Record<string, unknown>; ts: number }[];
+  };
+  const subsequent = evidence.subsequentActions ?? [];
+  const latestReason = subsequent.length > 0 ? subsequent[subsequent.length - 1]!.reason : existing.reason;
+  if (latestReason === params.reason) return false;
+
+  subsequent.push({ reason: params.reason, evidence: params.evidence, ts: params.ts });
+  await env.DB.prepare(`UPDATE enforcement_actions SET evidence_json = ? WHERE tenant_id = ? AND action = ?`)
+    .bind(JSON.stringify({ ...evidence, subsequentActions: subsequent }), params.tenantId, params.action)
+    .run();
+  return false;
 }
 
 /** D6 digest — count of terminated tenants (one enforcement_actions row per
