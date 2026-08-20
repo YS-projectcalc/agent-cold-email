@@ -84,6 +84,19 @@ export type Collapsed<T> = T & { deduplicated: boolean };
  *   withheld, because the tenant it was reporting on is still stalled, just
  *   under a different blamed name. Scoped to that flip pair — every other
  *   `no_longer_applicable` clear on the platform still emails.
+ * - `pending_recovery` (alert-state design §3.5) — the check's producer reported
+ *   HEALTHY but the episode is still holding open, awaiting
+ *   `recoverAfterObservations` clean observations. Without it a `holding`
+ *   transition fell through to `nothing_owed`, which says "there was nothing to
+ *   tell" about a recovery that is actively being confirmed.
+ * - `suppressed_key_cap` (§1.4) — the episode has already announced
+ *   `MAX_ANNOUNCED_KEYS_PER_EPISODE` distinct materiality keys, so a further
+ *   NOVEL condition under the same check name is not escalated. The count of
+ *   these rides the next ladder email's body (`AnnouncedKeys.overflow`).
+ * - `suppressed_daily_budget` (§5.5) — the rolling 24h announcement budget was
+ *   full when this announcement came up for a slot. The episode's state still
+ *   advanced; only the email waits, and `alert_budget_exceeded` reports that the
+ *   channel is withholding.
  *
  * `nothing_owed` is separate from the withholding reasons on purpose: folding
  * "there was nothing to say" into "we chose not to say it" is how a delivery
@@ -98,7 +111,10 @@ export type DeliveryReason =
   | "no_notifier"
   | "nothing_owed"
   | "digest_only"
-  | "reclassified";
+  | "reclassified"
+  | "pending_recovery"
+  | "suppressed_key_cap"
+  | "suppressed_daily_budget";
 
 export interface Notified {
   delivered: boolean;

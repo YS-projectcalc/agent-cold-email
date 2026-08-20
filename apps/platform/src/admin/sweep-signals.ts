@@ -59,6 +59,7 @@ import {
   type AlertOutcome,
   type CheckResult,
 } from "./watchtower-alerts.js";
+import { alertDeliveryKey, cronLegsKey, sweepCoverageKey, warmupGaveUpKey } from "./watchtower-families.js";
 import { watchtowerStub } from "./watchtower-infra.js";
 import { SWEEP_TENANT_SLICE } from "./sweep-budget.js";
 import type { TenantSlice } from "./tenant-slice.js";
@@ -314,6 +315,13 @@ export async function reportSweepSignals(
     results.push({
       name: CRON_LEGS_CHECK,
       healthy: false,
+      // The KIND of failure, not WHICH legs — a leg that was counting errors is
+      // now THROWING is the escalation that changes the founder's action.
+      // Keying on the SET of failing legs is combinatorial; which legs they are
+      // rides the detail below at zero email cost. LOSS, STATED: leg A erroring
+      // and later leg B erroring is one key and gets no escalation email; the
+      // body updates and the ladder still fires.
+      materiality: cronLegsKey(signals.legsThrew.length > 0 || signals.unknownLegs.length > 0, signals.counted > 0),
       detail:
         `The ops sweep has been reporting failures on consecutive ticks — ${signals.detail}. ` +
         `These are counted per leg and were previously visible only in the Worker log, which pages nobody. ` +
@@ -355,6 +363,11 @@ export async function reportSweepSignals(
         : {
             name: SWEEP_COVERAGE_CHECK,
             healthy: false,
+            materiality: sweepCoverageKey(
+              coverage === null,
+              coverage !== null && coverage.coverageTicks > COVERAGE_TICKS_ALERT_AFTER,
+              signals.deferred >= DEFERRED_LEG_VISITS_ALERT_AFTER,
+            ),
             detail:
               `The ops sweep is not keeping up with the tenant count. ${rotation}. ` +
               (signals.deferred > 0 ? `Work deferred inside this tick's own slice: ${signals.deferralDetail}. ` : "") +
@@ -381,6 +394,7 @@ export async function reportSweepSignals(
         : {
             name: ALERT_DELIVERY_CHECK,
             healthy: false,
+            materiality: alertDeliveryKey(signals.undeliveredAlerts.reasons),
             detail:
               `${signals.undeliveredAlerts.count} watchtower alert(s) were OWED and did not reach the ops address on consecutive ticks: ` +
               `${signals.undeliveredAlerts.reasons.join(", ")}. ` +
@@ -417,7 +431,7 @@ export async function reportSweepSignals(
       results.push({
         ...(gaveUp === 0
           ? { healthy: true as const, basis: "no_longer_applicable" as const }
-          : { healthy: false as const }),
+          : { healthy: false as const, materiality: warmupGaveUpKey(gaveUp) }),
         name: "warmup_cancel_gave_up",
         // The vendor is deliberately NOT named here (test/vendor-identity-leak.ts's
         // source tripwire): the digest already names it on the operator-only
@@ -465,6 +479,7 @@ export async function reportSweepSignalsHealth(env: Env, mailer: OpsMailer, repo
       : {
           name: SWEEP_SIGNALS_CHECK,
           healthy: false,
+          materiality: "threw",
           detail:
             `The ops sweep's signal-reporting leg THREW — so no cron_legs, sweep_coverage, alert_delivery or ` +
             `warmup_cancel_gave_up observation was made this tick. Those checks are not healthy, they are UNREPORTED, ` +

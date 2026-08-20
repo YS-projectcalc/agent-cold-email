@@ -721,6 +721,10 @@ export async function runSetupInfrastructure(
   // are tenant-global and already have their own one-shot alerts.
   await alertIsolatedFailures(ctx, outcome, {
     checkName: (item) => domainOrdinalFailedCheckName(inFlightByOrdinal.get(item.domainIndex) ?? item.domain),
+    // A domain NAME on record for this ordinal means it was actually bought, so
+    // the money is out and nothing is behind it — a replacement job for a human.
+    // Without one the setup threw before buying anything, which a retry fixes.
+    materiality: ({ item }) => (inFlightByOrdinal.has(item.domainIndex) ? "paid_no_infra" : "setup_threw"),
     detail: (item) =>
       `domain setup for ordinal ${item.domainIndex} (${inFlightByOrdinal.get(item.domainIndex) ?? item.domain}) could not be completed. ` +
       `The other ordinals were still attempted. If the domain was already bought, it is paid for with no working mail on it until this is finished by hand.`,

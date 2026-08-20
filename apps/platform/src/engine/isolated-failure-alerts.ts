@@ -32,7 +32,7 @@
 // happens where the caller was going to await anyway.
 
 import { RealClock } from "../clock.js";
-import { forEachIsolated, type IsolatedOutcome } from "../isolated-loop.js";
+import { forEachIsolated, type IsolatedFailure, type IsolatedOutcome } from "../isolated-loop.js";
 import { reportCheck } from "../admin/watchtower.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { TenantContext } from "../tenant-context.js";
@@ -40,6 +40,16 @@ import type { TenantContext } from "../tenant-context.js";
 export interface IsolatedFailureAlertSpec<TItem> {
   /** The per-item watchtower check name (its own prefix — see watchtower-alerts.ts). */
   checkName: (item: TItem) => string;
+  /**
+   * This family's materiality key for the item (alert-state design §1.2).
+   *
+   * A FUNCTION OF THE ITEM'S OWN OUTCOME, not of the loop: `vendor_threw` and
+   * `still_slot_counted` are different remedies for a failed release, and
+   * `setup_threw` vs `paid_no_infra` is the difference between "retry it" and
+   * "money is out and nothing is behind it". Stated by each caller because each
+   * caller is the only thing that knows.
+   */
+  materiality: (failure: IsolatedFailure<TItem>) => string;
   /** What the founder needs to act. Customer-safe by construction: it is the
    * SAME abstract text the activity row carries, never the adapter's, so the
    * vendor-identity source tripwire holds here as everywhere else. */
@@ -66,9 +76,7 @@ export async function alertIsolatedFailures<TItem>(
   spec: IsolatedFailureAlertSpec<TItem>,
   mailer: OpsMailer = createOpsMailer(ctx.env),
 ): Promise<void> {
-  const reportable = outcome.failures
-    .filter((failure) => !(outcome.abortedAt && failure.index === outcome.abortedAt.index))
-    .map((failure) => failure.item);
+  const reportable = outcome.failures.filter((failure) => !(outcome.abortedAt && failure.index === outcome.abortedAt.index));
   if (reportable.length === 0) return;
 
   const nowMs = new RealClock().now();
@@ -79,15 +87,20 @@ export async function alertIsolatedFailures<TItem>(
   // exemption would outlive the reasoning behind it.
   await forEachIsolated(
     reportable,
-    (item) =>
+    (failure) =>
       reportCheck(
         ctx.env,
         mailer,
-        { name: spec.checkName(item), healthy: false, detail: `tenant ${ctx.tenantId}: ${spec.detail(item)}` },
+        {
+          name: spec.checkName(failure.item),
+          healthy: false,
+          materiality: spec.materiality(failure),
+          detail: `tenant ${ctx.tenantId}: ${spec.detail(failure.item)}`,
+        },
         nowMs,
       ),
     {
-      onItemError: ({ item, error }) => console.error(`watchtower: could not raise "${spec.checkName(item)}"`, error),
+      onItemError: ({ item, error }) => console.error(`watchtower: could not raise "${spec.checkName(item.item)}"`, error),
     },
   );
 }

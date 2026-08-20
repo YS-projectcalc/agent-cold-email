@@ -16,6 +16,7 @@
 import type { Env } from "../env.js";
 import { InboxKitClient, type InboxKitClientConfig } from "../vendors/real/inboxkit-client.js";
 import type { CheckResult } from "./watchtower-alerts.js";
+import { warmupDuplicatesKey } from "./watchtower-families.js";
 
 export const VENDOR_WALLET_CHECK = "vendor_wallet";
 export const WARMUP_DUPLICATES_CHECK = "warmup_duplicates";
@@ -107,7 +108,7 @@ async function checkVendorWallet(client: InboxKitClient, env: Env): Promise<Chec
   try {
     body = await client.request<WalletResponseUnknown>("watchtowerWallet", "GET", "/billing/wallet");
   } catch (err) {
-    return { name: VENDOR_WALLET_CHECK, healthy: false, detail: `inboxkit billing/wallet unreachable: ${errMsg(err)}` };
+    return { name: VENDOR_WALLET_CHECK, healthy: false, materiality: "unreachable", detail: `inboxkit billing/wallet unreachable: ${errMsg(err)}` };
   }
 
   const creditsRemaining = body.credits_remaining;
@@ -119,6 +120,7 @@ async function checkVendorWallet(client: InboxKitClient, env: Env): Promise<Chec
     return {
       name: VENDOR_WALLET_CHECK,
       healthy: false,
+      materiality: "shape_drift",
       detail: `inboxkit billing/wallet returned an unexpected shape (expected numeric credits_remaining + boolean auto_topup_enabled): ${JSON.stringify(body)}`,
     };
   }
@@ -135,6 +137,11 @@ async function checkVendorWallet(client: InboxKitClient, env: Env): Promise<Chec
   return {
     name: VENDOR_WALLET_CHECK,
     healthy: false,
+    // The four arms `evaluateVendorChecks` already branches on. Auto-topup ON vs
+    // OFF is the escalation that matters: one may self-heal, the other will not.
+    // NEVER the credit COUNT, which moves on every purchase and every warmup
+    // charge — that is in the detail, where it costs no emails.
+    materiality: autoTopupEnabled ? "below_floor_autotopup_on" : "below_floor_autotopup_off",
     detail:
       `inboxkit wallet has ${creditsRemaining} credit(s) remaining, below the floor of ${floor}. ` +
       (autoTopupEnabled
@@ -186,6 +193,7 @@ async function checkWarmupDuplicates(client: InboxKitClient): Promise<CheckResul
   return {
     name: WARMUP_DUPLICATES_CHECK,
     healthy: false,
+    materiality: warmupDuplicatesKey(duplicateMailboxes.size),
     detail: `${duplicateMailboxes.size} mailbox(es) have MORE THAN ONE active InboxKit warmup subscription (double-billing the $3/mo add-on): ${[...duplicateMailboxes].join(", ")}.`,
   };
 }

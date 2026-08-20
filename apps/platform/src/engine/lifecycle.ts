@@ -323,6 +323,10 @@ export async function releaseMailboxes(
   // await lands between the loop's per-item DO writes.
   await alertIsolatedFailures(ctx, outcome, {
     checkName: (m) => mailboxReleaseFailedCheckName(m.email),
+    // `slot_counted` IS the escalation: an unreleased mailbox always costs us at
+    // the vendor, but one still holding a PLAN SLOT is also billing the customer
+    // and blocking a seat they paid for. Two different remedies.
+    materiality: ({ item }) => (item.slot_counted ? "still_slot_counted" : "vendor_threw"),
     detail: (m) =>
       `mailbox ${m.email} could not be released. It is STILL LIVE at the provider and still counted against the plan slot, ` +
       `so it keeps costing money on both sides until it is released by hand. Its released_at is deliberately unwritten and its ` +

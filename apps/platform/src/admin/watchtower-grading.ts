@@ -49,6 +49,30 @@ export const FAILURE_SIGNAL_COMPLAINT_THRESHOLD = 1;
 /** Consecutive bad sweeps before the cron-leg health check alerts (15 min). */
 export const LEG_ALERT_AFTER_SWEEPS = 3;
 
+/**
+ * The keyed streak that answers "have failure signals sat in the DEAD BAND
+ * continuously?" (U-2, alert-state design §4). Its own key, so it shares no
+ * state with the leg/coverage/delivery streaks.
+ */
+export const FAILURE_SIGNALS_HOLD_STREAK = "failure_signals_hold";
+
+/**
+ * How long the dead band must be occupied before it is worth an alert: 144 ticks
+ * = 12h at the 5-minute cadence.
+ *
+ * A RATE THAT NEVER TRIPS A THRESHOLD IS STILL A FAULT. 1-2 terminal failures an
+ * hour is below `FAILURE_SIGNAL_FAILED_THRESHOLD` forever, so `gradeFailureSignals`
+ * answers `null` (hold) on every window and nothing is ever reported. Lowering
+ * the threshold was REJECTED — it destroys a still-correct product rationale
+ * ("three in an hour is a pattern, not an address") and does not close the class,
+ * because whatever the threshold is, there is a sustained rate just below it.
+ * Widening `Grade` was REJECTED as insufficient: it is already three-valued and
+ * the missing information is TEMPORAL. This reuses the DO's existing generic
+ * keyed streak store — no new store, no new grader, only an explicit threshold
+ * argument on that RPC.
+ */
+export const SUSTAINED_HOLD_TICKS = 144;
+
 /** Consecutive clean sweeps before it recovers — hysteresis, so a leg that
  * errors every other tick never produces an alternating email pair. */
 export const LEG_RECOVER_AFTER_SWEEPS = 3;

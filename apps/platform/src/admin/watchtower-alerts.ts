@@ -22,6 +22,7 @@ import {
   DEBOUNCED_DIGEST_ALERT_POLICY,
   IMMEDIATE_ALERT_POLICY,
   type AlertAction,
+  type AlertObservation,
   type AlertPolicy,
   type AlertTransition,
 } from "./watchtower-policy.js";
@@ -46,10 +47,27 @@ import {
  * made implicitly. `no_longer_applicable` then makes `recoveryEmail` DISCARD
  * the producer's prose, so a false cause cannot reach the founder even if
  * someone writes one.
+ *
+ * `materiality` on the UNHEALTHY arm is the exact same device for the exact same
+ * reason (alert-state design §1.1). The suppression used to decide on a
+ * two-valued healthy/unhealthy comparison, so it could not tell a repeat from an
+ * escalation: inside an announced episode `last_detail` was overwritten and
+ * NOTHING was compared, and a second, genuinely worse condition under the same
+ * check name reached the founder as an edited string on a suppressed row. The
+ * key is a producer-stated classification over a CLOSED enumeration
+ * (`ALERT_FAMILIES`), never the detail string and never a count — those embed
+ * `errMsg(err)`, `JSON.stringify(body)` and per-tick counts, so keying on them
+ * means one email per variant.
  */
 export type CheckResult =
-  | { name: string; healthy: false; detail: string }
+  | { name: string; healthy: false; detail: string; materiality: string }
   | { name: string; healthy: true; detail: string; basis: RecoveryBasis };
+
+/** The observation a `CheckResult` makes, without the name or the prose — what
+ * the pure state machine actually decides on. */
+export function observationOf(result: CheckResult): AlertObservation {
+  return result.healthy ? { healthy: true, basis: result.basis } : { healthy: false, materiality: result.materiality };
+}
 
 export interface AlertOutcome {
   name: string;
@@ -85,6 +103,8 @@ const CHECK_LABELS: Record<string, string> = {
   // two account-wide InboxKit checks (admin/watchtower-vendor.ts).
   vendor_wallet: "InboxKit vendor wallet",
   warmup_duplicates: "Duplicate warmup subscriptions",
+  // Alert-state design §5.5 — the alerting channel reporting on itself.
+  alert_budget_exceeded: "Founder alert budget",
 };
 
 /**
@@ -179,6 +199,17 @@ export const SWEEP_SIGNALS_CHECK = "sweep_signals";
  * monitor was healthy on the exact tick the monitor could not reach them.
  */
 export const ALERT_DELIVERY_CHECK = "alert_delivery";
+
+/**
+ * The ANNOUNCEMENT CHANNEL reporting that it is withholding (alert-state design
+ * §5.5).
+ *
+ * A FAMILY rather than a key on an existing check, by §4's rule: a new family is
+ * warranted when the SUBJECT is new; a materiality key when the subject is the
+ * same and only the rung differs. Its subject is the alerting channel itself,
+ * not any platform condition, and no existing check's key could carry it.
+ */
+export const ALERT_BUDGET_EXCEEDED_CHECK = "alert_budget_exceeded";
 
 export function labelFor(name: string): string {
   if (name.startsWith(MAILBOX_PROVISIONING_CHECK)) {
@@ -306,6 +337,12 @@ export function policyFor(checkName: string): AlertPolicy {
   // Same cadence as every other re-observed check; only the channel differs.
   if (checkName.startsWith(CUSTOMER_PROGRESS_AGENT_CHECK)) return DEBOUNCED_DIGEST_ALERT_POLICY;
 
+  // The alerting channel's own saturation check (alert-state design §3.3) takes
+  // the DEBOUNCED default DELIBERATELY, stated here rather than inherited: it is
+  // re-observed every tick from the counter, so a single tick that touches the
+  // ceiling is a flap worth zero emails, and two consecutive (10 min) is a
+  // genuinely saturated channel. Its exemption is from the BUDGET (it cannot be
+  // budgeted by the budget it announces), not from the debounce.
   return DEBOUNCED_ALERT_POLICY;
 }
 
@@ -338,28 +375,63 @@ export function alertEmailFor(
   if (policy.channel === "digest") return null;
   switch (transition.action) {
     case "alerted":
-      return unhealthyEmail(env, result, nowMs, false);
+      return unhealthyEmail(env, result, transition, nowMs, "first");
+    case "escalated":
+      return unhealthyEmail(env, result, transition, transition.next.sinceTs, "escalation");
     case "realerted":
-      return unhealthyEmail(env, result, transition.next.sinceTs, true);
+      return unhealthyEmail(env, result, transition, transition.next.sinceTs, "realert");
     case "recovered":
       // `recovered` is only ever produced from a healthy observation
       // (watchtower-policy.ts's decideAlert), so the narrowing always holds;
       // the guard keeps it a type fact rather than a comment.
       return result.healthy ? recoveryEmail(env, result, prevSinceTs ?? nowMs, nowMs) : null;
-    default:
+    case "suppressed":
+    case "pending":
+    case "holding":
+    case "healthy":
+    case "unreportable":
       return null;
+    default:
+      // EXHAUSTIVE, not a silent `default: return null` (§3.5, read site 1). A
+      // forgotten case would drop the email WHILE the ledger records its key as
+      // announced — a permanent deletion, because `escalated` never fires twice
+      // for the same key. `escalated` is exactly the case that would have been
+      // forgotten, which is why this became a compile-time obligation.
+      return unhandledAction(transition.action);
   }
 }
 
-function unhealthyEmail(env: Env, result: CheckResult, sinceTs: number, isReAlert: boolean): OutgoingAlert {
+function unhandledAction(action: never): never {
+  throw new Error(`unhandled watchtower alert action: ${String(action)}`);
+}
+
+/** Which unhealthy email this is — they differ only in the one line that says
+ * why it arrived, which is the whole point of telling them apart. */
+type UnhealthyKind = "first" | "escalation" | "realert";
+
+function unhealthyEmail(env: Env, result: CheckResult, transition: AlertTransition, sinceTs: number, kind: UnhealthyKind): OutgoingAlert {
   const label = labelFor(result.name);
-  const persistence = isReAlert ? `\n\nStill unhealthy since ${new Date(sinceTs).toISOString()} (re-alert after cooldown).` : "";
-  const text = `Check "${label}" (${result.name}) is UNHEALTHY.\n\n${result.detail}${persistence}\n\nThis is an automated coldrig watchtower alert.`;
+  const since = new Date(sinceTs).toISOString();
+  const context =
+    kind === "realert"
+      ? `Still unhealthy since ${since} (re-alert after cooldown).`
+      : kind === "escalation"
+        ? `Unhealthy since ${since}. This is a DIFFERENT condition under the same check — the earlier one may also still be true.`
+        : "";
+  // The cap's disclosure (§1.3): an episode that hit
+  // MAX_ANNOUNCED_KEYS_PER_EPISODE holds more distinct conditions than it has
+  // told the founder about, and silently dropping that fact is what makes a cap
+  // dangerous rather than safe.
+  const overflow = transition.next.announcedKeys.overflow;
+  const overflowLine =
+    overflow > 0 ? `${overflow} further distinct condition(s) on this check were not announced separately — read the check's current detail for what it says now.` : "";
+  const extra = [context, overflowLine].filter(Boolean);
+  const text = `Check "${label}" (${result.name}) is UNHEALTHY.\n\n${result.detail}${extra.length > 0 ? `\n\n${extra.join("\n")}` : ""}\n\nThis is an automated coldrig watchtower alert.`;
   return {
     to: env.OPS_ALERT_EMAIL,
     subject: `[coldrig] ${label}: UNHEALTHY`,
     text,
-    html: `<p>Check <strong>${escapeHtml(label)}</strong> (<code>${escapeHtml(result.name)}</code>) is <strong>UNHEALTHY</strong>.</p><p>${escapeHtml(result.detail)}</p>${isReAlert ? `<p>Still unhealthy since ${escapeHtml(new Date(sinceTs).toISOString())} (re-alert after cooldown).</p>` : ""}<p>This is an automated coldrig watchtower alert.</p>`,
+    html: `<p>Check <strong>${escapeHtml(label)}</strong> (<code>${escapeHtml(result.name)}</code>) is <strong>UNHEALTHY</strong>.</p><p>${escapeHtml(result.detail)}</p>${extra.map((line) => `<p>${escapeHtml(line)}</p>`).join("")}<p>This is an automated coldrig watchtower alert.</p>`,
   };
 }
 
@@ -441,8 +513,15 @@ export function notifiedFromOutcome(outcome: AlertOutcome | null): Notified {
  * `AlertAction` semantics rather than inlined so "we chose not to tell you"
  * cannot quietly stand in for "there was nothing to tell".
  */
-export function reasonForNoEmail(action: AlertAction): DeliveryReason {
-  if (action === "pending") return "pending_debounce";
-  if (action === "suppressed") return "suppressed_cooldown";
+export function reasonForNoEmail(transition: AlertTransition): DeliveryReason {
+  if (transition.action === "pending") return "pending_debounce";
+  // §3.5, read site 3. `holding` used to fall through to `nothing_owed`, which
+  // reports "there was nothing to tell" about a recovery that is actively being
+  // confirmed — the producer said HEALTHY and the episode is deliberately still
+  // open.
+  if (transition.action === "holding") return "pending_recovery";
+  if (transition.action === "suppressed") {
+    return transition.suppressedBy === "key_cap" ? "suppressed_key_cap" : "suppressed_cooldown";
+  }
   return "nothing_owed";
 }

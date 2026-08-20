@@ -38,9 +38,11 @@ import {
   alertEmailFor,
   customerProgressAgentCheckName,
   customerProgressOperatorCheckName,
+  observationOf,
   policyFor,
   reasonForNoEmail,
   trySend,
+  ALERT_BUDGET_EXCEEDED_CHECK,
   CRED_PUSH_AGING_CHECK,
   CUSTOMER_PROGRESS_AGENT_CHECK,
   CUSTOMER_PROGRESS_OPERATOR_CHECK,
@@ -59,9 +61,31 @@ import {
   type AlertOutcome,
   type CheckResult,
 } from "./watchtower-alerts.js";
-import { decideAlert, normalizeAlertState, withheldAlertState, type AlertState } from "./watchtower-policy.js";
-import { FAILURE_SIGNAL_WINDOW_MS, gradeFailureSignals } from "./watchtower-grading.js";
-import { reconcileD1Alert, recordWatchtowerCompleted } from "./watchtower-infra.js";
+import {
+  decideAlert,
+  normalizeAlertState,
+  withheldAlertState,
+  EMPTY_ANNOUNCED_KEYS,
+  type AlertAction,
+  type AlertPolicy,
+  type AlertState,
+  type AlertTransition,
+  type AnnouncedKeys,
+} from "./watchtower-policy.js";
+import {
+  MAX_ANNOUNCEMENT_EMAILS_PER_DAY,
+  MAX_PER_ENTITY_ANNOUNCEMENTS_PER_DAY,
+  type AnnouncementCandidate,
+} from "./watchtower-budget.js";
+import {
+  customerProgressKey,
+  failureSignalsKey,
+  isBudgetExemptCheck,
+  isPerEntityCheck,
+  tenantDoWedgedKey,
+} from "./watchtower-families.js";
+import { FAILURE_SIGNAL_WINDOW_MS, FAILURE_SIGNALS_HOLD_STREAK, gradeFailureSignals, SUSTAINED_HOLD_TICKS } from "./watchtower-grading.js";
+import { reconcileD1Alert, recordWatchtowerCompleted, watchtowerStub } from "./watchtower-infra.js";
 import { evaluateVendorChecks } from "./watchtower-vendor.js";
 
 // A probe to the external engine must not hang the whole sweep on a stalled
@@ -150,7 +174,7 @@ export async function evaluateHealthChecks(env: Env, nowMs: number, scope: Sweep
     results.push({ name: D1_CHECK, healthy: true, detail: "D1 SELECT 1 ok", basis: "reobserved" });
   } catch (err) {
     d1Healthy = false;
-    results.push({ name: D1_CHECK, healthy: false, detail: `D1 unreachable: ${errMsg(err)}` });
+    results.push({ name: D1_CHECK, healthy: false, materiality: "down", detail: `D1 unreachable: ${errMsg(err)}` });
   }
 
   results.push(await probeDurableObjectStorage(env));
@@ -165,10 +189,10 @@ export async function evaluateHealthChecks(env: Env, nowMs: number, scope: Sweep
       results.push(
         res.ok
           ? { name: "engine", healthy: true, detail: `engine /health -> ${res.status}`, basis: "reobserved" }
-          : { name: "engine", healthy: false, detail: `engine /health -> HTTP ${res.status}` },
+          : { name: "engine", healthy: false, materiality: "down", detail: `engine /health -> HTTP ${res.status}` },
       );
     } catch (err) {
-      results.push({ name: "engine", healthy: false, detail: `engine /health unreachable: ${errMsg(err)}` });
+      results.push({ name: "engine", healthy: false, materiality: "down", detail: `engine /health unreachable: ${errMsg(err)}` });
     }
   }
 
@@ -199,7 +223,7 @@ async function probeDurableObjectStorage(env: Env): Promise<CheckResult> {
   try {
     await env.SIGNUP_LIMITER.get(env.SIGNUP_LIMITER.idFromName(DO_PROBE_NAME)).ping();
   } catch (err) {
-    return { name: "do_storage", healthy: false, detail: `RateLimiterDO probe failed: ${errMsg(err)}` };
+    return { name: "do_storage", healthy: false, materiality: "down", detail: `RateLimiterDO probe failed: ${errMsg(err)}` };
   }
   try {
     await env.TENANT.get(env.TENANT.idFromName(DO_PROBE_NAME)).ping();
@@ -207,6 +231,7 @@ async function probeDurableObjectStorage(env: Env): Promise<CheckResult> {
     return {
       name: "do_storage",
       healthy: false,
+      materiality: "down",
       detail: `TenantDO canary probe failed — the class holding every tenant's state does not construct or read: ${errMsg(err)}`,
     };
   }
@@ -273,6 +298,9 @@ async function scanTenants(env: Env, nowMs: number, scope: SweepScope): Promise<
       results.push({
         name: tenantDoWedgedCheckName(tenantId),
         healthy: false,
+        // The KIND of throw, from `err.name` — never `err.message`, which is in
+        // the detail below and moves with every RPC.
+        materiality: tenantDoWedgedKey(err),
         detail:
           `Tenant ${tenantId}'s Durable Object threw instead of answering opsSummary: ${errMsg(err)}. ` +
           `While it stays this way that tenant is invisible to EVERY health check (failure signals, credential pushes, send ` +
@@ -314,20 +342,65 @@ async function scanTenants(env: Env, nowMs: number, scope: SweepScope): Promise<
   const observed = gradeFailureSignals(failed, complaints);
   const holdWouldHideRecovery = observed === true && !scanComplete && (await readCheckStatus(env, FAILURE_SIGNALS_CHECK)) === "unhealthy";
   const grade = holdWouldHideRecovery ? null : observed;
-  if (grade !== null) {
-    const windowMin = Math.round(FAILURE_SIGNAL_WINDOW_MS / 60000);
-    const scanScope = scanComplete ? `all ${tenantTotal} tenant(s)` : `${swept.visited} of ${tenantTotal} tenant(s) scanned this cycle`;
-    const failureDetail = grade
-      ? `no failed sends or complaints in the last ${windowMin} min, across ${scanScope}`
-      : `${failed} terminal-failed send(s) + ${complaints} complaint(s) in the last ${windowMin} min, across ${scanScope}`;
-    results.push({
-      name: FAILURE_SIGNALS_CHECK,
-      // reobserved: the healthy claim is a freshly counted window, not an
-      // entity dropping out of a filter.
-      ...(grade ? { healthy: true as const, basis: "reobserved" as const } : { healthy: false as const }),
-      detail: failureDetail,
-    });
+
+  // U-2 — THE SUSTAINED DEAD BAND (alert-state design §4). `gradeFailureSignals`
+  // answers `null` for a window that is neither clean nor over threshold, and
+  // `null` means "report nothing" — so a tenant losing 1-2 sends an hour, every
+  // hour, forever, was reported by nothing at all. The missing information is
+  // TEMPORAL, not categorical (`Grade` is already three-valued), and the store it
+  // needs already exists: the DO's generic keyed streak.
+  //
+  // POLARITY (B1 — the highest-value RED in the increment). `gradeStreak`'s arms
+  // are DISJOINT BY INPUT: fed `observedUnhealthy = (grade === null)`, a tick
+  // satisfying `grade === null` takes the first branch, which can only return
+  // `false` or `null`. `true` is unreachable there, so a `grade === null &&
+  // holdGrade` composition is ALWAYS FALSY — 300 ticks, 0 results, byte-identical
+  // to doing nothing. The guard is `holdGrade === false`: `false` is "the streak
+  // has reached its threshold", i.e. the dead band has been occupied
+  // continuously. This inversion passes every "it alerts on a real signal" test,
+  // because the real-signal path is the OTHER arm.
+  //
+  // INTERACTION, STATED: a tick where `grade === false` feeds
+  // `observedUnhealthy = false` and clears the hold streak, so dead-band ⇄
+  // over-threshold oscillation never accumulates 144 consecutive hold ticks.
+  // Acceptable — the over-threshold ticks emit the real signal on their own arm.
+  //
+  // FED `observed`, NOT `grade`. `grade` is `null` for two different reasons and
+  // only one of them is a dead band: `holdWouldHideRecovery` nulls a genuinely
+  // CLEAN window that a partial scan may not use to claim a recovery. Feeding
+  // that in would accumulate dead-band ticks on clean windows and eventually
+  // announce a sustained sub-threshold rate that is not happening.
+  const holdGrade = await watchtowerStub(env).gradeSweepStreak(FAILURE_SIGNALS_HOLD_STREAK, observed === null, SUSTAINED_HOLD_TICKS, 1);
+
+  const windowMin = Math.round(FAILURE_SIGNAL_WINDOW_MS / 60000);
+  const scanScope = scanComplete ? `all ${tenantTotal} tenant(s)` : `${swept.visited} of ${tenantTotal} tenant(s) scanned this cycle`;
+  if (grade === null) {
+    if (holdGrade === false) {
+      results.push({
+        name: FAILURE_SIGNALS_CHECK,
+        healthy: false,
+        materiality: "sustained_subthreshold",
+        detail:
+          `Terminal send failures have sat BELOW the alerting threshold continuously for ~${Math.round((SUSTAINED_HOLD_TICKS * 5) / 60)}h — ` +
+          `${failed} failed send(s) + ${complaints} complaint(s) in the last ${windowMin} min, across ${scanScope}. ` +
+          `No single window is worth an alert, and the sustained rate is: this is the shape a slowly-dying mailbox, a ` +
+          `degrading domain reputation or a partially-wrong credential makes. Read the per-tenant breakdown in GET /admin/ops/digest.`,
+      });
+    }
+    return results;
   }
+
+  results.push({
+    name: FAILURE_SIGNALS_CHECK,
+    // reobserved: the healthy claim is a freshly counted window, not an
+    // entity dropping out of a filter.
+    ...(grade
+      ? { healthy: true as const, basis: "reobserved" as const }
+      : { healthy: false as const, materiality: failureSignalsKey(failed, complaints) }),
+    detail: grade
+      ? `no failed sends or complaints in the last ${windowMin} min, across ${scanScope}`
+      : `${failed} terminal-failed send(s) + ${complaints} complaint(s) in the last ${windowMin} min, across ${scanScope}`,
+  });
 
   return results;
 }
@@ -389,6 +462,9 @@ export function sendPipelineChecks(
     results.push({
       name: domainDnsAgingCheckName(stalled.domain),
       healthy: false,
+      // `gaveUp` IS the escalation: "propagation may still explain it" and "the
+      // platform will never retry this domain" are different founder actions.
+      materiality: stalled.gaveUp ? "gave_up" : "pending",
       detail:
         `Domain ${stalled.domain} (tenant ${tenantId}) has had un-ready mail DNS for ${hours}h. ` +
         (stalled.gaveUp
@@ -437,6 +513,7 @@ export function sendPipelineChecks(
     results.push({
       name: credPushAgingCheckName(push.email),
       healthy: false,
+      materiality: "aging",
       detail:
         `Mailbox ${push.email} (tenant ${tenantId}) has been waiting ${Math.round(push.pendingForMs / 60000)} min for its engine ` +
         `credential push. It cannot send or poll until an OAuth grant is minted for it — on the manual path that means adding it ` +
@@ -483,6 +560,7 @@ export function sendPipelineChecks(
     results.push({
       name: starvedName,
       healthy: false,
+      materiality: "starved",
       detail:
         `Tenant ${tenantId} (${summary.brand}) has ${dueNonDemoPendingSends} send(s) due and ZERO eligible mailboxes — nothing will go ` +
         `out. Every mailbox it holds is released, sandbox-origin, BYO (no engine credentials wired yet), unclassified, paused by the ` +
@@ -522,6 +600,7 @@ export function sendPipelineChecks(
     results.push({
       name: mailboxOrphanCheckName(orphan.email),
       healthy: false,
+      materiality: "orphaned",
       detail:
         `Mailbox intent ${orphan.email} (tenant ${tenantId}) has sat at a post-purchase status for ${minutes} min with ` +
         `no live mailboxes row — the vendor may hold a mailbox this platform has no record of and cannot bill or manage. ` +
@@ -559,6 +638,7 @@ export function sendPipelineChecks(
     results.push({
       name: domainOrphanCheckName(orphan.domain),
       healthy: false,
+      materiality: "orphaned",
       detail:
         `Domain intent ${orphan.domain} (tenant ${tenantId}) has been marked committed for ${minutes} min with no matching ` +
         `domains row — the vendor may hold a domain this platform has no record of. Ask the vendor what it holds before buying a replacement.`,
@@ -617,6 +697,12 @@ export function sendPipelineChecks(
     results.push({
       name: blamedName,
       healthy: false,
+      // The ACTION CLASS of the highest-precedence owed step — a closed map over
+      // all 12 NEXT_STEP_REASONS. Keying on the reason gives 12; keying on
+      // `waitingOn` is near-constant per name, because the blame is already IN
+      // the name. "our blocker became a capacity hold" is the change that
+      // changes what the founder does.
+      materiality: customerProgressKey(owedReasons),
       detail:
         `Tenant ${tenantId} (${summary.brand}) has ${owedCount} owed next-step(s) — ${owedReasons.join(", ")} — ` +
         `blamed on ${anyOwedWaitingOnOperator ? "the operator" : "the agent"}. ` +
@@ -708,6 +794,50 @@ function customerProgressSiblingName(name: string): string | null {
   return null;
 }
 
+/**
+ * The transitions an email is genuinely OWED for.
+ *
+ * A SECOND, INDEPENDENT enumeration of the email-owing actions (§3.5, read site
+ * 2 — `alertEmailFor`'s switch is the first). `escalated` had to join BOTH or
+ * the digest-channel `why` would be wrong for exactly the transition this
+ * increment adds.
+ */
+function wouldEmail(action: AlertAction): boolean {
+  return action === "alerted" || action === "escalated" || action === "realerted" || action === "recovered";
+}
+
+/**
+ * Does this transition need a slot in the rolling daily budget (§5.5)?
+ *
+ * ANNOUNCEMENTS ONLY. `recovered` is exempt — a budget-withheld recovery reverts
+ * the whole previous state through `withheldAlertState`, so the episode would
+ * never close, and NO BUDGET DECISION MAY BLOCK AN EPISODE CLOSE. The exemption
+ * is self-bounding rather than open-ended: a recovery is owed only when
+ * `alertCount > 0`, i.e. only for an episode that was actually ANNOUNCED, and a
+ * budget-withheld confirming alert leaves `alertCount` at 0 — so recoveries over
+ * any window are bounded by the announcements over that window, which is exactly
+ * what this budget limits.
+ */
+function isBudgetedAnnouncement(checkName: string, action: AlertAction): boolean {
+  if (action !== "alerted" && action !== "escalated" && action !== "realerted") return false;
+  return !isBudgetExemptCheck(checkName);
+}
+
+/** One check's decision, before anything has been sent or written. */
+interface PendingDecision {
+  result: CheckResult;
+  persisted: PersistedCheck | undefined;
+  prev: AlertState | null;
+  policy: AlertPolicy;
+  transition: AlertTransition;
+  /** The other `customer_progress_*` name for this tenant, or null. */
+  sibling: string | null;
+  reclassified: boolean;
+  digestSuppressed: boolean;
+  /** Set only for a budgeted announcement — its index into the candidate list. */
+  candidateIndex: number | null;
+}
+
 export async function reconcileAlerts(
   env: Env,
   mailer: OpsMailer,
@@ -728,35 +858,83 @@ export async function reconcileAlerts(
       .map((r) => r.name),
   );
 
+  // PASS 1 — DECIDE. Nothing is sent or written here, because the daily budget
+  // has to rank this tick's announcements against EACH OTHER before any of them
+  // takes a slot (§5.5 ordering): round-robin across families, most urgent
+  // action first. Deciding per-check-then-sending, the old shape, hands slots
+  // out in array order, which is the tenant scan's order — so one noisy family
+  // at the head of the batch would starve every check behind it.
+  const decisions: PendingDecision[] = [];
+  const candidates: AnnouncementCandidate[] = [];
   for (const result of results) {
+    const persisted = stateByName.get(result.name);
+    const prev = persisted?.state ?? null;
+    const policy = policyFor(result.name);
+    let transition: AlertTransition;
     try {
-      const persisted = stateByName.get(result.name);
-      const prev = persisted?.state ?? null;
-      const policy = policyFor(result.name);
-      const transition = decideAlert(prev, result.healthy, nowMs, policy);
+      transition = decideAlert(prev, observationOf(result), nowMs, policy);
+    } catch (err) {
+      console.error(`watchtower: check "${result.name}" could not be decided — it is UNREPORTED this tick`, err);
+      outcomes.push({ name: result.name, action: "unreportable", emailSent: false, why: "send_failed" });
+      continue;
+    }
 
-      // A blame flip is a RE-CLASSIFICATION, not a recovery: suppress the
-      // SEND, never the state transition. `transition.next` (the ordinary
-      // clear-to-healthy state) still persists — this tenant is still
-      // stalled, just under the sibling's name now, and the abandoned name
-      // must not re-alert on its own 24h step.
-      const sibling = customerProgressSiblingName(result.name);
-      const reclassified = result.healthy && sibling !== null && unhealthyProgressNames.has(sibling);
-      // An email was genuinely OWED (would have rendered on the email
-      // channel) but this check's channel is not email — distinct from
-      // "nothing was owed yet" (pending/suppressed/steady-healthy), which
-      // keeps its ordinary `reasonForNoEmail`.
-      const wouldEmail = transition.action === "alerted" || transition.action === "realerted" || transition.action === "recovered";
-      const digestSuppressed = !reclassified && policy.channel === "digest" && wouldEmail;
+    // A blame flip is a RE-CLASSIFICATION, not a recovery: suppress the
+    // SEND, never the state transition. `transition.next` (the ordinary
+    // clear-to-healthy state) still persists — this tenant is still
+    // stalled, just under the sibling's name now, and the abandoned name
+    // must not re-alert on its own 24h step.
+    const sibling = customerProgressSiblingName(result.name);
+    const reclassified = result.healthy && sibling !== null && unhealthyProgressNames.has(sibling);
+    // An email was genuinely OWED (would have rendered on the email channel) but
+    // this check's channel is not email — distinct from "nothing was owed yet"
+    // (pending/holding/suppressed/steady-healthy), which keeps its ordinary
+    // `reasonForNoEmail`.
+    const digestSuppressed = !reclassified && policy.channel === "digest" && wouldEmail(transition.action);
 
-      const email = reclassified ? null : alertEmailFor(env, result, transition, prev?.sinceTs ?? null, nowMs, policy);
+    let candidateIndex: number | null = null;
+    if (!reclassified && !digestSuppressed && isBudgetedAnnouncement(result.name, transition.action)) {
+      candidateIndex = candidates.length;
+      candidates.push({
+        name: result.name,
+        family: familyKeyOf(result.name),
+        action: transition.action,
+        perEntity: isPerEntityCheck(result.name),
+      });
+    }
+    decisions.push({ result, persisted, prev, policy, transition, sibling, reclassified, digestSuppressed, candidateIndex });
+  }
+
+  // Claim slots ATOMICALLY, in the budget's own order. A failure here must not
+  // take the tick down: an unreachable WatchtowerDO means we cannot tell whether
+  // a slot is free, and the safe reading for a MONITOR is to let the
+  // announcement through — under-alerting is the failure this whole subsystem
+  // exists to prevent, and the ring is bounded by its own window regardless.
+  const claims = await claimAnnouncementSlots(env, candidates, nowMs);
+  const releasable: string[] = [];
+
+  // PASS 2 — SEND, PERSIST, REPORT, in the caller's own result order.
+  for (const decision of decisions) {
+    const { result, persisted, prev, policy, transition, sibling, reclassified, digestSuppressed, candidateIndex } = decision;
+    try {
+      const claim = candidateIndex === null ? null : claims[candidateIndex] ?? null;
+      // Withheld for want of a slot: the state still advances everywhere the
+      // announcement counters do not, so nothing is lost except the timing of
+      // the email — and `alert_budget_exceeded` reports that it happened.
+      const budgetWithheld = candidateIndex !== null && claim === null;
+      const email = reclassified || budgetWithheld ? null : alertEmailFor(env, result, transition, prev?.sinceTs ?? null, nowMs, policy);
       // `null` = no email was OWED (suppressed / pending / steady-healthy /
       // digest channel / reclassified). That is not a delivery, and it is not
       // a failure either — it must not withhold the transition, and it must
       // not be recorded as "sent". The two used to be one boolean, which is
       // the same conflation member 5 is about, one level down.
       const notified: Notified | null = email ? await trySend(mailer, email) : null;
-      const withheld = notified !== null && !notified.delivered;
+      const withheld = budgetWithheld || (notified !== null && !notified.delivered);
+      // A claimed slot whose send did not land is not an email that was sent, so
+      // it goes back. Leaving it banked would let a dark channel burn the whole
+      // day's budget on zero delivered emails, and keep suppressing real
+      // announcements for 24h after the channel came back.
+      if (claim !== null && notified !== null && !notified.delivered) releasable.push(claim);
       const decided = withheld ? withheldAlertState(prev, transition) : transition.next;
 
       // NON-BLOCKING-3 — THE EPISODE IS THE STALL, NOT THE NAME.
@@ -778,15 +956,36 @@ export async function reconcileAlerts(
       // the backoff compares against `lastAlertTs`, which is always set once
       // `alertCount > 0`. An earlier `sinceTs` therefore accelerates no email —
       // it only makes "unhealthy since" report the truth about the stall.
+      //
+      // GATED ON `healthyObs === 0` (B6, alert-state design §3.1). `holding`
+      // leaves a check reading `status = 'unhealthy'` while its PRODUCER has
+      // already said healthy, and this predicate reads exactly that column — so
+      // without the gate a cleared sibling stays adoptable, the new episode
+      // inherits an OLD `T0`, and `maybeEmitContinuityNudge`'s `>=` guard
+      // returns early: ZERO nudges for the new episode's entire duration. That
+      // is the silent direction of the exactly-once property, and it is the
+      // failure `holding` would have introduced into a shipped, gate-ratified
+      // guarantee. `healthyObs > 0` means the producer has reported healthy at
+      // least once, so that sibling is not carrying a live stall.
+      //
+      // The legitimate same-tick blame flip is unaffected: `stateByName` is the
+      // PRE-PASS read, so on the flip tick the abandoned sibling still reads
+      // `healthyObs === 0`.
       const siblingState = sibling !== null ? normalizeAlertState(stateByName.get(sibling)?.state ?? null) : null;
+      const siblingCarriesStall = siblingState !== null && siblingState.status === "unhealthy" && siblingState.healthyObs === 0;
       const stallOnsetTs =
-        !result.healthy && siblingState !== null && siblingState.status === "unhealthy"
-          ? Math.min(decided.sinceTs, siblingState.sinceTs)
-          : decided.sinceTs;
+        !result.healthy && siblingCarriesStall ? Math.min(decided.sinceTs, siblingState.sinceTs) : decided.sinceTs;
       const state = stallOnsetTs < decided.sinceTs ? { ...decided, sinceTs: stallOnsetTs } : decided;
+      // N6 — WHILE HOLDING, KEEP THE LAST UNHEALTHY DETAIL. The upsert writes
+      // `result.detail` unconditionally, so a holding row would read
+      // `status='unhealthy'` beside a healthy producer's prose ("Domain X now
+      // has working mail DNS") on `GET /admin/ops/checks`. `healthy_obs` is what
+      // tells an operator a recovery is in progress; the detail must keep
+      // describing the condition the row is still open for.
+      const detail = transition.action === "holding" ? (persisted?.detail ?? result.detail) : result.detail;
       // S5 — a tick that changed nothing writes nothing. See `isSteadyState`.
-      if (!isSteadyState(persisted, state, result.detail)) {
-        await upsertWatchtowerState(env, { name: result.name, state, detail: result.detail, nowMs });
+      if (!isSteadyState(persisted, state, detail)) {
+        await upsertWatchtowerState(env, { name: result.name, state, detail, nowMs });
       }
 
       // I15 (§7.12) — the one-shot continuity nudge.
@@ -826,7 +1025,15 @@ export async function reconcileAlerts(
         name: result.name,
         action: transition.action,
         emailSent: notified?.delivered ?? false,
-        why: notified?.why ?? (reclassified ? "reclassified" : digestSuppressed ? "digest_only" : reasonForNoEmail(transition.action)),
+        why:
+          notified?.why ??
+          (reclassified
+            ? "reclassified"
+            : digestSuppressed
+              ? "digest_only"
+              : budgetWithheld
+                ? "suppressed_daily_budget"
+                : reasonForNoEmail(transition)),
       });
     } catch (err) {
       console.error(`watchtower: check "${result.name}" could not be reconciled — it is UNREPORTED this tick`, err);
@@ -834,7 +1041,59 @@ export async function reconcileAlerts(
     }
   }
 
+  await releaseAnnouncementSlots(env, releasable);
   return outcomes;
+}
+
+/**
+ * The FAMILY a check name belongs to, for round-robin ordering — the prefix for
+ * a per-entity check, the name itself for a global one. Ordering on the raw name
+ * would make every `tenant_do_wedged:<id>` its own "family" and the round-robin
+ * a no-op, which is the whole defect ordering (i) exists to close.
+ */
+function familyKeyOf(checkName: string): string {
+  const colon = checkName.indexOf(":");
+  return colon === -1 ? checkName : checkName.slice(0, colon + 1);
+}
+
+/**
+ * Claim budget slots, or let every announcement through if the budget cannot be
+ * consulted.
+ *
+ * FAIL-OPEN, STATED. The WatchtowerDO holding the ring is the same DO the `d1`
+ * check's alert state lives in, and it is unreachable exactly when the platform
+ * is worst off. For a MONITOR, "we could not check the rate limit" must not mean
+ * "stay silent": under-alerting is the failure this whole subsystem exists to
+ * prevent, and the ring's own 24h window bounds the overshoot regardless.
+ */
+async function claimAnnouncementSlots(
+  env: Env,
+  candidates: AnnouncementCandidate[],
+  nowMs: number,
+): Promise<(string | null)[]> {
+  if (candidates.length === 0) return [];
+  try {
+    return await watchtowerStub(env).admitAnnouncements(candidates, nowMs);
+  } catch (err) {
+    console.error("watchtower: the announcement budget could not be consulted — every announcement is being let through", err);
+    return candidates.map(() => null as string | null).fill(FAIL_OPEN_CLAIM);
+  }
+}
+
+/** The claim id used when the budget was unreachable: it admits the send and is
+ * never released, because there is no ring entry to release. */
+const FAIL_OPEN_CLAIM = "budget-unavailable";
+
+async function releaseAnnouncementSlots(env: Env, ids: string[]): Promise<void> {
+  const real = ids.filter((id) => id !== FAIL_OPEN_CLAIM);
+  if (real.length === 0) return;
+  try {
+    await watchtowerStub(env).releaseAnnouncements(real);
+  } catch (err) {
+    // The slot stays banked for its 24h window — a bounded over-count of the
+    // budget, never an unbounded one, and never a lost alert.
+    console.error("watchtower: budget slots for undelivered alerts could not be released", err);
+  }
 }
 
 /** Full sweep: probe, reconcile, record the sweep's completion. Called from
@@ -852,8 +1111,69 @@ export async function runWatchtower(env: Env, mailer: OpsMailer, nowMs: number, 
   if (!d1.healthy) return outcomes;
 
   outcomes.push(...(await reconcileAlerts(env, mailer, results.filter((r) => r.name !== D1_CHECK), nowMs)));
+  outcomes.push(...(await reportAlertBudgetHealth(env, mailer, nowMs)));
   await recordWatchtowerCompleted(env, nowMs);
   return outcomes;
+}
+
+/**
+ * Report whether the announcement channel is WITHHOLDING (§5.5).
+ *
+ * OBSERVED AFTER this tick's announcements, not before, so the report describes
+ * the budget the tick actually left behind.
+ *
+ * EXEMPT FROM THE BUDGET IT ANNOUNCES, and that is the whole point of it being a
+ * check at all: budgeting this one makes it self-suppressing — it goes unhealthy
+ * exactly when the budget is full, so it is always the announcement with no slot
+ * left. Simulated over a 7-day storm, 0 sent / 2015 withheld, with the founder
+ * never told the channel was rate-limited. This repo has a name for that shape
+ * (an alarm that depends on the thing it monitors); it is the same reason
+ * `cron_sweep` is exempt from the debounce.
+ *
+ * `saturated` reads EITHER counter. A total-only reading is silent in exactly
+ * the storm this exists for: with the 15-of-20 per-entity sub-cap in place, a
+ * PURE per-entity storm pins the total at 15/20 forever, so the check never
+ * fires while 85 of 100 instances are being suppressed.
+ *
+ * NEVER THROWS: the budget being unreadable is not a reason to take the sweep
+ * down, and `reconcileAlerts` has already fail-opened on the same DO.
+ */
+export async function reportAlertBudgetHealth(env: Env, mailer: OpsMailer, nowMs: number): Promise<AlertOutcome[]> {
+  let budget: { total: number; perEntity: number; saturated: boolean };
+  try {
+    budget = await watchtowerStub(env).readAnnouncementBudget(nowMs);
+  } catch (err) {
+    console.error("watchtower: the announcement budget could not be read, so its own check is UNREPORTED this tick", err);
+    return [];
+  }
+
+  const scope = `${budget.total} of ${MAX_ANNOUNCEMENT_EMAILS_PER_DAY} announcement(s) in the last 24h, ${budget.perEntity} of ${MAX_PER_ENTITY_ANNOUNCEMENTS_PER_DAY} per-entity`;
+  return reconcileAlerts(
+    env,
+    mailer,
+    [
+      budget.saturated
+        ? {
+            name: ALERT_BUDGET_EXCEEDED_CHECK,
+            healthy: false,
+            materiality: "saturated",
+            detail:
+              `The founder alert channel is WITHHOLDING announcements — ${scope}. ` +
+              `Alerts that would otherwise have been sent are being delayed until a slot frees up, so an empty inbox does NOT ` +
+              `mean a quiet platform right now: poll GET /admin/ops/checks for the full picture. The cron dead-man, the ` +
+              `money-bearing one-shot failures and every recovery email are exempt and still arriving.`,
+          }
+        : {
+            name: ALERT_BUDGET_EXCEEDED_CHECK,
+            healthy: true,
+            // reobserved: the counters were just read out of the ring, so the
+            // healthy claim is a current measurement, not an absence.
+            basis: "reobserved",
+            detail: `The founder alert channel has room — ${scope}.`,
+          },
+    ],
+    nowMs,
+  );
 }
 
 /**
@@ -1057,7 +1377,8 @@ interface PersistedCheck {
 
 async function readWatchtowerState(env: Env): Promise<Map<string, PersistedCheck>> {
   const result = await env.DB.prepare(
-    `SELECT check_name, status, since_ts, last_alert_ts, last_detail, unhealthy_obs, alert_count FROM watchtower_state`,
+    `SELECT check_name, status, since_ts, last_alert_ts, last_detail, unhealthy_obs, alert_count, healthy_obs, realert_count, announced_keys
+       FROM watchtower_state`,
   ).all<{
     check_name: string;
     status: "healthy" | "unhealthy";
@@ -1066,6 +1387,9 @@ async function readWatchtowerState(env: Env): Promise<Map<string, PersistedCheck
     last_detail: string | null;
     unhealthy_obs: number;
     alert_count: number;
+    healthy_obs: number;
+    realert_count: number;
+    announced_keys: string | null;
   }>();
   const map = new Map<string, PersistedCheck>();
   for (const row of result.results) {
@@ -1075,12 +1399,36 @@ async function readWatchtowerState(env: Env): Promise<Map<string, PersistedCheck
         sinceTs: row.since_ts,
         lastAlertTs: row.last_alert_ts,
         unhealthyObs: row.unhealthy_obs,
+        healthyObs: row.healthy_obs,
         alertCount: row.alert_count,
+        realertCount: row.realert_count,
+        announcedKeys: parseAnnouncedKeys(row.announced_keys, row.check_name),
       },
       detail: row.last_detail ?? "",
     });
   }
   return map;
+}
+
+/**
+ * Read the ledger blob, taking the LEGACY branch on anything unreadable.
+ *
+ * A `JSON.parse` failure must NOT produce "this episode announced nothing":
+ * that instructs the machine to re-announce every key in the episode, so a
+ * single corrupt byte becomes a storm. An empty ledger on an announced episode
+ * is `decideAlert`'s silent adopt instead — the safe reading of "we cannot tell
+ * what was announced". `normalizeAlertState` coerces the shape; this only has to
+ * survive the parse.
+ */
+function parseAnnouncedKeys(raw: string | null, checkName: string): AnnouncedKeys {
+  if (raw === null) return { ...EMPTY_ANNOUNCED_KEYS };
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") return parsed as AnnouncedKeys;
+  } catch (err) {
+    console.error(`watchtower: check "${checkName}" has an unreadable announced-keys ledger — treating it as legacy`, err);
+  }
+  return { ...EMPTY_ANNOUNCED_KEYS };
 }
 
 /**
@@ -1109,7 +1457,17 @@ function isSteadyState(prev: PersistedCheck | undefined, next: AlertState, detai
     prev.state.sinceTs === next.sinceTs &&
     prev.state.lastAlertTs === next.lastAlertTs &&
     prev.state.unhealthyObs === next.unhealthyObs &&
-    prev.state.alertCount === next.alertCount
+    prev.state.alertCount === next.alertCount &&
+    // The three the alert-state increment added. Omitting any of them would make
+    // this predicate report "nothing changed" for a tick that banked a new
+    // materiality key or advanced the recovery confirmation — the write would be
+    // skipped and the ledger silently reverted on the next read, so the same
+    // condition would announce again on every tick.
+    prev.state.healthyObs === next.healthyObs &&
+    prev.state.realertCount === next.realertCount &&
+    prev.state.announcedKeys.overflow === next.announcedKeys.overflow &&
+    prev.state.announcedKeys.keys.length === next.announcedKeys.keys.length &&
+    prev.state.announcedKeys.keys.every((key, i) => key === next.announcedKeys.keys[i])
   );
 }
 
@@ -1203,8 +1561,9 @@ async function upsertWatchtowerState(
   params: { name: string; state: AlertState; detail: string; nowMs: number },
 ): Promise<void> {
   await env.DB.prepare(
-    `INSERT INTO watchtower_state (check_name, status, since_ts, last_alert_ts, last_detail, updated_at, unhealthy_obs, alert_count)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO watchtower_state
+       (check_name, status, since_ts, last_alert_ts, last_detail, updated_at, unhealthy_obs, alert_count, healthy_obs, realert_count, announced_keys)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(check_name) DO UPDATE SET
        status = excluded.status,
        since_ts = excluded.since_ts,
@@ -1212,7 +1571,10 @@ async function upsertWatchtowerState(
        last_detail = excluded.last_detail,
        updated_at = excluded.updated_at,
        unhealthy_obs = excluded.unhealthy_obs,
-       alert_count = excluded.alert_count`,
+       alert_count = excluded.alert_count,
+       healthy_obs = excluded.healthy_obs,
+       realert_count = excluded.realert_count,
+       announced_keys = excluded.announced_keys`,
   )
     .bind(
       params.name,
@@ -1223,6 +1585,9 @@ async function upsertWatchtowerState(
       params.nowMs,
       params.state.unhealthyObs,
       params.state.alertCount,
+      params.state.healthyObs,
+      params.state.realertCount,
+      JSON.stringify(params.state.announcedKeys),
     )
     .run();
 }

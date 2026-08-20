@@ -165,6 +165,19 @@ export async function confirmVendorOwnership(
 }
 
 /**
+ * Which stuck state this is (alert-state design §1.2). A UNION, not a string:
+ * these are event-driven one-shots raised around real vendor spend, and the
+ * caller is the only thing that knows which arm it took — a defaulted key would
+ * make "the provider cannot be asked" and "attempting the one authorized re-buy"
+ * the same announcement, which is exactly the repeat-vs-escalation confusion the
+ * ledger exists to fix.
+ */
+export type MailboxProvisioningKey = "lookup_failed" | "too_recent" | "rebuy_attempting";
+
+/** Which way the re-buy lane failed — same reasoning as above. */
+export type MailboxRebuyKey = "unusable_at_vendor" | "budget_spent" | "dispatch_failed";
+
+/**
  * The founder alert for a mailbox whose purchase is stuck. Fires on ENTERING the
  * state; the watchtower's own dedup keeps a tenant retrying every minute from
  * turning it into a storm.
@@ -179,6 +192,7 @@ export async function confirmVendorOwnership(
 export async function alertMailboxStuck(
   ctx: TenantContext,
   email: string,
+  materiality: MailboxProvisioningKey,
   detail: string,
   mailer: OpsMailer = createOpsMailer(ctx.env),
 ): Promise<Notified> {
@@ -186,7 +200,7 @@ export async function alertMailboxStuck(
     await reportCheck(
       ctx.env,
       mailer,
-      { name: mailboxProvisioningCheckName(email), healthy: false, detail: `tenant ${ctx.tenantId}: ${detail}` },
+      { name: mailboxProvisioningCheckName(email), healthy: false, materiality, detail: `tenant ${ctx.tenantId}: ${detail}` },
       new RealClock().now(),
     ),
   );
@@ -228,6 +242,7 @@ export async function alertMailboxResolved(
 export async function alertMailboxRebuyFailed(
   ctx: TenantContext,
   email: string,
+  materiality: MailboxRebuyKey,
   detail: string,
   mailer: OpsMailer = createOpsMailer(ctx.env),
 ): Promise<Notified> {
@@ -235,7 +250,7 @@ export async function alertMailboxRebuyFailed(
     await reportCheck(
       ctx.env,
       mailer,
-      { name: mailboxRebuyCheckName(email), healthy: false, detail: `tenant ${ctx.tenantId}: ${detail}` },
+      { name: mailboxRebuyCheckName(email), healthy: false, materiality, detail: `tenant ${ctx.tenantId}: ${detail}` },
       new RealClock().now(),
     ),
   );

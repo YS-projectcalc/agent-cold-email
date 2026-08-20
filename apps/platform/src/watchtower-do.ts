@@ -2,13 +2,25 @@ import { DurableObject } from "cloudflare:workers";
 import type { Notified } from "@coldstart/shared";
 import {
   alertEmailFor,
+  observationOf,
   policyFor,
   trySend,
   CRON_SWEEP_CHECK,
   D1_CHECK,
   type CheckResult,
 } from "./admin/watchtower-alerts.js";
-import { decideAlert, withheldAlertState, type AlertTransition, type PersistedAlertState } from "./admin/watchtower-policy.js";
+import { decideAlert, withheldAlertState, type AlertObservation, type AlertTransition, type PersistedAlertState } from "./admin/watchtower-policy.js";
+import {
+  admitInOrder,
+  announcementOrder,
+  countRing,
+  isSaturated,
+  pruneRing,
+  EMPTY_ANNOUNCEMENT_RING,
+  type AnnouncementCandidate,
+  type AnnouncementCounts,
+  type AnnouncementRing,
+} from "./admin/watchtower-budget.js";
 import { DEAD_MAN_INTERVAL_MS, EMPTY_STREAK, gradeStreak, SWEEP_STALE_MS, type Grade, type StreakState } from "./admin/watchtower-grading.js";
 import type { Env } from "./env.js";
 import { createOpsMailer, type OpsMailer } from "./ops-mail/ops-mailer.js";
@@ -43,6 +55,11 @@ const HEARTBEAT_KEY = "sweep_heartbeat_ts";
 const D1_ALERT_KEY = "d1_alert_state";
 const DEAD_MAN_ALERT_KEY = "dead_man_alert_state";
 const STREAK_KEY_PREFIX = "streak:";
+/** The rolling 24h announcement budget (§5.5). Watchtower control state, held
+ * here rather than in D1 for the same reason the `d1` check's own alert state
+ * is: it must be readable during a D1 outage, or the one alert that describes
+ * the outage is the one the budget cannot decide. */
+const ANNOUNCEMENT_RING_KEY = "announcement_ring";
 
 /** What the Worker needs to render the email for a decision made in here. */
 export interface RemoteAlertDecision {
@@ -81,23 +98,23 @@ export class WatchtowerDO extends DurableObject<Env> {
    * and re-attempts, which is the safe direction for the one check that exists
    * to report its own store being down.
    */
-  async decideD1Alert(healthy: boolean, nowMs: number): Promise<RemoteAlertDecision> {
-    return (await this.readAndDecide(D1_ALERT_KEY, D1_CHECK, healthy, nowMs)).decision;
+  async decideD1Alert(observation: AlertObservation, nowMs: number): Promise<RemoteAlertDecision> {
+    return (await this.readAndDecide(D1_ALERT_KEY, D1_CHECK, observation, nowMs)).decision;
   }
 
   /**
    * Bank what the send outcome entitles us to record — the other half of
    * `decideD1Alert`, called by the Worker once it knows.
    *
-   * Re-derives the transition from the SAME (prev, healthy, nowMs) rather than
-   * taking a state from the caller: `decideAlert` is pure and nothing was
+   * Re-derives the transition from the SAME (prev, observation, nowMs) rather
+   * than taking a state from the caller: `decideAlert` is pure and nothing was
    * written in between, so this is the identical transition, and the DO stays
    * the only thing that decides what the DO stores. `notified` is `null` when
-   * no email was OWED (suppressed / pending / steady-healthy) — not a delivery
-   * and not a failure, so the transition is banked in full.
+   * no email was OWED (suppressed / pending / holding / steady-healthy) — not a
+   * delivery and not a failure, so the transition is banked in full.
    */
-  async commitD1Alert(healthy: boolean, nowMs: number, notified: Notified | null): Promise<void> {
-    const { prev, decision } = await this.readAndDecide(D1_ALERT_KEY, D1_CHECK, healthy, nowMs);
+  async commitD1Alert(observation: AlertObservation, nowMs: number, notified: Notified | null): Promise<void> {
+    const { prev, decision } = await this.readAndDecide(D1_ALERT_KEY, D1_CHECK, observation, nowMs);
     await this.bankAlert(D1_ALERT_KEY, prev, decision.transition, notified);
   }
 
@@ -126,11 +143,76 @@ export class WatchtowerDO extends DurableObject<Env> {
    * Lives here rather than in D1 because it is the same "the watchtower's own
    * bookkeeping" concern, and adding a table for two counters is not.
    */
-  async gradeSweepStreak(key: string, observedUnhealthy: boolean): Promise<Grade> {
+  async gradeSweepStreak(key: string, observedUnhealthy: boolean, alertAfter?: number, recoverAfter?: number): Promise<Grade> {
     const prev = (await this.ctx.storage.get<StreakState>(STREAK_KEY_PREFIX + key)) ?? EMPTY_STREAK;
-    const { next, grade } = gradeStreak(prev, observedUnhealthy);
+    const { next, grade } = gradeStreak(prev, observedUnhealthy, alertAfter, recoverAfter);
     await this.ctx.storage.put(STREAK_KEY_PREFIX + key, next);
     return grade;
+  }
+
+  /**
+   * Claim slots in the rolling 24h announcement budget, ATOMICALLY (§5.5).
+   *
+   * `candidates` arrive in the order the caller wants them offered slots (see
+   * `announcementOrder`); this returns a slot id per admitted candidate and
+   * `null` for each one the budget turned away, positionally.
+   *
+   * ADMISSION HAPPENS HERE, NOT IN THE WORKER. A read-then-decide in the Worker
+   * leaves a gap: the cron tick and an event-driven `reportCheck` from a tenant
+   * DO can both read `total = 19` and both send. DO storage is serialized by the
+   * input gate, so deciding and recording in one call is what makes "<=20 in any
+   * rolling 24h span" exact rather than approximate.
+   *
+   * RECORDED ON CLAIM, RELEASED ON FAILURE (`releaseAnnouncements`). The ring is
+   * a log of emails ACTUALLY SENT — a claimed slot whose send then failed is not
+   * one, and leaving it banked would let a dark channel burn the whole day's
+   * budget on zero delivered emails and then keep suppressing for 24h after the
+   * channel came back.
+   *
+   * EXEMPT SENDS NEVER REACH HERE. A send that consumed budget would not be
+   * exempt: a 100-item `mailbox_release_failed:` batch would silence every
+   * ordinary announcement for the day, inverting the exemptions' purpose. The
+   * cost — the total counter under-reads real inbox volume — cannot hide
+   * suppression, because `saturated` also reads the per-entity counter and
+   * denial implies saturation exactly.
+   */
+  async admitAnnouncements(candidates: AnnouncementCandidate[], nowMs: number): Promise<(string | null)[]> {
+    const ring = pruneRing((await this.ctx.storage.get<AnnouncementRing>(ANNOUNCEMENT_RING_KEY)) ?? EMPTY_ANNOUNCEMENT_RING, nowMs);
+    const admitted = admitInOrder(countRing(ring), candidates, announcementOrder(candidates));
+
+    const claims: (string | null)[] = [];
+    const sends = [...ring.sends];
+    for (const [index, candidate] of candidates.entries()) {
+      if (!admitted[index]) {
+        claims.push(null);
+        continue;
+      }
+      const id = `${nowMs}:${index}:${candidate.name}`;
+      sends.push({ id, ts: nowMs, perEntity: candidate.perEntity });
+      claims.push(id);
+    }
+    await this.ctx.storage.put(ANNOUNCEMENT_RING_KEY, { sends });
+    return claims;
+  }
+
+  /** Give back slots whose send did not reach the founder — see above. */
+  async releaseAnnouncements(ids: string[]): Promise<void> {
+    if (ids.length === 0) return;
+    const ring = (await this.ctx.storage.get<AnnouncementRing>(ANNOUNCEMENT_RING_KEY)) ?? EMPTY_ANNOUNCEMENT_RING;
+    const released = new Set(ids);
+    await this.ctx.storage.put(ANNOUNCEMENT_RING_KEY, { sends: ring.sends.filter((s) => !released.has(s.id)) });
+  }
+
+  /**
+   * What `alert_budget_exceeded` observes (§5.5). Reads only — the check is
+   * re-observed every tick from the counter, so a single tick that touches the
+   * ceiling is a flap and costs nothing under its DEBOUNCED policy, while two
+   * consecutive (10 min) is a saturated channel.
+   */
+  async readAnnouncementBudget(nowMs: number): Promise<AnnouncementCounts & { saturated: boolean }> {
+    const ring = pruneRing((await this.ctx.storage.get<AnnouncementRing>(ANNOUNCEMENT_RING_KEY)) ?? EMPTY_ANNOUNCEMENT_RING, nowMs);
+    const counts = countRing(ring);
+    return { ...counts, saturated: isSaturated(counts) };
   }
 
   /**
@@ -160,8 +242,10 @@ export class WatchtowerDO extends DurableObject<Env> {
     const result: CheckResult = {
       name: CRON_SWEEP_CHECK,
       // reobserved: `stale` is derived from the heartbeat just read out of
-      // storage, so the healthy claim is a current measurement.
-      ...(stale ? { healthy: false as const } : { healthy: true as const, basis: "reobserved" as const }),
+      // storage, so the healthy claim is a current measurement. The dead-man's
+      // key space is single-valued — it cannot escalate, and it is hard-exempt
+      // from the escape entirely.
+      ...(stale ? { healthy: false as const, materiality: "stale" as const } : { healthy: true as const, basis: "reobserved" as const }),
       detail: stale
         ? `No ops sweep has completed for ~${Math.round(ageMs / 60000)} min (last: ${new Date(heartbeat).toISOString()}). ` +
           `The 5-minute Cron Trigger appears to have stopped, so EVERY other watchtower alert is silent too — ` +
@@ -173,7 +257,7 @@ export class WatchtowerDO extends DurableObject<Env> {
     // alarm holds its own mailer, so unlike the `d1` check it needs no second
     // RPC — but it owes the same guarantee: `trySend` never throws, so the bank
     // step always runs, and it records an announcement only if one happened.
-    const { prev, decision } = await this.readAndDecide(DEAD_MAN_ALERT_KEY, result.name, result.healthy, nowMs);
+    const { prev, decision } = await this.readAndDecide(DEAD_MAN_ALERT_KEY, result.name, observationOf(result), nowMs);
     const email = alertEmailFor(this.env, result, decision.transition, decision.prevSinceTs, nowMs, policyFor(result.name));
     const notified = email ? await trySend(this.mailer, email) : null;
     await this.bankAlert(DEAD_MAN_ALERT_KEY, prev, decision.transition, notified);
@@ -198,11 +282,11 @@ export class WatchtowerDO extends DurableObject<Env> {
   private async readAndDecide(
     key: string,
     checkName: string,
-    healthy: boolean,
+    observation: AlertObservation,
     nowMs: number,
   ): Promise<{ prev: PersistedAlertState | null; decision: RemoteAlertDecision }> {
     const prev = (await this.ctx.storage.get<PersistedAlertState>(key)) ?? null;
-    const transition = decideAlert(prev, healthy, nowMs, policyFor(checkName));
+    const transition = decideAlert(prev, observation, nowMs, policyFor(checkName));
     return { prev, decision: { transition, prevSinceTs: prev?.sinceTs ?? null } };
   }
 
