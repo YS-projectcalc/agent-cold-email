@@ -1,10 +1,16 @@
 import { Hono } from "hono";
 import { AdminScreeningDecisionInput } from "../admin/schemas.js";
-import { getScreeningReview, getTenantIndexById, listPendingScreeningReviews, resolveScreeningReview } from "../admin/db.js";
+import {
+  countPendingScreeningReviews,
+  getScreeningReview,
+  getTenantIndexById,
+  listPendingScreeningReviews,
+  resolveScreeningReview,
+} from "../admin/db.js";
 import { terminateTenantForAbuse } from "../admin/terminate.js";
 import { RealClock } from "../clock.js";
 import type { Env } from "../env.js";
-import { parseJsonBody } from "../validate.js";
+import { parseIntQueryParam, parseJsonBody } from "../validate.js";
 
 const RESOLVED_BY = "admin"; // ADMIN_TOKEN is a single shared owner secret, not a per-admin identity (mirrors enforcement_actions' posture).
 
@@ -17,9 +23,16 @@ const RESOLVED_BY = "admin"; // ADMIN_TOKEN is a single shared owner secret, not
 //     terminate path (design: "reject can chain into the existing terminate
 //     path") — never a silent no-op, never auto-anything.
 export const adminScreeningRoute = new Hono<{ Bindings: Env }>()
+  // S8 — BOUNDED (`?limit=`, clamped, default 200). `count` is this PAGE's size
+  // and `total` is the queue's real depth: `count` alone was a truncatable
+  // number in a field an operator reads as "how many are waiting".
   .get("/admin/screening/reviews", async (c) => {
-    const reviews = await listPendingScreeningReviews(c.env);
-    return c.json({ count: reviews.length, reviews });
+    const limit = parseIntQueryParam(c.req.query("limit"));
+    const [reviews, total] = await Promise.all([
+      listPendingScreeningReviews(c.env, { limit }),
+      countPendingScreeningReviews(c.env),
+    ]);
+    return c.json({ count: reviews.length, total, reviews });
   })
   .post("/admin/tenants/:id/screening", async (c) => {
     const tenantId = c.req.param("id");

@@ -51,6 +51,33 @@ export function parseIntQueryParam(raw: string | undefined): number | undefined 
 }
 
 /**
+ * The one clamp every bounded list read shares (S8, docs/adversarial/
+ * scale-readiness-audit-2026-08-17.md). Absent, non-finite (`NaN` from
+ * `parseIntQueryParam`'s pass-through) or non-positive falls back to
+ * `fallback`; anything larger than `max` is capped there, so a caller cannot
+ * ask for the unbounded read the bound exists to remove.
+ */
+export function clampListLimit(limit: number | undefined, fallback: number, max: number): number {
+  if (limit === undefined || !Number.isFinite(limit)) return fallback;
+  return Math.min(Math.max(Math.trunc(limit), 1), max);
+}
+
+/**
+ * A caller-supplied string as a LITERAL prefix pattern for SQL `LIKE ? ESCAPE
+ * '\'` (F3, docs/adversarial/admin-read-endpoints-gate-2026-08-17.md).
+ *
+ * `LIKE` is a pattern language, not a prefix test: `_` matches any single
+ * character and `%` matches anything, so `setup_infrastructure:%` also selects
+ * `setupXinfrastructure:...`, and a caller passing a bare `%` selects the whole
+ * table. Escaping the three metacharacters (the escape char FIRST, or it
+ * double-escapes the ones added after it) makes the pattern mean exactly the
+ * characters it contains.
+ */
+export function likePrefixPattern(prefix: string): string {
+  return `${prefix.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`;
+}
+
+/**
  * THE one sanctioned way to read a request body in this codebase. Returns the
  * body text, or `null` when it exceeds `maxBytes` of ACTUAL bytes read.
  *

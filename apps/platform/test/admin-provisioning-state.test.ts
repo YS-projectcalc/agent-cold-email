@@ -316,6 +316,46 @@ describe("GET /admin/tenants/:id/provisioning-state", () => {
       expect(res.body.requestIdempotency.map((r) => r.key)).toEqual(["setup_infrastructure:prefixparam-key"]);
       expect(res.body.requestIdempotencyTotal).toBe(1);
     });
+
+    // F3 (docs/adversarial/admin-read-endpoints-gate-2026-08-17.md) — the
+    // narrowing is a PREFIX, but it was written as a bare SQL `LIKE`, where `_`
+    // matches any single character and `%` matches anything at all. When F3 was
+    // filed the pattern was a server-side literal, so nothing could reach the
+    // wildcards; the prefix is now CALLER-SUPPLIED (`?idempotencyPrefix=`), which
+    // makes it live input reaching a pattern language — the boundary-validation
+    // rule (CLAUDE.md h) applies whatever the blast radius.
+    describe("F3 — ?idempotencyPrefix= is a PREFIX, not a LIKE pattern", () => {
+      it("`_` in the prefix matches a literal underscore, never any single character", async () => {
+        const { tenantId } = await mintTenant("Prov State Wildcard Co", "managed");
+        await withTenantContext(tenantId, (ctx) =>
+          withRequestIdempotency(ctx, "setup_infrastructure:real-key", () => terminal({ jobId: "job-real" })),
+        );
+        // The key an `_` wildcard would drag in. No production writer can mint
+        // it (every prefix is built server-side), so it is planted directly.
+        await withTenantContext(tenantId, (ctx) =>
+          withRequestIdempotency(ctx, "setupXinfrastructure:zzwildcardleakzz", () => terminal({ jobId: "job-leak" })),
+        );
+
+        const res = await adminApi<ProvisioningStateResponse>(
+          `/admin/tenants/${tenantId}/provisioning-state?idempotencyPrefix=${encodeURIComponent("setup_infrastructure:")}`,
+        );
+        expect(res.body.requestIdempotency.map((r) => r.key)).toEqual(["setup_infrastructure:real-key"]);
+        expect(res.body.requestIdempotencyTotal).toBe(1);
+      });
+
+      it("`%` in the prefix matches a literal percent, so it cannot select the whole table", async () => {
+        const { tenantId } = await mintTenant("Prov State Percent Co", "managed");
+        await withTenantContext(tenantId, (ctx) =>
+          withRequestIdempotency(ctx, "launch_campaign:pct-key", () => terminal({ campaignId: "cmp-pct" })),
+        );
+
+        const res = await adminApi<ProvisioningStateResponse>(
+          `/admin/tenants/${tenantId}/provisioning-state?idempotencyPrefix=${encodeURIComponent("%")}`,
+        );
+        expect(res.body.requestIdempotency).toEqual([]);
+        expect(res.body.requestIdempotencyTotal).toBe(0);
+      });
+    });
   });
 
   // Item 3a(second half) — the response gains the two tables the incident

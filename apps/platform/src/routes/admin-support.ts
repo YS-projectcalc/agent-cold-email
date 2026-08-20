@@ -6,7 +6,7 @@ import { triageSupportMessage, type SupportTriageResult } from "../admin/support
 import { RealClock } from "../clock.js";
 import type { Env } from "../env.js";
 import { newId } from "../schema.js";
-import { parseJsonBody } from "../validate.js";
+import { parseIntQueryParam, parseJsonBody } from "../validate.js";
 
 // D1 (brief) — AI support triage lane. POST /admin/support/triage classifies
 // + drafts/escalates + logs; GET /admin/support/digest is the owner's pull
@@ -50,9 +50,13 @@ export const adminSupportRoute = new Hono<{ Bindings: Env }>()
     };
     return c.json(body, 201);
   })
+  // S8 — BOUNDED (`?limit=`, clamped, default 200). `counts` is computed over
+  // the whole table, so it stays the honest denominator when `tickets` is one
+  // page of it: an operator can always tell a short page from an empty queue.
   .get("/admin/support/digest", async (c) => {
+    const limit = parseIntQueryParam(c.req.query("limit"));
     const [tickets, counts] = await Promise.all([
-      listOpenAndEscalatedSupportTickets(c.env),
+      listOpenAndEscalatedSupportTickets(c.env, limit),
       countSupportTicketsByStatus(c.env),
     ]);
     return c.json({ counts, tickets });

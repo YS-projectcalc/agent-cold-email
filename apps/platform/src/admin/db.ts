@@ -7,7 +7,15 @@
 
 import type { TenantIndexRow } from "../db.js";
 import type { Env } from "../env.js";
+import { clampListLimit } from "../validate.js";
 import type { SupportCategory } from "./support-kb.js";
+
+// S8 — the default page and the hard cap every cross-tenant operator list read
+// shares. 200 mirrors the per-tenant messages twin (engine/tenant-messages.ts),
+// which is the convention this codebase already settled on; the max exists so an
+// explicit `?limit=` cannot re-open the unbounded read.
+const DEFAULT_ADMIN_LIST_LIMIT = 200;
+const MAX_ADMIN_LIST_LIMIT = 1000;
 
 export interface SupportTicketRow {
   id: string;
@@ -151,12 +159,26 @@ function fromD1Row(row: SupportTicketD1Row): SupportTicketRow {
   };
 }
 
-/** GET /admin/support/digest — every ticket still needing the owner's attention (brief: "open/escalated tickets"). */
-export async function listOpenAndEscalatedSupportTickets(env: Env): Promise<SupportTicketRow[]> {
+/**
+ * GET /admin/support/digest — the tickets still needing the owner's attention
+ * (brief: "open/escalated tickets"), NEWEST FIRST and BOUNDED (S8,
+ * docs/adversarial/scale-readiness-audit-2026-08-17.md).
+ *
+ * `support_tickets` is lifetime-cumulative — nothing deletes a ticket — and this
+ * projection carries the full `body` of every row, so the unbounded version grew
+ * a single operator response without limit. The truncation is safe to leave
+ * silent HERE only because the route pairs this with
+ * `countSupportTicketsByStatus`, whose counts are computed over the whole table:
+ * the digest can be a page, but it must never be able to imply the queue is
+ * empty behind it.
+ */
+export async function listOpenAndEscalatedSupportTickets(env: Env, limit?: number): Promise<SupportTicketRow[]> {
   const result = await env.DB.prepare(
     `SELECT id, from_email, subject, body, tenant_id, category, draft, status, created_at, source
-     FROM support_tickets WHERE status IN ('open', 'escalated') ORDER BY created_at DESC`,
-  ).all<SupportTicketD1Row>();
+     FROM support_tickets WHERE status IN ('open', 'escalated') ORDER BY created_at DESC LIMIT ?`,
+  )
+    .bind(clampListLimit(limit, DEFAULT_ADMIN_LIST_LIMIT, MAX_ADMIN_LIST_LIMIT))
+    .all<SupportTicketD1Row>();
   return result.results.map(fromD1Row);
 }
 
@@ -369,12 +391,49 @@ export async function upsertScreeningReview(
 }
 
 /** GET /admin/screening/reviews — every review still awaiting the founder. */
-export async function listPendingScreeningReviews(env: Env): Promise<ScreeningReviewRow[]> {
-  const result = await env.DB.prepare(
-    `SELECT tenant_id, matched_terms, screened_fields, list_version, status, created_at, resolved_at, resolved_by
-     FROM screening_reviews WHERE status = 'pending' ORDER BY created_at ASC`,
-  ).all<ScreeningReviewD1Row>();
+/**
+ * Pending screening reviews, oldest first and BOUNDED (S8).
+ *
+ * TWO CONSUMERS WITH DIFFERENT NEEDS, which is why the narrowing is a parameter
+ * rather than a bound baked into the query:
+ *
+ *  - `routes/admin-screening.ts` renders an operator PAGE, and a page is allowed
+ *    to be a page (it reports `total` beside it).
+ *  - `ofac/screening-recovery.ts` is a 5-minute cron that must REACH every tenant
+ *    held on the `list-unavailable` sentinel. It used to load the whole queue and
+ *    filter in JS, so a limit added for the operator's benefit would have
+ *    silently stopped a sanctions recovery from ever seeing a tenant sitting past
+ *    the cap — a truncation with no error and no operator anywhere. It now asks
+ *    for its own rows via `listVersion`, which narrows in SQL, so its batch is
+ *    spent on the population it actually processes.
+ */
+export async function listPendingScreeningReviews(
+  env: Env,
+  opts: { limit?: number; listVersion?: string } = {},
+): Promise<ScreeningReviewRow[]> {
+  const limit = clampListLimit(opts.limit, DEFAULT_ADMIN_LIST_LIMIT, MAX_ADMIN_LIST_LIMIT);
+  const result = opts.listVersion
+    ? await env.DB.prepare(
+        `SELECT tenant_id, matched_terms, screened_fields, list_version, status, created_at, resolved_at, resolved_by
+         FROM screening_reviews WHERE status = 'pending' AND list_version = ? ORDER BY created_at ASC LIMIT ?`,
+      )
+        .bind(opts.listVersion, limit)
+        .all<ScreeningReviewD1Row>()
+    : await env.DB.prepare(
+        `SELECT tenant_id, matched_terms, screened_fields, list_version, status, created_at, resolved_at, resolved_by
+         FROM screening_reviews WHERE status = 'pending' ORDER BY created_at ASC LIMIT ?`,
+      )
+        .bind(limit)
+        .all<ScreeningReviewD1Row>();
   return result.results.map(fromScreeningReviewD1Row);
+}
+
+/** How deep the pending queue actually is — the `total` beside a bounded page. */
+export async function countPendingScreeningReviews(env: Env): Promise<number> {
+  const row = await env.DB.prepare(`SELECT COUNT(*) as n FROM screening_reviews WHERE status = 'pending'`).first<{
+    n: number;
+  }>();
+  return row?.n ?? 0;
 }
 
 export async function getScreeningReview(env: Env, tenantId: string): Promise<ScreeningReviewRow | null> {
