@@ -210,8 +210,8 @@ export class TenantDO extends DurableObject<Env> {
     this.backfillFirstPaidAt();
 
     const row = this.ctx.storage.sql
-      .exec<{ id: string; plan: TenantPlan; clock_base: number; clock_offset: number; clock_multiplier: number; clock_mode: string }>(
-        `SELECT id, plan, clock_base, clock_offset, clock_multiplier, clock_mode FROM tenant_profile LIMIT 1`,
+      .exec<{ id: string; plan: TenantPlan; clock_base: number; clock_offset: number; clock_mode: string }>(
+        `SELECT id, plan, clock_base, clock_offset, clock_mode FROM tenant_profile LIMIT 1`,
       )
       .toArray()[0];
 
@@ -301,12 +301,11 @@ export class TenantDO extends DurableObject<Env> {
     plan: TenantPlan;
     clock_base: number;
     clock_offset: number;
-    clock_multiplier: number;
     clock_mode: string;
   }): Clock {
     if (row.clock_mode === "real") return new RealClock();
 
-    const virtual = new VirtualClock(row.clock_base, row.clock_offset, row.clock_multiplier);
+    const virtual = new VirtualClock(row.clock_base, row.clock_offset);
     if (!isPaidPlan(row.plan)) return virtual;
 
     try {
@@ -359,6 +358,8 @@ export class TenantDO extends DurableObject<Env> {
     this.addColumnIfMissing("campaigns", "content_hash", "TEXT NOT NULL DEFAULT ''");
     this.addColumnIfMissing("campaigns", "launched_at_real", "INTEGER NOT NULL DEFAULT 0");
     this.addColumnIfMissing("ledger_entries", "source_send_id", "TEXT");
+    // Content-hash fallback send episodes (IN-7, see schema.ts + engine/threads.ts).
+    this.addColumnIfMissing("sent_message_keys", "epoch", "INTEGER NOT NULL DEFAULT 0");
     this.addColumnIfMissing("tenant_profile", "billing_state", "TEXT NOT NULL DEFAULT 'none'");
     this.addColumnIfMissing("tenant_profile", "stripe_customer_id", "TEXT");
     this.addColumnIfMissing("tenant_profile", "stripe_subscription_id", "TEXT");
@@ -678,7 +679,6 @@ export class TenantDO extends DurableObject<Env> {
     if (this.tenantId) return;
 
     const baseMs = new RealClock().now();
-    const multiplier = input.plan === "demo" || input.plan === "free" ? 1440 : 1;
     // Swap site 2 (wave-2 DECISION 2): a tenant minted DIRECTLY on the paid
     // plan starts on real time — there is no demo-era state to rebase, so the
     // migration is not needed and 'real' is stamped at insert. The clock_*
@@ -687,17 +687,16 @@ export class TenantDO extends DurableObject<Env> {
 
     this.tenantId = input.tenantId;
     this.plan = input.plan;
-    this.currentClock = paid ? new RealClock() : new VirtualClock(baseMs, 0, multiplier);
+    this.currentClock = paid ? new RealClock() : new VirtualClock(baseMs, 0);
 
     this.ctx.storage.sql.exec(
-      `INSERT INTO tenant_profile (id, brand, plan, status, created_at, clock_base, clock_offset, clock_multiplier, clock_mode)
-       VALUES (?, ?, ?, 'active', ?, ?, 0, ?, ?)`,
+      `INSERT INTO tenant_profile (id, brand, plan, status, created_at, clock_base, clock_offset, clock_mode)
+       VALUES (?, ?, ?, 'active', ?, ?, 0, ?)`,
       input.tenantId,
       input.brand,
       input.plan,
       baseMs,
       baseMs,
-      multiplier,
       paid ? "real" : "virtual",
     );
     this.ctx.storage.sql.exec(

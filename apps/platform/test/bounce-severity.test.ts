@@ -67,7 +67,7 @@ function pendingCount(tenantId: string): Promise<number> {
 // G2 — the sandbox emits BOTH bounce branches, keyed off the recipient local-part.
 describe("sandbox EmailPort emits both hard and soft bounce branches (A1 / G2)", () => {
   it("classifies a 'softbounce' recipient as a transient 4.x.x soft bounce, and 'bounce' as a permanent 5.x.x hard bounce", async () => {
-    const port = new SandboxEmailPort(new VirtualClock(Date.now(), 0, 1));
+    const port = new SandboxEmailPort(new VirtualClock(Date.now(), 0));
     const base = { subject: "s", body: "b", threadId: "t", inReplyToMessageId: null };
 
     await port.send({ ...base, fromEmail: "s@a.com", toEmail: "softbounce@x.com" }, "k-soft");

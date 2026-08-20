@@ -535,7 +535,7 @@ describe("R3 NON-BLOCKING fold-ins", () => {
     const tenantId = await seedTenant({ ordinals: [{ domain: "vclock0.com", liveMailboxes: 2 }], billedQuantity: 5 });
     await withTenantContext(tenantId, (ctx) =>
       ctx.sql.exec(
-        `UPDATE tenant_profile SET clock_mode = 'virtual', clock_base = ?, clock_offset = ?, clock_multiplier = 1 WHERE id = ?`,
+        `UPDATE tenant_profile SET clock_mode = 'virtual', clock_base = ?, clock_offset = ? WHERE id = ?`,
         Date.now(),
         40 * 24 * 60 * 60 * 1000,
         ctx.tenantId,

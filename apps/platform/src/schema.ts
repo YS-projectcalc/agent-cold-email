@@ -110,7 +110,6 @@ CREATE TABLE IF NOT EXISTS tenant_profile (
   created_at INTEGER NOT NULL,
   clock_base INTEGER NOT NULL,
   clock_offset INTEGER NOT NULL DEFAULT 0,
-  clock_multiplier INTEGER NOT NULL DEFAULT 1,
   -- Wave-2 DECISION 2 (founder ruling 2026-08-05): which clock this tenant's
   -- TenantContext runs on. 'virtual' (the DEFAULT — every tenant signs up as
   -- 'demo', routes/signup.ts) | 'real'. Stamped 'real' ONLY inside the one-shot
@@ -555,7 +554,15 @@ CREATE TABLE IF NOT EXISTS thread_marks (
 CREATE TABLE IF NOT EXISTS sent_message_keys (
   send_key TEXT PRIMARY KEY,
   message_id TEXT NOT NULL,
-  sent_at INTEGER NOT NULL
+  sent_at INTEGER NOT NULL,
+  -- Which SEND EPISODE this row describes, for the content-hash fallback key
+  -- (IN-7, engine/threads.ts). A genuine repeat reply past the replay window is
+  -- a new episode and must present a NEW key to the vendor, which dedups on it
+  -- independently of this table. Derived from this row rather than from a
+  -- wall-clock bucket so a crash-retry recomputes the SAME epoch and the vendor
+  -- still collapses it. 0 for every pre-existing row, which is exactly right:
+  -- their key IS the bare lookup key.
+  epoch INTEGER NOT NULL DEFAULT 0
 );
 
 -- B1 money path: simulated (no Stripe key) checkout sessions. A REAL Stripe
