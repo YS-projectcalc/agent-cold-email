@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createExecutionContext, createScheduledController, env, runInDurableObject, waitOnExecutionContext } from "cloudflare:test";
 import worker from "../src/index.js";
 import sdnValidCsv from "./fixtures/ofac/sdn-valid.csv?raw";
+import { coverageTicks, SWEEP_TENANT_SLICE } from "../src/admin/sweep-budget.js";
+import { countTenants } from "../src/admin/tenant-slice.js";
 import {
   activatePaidPlan,
   api,
@@ -114,10 +116,42 @@ function fakeEngine(): FakeEngine {
   return state;
 }
 
+/**
+ * Drive the real cron entry point for a FULL ROTATION, not one tick.
+ *
+ * The cron sweeps a BOUNDED slice per tick and reaches every tenant across
+ * `ceil(total / slice)` ticks — that is the guarantee, and this file's
+ * `tenants_index` accumulates across its tests, so the tenant under test is
+ * usually not in any one tick's window. It used to be, only because
+ * `ASSUMED_DO_RPC_MS` was 16x below real DO latency and the slice it derived
+ * (37) was wider than anything these tests seed. Calibrating that constant
+ * against production (2026-08-20) took the slice to 3 and made these tests
+ * depend on a bound they were never meant to be testing: the positive control
+ * in `proveSendCapableThenQueueAnother` is what reds, i.e. the fixture stops
+ * proving itself send-capable and every "never driven" assertion below it goes
+ * vacuous.
+ *
+ * A rotation is the honest unit here. Every assertion in this file is about
+ * whether the cron drives a tenant AT ALL, never about which tick does it.
+ *
+ * `+ 1` IS LOAD-BEARING (gate 2026-08-20 NB-2). `ceil(total / slice)` ticks
+ * covers the index only from a cursor sitting exactly at the head, and it never
+ * is: D1 state accumulates across `it`s in a file, so the persisted
+ * `sweep_cursor` starts mid-rotation, and `crypto.randomUUID()` tenant ids
+ * re-sort every run. The gate's exhaustive model over
+ * `total ∈ [1,120] × slice ∈ {1,2,3,5,37} ×` every starting phase found 11,430
+ * configurations that miss a tenant at `ceil(total/slice)` and ZERO at `+ 1`;
+ * instrumented runs of THIS file missed 1-2 tenants on 4-5 of 27 calls. It
+ * happened not to draw the tenant under assertion in 14 observed runs — i.e.
+ * the positive control this helper exists to protect was a per-run lottery.
+ */
 async function runCron(): Promise<void> {
-  const ctx = createExecutionContext();
-  await worker.scheduled(createScheduledController(), env, ctx);
-  await waitOnExecutionContext(ctx);
+  const ticks = Math.max(1, coverageTicks(await countTenants(env), SWEEP_TENANT_SLICE) + 1);
+  for (let i = 0; i < ticks; i++) {
+    const ctx = createExecutionContext();
+    await worker.scheduled(createScheduledController(), env, ctx);
+    await waitOnExecutionContext(ctx);
+  }
 }
 
 function setupBody(brand: string, domain: string) {

@@ -11,11 +11,18 @@
 // on the same tick, so "this tenant was swept" is one fact rather than seven.
 //
 // COVERAGE IS THE PRICE, AND IT IS PUBLISHED. A bounded sweep reaches every
-// tenant across `coverageTicks(total, slice)` ticks instead of every tick. That
-// is a real degradation of detection latency and it is reported
+// tenant across `coverageTicks(total, leastVisited)` ticks instead of every
+// tick. That is a real degradation of detection latency and it is reported
 // (`admin/sweep-signals.ts`'s coverage check + GET /admin/ops/checks), because a
 // bound whose latency nobody publishes is the same blind spot pointing the
 // other way.
+//
+// THE SECOND ARGUMENT IS `leastVisited`, NOT THE SLICE. It was the slice until
+// 2026-08-20, and that is a different number whenever the shared fan-out
+// deadline stops a trailing leg partway through — which at real DO latency was
+// every tick, making the published figure 31x optimistic. `commitSweepCursor`
+// below already advances the rotation by the least-covered leg for exactly this
+// reason; the reported latency has to use the same quantity the cursor does.
 //
 // KEYSET, NOT OFFSET. `WHERE id > ? ORDER BY id LIMIT ?` bounds the D1 read
 // itself (the old `SELECT id FROM tenants_index` had no LIMIT, so the whole
@@ -96,12 +103,37 @@ export interface SweepScope {
 export interface TenantSlice {
   /** The tenants this tick may touch, in `id` order. */
   ids: string[];
+  /**
+   * The window size this tick was ALLOWED — `SWEEP_TENANT_SLICE`, or a test's
+   * `sliceLimit`. Distinct from `ids.length`, which is the SHORT TAIL whenever
+   * the remaining index is smaller than the limit.
+   *
+   * Carried because the two are not interchangeable for coverage arithmetic
+   * (gate 2026-08-20 NB-3). On a tail tick `ids.length` is small because the
+   * tail is small, not because anything clipped, so extrapolating a rotation
+   * from it is wrong in the pessimistic direction — `{total: 30, covered: 1}`
+   * published "a full pass every 30 tick(s) (~150 min)" when the truth was 10
+   * ticks / 50 min. The sustainable advance is this limit; `ids.length` only
+   * says whether the tick was clipped.
+   */
+  limit: number;
   /** EVERY tenant in the index — the denominator, so a partial pass can say so. */
   total: number;
   /** True iff `ids` is the whole index (nothing was left for a later tick). */
   complete: boolean;
-  /** Ticks a full rotation takes at this tenant count. */
-  coverageTicks: number;
+  /**
+   * Ticks a full rotation takes at this tenant count IF every fan-out leg
+   * reaches the whole slice — the PLAN, not the outcome.
+   *
+   * NAMED `planned` SINCE THE 2026-08-20 CALIBRATION FIX, because it was being
+   * read as the achieved figure and reported to the founder as one. The
+   * rotation advances by `SweepFanout.leastVisited` (see `commitSweepCursor`),
+   * which the shared fan-out deadline can drive far below `ids.length`: live at
+   * 63 tenants this said 2 ticks while the cursor was moving one tenant per
+   * tick, i.e. 63. Anything grading or publishing COVERAGE LATENCY must use the
+   * achieved count; this field is only ever the intent.
+   */
+  plannedCoverageTicks: number;
 }
 
 /** Rows a single on-demand (non-cron) fan-out may read. The audit's S8: the
@@ -142,7 +174,7 @@ export async function readTenantSlice(env: Env, limit: number = SWEEP_TENANT_SLI
     ids = restart.results.map((r) => r.id);
   }
 
-  return { ids, total, complete: ids.length >= total, coverageTicks: coverageTicks(total, limit) };
+  return { ids, limit, total, complete: ids.length >= total, plannedCoverageTicks: coverageTicks(total, limit) };
 }
 
 /**
