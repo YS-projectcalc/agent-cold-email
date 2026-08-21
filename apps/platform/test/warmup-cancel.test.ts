@@ -272,10 +272,14 @@ describe("warmup auto-cancel at ramp completion (founder ruling 2026-08-02)", ()
     // A FULL ROTATION, not one tick. The cron sweeps a bounded slice
     // (admin/sweep-budget.ts) and this file's tenants_index accumulates across
     // its tests, so the tenant seeded above is not necessarily in this tick's
-    // window. Reaching every tenant across `ceil(total / slice)` ticks IS the
-    // bounded sweep's guarantee, and this test is about whether the cron drives
-    // the sweep at all — never about which tick does it.
-    const ticks = Math.max(1, coverageTicks(await countTenants(env), SWEEP_TENANT_SLICE));
+    // window. This test is about whether the cron drives the sweep at all —
+    // never about which tick does it.
+    //
+    // `+ 1` because the persisted cursor starts mid-rotation: `ceil(total/slice)`
+    // ticks only covers the index from a cursor at the head, and the gate's
+    // exhaustive phase model found 11,430 configurations that miss a tenant
+    // there and zero at `+ 1` (gate 2026-08-20 NB-2).
+    const ticks = Math.max(1, coverageTicks(await countTenants(env), SWEEP_TENANT_SLICE) + 1);
     for (let i = 0; i < ticks; i++) {
       const ctx = createExecutionContext();
       await worker.scheduled(createScheduledController(), env, ctx);

@@ -79,7 +79,11 @@ import {
   type CheckResult,
 } from "./watchtower-alerts.js";
 import { watchtowerStub } from "./watchtower-infra.js";
-import { coverageTicks, SWEEP_TENANT_SLICE } from "./sweep-budget.js";
+// No `SWEEP_TENANT_SLICE` here, deliberately: since NB-3 this module reasons
+// only about what the TICK reported (`covered` / `handed` / `allowed`), never
+// about the configured constant. Reaching for the constant is what made a short
+// tail read as a clipped tick.
+import { coverageTicks } from "./sweep-budget.js";
 
 /**
  * HOW EACH LEG REPORTS — the table that makes this module's coverage claim
@@ -309,6 +313,22 @@ export interface SweepCoverage {
   total: number;
   /** Tenants the least-covered fan-out leg actually reached this tick. */
   covered: number;
+  /**
+   * Tenants this tick was HANDED (`slice.ids.length`). `covered < handed` is the
+   * one true test for "the shared fan-out deadline clipped this tick".
+   */
+  handed: number;
+  /**
+   * The window size the tick was ALLOWED (`slice.limit`) — the sustainable
+   * per-tick advance whenever the tick was not clipped.
+   *
+   * NB-3 (gate 2026-08-20): without this, a SHORT-TAIL tick — `covered` small
+   * only because the tail was small — extrapolated a rotation from the tail and
+   * published a figure up to 3x pessimistic, WITH a "the deadline is stopping
+   * the trailing legs" clause that was simply false. 63 % 3 == 0 today so no
+   * tail exists; tenant #64 creates one every rotation.
+   */
+  allowed: number;
 }
 
 /**
@@ -391,19 +411,35 @@ export async function reportSweepSignals(
   // read this tick" — a healthy claim built on absent data. Skipping the
   // observation holds the streak instead: the leg's throw is already reported
   // by `cron_legs`, which is the check that owns it.
-  if (coverage !== null) {
-    const rotationTicks = coverageTicks(coverage.total, coverage.covered);
+  // `covered > 0` is NB-4 (gate 2026-08-20), and it is this lane's own class at
+  // its maximum: `coverageTicks` returns 0 for a non-positive advance, 0 is not
+  // > 12, so zero coverage published `healthy` with the detail "a full pass
+  // every 0 tick(s) (~0 min)" — a number the rotation did not achieve, in the
+  // reassuring direction, which is the exact defect this whole lane removes.
+  // Reachable only with an empty id list alongside a non-null slice (a
+  // zero-tenant platform, or a D1 read race), so: narrow, and one word.
+  if (coverage !== null && coverage.covered > 0) {
+    // CLIPPED is `covered < handed`, never `covered < SWEEP_TENANT_SLICE`. A
+    // short tail is smaller than the constant without anything having gone
+    // wrong; only falling short of what this tick was actually HANDED means the
+    // deadline cut it. NB-3.
+    const clipped = coverage.covered < coverage.handed;
+    // A clipped tick advances by what it covered. An unclipped one advances by
+    // the window it is allowed every tick — extrapolating a rotation from a
+    // short tail is what made `{total: 30, covered: 1}` read as 30 ticks.
+    const rotationTicks = coverageTicks(coverage.total, clipped ? coverage.covered : coverage.allowed);
     const coverageGrade = await watchtowerStub(env).gradeSweepStreak(SWEEP_COVERAGE_CHECK, rotationTicks > COVERAGE_TICKS_ALERT_AFTER);
     if (coverageGrade !== null) {
-      // The ACHIEVED figure, always — and the planned slice beside it whenever
-      // the two disagree, because that gap is the whole diagnosis: it says the
-      // deadline is binding mid-slice rather than the tenant count having grown.
+      // The ACHIEVED figure, always — and the cause beside it ONLY when the tick
+      // was genuinely clipped, because that gap is the diagnosis: it separates
+      // "the deadline is binding mid-slice" from "the tenant count has grown".
       const rotation =
-        `${coverage.total} tenant(s), and this tick's least-covered leg reached ${coverage.covered} of them ` +
-        `= a full pass every ${rotationTicks} tick(s) (~${rotationTicks * 5} min)` +
-        (coverage.covered < SWEEP_TENANT_SLICE
-          ? `. The slice is sized at ${SWEEP_TENANT_SLICE} tenant(s) per tick, so the shared fan-out deadline is ` +
-            `stopping the trailing legs partway through it — the rotation advances by the LEAST-covered leg`
+        `${coverage.total} tenant(s), and this tick's least-covered leg reached ${coverage.covered} of the ` +
+        `${coverage.handed} it was handed = a full pass every ${rotationTicks} tick(s) (~${rotationTicks * 5} min)` +
+        (clipped
+          ? `. The shared fan-out deadline is stopping the trailing legs partway through the slice — the ` +
+            `rotation advances by the LEAST-covered leg, so it moves ${coverage.covered} tenant(s) per tick, ` +
+            `not ${coverage.allowed}`
           : "");
       results.push(
         coverageGrade
@@ -421,10 +457,14 @@ export async function reportSweepSignals(
                 (signals.deferred > 0 ? `Work deferred inside this tick's own slice: ${signals.deferralDetail}. ` : "") +
                 `NOTHING IS FAILING — every tenant is still reached, just later. What degrades is DETECTION LATENCY: a stuck ` +
                 `tenant, a dead domain or a starved send queue is now noticed a rotation late rather than within a cron period. ` +
-                `The fix is the D1/Analytics read-model (admin/README.md), not a bigger slice. The slice is bounded by the ` +
-                `WALL CLOCK the cron period has left after the send pipeline's own bounds, at a DO RPC round trip measured ` +
-                `against production — so widening it does not buy coverage, it just moves the deadline's cut further up the ` +
-                `leg order (admin/sweep-budget.ts).`,
+                `The slice is bounded by the WALL CLOCK the cron period has left after the send pipeline's own bounds, at a DO ` +
+                `RPC round trip measured against production — so simply raising the slice buys nothing, it just moves the ` +
+                `deadline's cut further up the leg order (admin/sweep-budget.ts). TWO REAL REMEDIES, and the cheap one has not ` +
+                `been tried: (1) BOUNDED-CONCURRENCY FAN-OUT — the same measurement puts DO cpuTime at 1-3% of wall time, so ` +
+                `the deadline is being spent WAITING, and overlapping those waits would raise the slice several-fold against ` +
+                `the same deadline. Unevaluated: nobody has measured this Worker against the simultaneous-connection ceiling. ` +
+                `(2) the D1/Analytics read-model (admin/README.md, ARCHITECTURE.md #3), which is the structural fix and the ` +
+                `larger build. Measure (1) before committing to (2).`,
             },
       );
     }

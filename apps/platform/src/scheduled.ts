@@ -192,7 +192,14 @@ export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer;
       // does for its own separate reason, would publish a healthy rotation
       // figure on the one tick where nothing was swept. The throws are already
       // `cron_legs`; this check simply makes no observation.
-      { legs, digest, coverage: slice && fanout.leastVisited !== null ? { total: slice.total, covered: fanout.leastVisited } : null },
+      {
+        legs,
+        digest,
+        coverage:
+          slice && fanout.leastVisited !== null
+            ? { total: slice.total, covered: fanout.leastVisited, handed: slice.ids.length, allowed: slice.limit }
+            : null,
+      },
       now,
     ),
   );

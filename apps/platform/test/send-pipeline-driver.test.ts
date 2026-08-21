@@ -133,9 +133,20 @@ function fakeEngine(): FakeEngine {
  *
  * A rotation is the honest unit here. Every assertion in this file is about
  * whether the cron drives a tenant AT ALL, never about which tick does it.
+ *
+ * `+ 1` IS LOAD-BEARING (gate 2026-08-20 NB-2). `ceil(total / slice)` ticks
+ * covers the index only from a cursor sitting exactly at the head, and it never
+ * is: D1 state accumulates across `it`s in a file, so the persisted
+ * `sweep_cursor` starts mid-rotation, and `crypto.randomUUID()` tenant ids
+ * re-sort every run. The gate's exhaustive model over
+ * `total ∈ [1,120] × slice ∈ {1,2,3,5,37} ×` every starting phase found 11,430
+ * configurations that miss a tenant at `ceil(total/slice)` and ZERO at `+ 1`;
+ * instrumented runs of THIS file missed 1-2 tenants on 4-5 of 27 calls. It
+ * happened not to draw the tenant under assertion in 14 observed runs — i.e.
+ * the positive control this helper exists to protect was a per-run lottery.
  */
 async function runCron(): Promise<void> {
-  const ticks = Math.max(1, coverageTicks(await countTenants(env), SWEEP_TENANT_SLICE));
+  const ticks = Math.max(1, coverageTicks(await countTenants(env), SWEEP_TENANT_SLICE) + 1);
   for (let i = 0; i < ticks; i++) {
     const ctx = createExecutionContext();
     await worker.scheduled(createScheduledController(), env, ctx);

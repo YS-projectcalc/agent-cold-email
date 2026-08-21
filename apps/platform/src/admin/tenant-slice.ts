@@ -103,6 +103,20 @@ export interface SweepScope {
 export interface TenantSlice {
   /** The tenants this tick may touch, in `id` order. */
   ids: string[];
+  /**
+   * The window size this tick was ALLOWED — `SWEEP_TENANT_SLICE`, or a test's
+   * `sliceLimit`. Distinct from `ids.length`, which is the SHORT TAIL whenever
+   * the remaining index is smaller than the limit.
+   *
+   * Carried because the two are not interchangeable for coverage arithmetic
+   * (gate 2026-08-20 NB-3). On a tail tick `ids.length` is small because the
+   * tail is small, not because anything clipped, so extrapolating a rotation
+   * from it is wrong in the pessimistic direction — `{total: 30, covered: 1}`
+   * published "a full pass every 30 tick(s) (~150 min)" when the truth was 10
+   * ticks / 50 min. The sustainable advance is this limit; `ids.length` only
+   * says whether the tick was clipped.
+   */
+  limit: number;
   /** EVERY tenant in the index — the denominator, so a partial pass can say so. */
   total: number;
   /** True iff `ids` is the whole index (nothing was left for a later tick). */
@@ -160,7 +174,7 @@ export async function readTenantSlice(env: Env, limit: number = SWEEP_TENANT_SLI
     ids = restart.results.map((r) => r.id);
   }
 
-  return { ids, total, complete: ids.length >= total, plannedCoverageTicks: coverageTicks(total, limit) };
+  return { ids, limit, total, complete: ids.length >= total, plannedCoverageTicks: coverageTicks(total, limit) };
 }
 
 /**

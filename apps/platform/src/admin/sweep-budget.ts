@@ -315,6 +315,16 @@ export const MEASURED_DO_RPC_MS = {
  * The deadline still makes being wrong DEGRADE rather than break — but "it
  * degrades gracefully" was used to justify never checking the number, and a
  * graceful degradation that misreports itself is not one.
+ *
+ * WHAT THE SMALLER SLICE DID TO SEND CADENCE IS AN EQUALISATION, NOT A WIN, and
+ * it is CONDITIONAL. Simulated over the verbatim rotation arithmetic (gate
+ * 2026-08-20, finding 1): mean wait 12.02 -> 10.00 ticks and worst case 31.0 ->
+ * 10.0, but 36 of 63 tenants get SLOWER — the median tenant pays 39 -> 50 min to
+ * retire a 155-min starvation tail. And if latency ever degrades far enough to
+ * clip the fan-out back to one tenant, the new regime's mean wait (29.09) is
+ * WORSE than the old one's (12.02). The whole improvement rests on the slice
+ * COMPLETING, which is what this constant buys and what `sweep_coverage` now
+ * measures. Full table in `admin/README.md`.
  */
 export const ASSUMED_DO_RPC_MS = MEASURED_DO_RPC_MS.p75Ms;
 

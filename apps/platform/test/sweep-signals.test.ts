@@ -333,7 +333,7 @@ describe("sweep_coverage — the bounded sweep's own coverage latency", () => {
     const mailer = new SandboxOpsMailer();
     const deferring = { sendPipeline: { errors: 0, budgetExpiries: 0, skippedForLegDeadline: 40 } };
     for (let i = 0; i < LEG_ALERT_AFTER_SWEEPS + 1; i++) {
-      await reportSweepSignals(env, mailer, { legs: deferring, digest: null, coverage: { total: 40, covered: 40 } }, T0 + i * 300_000);
+      await reportSweepSignals(env, mailer, { legs: deferring, digest: null, coverage: { total: 40, covered: 40, handed: 40, allowed: 40 } }, T0 + i * 300_000);
     }
     expect(legSubjects(mailer)).toEqual([]);
   });
@@ -351,7 +351,7 @@ describe("sweep_coverage — the bounded sweep's own coverage latency", () => {
       await reportSweepSignals(
         env,
         mailer,
-        { legs: barelyDeferring, digest: null, coverage: { total: 40, covered: 40 } },
+        { legs: barelyDeferring, digest: null, coverage: { total: 40, covered: 40, handed: 40, allowed: 40 } },
         T0 + i * 300_000,
       );
     }
@@ -366,7 +366,7 @@ describe("sweep_coverage — the bounded sweep's own coverage latency", () => {
     // damped upstream by gradeSweepStreak and then EXEMPT from the transition
     // debounce, so it does not page at 20 min. Reds on the debounced policy.
     for (let i = 0; i < LEG_ALERT_AFTER_SWEEPS; i++) {
-      await reportSweepSignals(env, mailer, { legs: deferring, digest: null, coverage: { total: 40, covered: 1 } }, T0 + i * 300_000);
+      await reportSweepSignals(env, mailer, { legs: deferring, digest: null, coverage: { total: 40, covered: 1, handed: 40, allowed: 40 } }, T0 + i * 300_000);
     }
     expect(subjectsFor(mailer, "Ops sweep coverage")).toEqual(["[coldrig] Ops sweep coverage: UNHEALTHY"]);
     expect(mailer.sent[0]!.text).toContain("NOTHING IS FAILING");
@@ -377,7 +377,7 @@ describe("sweep_coverage — the bounded sweep's own coverage latency", () => {
 
   it("fires on rotation length alone, with no deferral and no error anywhere", async () => {
     const mailer = new SandboxOpsMailer();
-    const slow = { total: 5_000, covered: 37 };
+    const slow = { total: 5_000, covered: 37, handed: 37, allowed: 37 };
     for (let i = 0; i < LEG_ALERT_AFTER_SWEEPS; i++) {
       await reportSweepSignals(env, mailer, { legs: CLEAN, digest: null, coverage: slow }, T0 + i * 300_000);
     }
@@ -388,7 +388,7 @@ describe("sweep_coverage — the bounded sweep's own coverage latency", () => {
   it("stays quiet while the rotation is short and nothing is deferred", async () => {
     const mailer = new SandboxOpsMailer();
     for (let i = 0; i < 6; i++) {
-      await reportSweepSignals(env, mailer, { legs: CLEAN, digest: null, coverage: { total: 3, covered: 3 } }, T0 + i * 300_000);
+      await reportSweepSignals(env, mailer, { legs: CLEAN, digest: null, coverage: { total: 3, covered: 3, handed: 3, allowed: 3 } }, T0 + i * 300_000);
     }
     expect(subjectsFor(mailer, "Ops sweep coverage").filter((s) => s.includes("UNHEALTHY"))).toEqual([]);
   });
@@ -417,7 +417,7 @@ describe("coverage is graded and reported on ACHIEVED rotation progress, not the
     // rotation is 63 ticks (~315 min), not the 2 ticks (~10 min) the shipped
     // detail string told the founder while it was paging them about latency.
     for (let i = 0; i < LEG_ALERT_AFTER_SWEEPS; i++) {
-      await reportSweepSignals(env, mailer, { legs: LIVE_TICK, digest: null, coverage: { total: 63, covered: 1 } }, T0 + i * 300_000);
+      await reportSweepSignals(env, mailer, { legs: LIVE_TICK, digest: null, coverage: { total: 63, covered: 1, handed: 37, allowed: 37 } }, T0 + i * 300_000);
     }
     expect(subjectsFor(mailer, "Ops sweep coverage")).toEqual(["[coldrig] Ops sweep coverage: UNHEALTHY"]);
     const text = mailer.sent[0]!.text;
@@ -442,7 +442,7 @@ describe("coverage is graded and reported on ACHIEVED rotation progress, not the
       await reportSweepSignals(
         env,
         mailer,
-        { legs: sharedDeadlineClip, digest: null, coverage: { total: 60, covered: 13 } },
+        { legs: sharedDeadlineClip, digest: null, coverage: { total: 60, covered: 13, handed: 26, allowed: 26 } },
         T0 + i * 300_000,
       );
     }
@@ -452,6 +452,74 @@ describe("coverage is graded and reported on ACHIEVED rotation progress, not the
         "bound, is the designed behaviour — alerting on it is what pinned the check and suppressed the arm " +
         "that means 'go build the read-model'",
     ).toEqual([]);
+  });
+
+  // NB-3 (gate 2026-08-20). The gate ran this exact input against the shipped
+  // producer and got: "30 tenant(s) ... = a full pass every 30 tick(s) (~150
+  // min). The slice is sized at 3 tenant(s) per tick, so the shared fan-out
+  // deadline is stopping the trailing legs partway through it" — a 3x
+  // pessimistic figure AND a cause that did not happen. 63 % 3 == 0 today, so
+  // tenant #64 is what makes this reachable.
+  it("a SHORT-TAIL tick is not a clipped tick — it extrapolates from the window, not from the tail", async () => {
+    const mailer = new SandboxOpsMailer();
+    // The tail tick of a 30-tenant rotation at slice 3: handed 1, covered 1.
+    // Nothing clipped — `covered === handed`. The true rotation is ceil(30/3).
+    for (let i = 0; i < LEG_ALERT_AFTER_SWEEPS + 2; i++) {
+      await reportSweepSignals(
+        env,
+        mailer,
+        { legs: NOTHING_DEFERRED, digest: null, coverage: { total: 30, covered: 1, handed: 1, allowed: 3 } },
+        T0 + i * 300_000,
+      );
+    }
+    expect(
+      subjectsFor(mailer, "Ops sweep coverage").filter((s) => s.includes("UNHEALTHY")),
+      "a short tail is small because the tail is small; grading it as a clipped tick pages on 10-tick rotations",
+    ).toEqual([]);
+  });
+
+  it("never blames the deadline on a tick the deadline did not touch", async () => {
+    const mailer = new SandboxOpsMailer();
+    // Same shape, but a tenant count that genuinely IS behind: the alert is
+    // owed, and it must not carry the false cause.
+    for (let i = 0; i < LEG_ALERT_AFTER_SWEEPS; i++) {
+      await reportSweepSignals(
+        env,
+        mailer,
+        { legs: NOTHING_DEFERRED, digest: null, coverage: { total: 300, covered: 2, handed: 2, allowed: 3 } },
+        T0 + i * 300_000,
+      );
+    }
+    expect(subjectsFor(mailer, "Ops sweep coverage")).toEqual(["[coldrig] Ops sweep coverage: UNHEALTHY"]);
+    const text = mailer.sent[0]!.text;
+    expect(text, "unclipped: the rotation is ceil(300/3), not ceil(300/2)").toContain("every 100 tick(s)");
+    expect(text, "nothing was clipped, so the deadline must not be named as the cause").not.toContain(
+      "stopping the trailing legs",
+    );
+  });
+
+  // NB-4 (gate 2026-08-20) — this lane's own class at its maximum: `coverageTicks`
+  // returns 0 for a non-positive advance, and `0 > 12` is false, so the shipped
+  // code published `healthy` with "a full pass every 0 tick(s) (~0 min)".
+  it("zero coverage is UNKNOWN, never a healthy 'a full pass every 0 tick(s)'", async () => {
+    const mailer = new SandboxOpsMailer();
+    for (let i = 0; i < LEG_ALERT_AFTER_SWEEPS + 2; i++) {
+      await reportSweepSignals(
+        env,
+        mailer,
+        { legs: NOTHING_DEFERRED, digest: null, coverage: { total: 63, covered: 0, handed: 3, allowed: 3 } },
+        T0 + i * 300_000,
+      );
+    }
+    // ASSERTED ON THE PERSISTED ROW, not on the mailer. A healthy grade from a
+    // fresh streak sends no RECOVERED (there was no episode to recover from),
+    // so an email-only assertion passes on the broken code too — which is how
+    // the gate found this by reading `watchtower_state` directly.
+    const row = await env.DB.prepare(
+      `SELECT status, last_detail FROM watchtower_state WHERE check_name = 'sweep_coverage'`,
+    ).first<{ status: string; last_detail: string | null }>();
+    expect(row?.status, "zero coverage banked as healthy is this lane's own class at its maximum").not.toBe("healthy");
+    expect(row?.last_detail ?? "").not.toContain("every 0 tick(s)");
   });
 
   it("reports NOTHING rather than a healthy claim when the tick cannot measure its own coverage", async () => {
