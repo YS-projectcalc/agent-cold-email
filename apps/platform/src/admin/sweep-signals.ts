@@ -38,8 +38,10 @@
 // `budgetExpiries` is still reported in this check's detail and still logged per
 // tenant, but no threshold reads it. That is a REGRESSION of this module taken
 // knowingly rather than a gap discovered — the alternative was a second arm in
-// its own units, which is what N6 was. It belongs to the per-tenant staleness
-// signal in the alert-state increment, where the frozen design already put it.
+// its own units, which is what N6 was. It belongs to a per-tenant staleness
+// signal that DOES NOT EXIST YET: the frozen alert-state design explicitly does
+// NOT settle it (a build-gate STOP-AND-REPORT; ROADMAP carries it as an owed
+// design decision) — do not read this line as "already handled elsewhere".
 //
 // Everything here goes through the SAME throttled state machine as every other
 // check (watchtower_state + reconcileAlerts), never a per-tick send, and every
