@@ -175,8 +175,33 @@ export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer;
   // all of it ended in the log line below and reached no human. Routed through
   // the SAME throttled state machine as every other check, and damped over
   // consecutive ticks so an intermittent leg cannot flap.
+  // `covered` is the ACHIEVED rotation advance — `fanout.leastVisited`, the same
+  // number `commitSweepCursor` moved the cursor by above — NOT `slice.ids.length`.
+  // Handing over the slice was the 2026-08-20 defect: at 63 tenants the slice
+  // said 37 while the fan-out deadline was letting the trailing legs finish one,
+  // so the founder was paged about degraded detection latency by an alert that
+  // put that latency at ~10 min when it was ~315. Read AFTER the `sweepCursor`
+  // leg, so every fan-out leg has already folded its own count in.
   const signalAlerts = await runLeg("sweepSignals", null, () =>
-    reportSweepSignals(env, mailer, { legs, digest, coverage: slice }, now),
+    reportSweepSignals(
+      env,
+      mailer,
+      // `leastVisited === null` means NO fan-out leg reported a visit count at
+      // all (they all threw). That is unknown coverage, not full coverage —
+      // substituting the slice length here, as `commitSweepCursor`'s fallback
+      // does for its own separate reason, would publish a healthy rotation
+      // figure on the one tick where nothing was swept. The throws are already
+      // `cron_legs`; this check simply makes no observation.
+      {
+        legs,
+        digest,
+        coverage:
+          slice && fanout.leastVisited !== null
+            ? { total: slice.total, covered: fanout.leastVisited, handed: slice.ids.length, allowed: slice.limit }
+            : null,
+      },
+      now,
+    ),
   );
 
   // W-M4 (docs/adversarial/sweep-completeness-pass-2026-08-17.md) — the
@@ -209,7 +234,16 @@ export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer;
     JSON.stringify({
       ...legs,
       signalAlerts,
-      slice: slice ? { scanned: slice.ids.length, total: slice.total, coverageTicks: slice.coverageTicks } : null,
+      // `covered` beside `scanned` on purpose: the gap between them is what a
+      // reader of this line needs to see the fan-out deadline binding mid-slice.
+      slice: slice
+        ? {
+            scanned: slice.ids.length,
+            covered: fanout.leastVisited,
+            total: slice.total,
+            plannedCoverageTicks: slice.plannedCoverageTicks,
+          }
+        : null,
     }),
   );
 }

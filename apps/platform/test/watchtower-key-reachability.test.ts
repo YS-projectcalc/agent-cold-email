@@ -5,12 +5,11 @@ import {
   ALERT_FAMILIES,
   customerProgressKey,
   failureSignalsKey,
-  sweepCoverageKey,
   tenantDoWedgedKey,
   warmupDuplicatesKey,
   warmupGaveUpKey,
 } from "../src/admin/watchtower-families.js";
-import { reportSweepSignals } from "../src/admin/sweep-signals.js";
+import { reportSweepSignals, type SweepCoverage } from "../src/admin/sweep-signals.js";
 import { reconcileAlerts, reportAlertBudgetHealth } from "../src/admin/watchtower.js";
 import { ALERT_BUDGET_EXCEEDED_CHECK, type CheckResult } from "../src/admin/watchtower-alerts.js";
 import { watchtowerStub } from "../src/admin/watchtower-infra.js";
@@ -66,19 +65,6 @@ interface FamilyProbe {
 }
 
 const PROBES: FamilyProbe[] = [
-  {
-    family: "sweep_coverage",
-    note:
-      "The three booleans `reportSweepSignals` computes. ⚠️ The sibling sweep-calibration lane deletes two of " +
-      "the three inputs (build gate F1), so this family's derivation AND its declared space are re-reconciled at " +
-      "that fold — after which this probe must be rewritten against the merged producer, not patched.",
-    produce: () => [
-      sweepCoverageKey(true, false, true),
-      sweepCoverageKey(false, true, false),
-      sweepCoverageKey(false, false, true),
-      sweepCoverageKey(false, true, true),
-    ],
-  },
   {
     family: "failure_signals",
     note:
@@ -168,14 +154,18 @@ beforeEach(async () => {
  * reported; after that `policyFor` gives them IMMEDIATE, so the first reported
  * observation announces.
  */
-async function bankedKeyFor(checkName: string, legs: Record<string, unknown>): Promise<string | null> {
+async function bankedKeyFor(
+  checkName: string,
+  legs: Record<string, unknown>,
+  coverage: SweepCoverage | null = null,
+): Promise<string | null> {
   await env.DB.prepare("DELETE FROM watchtower_state").run();
   await runInDurableObject(watchtowerStub(env), async (_instance, state) => {
     await state.storage.deleteAll();
   });
   const mailer = new SandboxOpsMailer();
   for (let tick = 0; tick <= LEG_ALERT_AFTER_SWEEPS; tick++) {
-    await reportSweepSignals(env, mailer, { legs, digest: null, coverage: null }, T0 + tick * SWEEP);
+    await reportSweepSignals(env, mailer, { legs, digest: null, coverage }, T0 + tick * SWEEP);
   }
   const row = await env.DB.prepare(`SELECT announced_keys FROM watchtower_state WHERE check_name = ?`)
     .bind(checkName)
@@ -287,6 +277,38 @@ describe("END-TO-END — the key the PRODUCER banks, for the families that cross
     assertKeySpace(ALERT_BUDGET_EXCEEDED_CHECK, produced);
   }, 120_000);
 
+  // REWRITTEN AT THE FOLD (F1), not patched. `sweep_coverage`'s key used to be
+  // three booleans the caller computed; the merged post-calibration producer
+  // grades ONE arm off a four-field `SweepCoverage`, so the only honest probe is
+  // one that hands it that shape and reads what it banks.
+  //
+  // `covered > 0` and `rotationTicks > COVERAGE_TICKS_ALERT_AFTER` are what make
+  // the check unhealthy at all, so both fixtures satisfy them; the two differ
+  // ONLY in `covered < handed`, which is the distinction the key carries.
+  it("sweep_coverage: both re-declared keys are reachable through the merged producer", async () => {
+    // Clipped: the least-covered leg reached 2 of the 10 tenants it was HANDED,
+    // so the deadline cut the tick mid-slice. ceil(100/2) = 50 ticks.
+    const clipped = await bankedKeyFor("sweep_coverage", {}, { total: 100, covered: 2, handed: 10, allowed: 10 });
+    // Not clipped: the tick covered everything it was handed. The rotation is
+    // behind because the tenant count outgrew the allowed window: ceil(100/3) = 34.
+    const behind = await bankedKeyFor("sweep_coverage", {}, { total: 100, covered: 3, handed: 3, allowed: 3 });
+
+    const produced = [clipped, behind];
+    expect(produced).toEqual(["deadline_clipped", "rotation_behind"]);
+    assertKeySpace("sweep_coverage", produced);
+  }, 60_000);
+
+  it("sweep_coverage makes NO observation when the slice could not be read — the condition migrated to cron_legs", async () => {
+    // `slice_unreadable` is not merely unused, it is unreachable BY
+    // CONSTRUCTION: a null coverage skips the arm entirely. Declaring it would
+    // be a dead rung, which is the class this whole file guards.
+    const nothing = await bankedKeyFor("sweep_coverage", {}, null);
+    expect(nothing).toBeNull();
+    // ...and the leg throw that causes it lands on cron_legs, under keys that
+    // family already declares.
+    expect(await bankedKeyFor("cron_legs", { tenantSlice: null }, null)).toBe("threw");
+  }, 60_000);
+
   it("cron_legs: all three declared keys are reachable through the real producer", async () => {
     const produced = [
       await bankedKeyFor("cron_legs", { dunning: { errors: 2 } }),
@@ -343,6 +365,7 @@ describe("the guard covers EVERY family — it cannot go stale as families are a
       "alert_delivery",
       "cron_legs",
       "alert_budget_exceeded",
+      "sweep_coverage",
       ...PROBES.map((p) => p.family),
       ...Object.keys(LITERAL_PRODUCERS),
     ]);

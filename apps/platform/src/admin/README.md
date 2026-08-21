@@ -179,14 +179,87 @@ ceilings (the invocation's subrequest budget, and the wall clock the 300s cron
 period has left after the send pipeline's own bounds). `tenant-slice.ts`
 keyset-pages the index against a persisted cursor that advances only as far as
 the LEAST-covered leg got, so every leg still reaches every tenant — just
-across `ceil(total / slice)` ticks rather than every tick.
+across `ceil(total / covered)` ticks rather than every tick.
+
+**`covered`, not `slice`.** The rotation advances by `SweepFanout.leastVisited`,
+which the shared fan-out deadline can drive well below the slice, so the two
+numbers are not interchangeable and only the first one is coverage latency.
+Reporting the second as the first is a defect that reached production: see the
+calibration note below.
 
 That coverage latency is the price, and it is PUBLISHED rather than emergent:
-the `sweep_coverage` watchtower check reports the rotation length and alerts
-once a full pass takes longer than an hour. When it fires, the answer is the
-D1/Analytics read-model ARCHITECTURE.md #3 already names as the scale path —
-NOT a bigger slice, which is bounded by the subrequest budget and is what used
-to make the heartbeat vanish.
+the `sweep_coverage` watchtower check reports the ACHIEVED rotation length and
+alerts once a full pass takes longer than an hour.
+
+#### What to do when `sweep_coverage` fires
+
+**Not "raise the slice".** It is bounded by the wall clock the cron period has
+left after the send pipeline's bounds, so raising it only moves the deadline's
+cut further up the leg order — the trailing legs still get nothing.
+
+Two real remedies, in the order they should be tried:
+
+1. **Bounded-concurrency fan-out — UNEVALUATED, and cheap to evaluate.**
+   `sweepTenants` awaits one tenant at a time and the legs run one after
+   another, so the 15s deadline is spent almost entirely WAITING: the same
+   capture that produced the latency numbers above puts DO `cpuTime` at 1-3% of
+   `wallTime`. Overlapping those waits would raise the slice several-fold
+   against the same deadline. Nobody has measured this Worker against the
+   platform's simultaneous-connection ceiling, and the option appears nowhere in
+   the wave-B.1 gate or `ARCHITECTURE.md` — it has never been considered and
+   rejected, it has simply never been raised (gate 2026-08-20, finding 6).
+2. **The D1/Analytics read-model** `ARCHITECTURE.md` #3 names as the scale path.
+   The structural fix, and the much larger build.
+
+Measure (1) before committing to (2).
+
+### Calibration (2026-08-20) — the slice is now WALL-CLOCK bound
+
+`ASSUMED_DO_RPC_MS` was 25ms, an in-process miniflare floor. Measured against
+production (`wrangler tail`, worker `133fc911`, 63 tenants, three consecutive
+ticks captured whole) a fan-out DO RPC round trip is **p50 350ms / mean 414ms /
+p75 450ms**, and `cpuTime` is 1-3% of `wallTime` on every one of those methods
+— the cost is the cold DO hop, not work, so it does not optimise away.
+
+Three consequences worth knowing before touching these constants:
+
+- **The binding ceiling changed.** The slice is 3 (wall clock), not 37
+  (subrequests). "A bigger slice is bounded by the subrequest budget" was the
+  old remedy text and it is no longer true: at real latency the 15s fan-out
+  deadline binds first, by an order of magnitude.
+- **The architecture is at its published wall now, not at ~590 tenants.** That
+  figure was itself computed through the 25ms assumption. A one-hour rotation is
+  36 tenants at the real slice; the platform has 63.
+- **Raising the slice is not the only remedy, and the untried one is cheaper.**
+  See "What to do when `sweep_coverage` fires" below.
+
+#### What the slice change did to send cadence — an EQUALISATION, not a win
+
+Recorded because the build report first claimed this as a straight improvement
+and the gate's simulation refuted it
+(`docs/adversarial/sweep-calibration-gate-2026-08-20.md`, finding 1: 4000-tick
+model over the verbatim `readTenantSlice` + `commitSweepCursor` arithmetic,
+measuring the wait from a uniformly-random due moment to the next
+send-pipeline visit, 63 tenants).
+
+| regime | max visit gap | mean wait | per-tenant mean (best / median / worst) |
+|---|---|---|---|
+| pre-fix, slice 37, cursor +1 | 63 ticks | 12.02 | 5.5 / 7.8 / **31.0** |
+| post-fix, slice 3, cursor +3 | **21 ticks** | **10.00** | 10.0 / 10.0 / 10.0 |
+| post-fix degraded, cursor +2 | 32 ticks | 15.02 | — |
+| post-fix degraded, cursor +1 | 63 ticks | **29.09** | — |
+
+**36 of 63 tenants get slower and 27 get faster.** The change removes a
+155-min-average starvation tail (worst case improves 3x) and costs the median
+tenant 39 → 50 min. The pre-fix worst case is 63 ticks, not 26: `readTenantSlice`
+RESTARTS at the head on wrap rather than refilling the window, so the head
+tenants were reached only on the wrap tick.
+
+⚠️ **The improvement is conditional on the slice completing.** If latency
+degrades far enough to clip the fan-out back to one tenant, the new regime's
+mean wait (29.09 ticks) is *worse* than the old one's (12.02). That is precisely
+what the p75 sizing buys and what `sweep_coverage` now measures — which is why
+the check grades on the achieved advance rather than on the configured slice.
 
 An on-demand caller (`POST /admin/ops/dunning-sweep`, `GET /admin/ops/digest`)
 passes no slice and gets a bounded full scan, with `tenants.scanned` beside

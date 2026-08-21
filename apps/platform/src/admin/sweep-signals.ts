@@ -8,10 +8,7 @@
 // incremented a number forever and paged nobody.
 //
 // WHAT THE COVERAGE CHECK DOES AND DOES NOT CATCH (NEW-4, round 2 of
-// docs/adversarial/wave-b1-scale-monitoring-gate-2026-08-20.md). "A wedged
-// engine abandoning EVERY tenant at its budget" is visible — that is
-// `deferred === SWEEP_TENANT_SLICE`, exactly the threshold. But the threshold
-// is calibrated at a full slice, so 43-of-44 tenants lost is silent, and ONE
+// docs/adversarial/wave-b1-scale-monitoring-gate-2026-08-20.md). ONE
 // persistently wedged tenant reaches no check at all: `send_starved:` requires
 // zero eligible mailboxes (a slow engine's mailboxes are healthy),
 // `tenant_do_wedged:` requires `opsSummary` to throw, and `customer_progress_*`
@@ -21,6 +18,28 @@
 // observability event rather than a stuck tenant. Named here rather than
 // papered over, and carried on the ROADMAP as owed; a per-tenant staleness
 // signal is the alert-state increment's shape, not a threshold tweak.
+//
+// THE 2026-08-20 CALIBRATION WIDENED THAT GAP, DELIBERATELY, AND IT IS OWED.
+// NEW-4 used to be able to say that "a wedged engine abandoning EVERY tenant at
+// its budget" was at least visible, because `budgetExpiries` was summed into
+// `signals.deferred` and a full slice's worth of them tripped the old threshold.
+// That arm is gone: it compared a CROSS-LEG SUM to a single slice, which is how
+// one shared fan-out deadline read as 109-against-37 and pinned the check.
+//
+// It could not be kept, only replaced. The slice is now 3, so the old
+// `deferred >= SWEEP_TENANT_SLICE` rule would fire on three deferred leg-visits
+// — hair-trigger, permanently pinned, reproducing the exact defect one size
+// smaller. And the rotation measure that replaced it cannot see this case by
+// construction: the send pipeline runs OUTSIDE the shared fan-out (its own
+// deadline, its own rotation offset) and so contributes nothing to
+// `leastVisited`.
+//
+// So: a wedged engine expiring every tenant's budget is now graded by NOTHING.
+// `budgetExpiries` is still reported in this check's detail and still logged per
+// tenant, but no threshold reads it. That is a REGRESSION of this module taken
+// knowingly rather than a gap discovered — the alternative was a second arm in
+// its own units, which is what N6 was. It belongs to the per-tenant staleness
+// signal in the alert-state increment, where the frozen design already put it.
 //
 // Everything here goes through the SAME throttled state machine as every other
 // check (watchtower_state + reconcileAlerts), never a per-tick send, and every
@@ -62,8 +81,11 @@ import {
 } from "./watchtower-alerts.js";
 import { alertDeliveryKey, cronLegsKey, sweepCoverageKey, warmupGaveUpKey } from "./watchtower-families.js";
 import { watchtowerStub } from "./watchtower-infra.js";
-import { SWEEP_TENANT_SLICE } from "./sweep-budget.js";
-import type { TenantSlice } from "./tenant-slice.js";
+// No `SWEEP_TENANT_SLICE` here, deliberately: since NB-3 this module reasons
+// only about what the TICK reported (`covered` / `handed` / `allowed`), never
+// about the configured constant. Reaching for the constant is what made a short
+// tail read as a clipped tick.
+import { coverageTicks } from "./sweep-budget.js";
 
 /**
  * HOW EACH LEG REPORTS — the table that makes this module's coverage claim
@@ -272,42 +294,60 @@ export function collectLegSignals(legs: Record<string, unknown>): LegSignals {
  *
  * 12 ticks is one hour at the live 5-minute cadence — the point at which "a
  * stuck tenant is noticed within a cron period" has stopped being true by an
- * order of magnitude. At the shipped slice that is ~590 tenants, which is
- * exactly where the audit says the per-tenant RPC fan-out has to be replaced by
- * the D1/Analytics read-model (admin/README.md, ARCHITECTURE.md #3) rather than
- * tuned. This check is what makes that arrive as a message instead of as a
- * customer complaint.
+ * order of magnitude. Past it, the audit's answer is to replace the per-tenant
+ * RPC fan-out with the D1/Analytics read-model (admin/README.md,
+ * ARCHITECTURE.md #3) rather than tune it. This check is what makes that arrive
+ * as a message instead of as a customer complaint.
+ *
+ * THE TENANT COUNT THIS CORRESPONDS TO WAS RESTATED on 2026-08-20 and it moved
+ * a long way. The docstring used to read "~590 tenants" — computed through
+ * `ASSUMED_DO_RPC_MS = 25`, which production measurement then put at ~450.
+ * One hour is `12 x SWEEP_TENANT_SLICE` tenants, which at the calibrated slice
+ * is 36. The threshold is deliberately NOT being raised to keep pace: it is a
+ * statement about detection latency the founder was given, the latency is real,
+ * and re-tuning the threshold to silence it is the exact move that would make
+ * this check decorative. What the number now says is that the read-model is due
+ * at the CURRENT tenant count.
  */
 export const COVERAGE_TICKS_ALERT_AFTER = 12;
 
 /**
- * How much DEFERRED work in one tick is worth telling the founder about.
+ * What one tick knows about its own COVERAGE — the two numbers, and only those
+ * two, that the rotation-latency question is asked in.
  *
- * N6 (docs/adversarial/wave-b1-scale-monitoring-gate-2026-08-20.md): this arm
- * had no threshold at all. ONE tenant clipped on ONE leg, on three consecutive
- * ticks, tripped the same check whose sibling arm waits for a full rotation to
- * take an hour — roughly a 15x mismatch in sensitivity, and because
- * `decideAlert` suppresses inside an announced episode, the noisy arm would
- * keep the quiet one (the one that means "go build the read-model") from ever
- * producing its own alert. That is the S4 defect reproduced inside the check S4
- * created, in miniature.
+ * `covered` is `SweepFanout.leastVisited`: how many tenants the LEAST-covered
+ * fan-out leg reached, which is by construction exactly how far
+ * `commitSweepCursor` advanced the rotation. It is the achieved figure, and it
+ * is the only one from which detection latency can be computed.
  *
- * ONE SLICE'S WORTH OF LEG-VISITS, chosen to align the two arms in the only
- * terms they share — how much work a tick is losing. `signals.deferred` sums
- * across legs, so a handful of tenants clipped on a few legs stays well under
- * it, and the rotation reaches those tenants on the next tick, which is the
- * designed behaviour and not a condition. At or above one slice the tick is
- * losing the equivalent of a whole slice of work every cycle, which is when
- * coverage genuinely degrades rather than merely wobbles.
- *
- * A CALIBRATION JUDGEMENT, not a measurement — stated because the alternative
- * (a fraction of the tenant count) compares a per-leg sum against a per-tenant
- * quantity, and the two are not in the same units. If real DO latency turns out
- * to be well above `ASSUMED_DO_RPC_MS` the fan-out deadline will bind on every
- * full slice and this will fire, which is the correct outcome: at that point
- * the slice is mis-sized and the operator needs to know.
+ * BUNDLED RATHER THAN TWO PARAMETERS, deliberately. The defect being fixed is a
+ * caller that had the slice and reported the slice; a shape that accepts a
+ * `TenantSlice` would let the next caller do it again, because a `TenantSlice`
+ * has a plausible-looking tick count on it. This type does not typecheck
+ * against one.
  */
-export const DEFERRED_LEG_VISITS_ALERT_AFTER = SWEEP_TENANT_SLICE;
+export interface SweepCoverage {
+  /** Every tenant in the control-plane index — the denominator. */
+  total: number;
+  /** Tenants the least-covered fan-out leg actually reached this tick. */
+  covered: number;
+  /**
+   * Tenants this tick was HANDED (`slice.ids.length`). `covered < handed` is the
+   * one true test for "the shared fan-out deadline clipped this tick".
+   */
+  handed: number;
+  /**
+   * The window size the tick was ALLOWED (`slice.limit`) — the sustainable
+   * per-tick advance whenever the tick was not clipped.
+   *
+   * NB-3 (gate 2026-08-20): without this, a SHORT-TAIL tick — `covered` small
+   * only because the tail was small — extrapolated a rotation from the tail and
+   * published a figure up to 3x pessimistic, WITH a "the deadline is stopping
+   * the trailing legs" clause that was simply false. 63 % 3 == 0 today so no
+   * tail exists; tenant #64 creates one every rotation.
+   */
+  allowed: number;
+}
 
 /**
  * Turn one tick's sweep output into founder alerts. Returns the reconciled
@@ -319,7 +359,7 @@ export const DEFERRED_LEG_VISITS_ALERT_AFTER = SWEEP_TENANT_SLICE;
 export async function reportSweepSignals(
   env: Env,
   mailer: OpsMailer,
-  input: { legs: Record<string, unknown>; digest: OpsDigest | null; coverage: TenantSlice | null },
+  input: { legs: Record<string, unknown>; digest: OpsDigest | null; coverage: SweepCoverage | null },
   nowMs: number,
 ): Promise<AlertOutcome[]> {
   const results: CheckResult[] = [];
@@ -355,46 +395,110 @@ export async function reportSweepSignals(
     });
   }
 
-  // S4 + S11 — CAPACITY, in its own name. Two independent ways the sweep can be
-  // failing to keep up, neither of them a fault: the rotation needs too many
-  // ticks to reach every tenant, or the tick's own deadlines are deferring work
-  // inside the slice it did choose.
+  // S4 + S11 — CAPACITY, in its own name, and since the 2026-08-20 calibration
+  // fix in ONE unit: how many ticks a full rotation ACTUALLY takes.
+  //
+  // It used to be two arms that could not be compared. The second asked whether
+  // the rotation was longer than an hour; the first summed every leg's deferral
+  // counters and compared that to a single slice. Those are not the same
+  // quantity — `signals.deferred` counts LEG-VISITS across legs, so ONE shared
+  // fan-out deadline landing at one tenant is counted once per leg. Live at 63
+  // tenants that read `1 + 36 + 36 + 36 = 109` against a threshold of 37 and
+  // pinned the check permanently, which (via `decideAlert`'s in-episode
+  // suppression) is also what kept the rotation-length arm — the one that means
+  // "go build the read-model" — from ever producing its own alert. N6, and the
+  // S4 defect reproduced inside the check S4 created.
+  //
+  // AND THE SUM WAS NOT EVEN COMPLETE, which is the other reason it could not be
+  // a threshold: of the six legs that iterate the tenant slice, only four can
+  // report a deferral at all. `digest` returns `tenants.scanned`/`complete`
+  // rather than a `deferred` counter, and `watchtower` returns an `AlertOutcome[]`
+  // with no counters anywhere in it (W-M1's shape). Both deferred 36 tenants on
+  // the live tick and contributed 0. A grade built on that sum is reading four
+  // sixths of the evidence.
+  //
+  // `leastVisited` has neither problem: `sweepTenants` folds EVERY slice leg's
+  // visit count into it by construction, including the two that cannot describe
+  // themselves. The deferral counters remain the operator-facing detail, where
+  // an under-count costs nothing but a less specific diagnosis.
+  //
+  // ONE ARM NOW: `ceil(total / covered)`. It subsumes the old rotation arm
+  // exactly (when nothing is deferred, `covered` IS the slice) and it answers
+  // the question the check's own prose asks — how late is a stuck tenant
+  // noticed — rather than how much work the tick chose not to do. Deferral
+  // counters stay in the DETAIL, where an operator needs them to see WHICH leg
+  // is losing work; they no longer decide the grade.
   const coverage = input.coverage;
-  const coverageBad =
-    signals.deferred >= DEFERRED_LEG_VISITS_ALERT_AFTER || (coverage !== null && coverage.coverageTicks > COVERAGE_TICKS_ALERT_AFTER);
-  const coverageGrade = await watchtowerStub(env).gradeSweepStreak(SWEEP_COVERAGE_CHECK, coverageBad);
-  if (coverageGrade !== null) {
-    const rotation =
-      coverage === null
-        ? "the tenant slice could not be read this tick"
-        : `${coverage.total} tenant(s) at ${SWEEP_TENANT_SLICE} per tick = a full pass every ${coverage.coverageTicks} tick(s) ` +
-          `(~${coverage.coverageTicks * 5} min)`;
-    results.push(
-      coverageGrade
-        ? {
-            name: SWEEP_COVERAGE_CHECK,
-            healthy: true,
-            basis: "reobserved",
-            detail: `The ops sweep is reaching every tenant on schedule — ${rotation}.`,
-          }
-        : {
-            name: SWEEP_COVERAGE_CHECK,
-            healthy: false,
-            materiality: sweepCoverageKey(
-              coverage === null,
-              coverage !== null && coverage.coverageTicks > COVERAGE_TICKS_ALERT_AFTER,
-              signals.deferred >= DEFERRED_LEG_VISITS_ALERT_AFTER,
-            ),
-            detail:
-              `The ops sweep is not keeping up with the tenant count. ${rotation}. ` +
-              (signals.deferred > 0 ? `Work deferred inside this tick's own slice: ${signals.deferralDetail}. ` : "") +
-              `NOTHING IS FAILING — every tenant is still reached, just later. What degrades is DETECTION LATENCY: a stuck ` +
-              `tenant, a dead domain or a starved send queue is now noticed a rotation late rather than within a cron period. ` +
-              `The fix is the D1/Analytics read-model (admin/README.md), not a bigger slice — the slice is bounded by the ` +
-              `invocation's subrequest budget — WITH every leg that fans out over a population of its own counted against it ` +
-              `(admin/sweep-budget.ts) — and raising it past that is what used to make the dead-man heartbeat vanish.`,
-          },
-    );
+  // UNKNOWN IS NOT HEALTHY, and it is not unhealthy either. A tick that could
+  // not read its own slice (the `tenantSlice` leg threw) has no coverage
+  // observation to make. The old code still graded the arm in that state and
+  // could emit a RECOVERED whose detail read "the tenant slice could not be
+  // read this tick" — a healthy claim built on absent data. Skipping the
+  // observation holds the streak instead: the leg's throw is already reported
+  // by `cron_legs`, which is the check that owns it.
+  // `covered > 0` is NB-4 (gate 2026-08-20), and it is this lane's own class at
+  // its maximum: `coverageTicks` returns 0 for a non-positive advance, 0 is not
+  // > 12, so zero coverage published `healthy` with the detail "a full pass
+  // every 0 tick(s) (~0 min)" — a number the rotation did not achieve, in the
+  // reassuring direction, which is the exact defect this whole lane removes.
+  // Reachable only with an empty id list alongside a non-null slice (a
+  // zero-tenant platform, or a D1 read race), so: narrow, and one word.
+  if (coverage !== null && coverage.covered > 0) {
+    // CLIPPED is `covered < handed`, never `covered < SWEEP_TENANT_SLICE`. A
+    // short tail is smaller than the constant without anything having gone
+    // wrong; only falling short of what this tick was actually HANDED means the
+    // deadline cut it. NB-3.
+    const clipped = coverage.covered < coverage.handed;
+    // A clipped tick advances by what it covered. An unclipped one advances by
+    // the window it is allowed every tick — extrapolating a rotation from a
+    // short tail is what made `{total: 30, covered: 1}` read as 30 ticks.
+    const rotationTicks = coverageTicks(coverage.total, clipped ? coverage.covered : coverage.allowed);
+    const coverageGrade = await watchtowerStub(env).gradeSweepStreak(SWEEP_COVERAGE_CHECK, rotationTicks > COVERAGE_TICKS_ALERT_AFTER);
+    if (coverageGrade !== null) {
+      // The ACHIEVED figure, always — and the cause beside it ONLY when the tick
+      // was genuinely clipped, because that gap is the diagnosis: it separates
+      // "the deadline is binding mid-slice" from "the tenant count has grown".
+      const rotation =
+        `${coverage.total} tenant(s), and this tick's least-covered leg reached ${coverage.covered} of the ` +
+        `${coverage.handed} it was handed = a full pass every ${rotationTicks} tick(s) (~${rotationTicks * 5} min)` +
+        (clipped
+          ? `. The shared fan-out deadline is stopping the trailing legs partway through the slice — the ` +
+            `rotation advances by the LEAST-covered leg, so it moves ${coverage.covered} tenant(s) per tick, ` +
+            `not ${coverage.allowed}`
+          : "");
+      results.push(
+        coverageGrade
+          ? {
+              name: SWEEP_COVERAGE_CHECK,
+              healthy: true,
+              basis: "reobserved",
+              detail: `The ops sweep is reaching every tenant on schedule — ${rotation}.`,
+            }
+          : {
+              name: SWEEP_COVERAGE_CHECK,
+              healthy: false,
+              // RE-DERIVED AT THE FOLD from the merged producer's own facts
+              // (build gate F1). `clipped` is `covered < handed` — the ONE
+              // true test for 'the shared fan-out deadline cut this tick',
+              // and keying off `SWEEP_TENANT_SLICE` instead would
+              // re-introduce this lane's NB-3 inside the materiality space.
+              materiality: sweepCoverageKey(clipped),
+              detail:
+                `The ops sweep is not keeping up with the tenant count. ${rotation}. ` +
+                (signals.deferred > 0 ? `Work deferred inside this tick's own slice: ${signals.deferralDetail}. ` : "") +
+                `NOTHING IS FAILING — every tenant is still reached, just later. What degrades is DETECTION LATENCY: a stuck ` +
+                `tenant, a dead domain or a starved send queue is now noticed a rotation late rather than within a cron period. ` +
+                `The slice is bounded by the WALL CLOCK the cron period has left after the send pipeline's own bounds, at a DO ` +
+                `RPC round trip measured against production — so simply raising the slice buys nothing, it just moves the ` +
+                `deadline's cut further up the leg order (admin/sweep-budget.ts). TWO REAL REMEDIES, and the cheap one has not ` +
+                `been tried: (1) BOUNDED-CONCURRENCY FAN-OUT — the same measurement puts DO cpuTime at 1-3% of wall time, so ` +
+                `the deadline is being spent WAITING, and overlapping those waits would raise the slice several-fold against ` +
+                `the same deadline. Unevaluated: nobody has measured this Worker against the simultaneous-connection ceiling. ` +
+                `(2) the D1/Analytics read-model (admin/README.md, ARCHITECTURE.md #3), which is the structural fix and the ` +
+                `larger build. Measure (1) before committing to (2).`,
+            },
+      );
+    }
   }
 
   // W-M1 — alerts that were OWED and did not arrive.

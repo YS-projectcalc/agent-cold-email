@@ -100,11 +100,10 @@ export const ALERT_FAMILIES: Readonly<Record<string, AlertFamily>> = {
   },
   [CRON_LEGS_CHECK]: { keys: ["counted", "threw", "both"], scope: "global", budget: "counted" },
   warmup_cancel_gave_up: { keys: ["gaveup_b1", "gaveup_b2", "gaveup_b3"], scope: "global", budget: "counted" },
-  [SWEEP_COVERAGE_CHECK]: {
-    keys: ["slice_unreadable", "rotation_behind", "in_tick_deferral", "both"],
-    scope: "global",
-    budget: "counted",
-  },
+  // RE-DECLARED AT THE FOLD (F1) to what the merged producer can emit — see
+  // `sweepCoverageKey` for why the other two frozen members are gone rather
+  // than merely unused.
+  [SWEEP_COVERAGE_CHECK]: { keys: ["deadline_clipped", "rotation_behind"], scope: "global", budget: "counted" },
   [SWEEP_SIGNALS_CHECK]: { keys: ["threw"], scope: "global", budget: "counted" },
   [ALERT_DELIVERY_CHECK]: { keys: ["dark_channel", "send_failed", "both"], scope: "global", budget: "counted" },
   vendor_wallet: {
@@ -253,23 +252,49 @@ export function cronLegsKey(threw: boolean, counted: boolean): string {
 }
 
 /**
- * `sweep_coverage`'s two independent ways of not keeping up.
+ * `sweep_coverage`'s DIAGNOSIS: why the rotation is behind.
  *
- * DEVIATION FROM §1.2, DECLARED (build gate N5): the frozen cell derives
- * `in_tick_deferral` from `signals.deferred > 0`; the producer passes
- * `signals.deferred >= DEFERRED_LEG_VISITS_ALERT_AFTER`. The threshold is the
- * right input — it aligns the KEY with the alerting CAUSE, so the key cannot
- * report a condition the check did not fire on — but it is an undocumented
- * divergence from frozen text, and this is the note. ⚠️ The inputs themselves
- * are NOT changed here: the sibling `sweep-calibration` lane deletes
- * `DEFERRED_LEG_VISITS_ALERT_AFTER` and reshapes the coverage type, so this
- * key's derivation AND its declared space are re-reconciled at that fold
- * (build gate F1). Do not tune this in isolation.
+ * RE-DERIVED AT THE FOLD (build gate F1) against the merged post-calibration
+ * producer, not patched onto the old one. §1.2's frozen cell declared four keys
+ * — `slice_unreadable` | `rotation_behind` | `in_tick_deferral` | `both` —
+ * derived from three inputs the sweep-calibration lane has since removed or
+ * invalidated. What the merged producer can emit is TWO, and the space is
+ * re-declared to exactly that:
+ *
+ *  - `slice_unreadable` is GONE, and not by omission: a tick that could not read
+ *    its own slice now makes NO coverage observation at all (`coverage === null`
+ *    skips the arm), because the `tenantSlice` leg's throw is reported by
+ *    `cron_legs`, which owns it. The condition MIGRATED families rather than
+ *    disappearing — a leg throw reaches `cron_legs`' existing `threw`/`both`
+ *    keys through `legsThrew`, so nothing there needs widening.
+ *  - `in_tick_deferral` is GONE AS A GRADE. `signals.deferred` no longer decides
+ *    anything: it sums LEG-VISITS, so one shared deadline landing at one tenant
+ *    was counted once per leg (live: 109 against a threshold of 37, pinning the
+ *    check permanently). It survives only in the operator-facing detail.
+ *  - `both` is GONE because the two are no longer INDEPENDENT conditions. There
+ *    is one arm now — `rotationTicks > COVERAGE_TICKS_ALERT_AFTER` — and
+ *    `clipped` is a MODIFIER on it, not a second way to be unhealthy. Declaring
+ *    `both` would be a key no producer input can reach, which is exactly the
+ *    class the reachability guard exists to catch; it is deliberately absent.
+ *
+ * THE SURVIVING DISTINCTION IS THE ONE THE FOUNDER ACTS ON, which is what a
+ * materiality key is for. Both mean "a stuck tenant is noticed a rotation late",
+ * and they have different remedies:
+ *  - `deadline_clipped` — the shared fan-out deadline is stopping trailing legs
+ *    PARTWAY THROUGH the slice, so the rotation advances by the least-covered
+ *    leg. The cheap remedy (bounded-concurrency fan-out) has not been tried.
+ *  - `rotation_behind` — nothing was clipped; the tenant count has simply grown
+ *    past what a full, unclipped window covers in `COVERAGE_TICKS_ALERT_AFTER`
+ *    ticks. That is the structural one: the D1/Analytics read-model.
+ * A check that could not tell those apart would send the founder to measure a
+ * deadline that is not binding, or to build a read-model it does not yet need.
+ *
+ * NAMED `deadline_clipped`, not `clipped`: a bare `clipped` is ambiguous standing
+ * alone in an operator's key column, and the producer's own prose is "the shared
+ * fan-out deadline is stopping the trailing legs".
  */
-export function sweepCoverageKey(sliceUnreadable: boolean, rotationBehind: boolean, inTickDeferral: boolean): string {
-  if (sliceUnreadable) return "slice_unreadable";
-  if (rotationBehind && inTickDeferral) return "both";
-  return rotationBehind ? "rotation_behind" : "in_tick_deferral";
+export function sweepCoverageKey(deadlineClipped: boolean): string {
+  return deadlineClipped ? "deadline_clipped" : "rotation_behind";
 }
 
 /**
