@@ -271,3 +271,197 @@ The `["pending","healthy"]` → `["pending","holding","holding","healthy"]` chan
 5. **Disclose N2 in the §9.13 [RATIFY:founder] ask** — the ≤20/day bound does not hold while the WatchtowerDO is unreachable (measured: 200/24h at 100 instances), the condition is correlated with the storms the budget exists for, and `alert_budget_exceeded` is silent in exactly that state.
 6. **Re-run the full battery on the MERGED tree**, per §9.12 — a lane worktree is not the post-merge tree, and F1 guarantees the merged tree differs from both lanes.
 7. **After the fold, apply migration `0021_watchtower_alert_state.sql` remotely** and confirm with `wrangler d1 migrations list --remote`. Re-pick the number one more time if any lane lands a migration first — the SQL header states the rule.
+
+---
+
+# ROUND 2 — the full lane, post-fix + post-fold
+
+## VERDICT: **SHIP**
+
+Every round-1 item is closed and re-verified by execution, not by reading the fix. **B1 is closed at the input where the defect was, and the escalation it killed now fires.** The class guard reds on the original defect and on three of five other plants I planted. **F1's reconciliation is correct and its 2-key space is a total partition of the unhealthy population** — I drove the merged producer's edge shapes myself, including the short tail the guard omits. **The design delta SHIPS.** No blocking findings.
+
+Five NEW non-blocking observations, all outside round 1's checklist and carrying no verdict weight — two are holes in the new guard, three are justifying sentences that do not survive execution. Plus **N8 is still open** and is a one-line doc fix.
+
+### Grounding
+
+| Item | Value |
+|---|---|
+| Target | HEAD **`d13588f2262b8c76fbb83046395d9d9894f40e2b`**, working tree CLEAN. Reviewed `53d4edd..d13588f`. |
+| Commits ruled on | `61d1ff5` (fix round), `a081ab0` (separable design delta), `d13588f` (F1 fold — a true 2-parent merge of `a081ab0` + main `7b19e63`, which carries the sweep-calibration lane at `23fe40d`). |
+| Sandbox | fresh rsync at `d13588f`, hard-linked `node_modules`. **`diff -r` confirms `apps/platform/src` and `packages/shared/src` are byte-identical to HEAD**, and `grep -c zzz-r2 = 0` in the battery log confirms my probe files were not collected — the green below is the clean tree's. |
+
+### Battery at `d13588f` (real exit codes)
+
+| Leg | Result |
+|---|---|
+| `npm run typecheck` (all workspaces) | **exit 0** |
+| platform | **239 files / 2373 passed / 1 skipped — exit 0** (838s) |
+| engine | 18 files (+2 skipped) / 153 passed (+4 skipped) — exit 0 |
+| dashboard | 31 files / 165 passed — exit 0 |
+| cli (dist built first) | pass 12 / fail 0 — exit 0 |
+
+**Cap-invariant table, re-derived independently** (own parser over `ALERT_FAMILIES`, not the suite's assertion): widest declared space is **4** (`failure_signals`, `vendor_wallet`, `tenant_do_wedged:`, both `customer_progress_*`); `MAX_ANNOUNCED_KEYS_PER_EPISODE` = 5; **5 > 4 strictly**. The delta's family is at 2. §9.3 holds.
+
+---
+
+## Round-1 checklist — every item re-verified
+
+### B1 · CLOSED, and the capability it killed is live
+
+`collectLegSignals` now carries `whys` (the closed `DeliveryReason` enum, deduped) beside the prose `reasons`, and the producer keys off `whys`. Fixed at the input, which is where the defect was; the key function was always correct.
+
+**Verified end-to-end through the real producer, reading `announced_keys` out of D1** — nothing reconstructed:
+
+```
+reasons (prose, for the email): ["chk_0 (dark_channel)","chk_1 (send_failed)"]
+whys (closed enum, for the key): ["dark_channel","send_failed"]
+BANKED (4 shapes):  ["dark_channel","send_failed","both","dark_channel"]
+DISTINCT PRODUCIBLE: ["dark_channel","send_failed","both"]     <- round 1: ["send_failed"]
+```
+
+The duplicate shape (`["dark_channel","dark_channel"]`) correctly dedupes to `dark_channel`, and the founder's email body still carries the per-check prose (`"...ticks: chk_0 (dark_channel), chk_1 (send_failed)"`). Both shapes of the fact are preserved and used for what each is for.
+
+**And the escalation fires.** Driving a `dark_channel` episode and then switching the condition to `send_failed`:
+
+```
+round 1: ["suppressed/suppressed_cooldown", x4]              ledger: {"keys":["send_failed"]}
+round 2: ["escalated/sent","suppressed", "suppressed", ...]  ledger: {"keys":["dark_channel","send_failed"]}
+```
+
+### B1b · the class guard — GRADED WITH SIX PLANTS, reds on four, blind on two
+
+The builder disclosed that its first guard version passed with B1 re-introduced (it rebuilt the composition instead of observing the producer) and that a second soundness hole was self-caught via revert. Both disclosures check out, and the final two-layer shape (end-to-end for reducer-seam families; function-level + `LITERAL_PRODUCERS` elsewhere; a completeness assertion over every `ALERT_FAMILIES` row) is the right shape. I graded it rather than accepting it. Baseline: 34 passed.
+
+| # | Plant | Guard | |
+|---|---|---|---|
+| P1 | **B1 verbatim** — producer fed `reasons` again | **RED** (`alert_delivery` end-to-end probe) | ✓ |
+| P2 | SOUNDNESS — `tenantDoWedgedKey` returns an undeclared key | **RED** (both halves) | ✓ |
+| P3 | a literal family grows a 2nd key in the TABLE only | **RED** | ✓ |
+| P3b | **MIRROR** — same key added to the table AND to `LITERAL_PRODUCERS` | **34 passed** | ✗ NEW-1 |
+| P4 | COMPLETENESS — a new `ALERT_FAMILIES` row with no probe | **RED** | ✓ |
+| P5 | **SEAM** — `clipped` keyed off `allowed` instead of `handed` | **34 passed** | ✗ NEW-2 |
+| P6 | formatting-only edit | **34 passed** | ✓ no false positive |
+
+P1 is the decisive one: the guard does catch the defect it was written for, through the layer that executes the wiring.
+
+### F1 · CLOSED — the 2-key space is a TOTAL partition, and the short tail is handled
+
+The fold is a real merge; B1's `whys` survived it intact (`sweep-signals.ts:518` keys off `whys`, `:521` renders `reasons`), the calibration lane's own tests are unmodified except two additive, legitimate edits, and `DEFERRED_LEG_VISITS_ALERT_AFTER` has **0 remaining references** anywhere in `src`.
+
+I drove the merged producer's edge shapes myself rather than trusting the guard's two fixtures:
+
+| Shape | Banked key | |
+|---|---|---|
+| SHORT TAIL — `{total:100, covered:1, handed:1, allowed:3}` | **`rotation_behind`** | ✓ and the detail correctly OMITS the "stopping the trailing legs" clause |
+| clipped tail — `{covered:1, handed:2, allowed:3}` | `deadline_clipped` | ✓ |
+| clipped AND behind — `{covered:2, handed:10, allowed:10}` | `deadline_clipped` | ✓ |
+| `covered = 0` | **no observation, no row** | ✓ (NB-4) |
+| 6-shape partition sweep | `["rotation_behind","deadline_clipped","rotation_behind","deadline_clipped","rotation_behind","rotation_behind"]` | ✓ exactly the declared set, nothing outside it |
+
+**Dropping `both` loses nothing, and the reason is structural.** With the merged single-arm grading, the check is unhealthy iff `rotationTicks > COVERAGE_TICKS_ALERT_AFTER` — so "behind" IS the unhealthy condition, not an independent one. `clipped` is a modifier on it. "Clipped and behind at once" is just "clipped", and `sweepCoverageKey(clipped)` is a total function over a boolean, so the two members partition the unhealthy population exhaustively. A third member would be unreachable by construction — the class the guard exists to catch. The commit's own reasoning says exactly this and it is correct.
+
+**`slice_unreadable`'s migration is real and `cron_legs` needed no widening.** `collectLegSignals` pushes any `leg === null` onto `legsThrew` before the shape table is consulted, so a `tenantSlice` throw becomes `cron_legs`' existing `threw` key. Verified end-to-end (`bankedKeyFor("cron_legs", { tenantSlice: null })` → `"threw"`), and `cron_legs`' 3-key space already covered it.
+
+### N1–N7 · all closed
+
+- **N1** — the vacuous `admits({total: 20, perEntity: 0})` arm is **removed** (grepped: gone), and the title is now *"reds at 0 on the TOTAL-ONLY reading — the defect this fixture discriminates."* Accurate.
+- **N2** — closed in code and measured below.
+- **N3** — the rationale is replaced with the two reasons that hold (three `reconcileAlerts` entry points; overlapping cron invocations) **and records the refuted claim** so a future editor cannot re-simplify on it. Better than asked for.
+- **N4** — `failureSignalsKey` now branches at `FAILURE_SIGNAL_FAILED_THRESHOLD`, so a complaint-driven alert below the failure band keys `complaints`. The residual precedence (a complaint on top of an elevated failure count does not escalate) is stated and costed against the frozen cap.
+- **N5** — the threshold deviation is documented as a declared deviation; moot after F1 rewrote the inputs.
+- **N6** — closed; see NEW-3 for one sentence of its justification.
+- **N7** — verified and carried into the design doc's post-freeze block, matching my derivation exactly ("0 by construction" under any-withholding; 672 belongs to total-only).
+
+### N8 · STILL OPEN — survived the merge
+
+`apps/platform/src/admin/sweep-signals.ts:41-42` still reads *"It belongs to the per-tenant staleness signal in the alert-state increment, **where the frozen design already put it**."* `grep -c -i staleness docs/research/alert-state-design-2026-08-20.md` = **0**. The design contains no staleness family. One-line fix, ordered: say it is OWED and unowned, not that the design already carries it, or the item falls between lanes with each believing the other owns it.
+
+---
+
+## RULING — the DESIGN DELTA (`a081ab0`): **SOUND, SHIP**
+
+`alert_budget_exceeded` gains a second key, `unreadable`.
+
+- **The gap is real and was measured**, not argued: at round 1 a WatchtowerDO outage produced 200 announcements/24h with **zero** explanation, because `reportAlertBudgetHealth` read the same dead DO and returned `[]`.
+- **`saturated` genuinely cannot carry it.** The two conditions have opposite founder expectations — the ceiling IS being applied and mail is queued behind it, versus the ceiling is NOT being applied and more mail is coming. A single key would make the announcement read as reassurance in the worse case.
+- **Key, not family, is the right call** — and by a firmer argument than the commit's. §4's rule is about family-vs-key, and the table's own precedent is that keys distinguish failure MODES, not only severity rungs: `vendor_wallet` (unreachable / shape_drift / two below-floor arms), `tenant_do_wedged:` (rpc / constructor / storage / other), `cron_legs` (counted / threw / both). The subject is unchanged — "the alerting channel is not behaving normally."
+- **Invariants hold.** 2 < 5 strictly, widest space still 4 (independently re-derived above). Budget exemption unchanged.
+- **§3.3 consequence is genuinely none.** `policyFor` returns DEBOUNCED; two consecutive unreadable ticks (10 min) announce, one is a flap worth zero emails. Appropriate for a transient RPC failure.
+- **The delivers-vs-audibility distinction is correct and I verified the mechanism.** `isBudgetedAnnouncement` filters exempt families before `claimAnnouncementSlots` is called at all, so during a real outage the `unreadable` announcement never touches the dead DO and cannot be denied a slot. **Executed with BOTH `admitAnnouncements` and `readAnnouncementBudget` throwing: 2 `alert_budget_exceeded` emails landed over 24h** (round 1: 0). The exemption delivers it; the fail-open bound only buys audibility. The code says so and it is true.
+- **Reverts cleanly** in its own commit, as promised.
+
+---
+
+## RULING — N2's bound, MEASURED, and its argument attacked
+
+`FAIL_OPEN_ANNOUNCEMENTS_PER_TICK = MAX_ANNOUNCEMENT_EMAILS_PER_DAY − MAX_PER_ENTITY_ANNOUNCEMENTS_PER_DAY` = 5, spent through `announcementOrder` — the budget's own priority order. Sized at the floor the 15/5 sub-cap guarantees is available no matter what a storm has consumed, which is a derivation rather than a pick, and it is right.
+
+**Measured, WatchtowerDO fully unreachable, 100 instances, 288 ticks:**
+
+```
+storm announcements in 24h = 200   |  max in ONE tick = 6   |  alert_budget_exceeded = 2
+```
+
+Round 1 measured 200/24h with a per-tick burst of 100 and zero explanation. So: **the burst is genuinely bounded (100 → 6 in a tick) and the condition is now audible; the 24h total is unchanged at 200.** The builder states exactly this and does not overclaim it — the ladder, not the budget, was always what bounded the daily total in this scenario.
+
+**Attacking the argument for why 24h cannot be honestly restored.** Two of the three reasons hold outright: the counter's store IS the thing that is down, and Worker memory IS isolate-scoped. **The third — "a D1 fallback would re-couple the failure domain the DO was chosen to escape" — does not hold as written.** A fallback is a union of availability, not an intersection: during a D1 outage the DO path still serves (unchanged), during a DO outage the D1 path would serve, and in a double outage `runWatchtower` has already returned at `if (!d1.healthy)`. No state gets worse. The honest objections are different and are sufficient on their own — two rings that diverge once the DO returns (so the 24h bound would still not be exact), a D1 write per announcement re-introducing the write amplification `isSteadyState` was just added to remove, and a new table plus migration for a failure mode that is now burst-bounded and announced. **The conclusion stands — do not build it — but the stated reason should be replaced with those.** Non-blocking; NEW-4 below.
+
+---
+
+## NEW (out-of-scope of round 1's checklist — no verdict weight)
+
+### NEW-1 · The guard's literal layer is a mirror of the table, not a reading of any producer
+
+`LITERAL_PRODUCERS` (`watchtower-key-reachability.test.ts:118-135`) is a second hand-maintained table inside the test file, and the assertion is `expect(new Set(ALERT_FAMILIES[family].keys)).toEqual(new Set(literals))` — table against table. **Executed:** adding `"drained"` to `send_starved:` in *both* places ships **34 passed** with no producer emitting it. The guard's own docstring says the table-against-itself shape is the defect it exists to close; for the 16 literal families it reproduces that shape one file over, and it trains the wrong reflex — an editor who reds P3 fixes it by editing `LITERAL_PRODUCERS`. *Strengthening:* scan the producer sources for `materiality: "<literal>"` per family, with the repo's existing vacuity guard (`watchtower-families.test.ts` already imports `?raw` source and regexes it). Narrow in practice — a literal cannot be "fed the wrong input", which is B1's class — so a note, not a finding.
+
+### NEW-2 · The guard's `sweep_coverage` fixtures both set `handed === allowed`, so they cannot see the one distinction the fold's key turns on
+
+Both fixtures are `{handed: 10, allowed: 10}` and `{handed: 3, allowed: 3}`. **Executed:** changing the producer to `covered < allowed` leaves the guard at **34 passed**, while my short-tail probe reds — `deadline_clipped` where the truth is `rotation_behind`. That is not cosmetic: a short tail occurs every rotation once `total % allowed != 0` (the merged docstring says so: *"63 % 3 == 0 today so no tail exists; tenant #64 creates one every rotation"*), and under the plant every tail tick would both mis-key AND emit the founder-facing clause *"The shared fan-out deadline is stopping the trailing legs partway through the slice"* — the calibration lane's own NB-3 defect, re-introduced inside the materiality space, which the fold commit explicitly set out to prevent. *Fix:* add a third fixture with `handed < allowed`. The shipped code is correct; only its guard is blind.
+
+### NEW-3 · N6's "no-op" sentence is false for two of the four policies
+
+`withheldAlertState`'s new comment claims *"a `reobserved` clear that reached `recovered` already carries `healthyObs === recoverAfterObservations - 1`, which is >= 1, so this is a no-op there."* For `recoverAfterObservations = 1` (IMMEDIATE and DEAD_MAN) that value is **0**. Executed:
+
+```
+DEBOUNCED (recoverAfter 3): prev.healthyObs 2 -> 2   no-op: true
+IMMEDIATE (recoverAfter 1): prev.healthyObs 0 -> 1   no-op: FALSE
+```
+
+**No behavioral consequence, and the safety claim it supports still holds:** the retry lands on the very next tick under both policies (verified), and the only functional reader of `healthyObs` outside the policy module is the `customer_progress_*` onset-adoption gate at `watchtower.ts:976` — and those families are DEBOUNCED/DEBOUNCED_DIGEST, so the IMMEDIATE case never reaches it. A precision fix to one clause.
+
+### NEW-4 · N2's third reason (the D1-fallback re-coupling) — see the ruling above.
+
+### NEW-5 · The §9.13 wording must not let the per-tick bound imply a daily one
+
+Measured: the fail-open's 24h total is **200, identical to the unbounded round-1 measurement**. What the bound buys is burst (100 → 6 per tick) and, with the delta, audibility. The disclosure should say that in those terms.
+
+**A pattern worth naming across NEW-3, NEW-4 and round-1's N3:** three times now, correct code has shipped with a justifying sentence that does not survive execution. The code has been right every time; the prose has been the defect. It is cheap to check and it is where this lane's residue keeps landing.
+
+---
+
+## Attacks that FAILED in round 2
+
+- **Did B1's fix move the defect rather than close it?** No — `whys` is built in the same loop as `reasons` from `outcome.why`, the closed enum, and deduped; the prose path is untouched and the email still names each check. Both shapes verified in one call.
+- **Does the `unreadable` announcement touch the dead DO?** No. Traced `isBudgetedAnnouncement` → zero candidates → `claimAnnouncementSlots` returns early without an RPC, and confirmed by executing with both DO methods throwing.
+- **Does the delta break the cap invariant or the widest-space figure?** No — re-derived independently: 25 rows parsed, widest 4, cap 5.
+- **Did the fold silently revert calibration behaviour?** No — `git diff 7b19e63..d13588f` over the calibration's five test files shows only two additive B.2 edits, both legitimate: the `alert_delivery` allowlist test now also feeds it the three new `DeliveryReason`s (a strengthening), and `sweep_signals`' recovery is extended to the DEBOUNCED three clean ticks (the same spec change as the other rewrites).
+- **Stale symbols after the fold?** `DEFERRED_LEG_VISITS_ALERT_AFTER`: 0 hits. `slice_unreadable` / `in_tick_deferral`: present only in the docstring recording why they were dropped, never in the table. README has no duplicated headings and its `~590 tenants` mention is the correction, not the stale claim.
+- **Is `0021` still free?** Yes — it is the tail of `apps/platform/migrations`, and no lane has landed a later one.
+- **Does the reachability guard produce false positives?** No — a formatting-only edit leaves it at 34 passed.
+- **Is `covered = 0` an absence-reads-as-health hole?** It makes no observation, so the streak holds and no healthy claim is published — the correct direction. Narrow (empty id list with a non-null slice) and pre-ruled by the calibration gate's NB-4.
+
+## UNVERIFIABLE (carried)
+
+- The live Mordy baseline and `tenant_do_wedged:`'s real production duty cycle — unchanged, no prod access.
+- Whether a short tail exists at today's live tenant count: the merged docstring says `63 % 3 == 0` so none exists yet, and tenant #64 creates one. Not observable from here; it makes NEW-2 latent rather than active.
+
+---
+
+## Deploy requirements (consolidated, supersedes round 1's list)
+
+1. **N8 doc one-liner** — correct `admin/sweep-signals.ts:41-42` so it says the per-tenant staleness signal is OWED and unowned rather than already carried by the frozen design.
+2. **§9.13 [RATIFY:founder] disclosure**, in the founder's units, covering all three facts measured here: the ≤20/day ceiling is **not applied at all** while the WatchtowerDO is unreachable; in that state announcements are bounded at **5 per 5-minute tick** and the 24h total is **not** bounded (measured 200/24h at 100 instances); and the platform now **says so** — `alert_budget_exceeded` announces `unreadable` after two consecutive unreadable ticks. Do not word the per-tick bound as a daily one.
+3. **Apply migration `0021_watchtower_alert_state.sql` remotely** and confirm with `wrangler d1 migrations list --remote`. Re-pick only if another lane lands a migration first.
+4. **Pre-deploy, read `watchtower_state`** — count rows with `status='unhealthy' AND alert_count > 0`. Each is a legacy-adopt candidate on the first post-deploy tick and each should produce **zero** deploy-day email; that count is the number to check the inbox against.
+5. **Expected post-deploy behaviour**, so nothing reads as a regression: recoveries take three clean ticks instead of one (`holding` in between, silent); escalations are a NEW email class on a genuinely different condition under the same check name; `sweep_coverage` now announces under `deadline_clipped` / `rotation_behind`; and the calibration lane's own honest re-fire is expected — coverage is graded on achieved rotation at the measured 450 ms DO RPC, so a rotation-behind alert on the current tenant count is the check working, not a regression.
+6. Optional, non-blocking: NEW-1 and NEW-2's guard strengthenings, and the NEW-3 / NEW-4 prose corrections.
