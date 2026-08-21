@@ -23,8 +23,8 @@ import { envWithFailingD1Statements, signup } from "./helpers.js";
 const T0 = 1_800_000_000_000; // fixed base ms
 const SWEEP = 300_000; // the live cron cadence
 
-function unhealthy(name: string, detail = "down"): CheckResult {
-  return { name, healthy: false, detail };
+function unhealthy(name: string, detail = "down", materiality = "down"): CheckResult {
+  return { name, healthy: false, detail, materiality };
 }
 function healthy(name: string, detail = "ok", basis: RecoveryBasis = "reobserved"): CheckResult {
   return { name, healthy: true, detail, basis };
@@ -112,6 +112,10 @@ describe("watchtower alert state machine (reconcileAlerts)", () => {
     const mailer = new SandboxOpsMailer();
     await reconcileAlerts(env, mailer, [unhealthy("d1")], T0);
     await reconcileAlerts(env, mailer, [unhealthy("d1")], T0 + SWEEP); // alert
+    // A `reobserved` clear now takes `recoverAfterObservations` observations to
+    // close the episode (§3.1); the RECOVERED email itself is unchanged.
+    await reconcileAlerts(env, mailer, [healthy("d1", "D1 SELECT 1 ok")], T0 + SWEEP + 20_000);
+    await reconcileAlerts(env, mailer, [healthy("d1", "D1 SELECT 1 ok")], T0 + SWEEP + 40_000);
     const rec = await reconcileAlerts(env, mailer, [healthy("d1", "D1 SELECT 1 ok")], T0 + SWEEP + 60_000);
     expect(rec[0]!.action).toBe("recovered");
     expect(mailer.sent).toHaveLength(2);
@@ -159,12 +163,19 @@ describe("watchtower alert state machine (reconcileAlerts)", () => {
       ]),
     );
 
-    // Next sweep (within cooldown): do_storage recovers, the other two persist.
+    // Next sweeps (within cooldown): do_storage recovers, the other two persist.
+    // Its recovery takes three clean observations (§3.1) and stays INDEPENDENT
+    // of the other two throughout, which is what this test is about.
+    for (const at of [T0 + 5 * 60_000, T0 + 10 * 60_000]) {
+      const holding = await reconcileAlerts(env, mailer, [unhealthy("d1"), healthy("do_storage"), unhealthy("engine")], at);
+      expect(holding[1]).toEqual({ name: "do_storage", action: "holding", emailSent: false, why: "pending_recovery" });
+      expect(mailer.sent).toHaveLength(3);
+    }
     const second = await reconcileAlerts(
       env,
       mailer,
       [unhealthy("d1"), healthy("do_storage"), unhealthy("engine")],
-      T0 + 5 * 60_000,
+      T0 + 15 * 60_000,
     );
     expect(second).toEqual([
       { name: "d1", action: "suppressed", emailSent: false, why: "suppressed_cooldown" },

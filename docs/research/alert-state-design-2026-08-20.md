@@ -15,6 +15,65 @@ non-blocking). §-numbering is preserved so the gate's per-§ rulings still map.
 | Line-reference policy (gate: the lane is moving) | Every reference below is anchored on a **function or exported constant name plus the behaviour asserted**, with the line number as a convenience only. A builder who finds the line moved should grep the name; if the *behaviour* moved, that is a finding, not a typo. |
 | Verified against v1's own claims | 19 baseline families (`EXPECTED_CONFIRM_OBSERVATIONS`) + 3 arriving in `scalemon` = **22**; `NEXT_STEP_REASONS` = 12 (`packages/shared/src/next-steps.ts`); `waitingOn` = `"operator" \| "customer_billing" \| null`; `0019_sweep_cursor.sql` exists untracked in the lane. |
 
+## POST-FREEZE CORRECTIONS (build round, 2026-08-20) — evidence only, no decision moved
+
+The design is FROZEN; these are corrections to EVIDENCE CITED in the v4 block below, found by
+executing it during the build. Every §-decision, constant and constraint is unchanged, and both
+corrections make the design's own claims narrower rather than wider. Raised in
+`docs/adversarial/alert-state-build-gate-2026-08-20.md` (build gate, ruling + N7).
+
+1. **§6.15b / the v4 table's "reds at 0 on both defective readings" is true of ONE reading, not
+   two.** On the pure per-entity fixture the shipped 15/5 sub-cap pins the total at 15/20, which
+   *rescues* a budgeted global check through the 5 reserved slots — so the v2 defect (the check
+   itself budgeted) leaves that arm **GREEN at 8**; only v3 (`saturated` reading the total counter
+   alone) reds at 0. The conflation is between v2's machine, which had no sub-cap, and v4's fixture.
+   The build carries BOTH fixtures, each discriminating its own defect: the pure per-entity storm for
+   v3, and a TOTAL-saturating mixed storm for the exemption. Verified in both directions by the build
+   gate.
+
+2. **§5.5's round-4 item 3 — "672 such ticks under BOTH defective readings" cannot be true of the
+   any-withholding reading.** Under any-withholding, `saturated` is broader than denial, so
+   `denial ⟹ saturated` holds trivially and the violating count is **0 by construction**; 672 can
+   only belong to the total-only reading. Same shape as correction 1. Nothing rests on it: the
+   invariant it supports (`denial ⟹ saturated`, exactly) was re-derived from the shipped code and is
+   pinned exhaustively over the whole counter space in `watchtower-budget.test.ts`.
+
+### DESIGN DELTA (build round, 2026-08-20) — `alert_budget_exceeded` declares TWO keys
+
+**NOT evidence-only.** This changes §1.2's key-space row for one family and states its §3.3
+consequence. Made on an ORCHESTRATOR RULING (option (a) on build-gate N2); gate round 2 rules on the
+delta itself, and the fallback if it is refused is option (b) — disclosure in §9.13 only — so the
+change is kept in its own commit and reverts cleanly.
+
+| | Frozen (§1.2) | Delta |
+|---|---|---|
+| `alert_budget_exceeded` key space | `saturated` | `saturated` \| **`unreadable`** |
+
+**Why.** The gate measured the budget's fail-open at 200 announcements/24h against a ratified ≤20,
+and named three costs. Two are answered in code (the burst is now bounded at the reserved global
+slice per tick, in the budget's own priority order). The third is that the condition is **silent**:
+`reportAlertBudgetHealth` reads the same WatchtowerDO, so it returned nothing at exactly the moment
+the ceiling was not being applied — *"the founder gets the storm with no explanation."* A check whose
+subject is "the alerting channel is not behaving normally" could not say the one thing it most needed
+to say. `saturated` and `unreadable` are opposite conditions with opposite founder expectations — the
+ceiling IS being applied and mail is queued behind it, versus the ceiling is NOT being applied and
+MORE mail is coming — so by §4's own rule (*a new family when the SUBJECT is new; a KEY when the
+subject is the same and only the rung differs*) this is a key, not a family.
+
+**§3.3 consequence: none — and that is the point.** The member inherits the family's DEBOUNCED
+policy unchanged, which is already right for it: one unreachable tick is a transient RPC failure and
+is worth zero emails; two consecutive (10 min) is a real outage. The escalation between the two
+members is exactly the escape this increment exists for — an episode that opened `saturated` and then
+loses the store escalates ONCE to `unreadable`.
+
+**Invariants checked:** §9.3's `MAX_ANNOUNCED_KEYS_PER_EPISODE > max(|declared space|)` still holds
+strictly (2 < 5, and the widest space in the table is unchanged at 4). Budget exemption unchanged —
+the family is still group 3, which is what delivers the announcement during the outage it reports
+(`isBudgetedAnnouncement` filters exempt families before any slot is requested, so it cannot be
+denied one). Both members are pinned reachable END-TO-END through the real producer in
+`test/watchtower-key-reachability.test.ts`, and the soundness half of that guard reds if the space is
+narrowed back while the producer still emits two.
+
 ## What changed in v4 (gate round 3 — 1 blocking + 2 notes, all inside §5.5)
 
 Round 3 accepted v3's NEW-2 refutation and closed NEW-2/3/4/5. It found that **v3's own NEW-5 fix

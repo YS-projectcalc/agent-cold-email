@@ -230,6 +230,12 @@ export async function provisionMailboxesForDomain(
   // a rethrow still reports the slots it isolated.
   await alertIsolatedFailures(ctx, outcome, {
     checkName: (slot) => mailboxSlotFailedCheckName(managedMailboxAddress(opts.personaSlug, opts.domain, opts.domainOrdinal, slot)),
+    // WHICH STEP threw, from `VendorError.step` — the one fact that separates
+    // "the purchase itself was refused" from "the purchase went through and a
+    // later step (local row, meter, credential push) did not". The second is a
+    // paid vendor unit with nothing usable behind it and needs a hand; the first
+    // is retryable and has spent nothing.
+    materiality: ({ error }) => (error instanceof VendorError && error.step === MAILBOX_STEP ? "buy_threw" : "paid_no_infra"),
     detail: (slot) =>
       `mailbox ${managedMailboxAddress(opts.personaSlug, opts.domain, opts.domainOrdinal, slot)} could not be provisioned. ` +
       `The remaining slots on this domain were still attempted; this address may have consumed a purchase with nothing usable behind it.`,
@@ -404,6 +410,7 @@ async function acquireMailbox(
     const notified = await alertMailboxRebuyFailed(
       ctx,
       opts.email,
+      "unusable_at_vendor",
       `the provider holds this address and reports it as no longer usable (${verdict.state}) — no re-buy authorized, this address needs a hand`,
       opts.mailer,
     );
@@ -414,6 +421,7 @@ async function acquireMailbox(
     await alertMailboxStuck(
       ctx,
       opts.email,
+      verdict.reason === "lookup_failed" ? "lookup_failed" : "too_recent",
       verdict.reason === "lookup_failed"
         ? `a purchase is on record but the provider could not be asked what it holds — no re-buy authorized (${dispatch.attempts} dispatch(es) so far)`
         : `a purchase is on record and the provider does not list it yet — too recent for absence to count, no re-buy authorized (${dispatch.attempts} dispatch(es) so far)`,
@@ -427,6 +435,7 @@ async function acquireMailbox(
     const notified = await alertMailboxRebuyFailed(
       ctx,
       opts.email,
+      "budget_spent",
       `${dispatch.attempts} purchases are on record and the provider confirms none of them exist — the one automatic re-buy is spent, so this address is abandoned and needs a hand`,
       opts.mailer,
     );
@@ -436,6 +445,7 @@ async function acquireMailbox(
   await alertMailboxStuck(
     ctx,
     opts.email,
+    "rebuy_attempting",
     `a purchase is on record and the provider confirms it produced nothing — attempting the ONE authorized automatic re-buy`,
     opts.mailer,
   );
@@ -445,6 +455,7 @@ async function acquireMailbox(
     await alertMailboxRebuyFailed(
       ctx,
       opts.email,
+      "dispatch_failed",
       `the automatic re-buy failed: ${err instanceof Error ? err.message : String(err)}`,
       opts.mailer,
     );

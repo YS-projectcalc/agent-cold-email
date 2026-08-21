@@ -23,7 +23,7 @@
 
 import type { Env } from "../env.js";
 import type { OpsMailer } from "../ops-mail/ops-mailer.js";
-import { alertEmailFor, policyFor, reasonForNoEmail, trySend, type AlertOutcome, type CheckResult } from "./watchtower-alerts.js";
+import { alertEmailFor, observationOf, policyFor, reasonForNoEmail, trySend, type AlertOutcome, type CheckResult } from "./watchtower-alerts.js";
 import { SWEEP_STALE_MS } from "./watchtower-grading.js";
 
 /** One instance, platform-wide — this is control state, not per-tenant state. */
@@ -61,11 +61,12 @@ export function watchtowerStub(env: Env) {
 export async function reconcileD1Alert(env: Env, mailer: OpsMailer, result: CheckResult, nowMs: number): Promise<AlertOutcome> {
   try {
     const stub = watchtowerStub(env);
-    const decision = await stub.decideD1Alert(result.healthy, nowMs);
+    const observation = observationOf(result);
+    const decision = await stub.decideD1Alert(observation, nowMs);
     const email = alertEmailFor(env, result, decision.transition, decision.prevSinceTs, nowMs, policyFor(result.name));
     const notified = email ? await trySend(mailer, email) : null;
     try {
-      await stub.commitD1Alert(result.healthy, nowMs, notified);
+      await stub.commitD1Alert(observation, nowMs, notified);
     } catch (err) {
       // The decision was made and (maybe) delivered; only the bookkeeping
       // failed. Reported honestly below rather than as `unreportable`, because
@@ -88,7 +89,7 @@ export async function reconcileD1Alert(env: Env, mailer: OpsMailer, result: Chec
       // check needs a different STORE, and a check reported through two stores
       // that describe the same non-delivery differently is the reporting
       // divergence this wave is about.
-      why: notified?.why ?? reasonForNoEmail(decision.transition.action),
+      why: notified?.why ?? reasonForNoEmail(decision.transition),
     };
   } catch (err) {
     console.error("watchtower: could not reconcile the D1 check — the WatchtowerDO is unreachable, so this outage is UNREPORTED", err);

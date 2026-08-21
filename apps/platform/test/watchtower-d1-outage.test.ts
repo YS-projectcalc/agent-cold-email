@@ -76,8 +76,10 @@ describe("BLOCKING-1 — a D1 outage reaches the founder", () => {
     ]);
     expect(mailer.sent[1]!.text).toContain("Still unhealthy since");
 
-    // D1 comes back — the real binding, so the rest of the sweep runs too.
-    await runWatchtower(env, mailer, confirmedAt + WATCHTOWER_COOLDOWN_MS + SWEEP);
+    // D1 comes back — the real binding, so the rest of the sweep runs too. The
+    // `d1` check is DEBOUNCED on both sides (alert-state design §3.3), so its
+    // episode closes after `recoverAfterObservations` clean sweeps.
+    for (let i = 1; i <= 3; i++) await runWatchtower(env, mailer, confirmedAt + WATCHTOWER_COOLDOWN_MS + i * SWEEP);
     expect(mailer.sent.map((m) => m.subject)).toContain("[coldrig] D1 database: RECOVERED");
   });
 
@@ -125,7 +127,12 @@ describe("BLOCKING-1 — a D1 outage reaches the founder", () => {
       // email here reports the end of an incident that was never announced —
       // the founder's first and only word about it would be that it is over.
       const working = new SandboxOpsMailer();
-      const recovered = await runWatchtower(env, working, T0 + 2 * SWEEP);
+      // Three clean sweeps to close the episode (§3.1). What must NOT happen is
+      // a RECOVERED email at the end of it, because the announcement that would
+      // have justified one never left the building.
+      await runWatchtower(env, working, T0 + 2 * SWEEP);
+      await runWatchtower(env, working, T0 + 3 * SWEEP);
+      const recovered = await runWatchtower(env, working, T0 + 4 * SWEEP);
       expect(recovered[0]!.action).toBe("healthy");
       expect(working.sent.map((m) => m.subject)).not.toContain("[coldrig] D1 database: RECOVERED");
     });

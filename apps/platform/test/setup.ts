@@ -21,6 +21,7 @@ import migration17Sql from "../migrations/0017_support_ticket_agent_source.sql?r
 import migration18Sql from "../migrations/0018_watchtower_debounce.sql?raw";
 import migration19Sql from "../migrations/0019_sweep_cursor.sql?raw";
 import migration20Sql from "../migrations/0020_sdn_entries_name_index.sql?raw";
+import migration21Sql from "../migrations/0021_watchtower_alert_state.sql?raw";
 
 function statementsOf(sql: string): string[] {
   return sql
@@ -52,6 +53,7 @@ for (const statement of [
   ...statementsOf(migration18Sql),
   ...statementsOf(migration19Sql),
   ...statementsOf(migration20Sql),
+  ...statementsOf(migration21Sql),
 ]) {
   await env.DB.prepare(statement).run();
 }

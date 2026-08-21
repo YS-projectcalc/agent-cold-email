@@ -80,15 +80,38 @@ closed (401 on every call) rather than falling open. Set it via
 - `watchtower-policy.ts` — the PURE transition rule (`decideAlert`) and the
   policy dials, extracted because two stores back the same machine and the
   anti-storm rules must be identical in both. Founder ruling 2026-08-16: a
-  check must be observed unhealthy on **2 consecutive** observations before its
-  first email (a single-sweep flap sends nothing, recovery included), then
-  re-alerts at +6h and every 24h after that. `policyFor` is the ONE place that
-  turns the debounce off, and it does so for exactly three reasons — the
-  `cron_sweep` dead-man (hard exemption: it already embodies `SWEEP_STALE_MS`
-  and is the check of last resort), `cron_legs` (already damped over 3
-  consecutive ticks upstream, so a debounce would push it past the 10-15 min
-  paging ceiling), and the one-shot event reports raised by `reportCheck`
-  (nothing re-observes them, so a debounce would silence them permanently).
+  check must be observed unhealthy on **2** observations before its first email
+  (a single-sweep flap sends nothing, recovery included), then re-alerts at +6h
+  and every 24h after that. `policyFor` is the ONE place that turns the debounce
+  off, and it does so for exactly three reasons — the `cron_sweep` dead-man
+  (hard exemption: it already embodies `SWEEP_STALE_MS` and is the check of last
+  resort), `cron_legs` (already damped over 3 consecutive ticks upstream, so a
+  debounce would push it past the 10-15 min paging ceiling), and the one-shot
+  event reports raised by `reportCheck` (nothing re-observes them, so a debounce
+  would silence them permanently).
+
+  **Not "consecutive" any more** (alert-state increment, `migrations/0021_*`):
+  `unhealthy_obs` is zeroed by an episode CLOSE, not by a healthy observation,
+  and a `reobserved` clear needs `recoverAfterObservations` observations to
+  close (the `holding` action). Before that, a fault alternating bad/good never
+  assembled two in a row and stayed silent forever. A `no_longer_applicable`
+  clear still closes in ONE observation — it says the entity LEFT the
+  population, and a departed entity never produces another observation.
+- `watchtower-families.ts` — the per-family table: the CLOSED set of materiality
+  keys each check's producer may state, whether the family is per-entity, and
+  whether its announcements are budgeted. A key is what lets the machine tell a
+  REPEAT from an ESCALATION inside an announced episode; it is never the detail
+  string and never a count, both of which move almost every tick.
+  `MAX_ANNOUNCED_KEYS_PER_EPISODE` is STRICTLY greater than the widest declared
+  space, so the cap can only ever bind on a mis-derived key.
+- `watchtower-budget.ts` — the rolling 24h ANNOUNCEMENT budget (a bounded ring
+  of send timestamps in WatchtowerDO storage, never a tumbling window). A
+  per-episode cap cannot bound a per-DAY inbox count across an unbounded
+  instance count. <=20 announcements total, of which <=15 may be per-entity so
+  the global and monitor families always have 5 slots. The budget may delay an
+  ANNOUNCEMENT; it may never delay an episode CLOSE (recoveries are exempt), and
+  it may never suppress the report that it is itself suppressing
+  (`alert_budget_exceeded` is exempt, and `saturated` reads EITHER counter).
 - `watchtower-grading.ts` — PURE observation damping between "what one probe
   saw this tick" and "what the state machine is told" (trailing window +
   threshold for event counts; N-up/M-down streak for per-tick booleans). A

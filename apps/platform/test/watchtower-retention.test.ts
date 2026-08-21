@@ -79,7 +79,7 @@ describe("S5a — a tick that changes nothing writes nothing", () => {
     const detail = "DO storage probe ok";
     await reconcileAlerts(env, mailer, [healthy(name, detail)], T0);
     // Same name, same detail, opposite health: the row must move.
-    await reconcileAlerts(env, mailer, [{ name, healthy: false, detail }], T0 + 300_000);
+    await reconcileAlerts(env, mailer, [{ name, healthy: false, detail, materiality: "down" }], T0 + 300_000);
 
     const after = await rowOf(name);
     expect(after?.status).toBe("unhealthy");
@@ -138,9 +138,9 @@ describe("S5b — a check that has been healthy long enough is retired", () => {
     await seedRow(name, "healthy", T0 - CHECK_RETENTION_MS - 1);
     await retireHealthyCheckRows(env, T0);
 
-    await reconcileAlerts(env, mailer, [{ name, healthy: false, detail: "waiting again" }], T0);
+    await reconcileAlerts(env, mailer, [{ name, healthy: false, detail: "waiting again", materiality: "aging" }], T0);
     expect(mailer.sent).toEqual([]);
-    await reconcileAlerts(env, mailer, [{ name, healthy: false, detail: "waiting again" }], T0 + 300_000);
+    await reconcileAlerts(env, mailer, [{ name, healthy: false, detail: "waiting again", materiality: "aging" }], T0 + 300_000);
     expect(mailer.sent.map((m) => m.subject)).toEqual(["[coldrig] Mailbox credentials back@example.com: UNHEALTHY"]);
   });
 });
@@ -228,7 +228,7 @@ describe("N3 — a PARTIAL scan still gives failure_signals a row, without ever 
 
     // Announce an episode the normal way (two consecutive unhealthy observations).
     for (const at of [T0, T0 + 300_000]) {
-      await reconcileAlerts(env, mailer, [{ name: "failure_signals", healthy: false, detail: "3 terminal-failed send(s)" }], at);
+      await reconcileAlerts(env, mailer, [{ name: "failure_signals", healthy: false, detail: "3 terminal-failed send(s)", materiality: "failed_elevated" }], at);
     }
     expect(mailer.sent.map((m) => m.subject)).toEqual(["[coldrig] Failure signals: UNHEALTHY"]);
 

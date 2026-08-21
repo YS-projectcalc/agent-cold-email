@@ -66,6 +66,7 @@
 //                       from outside, because a bag built above the reporter
 //                       cannot contain the reporter).
 
+import type { DeliveryReason } from "@coldstart/shared";
 import type { Env } from "../env.js";
 import type { OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { OpsDigest } from "./ops-sweep.js";
@@ -78,6 +79,7 @@ import {
   type AlertOutcome,
   type CheckResult,
 } from "./watchtower-alerts.js";
+import { alertDeliveryKey, cronLegsKey, sweepCoverageKey, warmupGaveUpKey } from "./watchtower-families.js";
 import { watchtowerStub } from "./watchtower-infra.js";
 // No `SWEEP_TENANT_SLICE` here, deliberately: since NB-3 this module reasons
 // only about what the TICK reported (`covered` / `handed` / `allowed`), never
@@ -151,8 +153,19 @@ export interface LegSignals {
    * failure: a leg this module cannot read is a leg it cannot clear either, and
    * silence about it is the exact defect W-M3 names. */
   unknownLegs: string[];
-  /** Alerts owed this tick that did not reach the founder (W-M1). */
-  undeliveredAlerts: { count: number; reasons: string[] };
+  /**
+   * Alerts owed this tick that did not reach the founder (W-M1).
+   *
+   * TWO SHAPES OF THE SAME FACT, and they are not interchangeable (build gate
+   * B1). `reasons` is RENDERED PROSE for the founder's email body — it names
+   * which check failed, which the founder needs. `whys` is the closed
+   * `DeliveryReason` enum, deduped, for `alertDeliveryKey` to classify. Feeding
+   * the prose to the classifier is what made 2 of `alert_delivery`'s 3 declared
+   * materiality keys unreachable and banked `send_failed` for every dark
+   * channel: the elements were `"engine (dark_channel)"`, so a
+   * `.includes("dark_channel")` membership test was false for every input.
+   */
+  undeliveredAlerts: { count: number; reasons: string[]; whys: DeliveryReason[] };
   detail: string;
   deferralDetail: string;
 }
@@ -181,6 +194,7 @@ export function collectLegSignals(legs: Record<string, unknown>): LegSignals {
   const failureParts: string[] = [];
   const deferralParts: string[] = [];
   const undeliveredReasons: string[] = [];
+  const undeliveredWhys: DeliveryReason[] = [];
   let counted = 0;
   let deferred = 0;
   let undelivered = 0;
@@ -236,6 +250,10 @@ export function collectLegSignals(legs: Record<string, unknown>): LegSignals {
         if (outcome.why !== "send_failed" && outcome.why !== "dark_channel") continue;
         undelivered++;
         undeliveredReasons.push(`${outcome.name} (${outcome.why})`);
+        // The CLASSIFICATION, kept separate from the prose above. Deduped: the
+        // key is about which failure MODES are present, not how many checks hit
+        // them (the count rides `count`, and the names ride `reasons`).
+        if (!undeliveredWhys.includes(outcome.why)) undeliveredWhys.push(outcome.why);
       }
       continue;
     }
@@ -264,7 +282,7 @@ export function collectLegSignals(legs: Record<string, unknown>): LegSignals {
     counted,
     deferred,
     unknownLegs,
-    undeliveredAlerts: { count: undelivered, reasons: undeliveredReasons },
+    undeliveredAlerts: { count: undelivered, reasons: undeliveredReasons, whys: undeliveredWhys },
     detail,
     deferralDetail: deferralParts.join(", "),
   };
@@ -354,6 +372,13 @@ export async function reportSweepSignals(
     results.push({
       name: CRON_LEGS_CHECK,
       healthy: false,
+      // The KIND of failure, not WHICH legs — a leg that was counting errors is
+      // now THROWING is the escalation that changes the founder's action.
+      // Keying on the SET of failing legs is combinatorial; which legs they are
+      // rides the detail below at zero email cost. LOSS, STATED: leg A erroring
+      // and later leg B erroring is one key and gets no escalation email; the
+      // body updates and the ladder still fires.
+      materiality: cronLegsKey(signals.legsThrew.length > 0 || signals.unknownLegs.length > 0, signals.counted > 0),
       detail:
         `The ops sweep has been reporting failures on consecutive ticks — ${signals.detail}. ` +
         `These are counted per leg and were previously visible only in the Worker log, which pages nobody. ` +
@@ -452,6 +477,12 @@ export async function reportSweepSignals(
           : {
               name: SWEEP_COVERAGE_CHECK,
               healthy: false,
+              // RE-DERIVED AT THE FOLD from the merged producer's own facts
+              // (build gate F1). `clipped` is `covered < handed` — the ONE
+              // true test for 'the shared fan-out deadline cut this tick',
+              // and keying off `SWEEP_TENANT_SLICE` instead would
+              // re-introduce this lane's NB-3 inside the materiality space.
+              materiality: sweepCoverageKey(clipped),
               detail:
                 `The ops sweep is not keeping up with the tenant count. ${rotation}. ` +
                 (signals.deferred > 0 ? `Work deferred inside this tick's own slice: ${signals.deferralDetail}. ` : "") +
@@ -484,6 +515,7 @@ export async function reportSweepSignals(
         : {
             name: ALERT_DELIVERY_CHECK,
             healthy: false,
+            materiality: alertDeliveryKey(signals.undeliveredAlerts.whys),
             detail:
               `${signals.undeliveredAlerts.count} watchtower alert(s) were OWED and did not reach the ops address on consecutive ticks: ` +
               `${signals.undeliveredAlerts.reasons.join(", ")}. ` +
@@ -520,7 +552,7 @@ export async function reportSweepSignals(
       results.push({
         ...(gaveUp === 0
           ? { healthy: true as const, basis: "no_longer_applicable" as const }
-          : { healthy: false as const }),
+          : { healthy: false as const, materiality: warmupGaveUpKey(gaveUp) }),
         name: "warmup_cancel_gave_up",
         // The vendor is deliberately NOT named here (test/vendor-identity-leak.ts's
         // source tripwire): the digest already names it on the operator-only
@@ -568,6 +600,7 @@ export async function reportSweepSignalsHealth(env: Env, mailer: OpsMailer, repo
       : {
           name: SWEEP_SIGNALS_CHECK,
           healthy: false,
+          materiality: "threw",
           detail:
             `The ops sweep's signal-reporting leg THREW — so no cron_legs, sweep_coverage, alert_delivery or ` +
             `warmup_cancel_gave_up observation was made this tick. Those checks are not healthy, they are UNREPORTED, ` +

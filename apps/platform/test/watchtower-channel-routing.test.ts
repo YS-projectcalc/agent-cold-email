@@ -23,8 +23,8 @@ import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
 const T0 = 1_800_000_000_000;
 const SWEEP = 300_000;
 
-function unhealthy(name: string, detail = "down"): CheckResult {
-  return { name, healthy: false, detail };
+function unhealthy(name: string, detail = "down", materiality = "down"): CheckResult {
+  return { name, healthy: false, detail, materiality };
 }
 function healthy(name: string, detail = "ok", basis: RecoveryBasis = "reobserved"): CheckResult {
   return { name, healthy: true, detail, basis };
@@ -55,7 +55,11 @@ describe("I13 — a digest-channel check never emails, whatever the transition",
     const mailer = new SandboxOpsMailer();
     await reconcileAlerts(env, mailer, [unhealthy(name)], T0);
     await reconcileAlerts(env, mailer, [unhealthy(name)], T0 + SWEEP);
-    const recovered = await reconcileAlerts(env, mailer, [healthy(name)], T0 + 2 * SWEEP);
+    // Three clean observations to close the episode (alert-state design §3.1) —
+    // the channel routing is unchanged by that and is what this file pins.
+    await reconcileAlerts(env, mailer, [healthy(name)], T0 + 2 * SWEEP);
+    await reconcileAlerts(env, mailer, [healthy(name)], T0 + 3 * SWEEP);
+    const recovered = await reconcileAlerts(env, mailer, [healthy(name)], T0 + 4 * SWEEP);
 
     expect(recovered).toEqual([{ name, action: "recovered", emailSent: false, why: "digest_only" }]);
     expect(mailer.sent).toEqual([]);
@@ -71,7 +75,9 @@ describe("I13 — the email channel is byte-identical to existing checks", () =>
     const confirming = await reconcileAlerts(env, mailer, [unhealthy(name)], T0 + SWEEP);
     expect(confirming).toEqual([{ name, action: "alerted", emailSent: true, why: "sent" }]);
 
-    const recovered = await reconcileAlerts(env, mailer, [healthy(name)], T0 + 2 * SWEEP);
+    await reconcileAlerts(env, mailer, [healthy(name)], T0 + 2 * SWEEP);
+    await reconcileAlerts(env, mailer, [healthy(name)], T0 + 3 * SWEEP);
+    const recovered = await reconcileAlerts(env, mailer, [healthy(name)], T0 + 4 * SWEEP);
     expect(recovered).toEqual([{ name, action: "recovered", emailSent: true, why: "sent" }]);
     expect(mailer.sent).toHaveLength(2);
   });
