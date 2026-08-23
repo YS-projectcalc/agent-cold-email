@@ -13,7 +13,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const CLI_ENTRY = fileURLToPath(new URL("../dist/index.js", import.meta.url));
-const HINT_LINE = '<claude-code-hint v="1" type="plugin" value="coldrig@claude-plugins-official" />';
+const HINT_LINE = '<claude-code-hint v="1" type="plugin" value="coldrig@coldrig" />';
 
 function spawnCli(args, env) {
   const merged = { ...process.env, ...env };
