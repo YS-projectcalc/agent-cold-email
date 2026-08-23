@@ -643,3 +643,134 @@ page overflow, 37 pages × 8 widths:   390/621/700/768/820/1024/1280/1440 → no
 5. **Plugin install on HEAD — unchanged.** Throwaway `HOME`, `git archive HEAD` tree:
    cache **28K**, **0** `node_modules`, `Skills (1) coldrig`, `MCP servers (1) coldrig`,
    ~180 tok always-on, and the userConfig prompt hint still printed.
+
+---
+
+# Round 4 — ship gate
+
+- **Date:** 2026-08-23 · **Ground ref (`git rev-parse HEAD`):** `be10f5ac867f8c486d5c439a90508dc64e2ecf38`
+- Since r3: `b1b5274` (B7 fix) folded as `be10f5a`; `305f07f` (gate record + verifier memory).
+
+## VERDICT: SHIP
+
+B7 is closed. All three r4 assertions pass on **296/296** page×width pairs with **0 skipped**, and
+the change additionally fixes a 35-instance pre-existing defect on `main`.
+
+## 1. The discrepancy — the builder was RIGHT, I was WRONG
+
+**My r3 claim ("fix A: 0 new desktop scroll, strictly dominates") was a vacuous pass caused by a bug
+in my own harness.** I produced the FIXA run by `sed`-renaming the label in `r3b.js` from `'HEAD'` to
+`'FIXA'`, but line 18 of that script still read:
+
+```js
+if(!res.MAIN||!res.HEAD) continue;   // res.HEAD is now undefined -> EVERY page skipped
+```
+
+so every page was skipped and every width printed `none`. Re-measured here with a corrected harness
+that reports how many pairs it actually compared, against a freshly rebuilt `git archive main -- site`
+baseline:
+
+```
+BASELINE=main  CANDIDATE=my-r3-patch   288/296 compared
+  B. NEW table scroll at >=820px : compare-vs-agentmail#0(3col)@1440:+20  @1280:+20  @1024:+38  @820:+226
+                                   docs#0@820:+171  guide-mcp-tool-count#0@820:+74  maildoso#1@820:+29
+  C. last col past edge >=1024px : compare-vs-agentmail#0 — 20px @1440, 20px @1280, 38px @1024
+```
+
+`980 vs 960 / 960 / 942 / 754` — **an exact match with the builder's reported numbers.** The cause is
+the builder's diagnosis: my patch kept the global `white-space:nowrap`, and
+`compare-vs-agentmail.html`'s 89-char first-column sentence ("Cold-outreach lifecycle (domains →
+mailboxes → warmup → campaigns → replies)") is forced onto one ~617 px line. Dropping `nowrap`
+entirely and replacing it with a word-safe `min-width` is the better mechanism. My r3 B7 diagnosis
+stands; my proposed patch was insufficient and my verification of it was invalid.
+
+*(For the record: r3's other number — page overflow 0 on 37×8 — came from `r3d.js`, a single-port
+loop with no MAIN/HEAD keys, so that one was real. Only the new-scroll sweep was vacuous.)*
+
+## 2. Full sweep on HEAD — 37 pages × 8 widths
+
+Harness now prints the comparison count and judges pages with no `main` baseline absolutely.
+
+```
+BASELINE=main  CANDIDATE=HEAD (be10f5a)   |  37 pages x 8 widths
+  page/width pairs actually compared: 296 / 296   SKIPPED: 0
+  A. page overflow > 1px             : 0 fails      (390/621/700/768/820/1024/1280/1440)
+  B. NEW table scroll at >=820px     : 0 fails
+  C. last col past edge at >=1024px  : 0 fails
+  no-main-baseline judged ABSOLUTELY : index.html (0 -> 1 tables) -> no scroll at >=820
+```
+
+The two r3 victims, re-measured at 1440 px:
+
+```
+compare-vs-maildoso#1  client=960 scroll=960  last col "Cost per 100 sends/day"  right-edge delta 0px
+compare-vs-agentmail#0 client=960 scroll=960  last col "Coldrig"                 right-edge delta 0px
+```
+
+Element screenshot confirms all six maildoso columns render in full, every `Cost per 100 sends/day`
+value visible ($16.67 / $5.00 / $3.33 / $66.00 / $41.50 / $36.06), first column wrapping at word
+boundaries.
+
+## 3. First-column legibility — PASS, and it fixes a pre-existing defect
+
+Range-API per-word check on every non-`<code>` first-column cell across all 37 pages, classifying each
+break by the character preceding it (hyphen/slash = legitimate soft wrap; anything else = the r1
+"DIMENSIO N" defect):
+
+```
+1440px  MAIN  legitimate hyphen/slash breaks = 8   TRUE MID-WORD BREAKS = 35
+1440px  HEAD  legitimate hyphen/slash breaks = 5   TRUE MID-WORD BREAKS =  0
+1024px  MAIN  legitimate = 8                        TRUE MID-WORD BREAKS = 35
+1024px  HEAD  legitimate = 5                        TRUE MID-WORD BREAKS =  0
+```
+
+`main` split `Credentials`, `Requirement`, `Dimension`, `Compliance`, `Sequencing`, `discoverability`,
+`authenticated`, `Independent` and 27 more mid-word. HEAD's five remaining breaks are all at a hyphen
+or slash (`List-Unsubscribe`, `server-card.json)`, `multi-project`, `server-side`) — normal soft
+wrapping, not the defect. **I flagged those five first and then refuted my own flag by measuring the
+break character.**
+
+Code-token first columns (`docs.html`) behave at least as well as `main`: the column is wider
+(104 px → 163 px) and no taller (`infrastructure_status` 97 px → 74 px), `overflow-wrap:anywhere` still
+lets long tokens break, and fewer cells need to break (18 → 7) because the column has more room.
+
+## 4. `:has()` support — report only, risk unchanged
+
+`grep -n -o ':has(' site/assets/style.css` → lines **76, 77** (new) and **152** (`:has(.footer-grid)`).
+`git show main:site/assets/style.css | grep -c ':has('` → **1**, so `main` already depends on `:has()`
+and the new rules add no new baseline requirement (`:has()` is Baseline: Chrome 105, Safari 15.4,
+Firefox 121). Degradation is safe by construction: if `:has()` were unsupported, lines 76-77 drop, code
+cells fall back to `overflow-wrap:break-word` and first cells lose `min-width:9rem` — with no `nowrap`
+anywhere and the scroll container still global, tables simply wrap more. No overflow path opens.
+
+## 5. Nothing else moved
+
+`git diff 2ed2221..be10f5a --name-only` → `site/assets/style.css`,
+`docs/adversarial/agent-skill-gate-2026-08-23.md`, `.claude/agent-memory/verifier/coldstart-platform-battery.md`.
+No `plugins/`, `skills/`, `integrations/`, `.claude-plugin/` or `.mcp.json` change, so the r3 install
+verification (28K cache, 0 `node_modules`, Skills(1)/MCP(1)) still holds byte-for-byte at `be10f5a`.
+
+Exact `style.css` delta since r3 — removed:
+
+```css
+th:first-child, td:first-child { white-space: nowrap; }
+th:not(:first-child), td:not(:first-child) { min-width: 11rem; }
+```
+
+added:
+
+```css
+th:has(code), td:has(code) { overflow-wrap: anywhere; }
+th:first-child:not(:has(code)), td:first-child:not(:has(code)) { min-width: 9rem; }
+```
+
+plus, inside `@media (max-width: 620px)`, the single insertion
+`table th:not(:first-child),table td:not(:first-child){min-width:11rem}` (verified by character-level
+diff of that one minified line — nothing else in the block changed).
+
+## Standing carry-overs (not gate items)
+
+`ROADMAP.md` / `HANDOFF.md` / `MEMORY.md` are still untouched by the wave diff, and founder ORDER
+2026-08-23 items (1) and (5) remain unchecked — (5) partially, since "server.json npm pin / CLI 0.2.3
+publish" is not in this wave (npm latest is still 0.2.1). Owed at wave close per the CLAUDE.md
+ROADMAP contract.
