@@ -328,3 +328,225 @@ the user's own approval of the lead list and of the offer/sequence copy before
   `camp_2c1f6918-2270-4183-8ebb-a86ebc522a3b`, plus one suppression row for
   `b@example.com`. Sandbox plan — no spend, no real sends, no vendor contact. Purge if
   demo-tenant hygiene matters.
+
+---
+
+# Round 2 — combined diff (integration branch)
+
+- **Date:** 2026-08-23
+- **Worktree:** `/Users/yaakovscher/dev/coldstart-wt-integ`
+- **Branch:** `integ/visibility-2026-08-23`
+- **Ground ref (verified, `git rev-parse HEAD`):** `d37e018d862c38bc730a85f6f73b91f38ea02e20`
+- **Scope:** `git diff main...HEAD` — the whole wave: skill lane (`6af3941`, `fa1e04b`, fix round `1052ab4`), site AEO lane (`25dd796`, `60a727b`), main's roadmap/outreach docs commits. 26 files, +767/-17.
+- **Reviewer:** adversary (fresh re-attack, read-only git, no fixes written)
+
+## VERDICT: SHIP-AFTER-FIX — 1 BLOCKING, 6 NON-BLOCKING
+
+Round-1 checklist: **B1–B5 all CLOSED, each re-verified by execution.** The single blocking
+item is a **new regression from the site lane's `style.css` change**, isolated to two CSS
+declarations and proven with a before/after/fixed measurement.
+
+---
+
+## Round-1 checklist — re-verified by execution
+
+| # | round-1 finding | status | evidence |
+|---|---|---|---|
+| B1 | plugin install writes 413 MB | **CLOSED** | Real install under a throwaway `HOME` from a `git archive HEAD` tree: `du -sh` cache = **28K** (was 413M), install **1 s** (was 45 s), `find … -name node_modules` = **nothing**. Cache holds exactly `.claude-plugin/plugin.json`, `.mcp.json`, `README.md`, `skills/coldrig/`. The `plugins/coldrig/skills/coldrig` symlink is **dereferenced into a real directory** in the cache (`SKILL.md`, 9797 bytes), as `plugin-marketplaces.md` promises. `claude plugin details` → Skills(1) coldrig, MCP servers(1) coldrig, ~180 tok always-on. |
+| B2 | `.mcp.json` host/name/credential mismatch + false green | **CLOSED** | Cached `.mcp.json` = `coldrig` / `https://api.coldrig.dev/mcp` / `Bearer ${user_config.token}`. With the required token **unset**, `claude mcp list` reports **"No MCP servers configured"** — the server does not register at all, so the round-1 false `✔ Connected` is gone. Install prints the remediation: *"1 userConfig option not yet set (1 required) — run /plugin configure coldrig@coldrig, or pass --config KEY=VALUE."* **Substitution proven end to end:** a sandbox copy pointed at a local capture server logged the real header — `Bearer cr_live_acf1d2424f1f…` — i.e. `${user_config.token}` resolves in a plugin `.mcp.json` `headers` field. `site/connect.html`'s replacement sentence ("connects to the same `coldrig` MCP server and prompts you for the bearer token when you enable it") is true on both halves. |
+| B3 | "campaign sends are refused, never silently dropped" | **CLOSED** | `grep -c "silently skips"` = 1 on each of `skills/coldrig/SKILL.md`, `integrations/cursor/coldrig.mdc`, `integrations/codex/AGENTS-snippet.md`; `grep -rn "campaign sends are refused" skills/ integrations/ .claude-plugin/ plugins/` = **zero hits**. The replacement text now splits the two paths correctly and points the reader at `list_leads`. |
+| B4 | new claim surfaces outside every guard | **CLOSED** | Both platform guards now import and list `.claude-plugin/marketplace.json`, `skills/coldrig/SKILL.md`, `integrations/cursor/coldrig.mdc`, `integrations/codex/AGENTS-snippet.md`, and the **moved** `plugins/coldrig/.claude-plugin/plugin.json`, in `CLAIM_SURFACES`, `BUYER_FACING_SURFACES` and `SURFACES_THAT_STATE_THE_COUNT`. **Graded with plants:** a realistic drift (one of SKILL.md's four count mentions reverting to the retired `24`, same in the `.mdc`) → `× skills/coldrig/SKILL.md never claims a retired tool count` + `× integrations/cursor/coldrig.mdc …`, 2 failed / 113 passed. Sole-mention plants on the other three → `× …marketplace.json`, `× …plugin.json`, `× …AGENTS-snippet.md`. **Revert → 377/377 GREEN**, matching the builder's number on the real tree. |
+| B5 | First run had no human gate before spend/send | **CLOSED** | `SKILL.md:97` is now "**Ask before you spend.**" with `quoteOnly: true`, `projectedMonthlyCents`, explicit user confirmation, and `registerDomains: true` as separate opt-in; `SKILL.md:99` is "**Ask before you send.**" requiring approval of the exact lead list and copy. Both primitives verified real: `quoteOnly` at `packages/shared/src/intents.ts:57`, `projectedMonthlyCents` at `apps/platform/src/engine/billing.ts:992`. |
+| NB1 | trigger description | closed — now leads with "Use when the user asks to…" and carries explicit negative scoping ("Not for Gmail/Outlook inbox triage, transactional or newsletter email, SMTP/DNS debugging, or copy-only writing tasks"). |
+| NB2 | missing READMEs | closed — `skills/README.md`, `plugins/README.md`, `plugins/coldrig/README.md`, `integrations/cursor/README.md`, `integrations/codex/README.md` all present. |
+| NB4 | renamed Option C anchor | closed — headings are now A/B/C(CLI demo)/D(plugin); `site/llms.txt` points at `#option-d--claude-code-plugin--skill`, which matches GitHub's slug rule verified against this file's rendered anchors in round 1. |
+
+**Builder's UNVERIFIED leg — ruled ACCEPTABLE TO SHIP.** Setting the `sensitive: true` userConfig
+value fails under a throwaway `$HOME` (`⚠ Installed, but --config not applied: Failed to save
+sensitive plugin options … to secure storage`) because the macOS Keychain is bound to the login
+session, not to `$HOME` — an environment limit, not a plugin defect. Proven by re-running the
+identical plugin with `sensitive: false` in a sandbox copy: `--config token=…` stored the value
+(`pluginConfigs["coldrig@coldrig-nonsens"].options.token`), the server registered as
+`plugin:coldrig:coldrig` at `https://api.coldrig.dev/mcp`, and the capture server received
+`Bearer cr_live_acf1d242…`. The only leg that stays unexercised here is Keychain *persistence*,
+which is the same code path every other `sensitive` plugin option uses, and its failure mode is
+fail-closed (no server registers, and the CLI names the fix).
+
+---
+
+## BLOCKING
+
+### B6 — the `style.css` table fix causes horizontal page overflow on 10 pages between 621 px and 1023 px
+
+**Lens:** 7 (regression ring) + 3 (live surface). New in round 2, from the site lane.
+
+`site/assets/style.css:75-76` makes two global changes:
+
+```css
+th, td { … overflow-wrap: break-word; }          /* was: overflow-wrap: anywhere */
+th:first-child, td:first-child { white-space: nowrap; }   /* new, GLOBAL */
+```
+
+The narrow-viewport safety net (`table{display:block;overflow-x:auto}`) only exists inside
+`@media (max-width: 620px)`. Between **621 px and 1023 px** a table is a normal table with a
+`nowrap` first column and no min-content shrink — so it pushes past `main.wrap`.
+
+Measured with Playwright on the real pages, `main` vs `HEAD`, same script, same widths
+(`document.documentElement.scrollWidth - window.innerWidth`):
+
+```
+===== MAIN (before) =====
+  621px  index.html:+4px          768px  none      1024px  none
+  700px  index.html:+4px          820px  none
+
+===== HEAD (after) =====
+  621px  index.html:+4px  docs.html:+329px  guide-mcp-tool-count.html:+232px
+         compare-vs-maildoso.html:+187px  compare-vs-agentmail.html:+384px
+         compare-vs-diy.html:+50px  compare-vs-smartlead-instantly.html:+19px
+         compare-vs-foxreach.html:+33px  compare-vs-smartlead.html:+98px
+         compare-vs-skyp.html:+103px  compare-vs-salesforge.html:+53px
+  700px  docs:+253  guide-mcp-tool-count:+156  maildoso:+111  agentmail:+308  smartlead:+22  skyp:+27
+  768px  docs:+188  guide-mcp-tool-count:+91   maildoso:+46   agentmail:+243
+  820px  docs:+138  guide-mcp-tool-count:+41   agentmail:+193
+  1024px none
+```
+
+`index.html:+4px` is present on **both** main and HEAD — pre-existing, not part of this finding.
+Everything else is new. 1440 px and 390 px are both clean, which is why the lane's own check
+missed it: 1440 has room, and ≤620 already scrolls inside the table.
+
+**Two independent causes, both required to fix** — isolated by patching a sandbox copy of the
+site and re-measuring:
+
+1. *Global `nowrap`.* Scoping it into the `@media (max-width:620px)` block fixed 8 of the 11 pages
+   (`621px` residue: `docs.html:+329`, `compare-vs-maildoso.html:+56`).
+2. *`overflow-wrap: break-word`.* `anywhere` participates in min-content sizing; `break-word` does
+   not, so an unbreakable token can no longer let its column shrink. `docs.html`'s API table
+   holds `?campaign&interestStatus&suppressed&replied&cursor&limit` (55 chars),
+   `/byo-domains/{id}/managed-mailboxes,` and `?limit&cursor&kind=event|deliverability`.
+
+**Both applied → exact parity with `main`** (only the pre-existing `index.html:+4px` remains):
+
+```
+===== V2-FIX (nowrap scoped to <=620px + overflow-wrap:anywhere restored) =====
+  621px  index.html:+4px   768px  none   820px  none   1024px  none
+  700px  index.html:+4px
+```
+
+**Fix (`site/assets/style.css`):**
+
+1. Line 75 — restore `overflow-wrap: anywhere;` (revert that half of the change).
+2. Line 76 — delete the global `th:first-child, td:first-child { white-space: nowrap; }` and move
+   it into the existing `@media (max-width: 620px)` block, immediately before the `min-width:11rem`
+   rule the fix round already added there:
+   `table th:first-child,table td:first-child{white-space:nowrap}`
+
+Re-run the same 5-width sweep across the compare/guide/docs pages as the acceptance check.
+
+---
+
+## NON-BLOCKING
+
+- **NB6 — `agent-cold-email setup` cannot express the consent primitives step 4 tells the agent
+  to use.** `SKILL.md:97` instructs `quoteOnly: true` and `registerDomains: true`, then says
+  "`agent-cold-email setup` is the CLI form of `setup_infrastructure` / `POST
+  /setup-infrastructure`". `packages/cli/src/commands/infra.ts:4-20` builds a fixed body of
+  `{brand, primaryDomain, domains, inboxesEach, persona, physicalAddress, senderIdentity}` — no
+  `quoteOnly`, no `registerDomains` flag anywhere in the CLI (`grep -n "quote\|projected"
+  packages/cli/src/commands/*.ts` = zero). It also silently substitutes placeholders when flags
+  are omitted: `brand="Sample Brand"`, `primaryDomain="sample-brand.com"`,
+  `physicalAddress="123 Main St, Springfield, USA"` — the last of which is the CAN-SPAM footer
+  address (`engine/tick.ts:111`). The MCP/HTTP path named in the same sentence works correctly, so
+  the human gate exists; it just isn't reachable on the CLI surface the sentence equates to it.
+  *Fix:* one clause in step 4 — "the CLI's `setup` cannot pass `quoteOnly` or `registerDomains`;
+  use the `setup_infrastructure` tool or `POST /setup-infrastructure` for the quote and the
+  opt-in, and always pass explicit `--brand/--primary-domain/--physical-address` if you do use the
+  CLI." (Or add the flags to `infra.ts`.)
+- **NB7 — `compare-vs-maildoso.html:74` says "No published refund policy" while `terms.html:75`
+  publishes one.** Terms states "we do not prorate or refund the unused portion of a billing
+  period already paid for, except where applicable law requires it." Against a competitor's
+  "30-day money-back guarantee", "no published policy" reads as undecided rather than as an
+  explicit no-refund term — the favourable-ambiguity direction. The lane rewrote this exact cell
+  and left the clause. *Fix:* "No refunds on the unused portion of a paid period (see
+  [Terms](/terms)) — month-to-month, cancel anytime; paid activation is live in production today."
+- **NB8 — the homepage table's "Sending platform + API" column blends two different vendors.**
+  Every cell traces to a cited source page (checked 6, read 4 in full context), but
+  `compare-vs-smartlead-instantly.html` reports **Smartlead 116+** and **Instantly 31-38** in the
+  same table, and the homepage takes Instantly's `31-38` for the tool-count row while taking
+  Smartlead's category list (`Campaigns, leads, email accounts, warmup, smart delivery, smart
+  senders, webhooks, sequences, analytics`) for the campaign row and Instantly's `6 categories`
+  for the replies row. Nothing is invented, but showing the smaller of the two competitor counts
+  next to Coldrig's 28 while omitting 116+ is a selection effect on a buyer-facing comparison.
+  *Fix:* name the vendor inline — "31-38 (Instantly) to 116+ (Smartlead) reported tools".
+- **NB9 — `README.md:70` still names the MCP server `agent-cold-email`** in the first Install JSON
+  block, three lines above the new sentence "The plugin connects to the same `coldrig` MCP
+  server". Everything else in the wave (root `.mcp.json`, the plugin, connect.html, the Codex
+  block) now says `coldrig`. *Fix:* rename the key in that block.
+- **NB10 — `.table-source-note` has no CSS rule** (`grep -c table-source-note
+  site/assets/style.css` = 0), so the new sourcing line renders as a plain paragraph. Also the new
+  `<section id="compare">` is not linked from anywhere (`href="#compare"` count = 0). Cosmetic.
+- **NB11 — `claude mcp get coldrig` does not resolve for a plugin-only user.** Verified: with the
+  token configured, `claude mcp get coldrig` → *"No MCP server named 'coldrig'. Configured
+  servers: plugin:coldrig:coldrig"*. `connect.html`'s step 3 belongs to the manual `claude mcp
+  add` list and the plugin sentence is a separate paragraph, so this is a fair reading as written
+  — but `/mcp` is the verification that works for both paths.
+
+---
+
+## Attacks that FAILED
+
+| lens | attack | why it held |
+|---|---|---|
+| 2 | Symlinked skill won't survive the plugin copy | It does — `plugins/coldrig/skills/coldrig` is preserved by `git archive` as mode 120000 and **dereferenced into a real directory** in the install cache. `claude plugin details` loads Skills(1). |
+| 2 | Moving `plugin.json` breaks the guards' `?raw` imports | Both guards updated the path to `plugins/coldrig/.claude-plugin/plugin.json` and kept the surface listed; the moved file still fails RED under a plant. |
+| 1 | Homepage table invents claims | 6 distinctive strings (`31-38`, `30 mailbox accounts`, `6 categories`, `Infraforge`, `footer address injection`, `Two separate API keys`) all trace to a cited source page; all three cited pages exist. |
+| 1 | "footer address injection" is narrated, not built | Real: `engine/tick.ts:111` `appendComplianceFooter` injects `senderIdentity` + `physicalAddress` + unsubscribe URL; called at `tick.ts:429`. |
+| 1 | "DNS verified automatically before a mailbox is provisioned" | Real and ordered: `engine/provisioning.ts:139` "buy → DNS → insert domain row → …", `:208` "RE-DRIVE DNS BEFORE PROVISIONING ANYTHING", `:224-225` blocks unless `dns_status === "ready"`. |
+| 1 | The "30 mailboxes went to spam" anecdote is mis-attributed to sending platforms | It isn't — the homepage's "Sending platform + API" column is explicitly defined in row 1 as "most often paired with a separate domain/mailbox infrastructure vendor … two different purchases", which is the same two-layer stitch the source page's anecdote is about. |
+| 1 | `support.html` rewrite is false | `status.html` records "Support email routing — public aliases route to a verified worker; support@ inbound delivery is live", so dropping "must be owner-verified before paid activation" is correct. |
+| 1 | `sameAs` targets contradict our own tool count | Glama's live page now reads "The 28 tools" / "your agent calls 28 intents" — the stale "~12 tools" blurb the ROADMAP flags is gone. Smithery states no count. |
+| 3 | Homepage JSON-LD broken by the `sameAs` edit | Single `application/ld+json` block parses; `sameAs` = 4 entries. |
+| 3 | The homepage table's inline `style="overflow-x:auto"` is CSP-blocked | `site/_headers:9` sets `style-src 'self' 'unsafe-inline'` — inline styles are allowed. |
+| 3 | `connect.html` structure | 4 tab-panels ↔ 4 `data-tab` values, unchanged. |
+| 3 | The CSS change breaks 1440 px or 390 px | Clean at both: 0 px page overflow and 0 clipped first-column cells across 9 table pages. At 390 px tables scroll inside themselves, which is the intended pre-existing behaviour. |
+| 1 | README's `agent-cold-email@0.2.1` is stale | npm registry `dist-tags.latest` = `0.2.1`. Matches. |
+
+## UNVERIFIABLE
+
+1. **`https://www.npmjs.com/package/agent-cold-email` returns 403** to plain curl, to curl with a
+   full browser header set, and to real headless Chromium (page title "Just a moment…" =
+   Cloudflare interstitial). Existence is confirmed authoritatively via
+   `https://registry.npmjs.org/agent-cold-email` → 200, `latest: 0.2.1`, and the URL is npm's
+   canonical package-page form, so the `sameAs` entry is valid. *Resolves:* open it in a normal
+   browser session. The other three `sameAs` URLs return 200 with a browser UA.
+2. **The GitHub-source install** (`/plugin marketplace add YS-projectcalc/agent-cold-email`) still
+   can't be exercised until merge; proven by proxy from a `git archive HEAD` tree.
+3. **Keychain persistence of the `sensitive` userConfig value** — see the ruling above.
+4. **Whether the skill fires on the intended prompts** — still no eval cases in the repo.
+
+## NEW (out of scope, report only)
+
+- **The tool-count guard's per-file predicate is "at least one correct mention".** A plant of a
+  *never-retired* number (`31`) in `SKILL.md` and `coldrig.mdc` stayed GREEN, because both files
+  keep other correct "28 … tool" mentions and `31` is not in `RETIRED_TOOL_COUNTS`. The guard's two
+  real legs — "must not claim a retired count" and "must claim the current count somewhere" — do
+  catch the actual drift mode (registry grows, a surface keeps the old number), *provided the
+  outgoing count is added to `RETIRED_TOOL_COUNTS = [17,19,21,24,25,27]` at bump time, which has
+  been the practice*. This is a pre-existing property shared by all 32 listed surfaces, not a
+  regression from this lane. Hardening idea: assert that *every* `\bN\b.{0,30}(tool|intent)` match
+  in a listed file equals `currentCount`.
+- **ROADMAP counts disagree with the file they live in.** `ROADMAP.md:19` [NOTE] says "112 kept";
+  commit `688150c` says "123 kept"; commit `2dac5a7` says "234 → 116 open"; the file actually has
+  **116** `- [ ]` items. Report only.
+- **Founder ORDER 2026-08-23 items 1 and 5 are still unchecked** (`ROADMAP.md:142`). This wave
+  delivers item (1) in full and item (5) partially — the homepage comparison table and `sameAs`
+  expansion are done, but "server.json npm pin / CLI 0.2.3 publish" is not (npm latest is still
+  0.2.1). Neither `ROADMAP.md`, `HANDOFF.md` nor `MEMORY.md` is touched by the wave diff, so the
+  CLAUDE.md update-discipline and self-draining-checkbox obligations are still owed at wave close.
+
+## Review side effects on production (round 2)
+
+One additional demo-plan tenant (`Adversary R2 Probe`,
+`adversary-r2+20260823@example.com`) was minted to supply a real bearer token for the
+header-capture test. Sandbox plan, no spend, no sends, no campaigns. Purge alongside the round-1
+probe tenant if demo-tenant hygiene matters.
