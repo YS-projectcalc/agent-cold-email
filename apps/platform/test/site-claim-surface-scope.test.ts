@@ -44,8 +44,12 @@ import guideCodex from "../../../site/guide-cold-email-operation-codex.html?raw"
 import guideWithAiAgent from "../../../site/guide-cold-email-with-ai-agent.html?raw";
 import openapiYaml from "../../../site/openapi.yaml?raw";
 import llmsInstallMd from "../../../llms-install.md?raw";
-import pluginJson from "../../../.claude-plugin/plugin.json?raw";
+import pluginJson from "../../../plugins/coldrig/.claude-plugin/plugin.json?raw";
 import cliReadme from "../../../packages/cli/README.md?raw";
+import marketplaceJson from "../../../.claude-plugin/marketplace.json?raw";
+import coldrigSkill from "../../../skills/coldrig/SKILL.md?raw";
+import cursorRule from "../../../integrations/cursor/coldrig.mdc?raw";
+import codexSnippet from "../../../integrations/codex/AGENTS-snippet.md?raw";
 
 const CLAIM_SURFACES: ReadonlyArray<readonly [string, string]> = [
   ["README.md", rootReadme],
@@ -90,8 +94,16 @@ const CLAIM_SURFACES: ReadonlyArray<readonly [string, string]> = [
   // them because the guard below only ever scanned SITE_SURFACES; adding them
   // here closes that scope gap for good.
   ["llms-install.md", llmsInstallMd],
-  [".claude-plugin/plugin.json", pluginJson],
+  ["plugins/coldrig/.claude-plugin/plugin.json", pluginJson],
   ["packages/cli/README.md", cliReadme],
+  // Agent Skill / plugin marketplace lane (2026-08-23 adversarial gate,
+  // B4): these carry the same live claims (tool count, pricing, retired
+  // framing) as the surfaces above but were introduced in that lane and
+  // missed by the original sweep — closing the same scope-gap class again.
+  [".claude-plugin/marketplace.json", marketplaceJson],
+  ["skills/coldrig/SKILL.md", coldrigSkill],
+  ["integrations/cursor/coldrig.mdc", cursorRule],
+  ["integrations/codex/AGENTS-snippet.md", codexSnippet],
 ];
 
 // Buyer/directory-facing surfaces the marketing-only checks below apply to:
@@ -101,7 +113,15 @@ const CLAIM_SURFACES: ReadonlyArray<readonly [string, string]> = [
 // buyer-facing copy (still covered by the concierge check, which applies to
 // every CLAIM_SURFACE).
 const BUYER_FACING_SURFACES = CLAIM_SURFACES.filter(
-  ([label]) => label.startsWith("site/") || label === "llms-install.md" || label === ".claude-plugin/plugin.json" || label === "packages/cli/README.md",
+  ([label]) =>
+    label.startsWith("site/") ||
+    label === "llms-install.md" ||
+    label === "plugins/coldrig/.claude-plugin/plugin.json" ||
+    label === "packages/cli/README.md" ||
+    label === ".claude-plugin/marketplace.json" ||
+    label === "skills/coldrig/SKILL.md" ||
+    label === "integrations/cursor/coldrig.mdc" ||
+    label === "integrations/codex/AGENTS-snippet.md",
 );
 
 // site/README.md is a repo-internal build doc describing the site's own

@@ -40,7 +40,7 @@
         "name": "EpiphanyMade",
         "url": "https://coldrig.dev/",
         "logo": { "@type": "ImageObject", "url": "https://coldrig.dev/apple-touch-icon.png", "width": 180, "height": 180 },
-        "sameAs": ["https://github.com/YS-projectcalc/agent-cold-email"]
+        "sameAs": ["https://github.com/YS-projectcalc/agent-cold-email", "https://www.npmjs.com/package/agent-cold-email", "https://smithery.ai/servers/yaakovscher/agent-cold-email", "https://glama.ai/mcp/servers/YS-projectcalc/agent-cold-email"]
       },
       {
         "@type": "SoftwareApplication",
@@ -298,6 +298,74 @@
         </div>
       </div>
       <p class="honesty-note"><strong>Plain-English status:</strong> the API, MCP endpoint, npm CLI, sandbox, and real sending are all live. Signup, billing, screening, and real mailbox provisioning are fully self-serve and automatic; the only remaining step is mailbox send-authorization completing on our side. Coldrig never guarantees inbox placement. <a href="/faq">Read the honest FAQ →</a></p>
+    </section>
+
+    <section id="compare" class="section wrap">
+      <div class="section-heading" data-reveal>
+        <div>
+          <span class="kicker">Compared honestly</span>
+          <h2>How does Coldrig compare to a DIY stack or a sending platform?</h2>
+        </div>
+        <p>agent-cold-email is built for a different case: one platform, one bearer token, and 28 curated tools that already cover both the infrastructure layer and the sequencing/reply layer a DIY vendor stack or a sending platform leaves to a separate vendor.</p>
+      </div>
+      <div style="overflow-x:auto">
+        <table>
+          <thead>
+            <tr><th>Dimension</th><th>DIY vendor stack</th><th>Sending platform + API</th><th>Coldrig</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Domain + mailbox provisioning</td>
+              <td>Generate candidates, buy each, configure SPF/DKIM/DMARC/rDNS per domain, verify manually.</td>
+              <td>Most often paired with a separate domain/mailbox infrastructure vendor (Infraforge, Mailforge, PrimeForge, or a bulk-mailbox provider like Mailscale/InboxKit) — the sending platform and the infrastructure layer are treated as two different purchases.</td>
+              <td>One <code>setup_infrastructure</code> call; DNS is verified automatically before a mailbox is provisioned on it.</td>
+            </tr>
+            <tr>
+              <td>Warmup state</td>
+              <td>Separate vendor account, manual per-mailbox warmup tracking across weeks of sessions.</td>
+              <td>Tracked and re-derived across two separate systems, across sessions.</td>
+              <td>Provisioned and warmed as part of the same call; <code>infrastructure_status</code> reports current state on demand — no state to re-derive.</td>
+            </tr>
+            <tr>
+              <td>Campaign execution</td>
+              <td>Self-built or separate tool: scheduler, caps, bounce/reply/unsubscribe detection, threading.</td>
+              <td>Campaigns, leads, email accounts, warmup, smart delivery, smart senders, webhooks, sequences, analytics.</td>
+              <td><code>launch_campaign</code>, campaign listing, pausing, and results. The caller supplies leads and copy.</td>
+            </tr>
+            <tr>
+              <td>Replies + lead disposition</td>
+              <td>Bounce/reply/unsubscribe detection, threading — self-built or a separate tool.</td>
+              <td>6 categories including reply classification, unsubscribe handling, lead routing.</td>
+              <td>Unified <code>inbox</code>, full <code>thread</code>, <code>reply</code>, read state, and labels.</td>
+            </tr>
+            <tr>
+              <td>Guardrails enforced server-side</td>
+              <td>Implemented by you or your agent, correctly, every campaign, with no server-side backstop if a step is skipped.</td>
+              <td>One cautionary account found during research described buying 30 mailbox accounts through an infrastructure vendor — all of which went to spam.</td>
+              <td>Enforced server-side by default (suppression, send caps, complaint auto-pause, footer address injection) — not dependent on the agent remembering.</td>
+            </tr>
+            <tr>
+              <td>One credential / one stateful surface</td>
+              <td>Registrar API key + mailbox-vendor API key + (optionally) sequencer credentials — three-plus separate secrets, three-plus auth models.</td>
+              <td>Two separate API keys/logins, two separate auth models.</td>
+              <td>One bearer token, one auth model, resolved fresh per call; usage, quota, warmup state, and billing live durably in the platform.</td>
+            </tr>
+            <tr>
+              <td>Agent-facing interfaces</td>
+              <td>Every new agent session touching this project re-derives vendor state from three-plus systems.</td>
+              <td>31-38 reported tools via an official first-party MCP — but even a fully MCP-driven setup still needs one manual login to mint an API key.</td>
+              <td>Hosted streamable-HTTP MCP, REST/OpenAPI, and the published npm CLI.</td>
+            </tr>
+            <tr>
+              <td>What it does not claim</td>
+              <td>No deliverability, open-rate, or reply-rate comparison is made anywhere on this page.</td>
+              <td>We have not independently verified these numbers, and we do not have a comparable production track record of our own yet.</td>
+              <td>Coldrig never guarantees inbox placement.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="table-source-note">Sourced from <a href="/compare-vs-diy">the DIY comparison</a>, <a href="/compare-vs-smartlead-instantly">Smartlead vs Instantly vs agent-cold-email</a>, and <a href="/guide-infrastructure-vs-sending-platform">infrastructure vs. sending platform</a> — full sourcing and caveats on each page.</p>
     </section>
 
     <section id="get-started" class="final-cta">
