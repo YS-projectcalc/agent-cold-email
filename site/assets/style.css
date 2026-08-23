@@ -116,7 +116,7 @@ th { color: var(--muted); font-size: .73rem; letter-spacing: .08em; text-transfo
 .hero-proof { display: flex; flex-wrap: wrap; gap: 1.1rem; margin-top: 2.1rem; color: var(--faint); font-size: .76rem; }.hero-proof span { padding-right: 1.1rem; border-right: 1px solid var(--line); }.hero-proof span:last-child { border: 0; }.hero-proof strong { color: var(--ink); font-family: var(--font-mono); font-weight: 600; }
 
 /* Hero product scene */
-.hero-stage { position: relative; min-height: 575px; isolation: isolate; }
+.hero-stage { position: relative; min-height: 575px; isolation: isolate; overflow: hidden; }
 .stage-grid { position: absolute; inset: -5%; z-index: -1; opacity: .45; background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg,var(--line) 1px,transparent 1px); background-size: 38px 38px; mask-image: radial-gradient(ellipse, #000 25%, transparent 72%); }
 .surface-card { border: 1px solid rgba(18,21,26,.13); background: rgba(255,255,255,.94); box-shadow: var(--shadow); }
 .agent-card { position: absolute; top: 3.5rem; left: 0; width: 88%; min-height: 405px; border-radius: 18px; transform: rotate(-1.3deg); overflow: hidden; }
