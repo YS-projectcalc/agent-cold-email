@@ -550,3 +550,96 @@ One additional demo-plan tenant (`Adversary R2 Probe`,
 `adversary-r2+20260823@example.com`) was minted to supply a real bearer token for the
 header-capture test. Sandbox plan, no spend, no sends, no campaigns. Purge alongside the round-1
 probe tenant if demo-tenant hygiene matters.
+
+---
+
+# Round 3 — ship gate (execution re-check)
+
+- **Date:** 2026-08-23 · **Worktree:** `/Users/yaakovscher/dev/coldstart-wt-integ` · **Branch:** `integ/visibility-2026-08-23`
+- **Ground ref (`git rev-parse HEAD`):** `2ed222154d7482b24cd1eaa926c532beb69bdc8f`
+- Since r2: `bc16a28` (NB6, NB9), `443e859` (B6 via a global table scroll container + NB7 + NB10), `987b0bc` (`.hero-stage{overflow:hidden}`).
+
+## VERDICT: NO-SHIP — 1 BLOCKING (B7), one CSS line, fix proven
+
+B6 is genuinely closed and the four NBs are in. But the **mechanism chosen for B6 introduced a new
+desktop regression**: two comparison tables now hide content behind an in-table scroll at 1440 px
+that `main` displayed in full. Fix is one declaration moved; measured below.
+
+## B7 (BLOCKING) — the unconditional `min-width: 11rem` clips the last column of two comparison tables at desktop
+
+`site/assets/style.css:77` moved `th:not(:first-child), td:not(:first-child) { min-width: 11rem }`
+out of the `@media (max-width:620px)` block and made it global, while `table` became
+`display:block; overflow-x:auto` at all widths. On a 960 px content column, five non-first columns
+at 176 px each no longer fit.
+
+Measured at 1440 px, `main` vs HEAD (`table.scrollWidth` vs `clientWidth`, and each first-row cell's
+`getBoundingClientRect().right` vs the table's):
+
+```
+compare-vs-maildoso.html table#1 (6 col)
+  MAIN  client=960 scroll=960   nothing past the right edge
+  HEAD  client=960 scroll=1114  CLIPPED col5 "Cost per 100 sends/day" — 154px of its 176px hidden
+compare-vs-agentmail.html table#0 (3 col)
+  MAIN  client=960 scroll=960   nothing past the right edge
+  HEAD  client=960 scroll=991   CLIPPED col2 "Coldrig" — 31px of its 197px hidden
+```
+
+`table.offsetHeight - table.clientHeight = 0`, i.e. macOS overlay scrollbars — **no visible
+affordance**. The element screenshot confirms it: the maildoso header row ends in a clipped
+"C / S" and each row's final value shows only a `$` sliver. It is the payoff column of a
+price-comparison table, and on the agentmail page it is our own "Coldrig" column.
+
+Full sweep of all 37 pages, tables that scroll on HEAD but did not on `main`:
+
+```
+1440px  compare-vs-agentmail#0:+31   compare-vs-maildoso#1:+154
+1280px  compare-vs-agentmail#0:+31   compare-vs-maildoso#1:+154
+1024px  compare-vs-agentmail#0:+49   compare-vs-maildoso#1:+172  compare-vs-smartlead#1:+16
+ 820px  agentmail+237  foxreach+36  maildoso+360  skyp+137  smartlead+204  docs+171  guide-mcp-tool-count+123
+```
+
+**Fix — move that one declaration back inside `@media (max-width: 620px)`,** keeping
+`display:block; overflow-x:auto` global (that is what actually closed B6):
+
+```css
+/* delete from the global block: */
+th:not(:first-child), td:not(:first-child) { min-width: 11rem; }
+/* add inside @media (max-width: 620px): */
+table th:not(:first-child),table td:not(:first-child){min-width:11rem}
+```
+
+**Proven on a patched copy of the HEAD site — strictly dominates HEAD:**
+
+```
+new-desktop-scroll sweep, 37 pages:   1440 none · 1280 none · 1024 none · 820 none
+page overflow, 37 pages × 8 widths:   390/621/700/768/820/1024/1280/1440 → none
+```
+
+## Verified PASS
+
+1. **B6 page overflow — CLOSED.** `main` had `index.html:+4px` at 621/700; HEAD is `none` at
+   621/700/768/820 across all 10 previously-flagged pages, and `none` at 390/1024/1440 on
+   index/docs/compare-vs-maildoso. Extended to the full site: **37 pages × 8 widths → 0 overflow
+   anywhere**, which exceeds the builder's 19×7 matrix.
+2. **Desktop no-op claim — PARTIALLY TRUE.** Table box geometry is unchanged: every table still
+   reports `getBoundingClientRect().width = 960 = parent`, i.e. `display:block` did **not** cost the
+   `width:100%` stretch. Column widths redistribute as intended by the first-column `nowrap`
+   (`compare-vs-diy` `[112,404,444] → [222,365,373]`; `docs` `[104,514,342] → [205,286,469]`;
+   `compare-vs-maildoso#0` `[127,393,440] → [375,284,300]`) — a deliberate visual change, not a
+   defect. The claim fails only on the two tables in B7.
+3. **Hero — PASS.** At 621/700/768/1440 the `.hero-stage` card geometry is **byte-identical between
+   `main` and HEAD**: `agent-card` overhangs 5 px left and `health-card` 4 px right / 4 px top on
+   both. `overflow:hidden` clips exactly that pre-existing 4–5 px of card edge, converting `main`'s
+   `pageOv=4` into `pageOv=0`. Screenshot at 700 px: all three cards present, "0 paused",
+   "8 healthy", "Guardrail applied — Daily volume held at 24/mailbox" and the full tool-call list
+   all fully legible. No text clipped.
+4. **NB6/NB7/NB9/NB10 — all in.** `SKILL.md:91` now states the CLI "cannot pass `quoteOnly` or
+   `registerDomains`, and it silently substitutes a placeholder CAN-SPAM physical address … so do
+   not use the CLI form for this consent step". `README.md` MCP block key is `coldrig` (the two
+   remaining `"agent-cold-email"` keys, `SKILL.md:75` and `llms-install.md:36`, are the **stdio
+   fallback** blocks launching `npx -y agent-cold-email mcp` — correctly named after the package,
+   not a residual). `compare-vs-maildoso` now reads "No refunds on the unused portion of a paid
+   period (see Terms)". `.table-source-note` styled at `style.css:79`.
+5. **Plugin install on HEAD — unchanged.** Throwaway `HOME`, `git archive HEAD` tree:
+   cache **28K**, **0** `node_modules`, `Skills (1) coldrig`, `MCP servers (1) coldrig`,
+   ~180 tok always-on, and the userConfig prompt hint still printed.
