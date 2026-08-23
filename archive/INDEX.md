@@ -29,3 +29,8 @@
 - 2026-08-20-b2-sweepcal-ship/prior-HANDOFF.md — HANDOFF.md as of `b260bd0`/Worker `133fc911-defd-4713-beee-1654ee53d7e2` (Wave B.1 shipped), before the Wave B.2 (alert-state build) + sweep-calibration ship rewrite (merged `ce6218b`+`9d31e26` / `23fe40d`, Worker `fca0c4d9-b116-4b98-8b43-2159bda6f117`) — this pass closed the trains program's build phase.
 - 2026-08-20-b2-sweepcal-ship/superseded-roadmap-wave-b1-now-entry.md — the pre-Wave-B.2 `ROADMAP.md ## Now` line (Wave B.1 ship summary), kept verbatim for provenance; superseded by the "trains program build phase complete" `## Now` entry, with Wave B.1's own facts unchanged in `HANDOFF.md`/`MEMORY.md`. No `[x]` lines existed to drain this pass (checked: zero across `ROADMAP.md`).
 - 2026-08-21-session-handoff/prior-HANDOFF.md — HANDOFF.md as of `e16bdc0` (post trains-program-close bookkeeping), before the 2026-08-21 handoff delta pass (nudge exactly-once verification, calibrated-detail-live confirmation, worktree reaps, fix-H folds).
+
+## 2026-08-23-roadmap-cleanup
+- `2026-08-23-roadmap-cleanup/inventory.md` — full DONE/DROP/KEEP classification of all 231 `ROADMAP.md ## Open` items, per founder ORDER 2026-08-23 ("Clean up the list and get rid of the ones done or just not really necessary"); orchestrator's 4 overriding rulings + final executed counts appended same day.
+- `ROADMAP-done.md` — appended 80 drained `[x]` lines (`## Archived 2026-08-23 — cleanup pass` section) at this cleanup pass.
+- `ROADMAP-dropped-2026-08-23.md` (new file) — 28 dropped `## Open` lines archived verbatim with their drop reasons; archived, never deleted.
