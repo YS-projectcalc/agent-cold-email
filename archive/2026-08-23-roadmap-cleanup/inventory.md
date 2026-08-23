@@ -24,6 +24,33 @@ The orchestrator accepted every DONE and DROP verdict below except these four, w
 
 `ROADMAP.md ## Open` unchecked-item count: 234 → 127 (231 − 80 DONE − 28 DROP + 1 new `[NOTE]` cleanup-pass pointer line; `## Now`'s 3 items untouched throughout). KEEP-by-kind after overrides: 97 agent-doable (A) / 26 founder-owned (B) — L95 counted as B (single dashboard-toggle, founder-owned), L165 counted as A (agent-run harness).
 
+### Pass 2 — 2026-08-23 (stale-KEEP rulings)
+
+The orchestrator ruled on the 29 stale-KEEP items flagged at pass 1 (dated ≤2026-07-24, still open after pass 1). Resolved by line-content match (dates shifted after pass 1's removals, so items are identified by date+gist, not the stale pass-1 line numbers):
+
+| Item (date — gist) | Verdict | Evidence / reason |
+|---|---|---|
+| 2026-07-14 Design-lane full page brief: remaining pages | **DONE** | All 10 static-page sub-items confirmed present via `ls site/*.html` (replies, security, 404, signup, connect, pricing, byo-domain, support, status, unsubscribe); billing UI + proof page independently tracked (not silently closed) |
+| 2026-07-21 Warm-lead Q1-Q6 ruled + increments 1-3 built/deployed | **KEEP (conditional check failed)** | Line's own tail states increment #4 `schedule_followup` (tool + `followups` table + tick drain) is still UNBUILT — does not qualify as fully shipped |
+| 2026-07-23 PR #10106 held on Glama quality score | **DONE** | Glama score live (Quality Checklist 83%, Server Coherence A); PR comment posted by `YS-projectcalc` 2026-08-23T06:02:23Z, bookkeeper-verified via `gh api repos/punkpeye/awesome-mcp-servers/issues/10106/comments` |
+| 2026-07-13 B4 remainder: A/B testing + manual-reply-path founder call | **DROP** | not necessary now (feature idea; no customer ask) |
+| 2026-07-14 Dogfood campaign contact-path/anti-spam/proof-page/founder calls | **DROP** | superseded by the 2026-08-23 founder ORDER (2) + `scratchpad/dogfood-tenant-runbook.md` |
+| 2026-07-15 Guide-pages nits: stdio-bridge block on /connect; title-scan | **DROP** | superseded by the 2026-08-23 skill lane (connect.html install block + llms-install Option B/C) |
+| 2026-07-15 Annual billing option | **DROP** | not necessary now |
+| 2026-07-20 IDEA No list-verification capability | **DROP** | not necessary now (fold into FAQ only if a customer asks) |
+| 2026-07-20 IDEA Portability-at-cancellation docs | **DROP** | not necessary now |
+| 2026-07-21 Review sites decided + dogfood scope | **DROP** | superseded by the 2026-08-23 ORDER (4) trust-floor item `[gated:founder-present]` + Wave 3+ table in `docs/research/backlink-outreach-targets-2026-08-17.md` |
+| 2026-07-23 Glama Dockerfile build and release | **DROP** | superseded by the 2026-08-23 ORDER (3) Glama claim/refresh item (score now exists) |
+| 2026-07-24 IDEA Event-driven alert class sweep | **DROP** | superseded by Wave B.2 alert-state (26-family materiality keys, deployed `fca0c4d9`) |
+| 2026-07-16 Productize BYO OAuth grant (Connect Google/Microsoft) | **KEEP + edit** | appended `[2026-08-23 ELEVATED]` — dogfood runbook found zero completed credential pushes/real sends; this is now the single real blocker |
+| 2026-07-16 Engine-443 residuals incl. one real send per transport | **KEEP + edit** | appended `[2026-08-23]` — still zero real sends in production |
+| 2026-07-23 Signup-auth magic-link lands in spam | **KEEP + edit** | appended `[2026-08-23]` — still open, own-domain mail deliverability is a Kind-A lane |
+| 2026-07-23 IDEA tools/aeo-panel measures retired brand name | **KEEP + edit** | appended `[2026-08-23 re-purpose]` — fold into the weekly no-brand prompt panel with tools/buyer-panel |
+| 2026-07-22 Stripe business name + statement descriptor unset | **KEEP + edit** | appended `[2026-08-23]` — still unset while 1 tenant is in a chargeback dispute |
+| 12 remaining items (B2 sagas · D6 backups/DR/key-rotation · engine DO-firewall :8080/GreenMail e2e · light-KYC ruling · data-deletion pipeline · pricing NO-SEND-QUOTA headline · watchtower CR/LF+test-isolation · business-readiness (d)/(e) · RETURN-QUEUE ChatGPT/MCPB · consumer-chat connector placement · BYO residuals TOCTOU/soft-lockout · watchtower external prober) | **KEEP unchanged** | no ruling issued this pass |
+
+Pass-2 executed totals: 2 DONE (+2, was 3 candidates, 1 resolved to KEEP), 9 DROP, 5 KEEP-edited-in-place, 13 KEEP-unchanged (12 + the conditional Warm-lead line) = 29. Running totals after both passes: **82 DONE**, **37 DROP**, **112 KEEP** (90 agent-doable / 22 founder-owned) — `## Open` unchecked count 127 → 116.
+
 ## Count reconciliation
 
 ```
