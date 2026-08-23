@@ -1,0 +1,34 @@
+{
+  "name": "coldrig",
+  "description": "Agent-native cold-email infrastructure: the Coldrig plugin bundles a Claude Code skill and the hosted 28-tool Coldrig MCP server.",
+  "owner": {
+    "name": "EpiphanyMade",
+    "url": "https://coldrig.dev"
+  },
+  "plugins": [
+    {
+      "name": "coldrig",
+      "source": "./",
+      "description": "Agent-native cold-email infrastructure. Bundles the hosted, 28-tool Coldrig MCP server (domains, mailboxes, campaigns, inbox, metrics, lead disposition) so your agent runs outbound email end to end with one bearer token — no dashboard required. Real sending is live in production (Gmail API, HTTPS/443), plus a free sandbox demo. Signup, billing, screening, and real mailbox provisioning are fully self-serve and automatic; mailbox send-authorization completes on our side after provisioning — you don't wait on a queue or do anything. $99/mo all-in for 5 mailboxes.",
+      "version": "0.3.0",
+      "author": {
+        "name": "EpiphanyMade",
+        "url": "https://coldrig.dev"
+      },
+      "homepage": "https://coldrig.dev/",
+      "repository": "https://github.com/YS-projectcalc/agent-cold-email",
+      "license": "MIT",
+      "keywords": [
+        "cold-email",
+        "cold-outreach",
+        "email-infrastructure",
+        "mcp",
+        "model-context-protocol",
+        "ai-agent",
+        "coding-agent",
+        "sales-automation",
+        "outreach"
+      ]
+    }
+  ]
+}
