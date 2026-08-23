@@ -67,7 +67,7 @@ This is the full list — see [`SPEC.md` §6](./SPEC.md#6-agent-surface--the-too
 ```json
 {
   "mcpServers": {
-    "agent-cold-email": {
+    "coldrig": {
       "url": "https://api.coldrig.dev/mcp"
     }
   }
