@@ -84,6 +84,15 @@ bearer_token_env_var = "COLDRIG_TOKEN"
 
 Same setup for every client (Claude Code, Cursor, Cline) at [coldrig.dev/connect](https://coldrig.dev/connect).
 
+**Claude Code plugin / agent skill:**
+
+```bash
+/plugin marketplace add YS-projectcalc/agent-cold-email
+/plugin install coldrig@coldrig
+```
+
+The plugin connects to the same `coldrig` MCP server and prompts for your bearer token when you enable it. Or install just the skill with [skills.sh](https://skills.sh): `npx skills add YS-projectcalc/agent-cold-email`. Cursor and Codex users: see [`integrations/`](./integrations/) for a Cursor rule and an `AGENTS.md` paste-in block.
+
 **CLI twin:**
 
 ```bash
