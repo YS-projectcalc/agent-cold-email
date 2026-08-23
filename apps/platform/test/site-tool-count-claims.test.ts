@@ -21,8 +21,12 @@ import agentsMd from "../../../AGENTS.md?raw";
 import serverJson from "../../../server.json?raw";
 import llmsInstall from "../../../llms-install.md?raw";
 import handoffMd from "../../../HANDOFF.md?raw";
-import pluginJson from "../../../.claude-plugin/plugin.json?raw";
+import pluginJson from "../../../plugins/coldrig/.claude-plugin/plugin.json?raw";
 import dashboardSetupPage from "../../dashboard/src/pages/SetupPage.tsx?raw";
+import marketplaceJson from "../../../.claude-plugin/marketplace.json?raw";
+import coldrigSkill from "../../../skills/coldrig/SKILL.md?raw";
+import cursorRule from "../../../integrations/cursor/coldrig.mdc?raw";
+import codexSnippet from "../../../integrations/codex/AGENTS-snippet.md?raw";
 
 import siteIndex from "../../../site/index.html?raw";
 import ogImageSvg from "../../../site/assets/og-image.svg?raw";
@@ -52,7 +56,7 @@ const CLAIM_SURFACES: ReadonlyArray<readonly [string, string]> = [
   ["server.json", serverJson],
   ["llms-install.md", llmsInstall],
   ["HANDOFF.md", handoffMd],
-  [".claude-plugin/plugin.json", pluginJson],
+  ["plugins/coldrig/.claude-plugin/plugin.json", pluginJson],
   ["apps/dashboard/src/pages/SetupPage.tsx", dashboardSetupPage],
   ["site/index.html", siteIndex],
   ["site/assets/og-image.svg", ogImageSvg],
@@ -75,6 +79,11 @@ const CLAIM_SURFACES: ReadonlyArray<readonly [string, string]> = [
   ["site/openapi.yaml", openapiYaml],
   ["site/guide-infrastructure-vs-sending-platform.html", guideInfraVsSending],
   ["site/README.md", siteReadme],
+  // Agent Skill / plugin marketplace lane (2026-08-23 adversarial gate, B4).
+  [".claude-plugin/marketplace.json", marketplaceJson],
+  ["skills/coldrig/SKILL.md", coldrigSkill],
+  ["integrations/cursor/coldrig.mdc", cursorRule],
+  ["integrations/codex/AGENTS-snippet.md", codexSnippet],
 ];
 
 // Surfaces that positively claim the total count in prose (used for the
@@ -87,7 +96,7 @@ const SURFACES_THAT_STATE_THE_COUNT = new Set([
   "server.json",
   "llms-install.md",
   "HANDOFF.md",
-  ".claude-plugin/plugin.json",
+  "plugins/coldrig/.claude-plugin/plugin.json",
   "apps/dashboard/src/pages/SetupPage.tsx",
   "site/index.html",
   "site/assets/og-image.svg",
@@ -110,6 +119,10 @@ const SURFACES_THAT_STATE_THE_COUNT = new Set([
   "site/openapi.yaml",
   "site/guide-infrastructure-vs-sending-platform.html",
   "site/README.md",
+  ".claude-plugin/marketplace.json",
+  "skills/coldrig/SKILL.md",
+  "integrations/cursor/coldrig.mdc",
+  "integrations/codex/AGENTS-snippet.md",
 ]);
 
 /**

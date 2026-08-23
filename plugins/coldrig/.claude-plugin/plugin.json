@@ -19,5 +19,14 @@
     "coding-agent",
     "sales-automation",
     "outreach"
-  ]
+  ],
+  "userConfig": {
+    "token": {
+      "type": "string",
+      "title": "Coldrig bearer token",
+      "description": "Tenant bearer token from POST https://api.coldrig.dev/signup, or the free `npx agent-cold-email demo` sandbox.",
+      "sensitive": true,
+      "required": true
+    }
+  }
 }

@@ -91,7 +91,7 @@ Same setup for every client (Claude Code, Cursor, Cline) at [coldrig.dev/connect
 /plugin install coldrig@coldrig
 ```
 
-Or install just the skill with [skills.sh](https://skills.sh): `npx skills add YS-projectcalc/agent-cold-email`. Cursor and Codex users: see [`integrations/`](./integrations/) for a Cursor rule and an `AGENTS.md` paste-in block.
+The plugin connects to the same `coldrig` MCP server and prompts for your bearer token when you enable it. Or install just the skill with [skills.sh](https://skills.sh): `npx skills add YS-projectcalc/agent-cold-email`. Cursor and Codex users: see [`integrations/`](./integrations/) for a Cursor rule and an `AGENTS.md` paste-in block.
 
 **CLI twin:**
 

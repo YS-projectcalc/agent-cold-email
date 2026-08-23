@@ -16,9 +16,14 @@ Never claim guaranteed inbox placement, deliverability, open rate, or reply rate
 ## Guardrails to respect
 
 - New mailboxes are ramp-limited server side — 5 sends/day in week 1, rising to 40/day after 4 weeks; poll `infrastructure_status` for each mailbox's current `dailyCap`.
-- `reply` and campaign sends are refused, never silently dropped, for a suppressed recipient, a deliverability-paused mailbox, or an exhausted daily cap.
+- `reply` is refused, never silently dropped, for a suppressed recipient, a deliverability-paused mailbox, or an exhausted daily cap. A campaign launch **silently skips** suppressed leads instead — the launch response does not report them; call `list_leads` to see who was actually contacted.
 - No inbox-placement or deliverability guarantee, ever.
 - Pricing: starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox (a $49 platform fee plus $10/mailbox, five-mailbox minimum); domains included, $0 per-send fees.
+
+## Ask before you spend or send
+
+- On an activated tenant, call `setup_infrastructure` with `quoteOnly: true` first, show the user the returned `projectedMonthlyCents` and mailbox/domain counts, and proceed to the real call only after the user explicitly confirms. A new domain purchase additionally needs the user's own opt-in via `registerDomains: true` — never default this to true on their behalf.
+- Get the user's explicit approval of the exact lead list and the exact offer/sequence copy before calling `launch_campaign` — it sends real mail to real people on an activated tenant, and this platform does not generate or vet copy.
 
 ## Connect (Cursor MCP)
 

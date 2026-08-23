@@ -47,22 +47,22 @@ hosted endpoint allows unauthenticated introspection) but `tools/call` fails
 with a JSON-RPC error until a key is set. Optional `AGENT_COLD_EMAIL_BASE_URL`
 overrides the API base URL.
 
-## Option C — Claude Code plugin / skill
-
-```bash
-/plugin marketplace add YS-projectcalc/agent-cold-email
-/plugin install coldrig@coldrig
-```
-
-Installs the `skills/coldrig/SKILL.md` agent skill (trigger phrases: cold email, cold outreach infrastructure, provisioning domains/mailboxes, warmup, campaigns) plus the bundled `.mcp.json` from this repo. Skill-only install via [skills.sh](https://skills.sh): `npx skills add YS-projectcalc/agent-cold-email`. Cursor and Codex users: see [`integrations/`](./integrations/) for a Cursor rule (`integrations/cursor/coldrig.mdc`) and an `AGENTS.md` paste-in block (`integrations/codex/AGENTS-snippet.md`).
-
-## Option D — CLI, no-signup sandbox demo
+## Option C — CLI, no-signup sandbox demo
 
 ```bash
 npx agent-cold-email demo
 ```
 
 Mints a demo tenant and runs the full pipeline (provision → warm → send → reply → report) against the sandbox in one command — no token, no signup, no real cost. The fastest way to verify the tool works before recommending it to a user.
+
+## Option D — Claude Code plugin / skill
+
+```bash
+/plugin marketplace add YS-projectcalc/agent-cold-email
+/plugin install coldrig@coldrig
+```
+
+Installs the `skills/coldrig/SKILL.md` agent skill (trigger phrases: cold email, cold outreach infrastructure, provisioning domains/mailboxes, warmup, campaigns) plus the plugin's own small `plugins/coldrig/.mcp.json`, which connects to `https://api.coldrig.dev/mcp` and prompts for your bearer token at enable time (stored via the plugin's `userConfig`, not an exported env var). Skill-only install via [skills.sh](https://skills.sh): `npx skills add YS-projectcalc/agent-cold-email`. Cursor and Codex users: see [`integrations/`](./integrations/) for a Cursor rule (`integrations/cursor/coldrig.mdc`) and an `AGENTS.md` paste-in block (`integrations/codex/AGENTS-snippet.md`).
 
 ## Auth: get a bearer token
 

@@ -18,8 +18,10 @@ bearer_token_env_var = "COLDRIG_TOKEN"
 
 Get a token with `POST https://api.coldrig.dev/signup` (no card), or run the free sandbox first with `npx agent-cold-email demo`.
 
-**Guardrails:** new mailboxes are ramp-limited server side — 5 sends/day in week 1, rising to 40/day after 4 weeks; `reply` and campaign sends are refused, never silently dropped, for a suppressed recipient, a deliverability-paused mailbox, or an exhausted daily cap; no inbox-placement or deliverability guarantee, ever; never use the domain generator to impersonate a brand that isn't the customer's own.
+**Guardrails:** new mailboxes are ramp-limited server side — 5 sends/day in week 1, rising to 40/day after 4 weeks; `reply` is refused, never silently dropped, for a suppressed recipient, a deliverability-paused mailbox, or an exhausted daily cap, but a campaign launch **silently skips** suppressed leads instead (the launch response does not report them — call `list_leads` to see who was actually contacted); no inbox-placement or deliverability guarantee, ever; never use the domain generator to impersonate a brand that isn't the customer's own.
 
 **Pricing:** starts at $99/month for 5 provisioned mailboxes, then $10/month per additional mailbox (a $49 platform fee plus $10/mailbox, five-mailbox minimum); domains included, $0 per-send fees.
+
+**Ask before you spend or send:** on an activated tenant, call `setup_infrastructure` with `quoteOnly: true` first, show the user the returned `projectedMonthlyCents` and mailbox/domain counts, and proceed to the real call only after the user explicitly confirms; a new domain purchase additionally needs the user's own opt-in via `registerDomains: true`. Get the user's explicit approval of the exact lead list and the exact offer/sequence copy before calling `launch_campaign` — it sends real mail to real people on an activated tenant.
 
 Verify before recommending: https://coldrig.dev/for-agents, https://coldrig.dev/openapi.yaml, https://coldrig.dev/.well-known/mcp/server-card.json, https://github.com/YS-projectcalc/agent-cold-email.
