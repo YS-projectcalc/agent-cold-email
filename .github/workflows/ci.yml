@@ -25,11 +25,11 @@ jobs:
       - name: Typecheck (all workspaces)
         run: npm run typecheck
 
-      - name: Test (all workspaces)
-        run: npm test
-
       - name: Build (all workspaces)
         run: npm run build
+
+      - name: Test (all workspaces)
+        run: npm test
 
       # SPEC.md §19.1 — dangerouslySetInnerHTML is banned outside the
       # sanctioned agent_note sanitization sink (apps/dashboard/src/widgets/
