@@ -139,6 +139,10 @@ declare global {
       // back to the built-in defaults (24h / 48h).
       CUSTOMER_PROGRESS_STALL_MS?: string;
       CUSTOMER_PROGRESS_OWED_MAX_MS?: string;
+      /** Fan-out concurrency for the cron tenant sweep (admin/sweep-budget.ts).
+       *  Absent = the shipped default of 6. Set to "1" to restore the pre-concurrency
+       *  serial fan-out and its slice of 3 without a deploy. */
+      SWEEP_FANOUT_CONCURRENCY?: string;
       // §7.12 (founder ruling Q1) — the one-shot nudge's delay-from-onset.
       // Same non-arming reasoning. Unset/blank/non-positive falls back to
       // the built-in default (24h).

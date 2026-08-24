@@ -64,10 +64,24 @@ export interface SweepDeadline {
  */
 export interface SweepFanout extends SweepDeadline {
   leastVisited: number | null;
+  /**
+   * How many tenants this tick's fan-out may have in flight at once.
+   *
+   * ON `SweepFanout` AND DELIBERATELY NOT ON `SweepDeadline`, which is what
+   * makes `sweepDeadlineOf()` strip it for free. A leg iterating a population
+   * that is NOT the tenant slice must stay SEQUENTIAL, and the reason is
+   * concrete rather than cautious: `reapStaleReservations` writes
+   * `vendor_spend_ledger WHERE period_key = ?` and
+   * `vendor_slot_state WHERE id = 1` — rows SHARED across the items it
+   * iterates. Every tenant-slice leg touches only its own tenant's DO and its
+   * own tenant's rows; those two do not. Same type-level separation, and the
+   * same reason, as `leastVisited`.
+   */
+  readonly concurrency: number;
 }
 
-export function newSweepFanout(startedAt: number, deadlineMs: number): SweepFanout {
-  return { startedAt, deadlineMs, leastVisited: null };
+export function newSweepFanout(startedAt: number, deadlineMs: number, concurrency: number = 1): SweepFanout {
+  return { startedAt, deadlineMs, leastVisited: null, concurrency: Math.max(1, Math.floor(concurrency)) };
 }
 
 /**
@@ -239,6 +253,19 @@ export async function resolveSweepTenants(env: Env, scope: SweepScope): Promise<
 export interface TenantSweepResult {
   /** Tenants this leg actually attempted, from the head of `tenantIds`. */
   visited: number;
+  /**
+   * Longest CONTIGUOUS PREFIX of `tenantIds` this leg finished — the ONLY
+   * number a keyset cursor may advance by.
+   *
+   * Identical to `visited` in the sequential path, and that is exactly why it
+   * needs its own name. `commitSweepCursor` does `slice.ids[covered - 1]`: it
+   * indexes the slice by a COUNT, which is sound only while the covered set IS
+   * a prefix. Concurrency makes that a live constraint rather than a free one
+   * (see `sweepTenants` below), and a single field called "visited" carrying
+   * both meanings is how the two get conflated — the same shape as the
+   * planned-vs-achieved coverage defect of 2026-08-20.
+   */
+  prefix: number;
   /** Tenants left for a later tick because the fan-out deadline arrived. NOT a
    * failure — see admin/sweep-signals.ts on why capacity and error must not
    * share a counter. */
@@ -267,6 +294,35 @@ export async function sweepTenants(
   fn: (tenantId: string) => Promise<void>,
   onError: (tenantId: string, err: unknown) => void,
 ): Promise<TenantSweepResult> {
+  // The concurrency lives on `SweepFanout`, so a leg with its OWN population
+  // (which passes `sweepDeadlineOf(...)`) is serial by construction, not by
+  // remembering to ask for it.
+  const concurrency = fanout && isSweepFanout(fanout) ? fanout.concurrency : 1;
+  const result = concurrency > 1 ? await sweepConcurrently(tenantIds, fanout, fn, onError, concurrency) : await sweepSerially(tenantIds, fanout, fn, onError);
+
+  // Only a leg iterating THE TENANT SLICE may move the rotation cursor. A leg
+  // with its own population passes `sweepDeadlineOf(...)`, which has no
+  // accumulator to write into.
+  //
+  // THE PREFIX, NOT THE COUNT. They are equal serially; concurrently they are
+  // not necessarily, and `commitSweepCursor` indexes by this number.
+  if (fanout && isSweepFanout(fanout)) {
+    fanout.leastVisited = fanout.leastVisited === null ? result.prefix : Math.min(fanout.leastVisited, result.prefix);
+  }
+  return result;
+}
+
+/** The serial path — BYTE-FOR-BYTE the loop that shipped before concurrency
+ * existed, kept as its own function rather than as `concurrency === 1` falling
+ * through the pool below. The pool at one worker is *semantically* the same
+ * loop, but it is not the same code, and "C=1 reproduces today exactly" is a
+ * claim worth being literally true rather than argued. */
+async function sweepSerially(
+  tenantIds: readonly string[],
+  fanout: SweepDeadline | undefined,
+  fn: (tenantId: string) => Promise<void>,
+  onError: (tenantId: string, err: unknown) => void,
+): Promise<TenantSweepResult> {
   const clock = new RealClock();
   let visited = 0;
   let errors = 0;
@@ -289,11 +345,86 @@ export async function sweepTenants(
     visited++;
   }
 
-  // Only a leg iterating THE TENANT SLICE may move the rotation cursor. A leg
-  // with its own population passes `sweepDeadlineOf(...)`, which has no
-  // accumulator to write into.
-  if (fanout && isSweepFanout(fanout)) {
-    fanout.leastVisited = fanout.leastVisited === null ? visited : Math.min(fanout.leastVisited, visited);
-  }
-  return { visited, deferred, errors };
+  // Serially the covered set is a prefix by construction — stated, not assumed,
+  // so the two paths return the same shape and the caller never has to know
+  // which one ran.
+  return { visited, prefix: visited, deferred, errors };
+}
+
+/**
+ * The bounded-concurrency path: `concurrency` workers pulling from one shared
+ * index, sharing the tick's deadline.
+ *
+ * WHY THIS EXISTS. The fan-out is dispatch-bound, not work-bound — production
+ * `wrangler tail` puts DO `cpuTime` at 1-3% of `wallTime`, so the 15s deadline
+ * was being spent almost entirely WAITING. Overlapping those waits takes the
+ * slice from 3 to 15 against the same deadline, which is the difference between
+ * a full rotation every 110 minutes and every 25 (sweep-budget.ts derives it;
+ * docs/research/sweep-capacity-measurement-2026-08-24.md measures it).
+ *
+ * "CLAIM", NOT "ABANDON" — THE ONE DECISION THAT MAKES THIS SAFE. The deadline
+ * stops handing out NEW tenants; whatever is already in flight is awaited to
+ * completion. Because workers claim indices in ascending order and every
+ * claimed index therefore finishes, the covered set is always `{0..k-1}` — a
+ * contiguous prefix, which is what `commitSweepCursor` requires.
+ *
+ * The tighter-looking alternative — race each tenant against the deadline and
+ * drop whatever has not returned — is WRONG HERE, and not subtly. One slow
+ * tenant at index i abandoned while i+1.. completed leaves a HOLE: the cursor
+ * advances past a tenant that was never swept, and since the next tick reads
+ * `WHERE id > ?` that tenant is skipped for the entire rotation. It skips
+ * precisely the SLOW tenant, i.e. the one most likely to be the sick one this
+ * sweep exists to notice. `tenant-slice-concurrency.test.ts` keeps that
+ * counterexample executable.
+ *
+ * The cost of `claim` is that the leg can overrun the deadline by at most one
+ * in-flight tenant's round trip. That is bounded and it is the right trade: the
+ * fan-out deadline is a scheduling target with 150s of send-pipeline budget
+ * behind it, whereas a rotation hole is silent data loss.
+ */
+async function sweepConcurrently(
+  tenantIds: readonly string[],
+  fanout: SweepDeadline | undefined,
+  fn: (tenantId: string) => Promise<void>,
+  onError: (tenantId: string, err: unknown) => void,
+  concurrency: number,
+): Promise<TenantSweepResult> {
+  const clock = new RealClock();
+  const n = tenantIds.length;
+  const done = new Array<boolean>(n).fill(false);
+  let next = 0;
+  let visited = 0;
+  let errors = 0;
+
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = next;
+      if (index >= n) return;
+      // THE SHIPPED GUARD, unchanged in meaning: index 0 is always attempted,
+      // so a leg can never make zero progress and pin the rotation head.
+      if (index > 0 && fanout && clock.now() - fanout.startedAt >= fanout.deadlineMs) {
+        next = n; // stop every OTHER worker from claiming as well
+        return;
+      }
+      next = index + 1;
+      const tenantId = tenantIds[index] as string;
+      try {
+        await fn(tenantId);
+      } catch (err) {
+        errors++;
+        onError(tenantId, err);
+      }
+      // An errored tenant still counts as covered, exactly as it does serially:
+      // it was reached, the failure is reported through `errors` / `cron_legs`,
+      // and leaving a hole here would strand it for a whole rotation.
+      done[index] = true;
+      visited++;
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, Math.max(1, n)) }, () => worker()));
+
+  let prefix = 0;
+  while (prefix < n && done[prefix]) prefix++;
+  return { visited, prefix, deferred: n - visited, errors };
 }

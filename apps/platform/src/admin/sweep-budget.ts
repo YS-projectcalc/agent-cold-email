@@ -58,16 +58,33 @@ export const SEND_PIPELINE_LEG_DEADLINE_MS = 150_000;
  * The per-invocation subrequest ceiling this sweep is sized against
  * (Cloudflare Workers Paid).
  *
- * UNVERIFIED IN PRODUCTION, deliberately restated as an assumption rather than
- * a fact: the scale audit could not confirm the real cap or whether DO RPCs
- * count toward it (miniflare does not enforce it — 200 tenants ran ~1629
- * subrequests clean — and the OSS workerd binary carries no such string). What
- * does NOT depend on that number is the property this file buys: per-tick cost
- * that no longer grows with the tenant count. If the real cap is higher, the
- * slice is merely conservative; if it is lower, `SWEEP_BUDGET_FRACTION` is the
- * one knob to turn.
+ * VERIFIED 2026-08-24 against the vendor's own limits page, and the previous
+ * value was WRONG BY 10x IN THE WRONG DIRECTION OF CONFIDENCE — it was labelled
+ * "UNVERIFIED IN PRODUCTION" and left at 1000, which is not a conservative
+ * reading of the Paid limit, it is the FREE plan's row:
+ *
+ *   developers.cloudflare.com/workers/platform/limits/ ("Subrequests", last
+ *   updated 2026-07-28) — "Subrequests per invocation: Free 50 / Paid 10,000
+ *   (up to 10M)"; "Subrequests to internal services: Free 1,000 / Paid Matches
+ *   configured limit (default 10,000)". A DO stub RPC is an internal-service
+ *   subrequest, so the applicable Paid figure is 10,000.
+ *
+ * WHAT IS STILL UNVERIFIED, kept explicit rather than quietly resolved: whether
+ * a DO stub RPC counts toward the SIX simultaneous-open-connections ceiling.
+ * The docs enumerate the calls that do (fetch, KV, Cache, R2, Queues, TCP
+ * connect, outbound WebSocket) and DO stubs and D1 are absent from that list,
+ * but absence is not an exemption. It does not endanger this arithmetic: the
+ * documented behaviour past six is QUEUEING, not an error, so an over-set
+ * concurrency saturates rather than throwing — see SWEEP_FANOUT_CONCURRENCY.
+ *
+ * NEITHER CEILING IS ENFORCEABLE LOCALLY, so no local experiment can bound
+ * them: workerd's `LimitEnforcer::newSubrequest` is `override {}` (a no-op) in
+ * `src/workerd/server/server.c++`, and `LimitEnforcer` declares no
+ * connection-concurrency hook at all.
+ *
+ * Full provenance: docs/research/sweep-capacity-measurement-2026-08-24.md §2.
  */
-export const SWEEP_SUBREQUEST_BUDGET = 1000;
+export const SWEEP_SUBREQUEST_BUDGET = 10_000;
 
 /**
  * How much of that budget the per-tenant fan-out may spend. The remainder is
@@ -343,18 +360,133 @@ export const ASSUMED_DO_RPC_MS = MEASURED_DO_RPC_MS.p75Ms;
 export const SWEEP_FANOUT_DEADLINE_MS = CRON_PERIOD_MS - SEND_PIPELINE_LEG_DEADLINE_MS - SEND_PIPELINE_TENANT_BUDGET_MS;
 
 /**
- * How many tenants one tick may touch, taking the SMALLER of the two
- * independent ceilings — subrequests and wall clock. Both are real and they bind
- * at different tenant counts, so taking either one alone leaves the other free
- * to break the tick.
+ * How many DO RPCs the tenant fan-out may have in flight at once.
+ *
+ * SIX, WHICH IS THE DOCUMENTED CEILING ITSELF, and that is the whole reason for
+ * the number. Cloudflare documents six simultaneous open connections per
+ * invocation; it does NOT document whether a DO stub RPC is one of them (the
+ * enumerated list omits DO stubs and D1 — see SWEEP_SUBREQUEST_BUDGET). Bounding
+ * at exactly six makes the design independent of that unanswered question: it
+ * cannot be clamped by a ceiling it never reaches.
+ *
+ * Going higher is measurably better (a slice of 22 at C=8, 32 at C=12) and is
+ * NOT taken, because it would rest on the unanswered half. If it is ever taken,
+ * the failure mode is benign and honest rather than broken: past six the
+ * documented behaviour is QUEUEING, so the tick would simply clip, and
+ * `sweep_coverage` already grades on the ACHIEVED advance (`covered < handed`)
+ * and would report the shortfall truthfully.
+ *
+ * `SWEEP_FANOUT_CONCURRENCY_MAX` is a clamp on the env override, not a target:
+ * beyond ~12 the measured return is flat and the unanswered question dominates.
+ *
+ * Measurement: docs/research/sweep-capacity-measurement-2026-08-24.md §4,
+ * harness in test/sweepcap-experiment/.
  */
-export const SWEEP_TENANT_SLICE = Math.max(
-  1,
-  Math.min(
-    Math.floor((SWEEP_SUBREQUEST_BUDGET * SWEEP_BUDGET_FRACTION - SWEEP_FIXED_SUBREQUESTS) / SWEEP_RPCS_PER_TENANT),
-    Math.floor(SWEEP_FANOUT_DEADLINE_MS / (ASSUMED_DO_RPC_MS * SWEEP_FANOUT_RPCS_PER_TENANT)),
-  ),
-);
+export const SWEEP_FANOUT_CONCURRENCY = 6;
+export const SWEEP_FANOUT_CONCURRENCY_MAX = 12;
+
+/**
+ * How much of LINEAR speedup C overlapping round trips actually buy: 0.70.
+ *
+ * NOT A SAFETY MARGIN — a MEASURED SHORTFALL, and sizing without it is the
+ * defect this constant exists to prevent. A leg is paced by its STRAGGLERS, not
+ * by its p75, so the naive `deadline x C` overstates the sustainable slice by
+ * 25-30% at every C >= 4. Measured maxima (>=95% of ticks covering the whole
+ * slice, 400 trials/cell against the fitted production latency distribution)
+ * versus that naive figure:
+ *
+ *   C     2     3     4     6     8    12
+ *   real  6     9    12    17    22    32
+ *   naive 7    11    14    22    29    44
+ *
+ * `1 + (C - 1) x 0.70` reproduces or conservatively under-shoots every one of
+ * those points — and it DEGENERATES TO 1 AT C = 1, so the whole concurrency
+ * change is a provable no-op with the fan-out serialised. That is the property
+ * `sweep-budget.test.ts` pins, and it is what makes the env knob a safe
+ * rollback rather than a second code path nobody has exercised.
+ */
+export const SWEEP_CONCURRENCY_EFFICIENCY = 0.7;
+
+export function effectiveConcurrency(concurrency: number): number {
+  return 1 + (Math.max(1, concurrency) - 1) * SWEEP_CONCURRENCY_EFFICIENCY;
+}
+
+/**
+ * How much of the fan-out deadline the EXPECTED (mean-latency) cost may occupy.
+ *
+ * Was an assertion in `sweep-budget.test.ts` and nowhere in the derivation,
+ * which held only by rounding luck at the serial slice: the p75-derived slice
+ * costs `mean/p75 = 0.92` of the deadline in expectation, and `floor()` happened
+ * to pull the shipped 3 down to 0.75. At any larger slice that luck runs out.
+ * A slice whose EXPECTED cost merely touches the deadline clips its last leg on
+ * about half of all ticks — which puts the published coverage figure back into
+ * the optimistic-by-default state the 2026-08-20 calibration removed.
+ *
+ * Now a ceiling in its own right, so the property is derived rather than hoped
+ * for. See `sweep-budget.test.ts` for what replaced the assertion it subsumes.
+ */
+export const SWEEP_MEAN_COMPLETION_FRACTION = 0.85;
+
+/**
+ * How many tenants one tick may touch at a given fan-out concurrency, taking
+ * the SMALLEST of THREE independent ceilings. Each is real and they bind under
+ * different conditions, so taking any one alone leaves the others free to break
+ * the tick.
+ *
+ *  1. SUBREQUESTS — what the invocation may spend at all.
+ *  2. WALL CLOCK AT p75 — a typical-tick bound: the slice has to fit the
+ *     deadline at the latency the slice is sized against.
+ *  3. WALL CLOCK AT THE MEAN, x SWEEP_MEAN_COMPLETION_FRACTION — a COMPLETION
+ *     bound. (2) says the slice can fit; (3) says it reliably does.
+ *
+ * At C = 1 this returns exactly 3, the value shipped since the 2026-08-20
+ * calibration — the derivation reproduces the serial configuration rather than
+ * replacing it.
+ */
+export function sweepTenantSliceFor(concurrency: number): number {
+  const effective = effectiveConcurrency(concurrency);
+  return Math.max(
+    1,
+    Math.min(
+      Math.floor((SWEEP_SUBREQUEST_BUDGET * SWEEP_BUDGET_FRACTION - SWEEP_FIXED_SUBREQUESTS) / SWEEP_RPCS_PER_TENANT),
+      Math.floor((SWEEP_FANOUT_DEADLINE_MS * effective) / (ASSUMED_DO_RPC_MS * SWEEP_FANOUT_RPCS_PER_TENANT)),
+      Math.floor(
+        (SWEEP_FANOUT_DEADLINE_MS * SWEEP_MEAN_COMPLETION_FRACTION * effective) /
+          (MEASURED_DO_RPC_MS.meanMs * SWEEP_FANOUT_RPCS_PER_TENANT),
+      ),
+    ),
+  );
+}
+
+/**
+ * The fan-out concurrency this deployment runs at: the env override if it is a
+ * sane integer, else the shipped default.
+ *
+ * A ROLLBACK LEVER FIRST AND A TUNING KNOB SECOND. Setting it to 1 restores the
+ * pre-concurrency behaviour EXACTLY — same slice (3), same serial loop
+ * (`sweepSerially` is the old code verbatim) — with no deploy, which is the
+ * property that makes arming this safe. Structurally typed on `env` rather than
+ * importing `Env`, so this module stays dependency-free and testable as pure
+ * arithmetic.
+ *
+ * Clamped rather than trusted: a typo'd binding must degrade to the default, not
+ * to 0 (which would stall the fan-out) or to 500 (which would queue at the
+ * platform's connection ceiling and clip every tick).
+ */
+export function sweepFanoutConcurrency(env: { SWEEP_FANOUT_CONCURRENCY?: string }): number {
+  const raw = env.SWEEP_FANOUT_CONCURRENCY;
+  const n = raw ? Number(raw) : NaN;
+  if (!Number.isInteger(n) || n < 1) return SWEEP_FANOUT_CONCURRENCY;
+  return Math.min(n, SWEEP_FANOUT_CONCURRENCY_MAX);
+}
+
+/**
+ * The slice at the SHIPPED concurrency — the documented constant, and the
+ * default `readTenantSlice` uses. The cron re-derives it from the env-resolved
+ * concurrency (`scheduled.ts`), so an override moves the slice with it; this
+ * constant is what every guard and every test reasons about.
+ */
+export const SWEEP_TENANT_SLICE = sweepTenantSliceFor(SWEEP_FANOUT_CONCURRENCY);
 
 /** What one tick actually costs at a full slice — the number the invariant is about. */
 export const SWEEP_TICK_SUBREQUESTS = SWEEP_RPCS_PER_TENANT * SWEEP_TENANT_SLICE + SWEEP_FIXED_SUBREQUESTS;

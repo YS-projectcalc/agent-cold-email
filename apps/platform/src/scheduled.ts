@@ -28,7 +28,7 @@ import { buildOpsDigest, runDeliverabilitySweepAllTenants, runDunningSweep, runP
 import { retireHealthyCheckRows, runWatchtower } from "./admin/watchtower.js";
 import { reportSweepSignals, reportSweepSignalsHealth } from "./admin/sweep-signals.js";
 import { recordSweepHeartbeat } from "./admin/watchtower-infra.js";
-import { SWEEP_FANOUT_DEADLINE_MS } from "./admin/sweep-budget.js";
+import { SWEEP_FANOUT_DEADLINE_MS, sweepFanoutConcurrency, sweepTenantSliceFor } from "./admin/sweep-budget.js";
 import { commitSweepCursor, newSweepFanout, readTenantSlice, type SweepScope } from "./admin/tenant-slice.js";
 import { createOpsMailer, type OpsMailer } from "./ops-mail/ops-mailer.js";
 import { reapStaleReservations } from "./engine/spend-ceiling.js";
@@ -77,8 +77,15 @@ export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer;
   // tenants. Reading it can fail (D1), and a failed read must not take the
   // tick down: an empty slice means the fan-out legs no-op and the watchtower's
   // own `d1` check reports the outage, which is the correct division of labour.
-  const slice = await runLeg("tenantSlice", null, () => readTenantSlice(env, opts.sliceLimit));
-  const fanout = newSweepFanout(new RealClock().now(), SWEEP_FANOUT_DEADLINE_MS);
+  //
+  // THE SLICE IS A FUNCTION OF THE FAN-OUT CONCURRENCY, so the two can never
+  // disagree: `sweepTenantSliceFor` derives how many tenants that many
+  // in-flight round trips can finish inside the deadline. Reading the env knob
+  // here rather than at module scope is what makes `SWEEP_FANOUT_CONCURRENCY=1`
+  // a live rollback to the pre-concurrency slice of 3.
+  const concurrency = sweepFanoutConcurrency(env);
+  const slice = await runLeg("tenantSlice", null, () => readTenantSlice(env, opts.sliceLimit ?? sweepTenantSliceFor(concurrency)));
+  const fanout = newSweepFanout(new RealClock().now(), SWEEP_FANOUT_DEADLINE_MS, concurrency);
   const scope: SweepScope = { tenantIds: slice?.ids ?? [], fanout };
 
   const deliverability = await runLeg("deliverability", null, () => runDeliverabilitySweepAllTenants(env, scope));

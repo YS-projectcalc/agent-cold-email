@@ -7,6 +7,10 @@ import scheduledSource from "../src/scheduled.ts?raw";
 import {
   ASSUMED_DO_RPC_MS,
   coverageTicks,
+  effectiveConcurrency,
+  SWEEP_FANOUT_CONCURRENCY,
+  SWEEP_MEAN_COMPLETION_FRACTION,
+  sweepTenantSliceFor,
   CRON_PERIOD_MS,
   SEND_PIPELINE_LEG_DEADLINE_MS,
   SEND_PIPELINE_TENANT_BUDGET_MS,
@@ -67,8 +71,23 @@ describe("S6 — the cron period is fully accounted for, by construction", () =>
     // The wall-clock ceiling the fan-out can actually meet at the shipped slice,
     // under the stated per-RPC assumption. This is the number the old comment
     // assumed was zero.
-    const fanoutWorstCaseMs = SWEEP_TENANT_SLICE * SWEEP_FANOUT_RPCS_PER_TENANT * ASSUMED_DO_RPC_MS;
+    //
+    // DIVIDED BY THE EFFECTIVE CONCURRENCY since 2026-08-24: the round trips
+    // overlap now, so the SEQUENTIAL sum is no longer the wall clock the leg
+    // spends. The divisor is the MEASURED one (`1 + (C-1) x 0.70`), not `C` —
+    // using `C` here would make this guard agree with a slice that the deadline
+    // cannot actually sustain, which is the whole failure mode
+    // SWEEP_CONCURRENCY_EFFICIENCY exists to prevent.
+    const fanoutWorstCaseMs =
+      (SWEEP_TENANT_SLICE * SWEEP_FANOUT_RPCS_PER_TENANT * ASSUMED_DO_RPC_MS) / effectiveConcurrency(SWEEP_FANOUT_CONCURRENCY);
     expect(fanoutWorstCaseMs).toBeLessThanOrEqual(SWEEP_FANOUT_DEADLINE_MS);
+  });
+
+  it("...and it still binds SERIALLY, so a rollback to concurrency 1 is also in budget", () => {
+    // SWEEP_FANOUT_CONCURRENCY=1 is the documented rollback lever. If the slice
+    // it derives did not fit the deadline serially, the lever would be a trap.
+    const serialSlice = sweepTenantSliceFor(1);
+    expect(serialSlice * SWEEP_FANOUT_RPCS_PER_TENANT * ASSUMED_DO_RPC_MS).toBeLessThanOrEqual(SWEEP_FANOUT_DEADLINE_MS);
   });
 });
 
@@ -101,16 +120,44 @@ describe("the slice is calibrated against MEASURED production latency, not an as
   });
 
   it("the shipped slice COMPLETES at the measured mean, with headroom — not merely at the assumption", () => {
-    // The fan-out phase is `SWEEP_FANOUT_RPCS_PER_TENANT x slice` SEQUENTIAL
-    // round trips, so its expected cost is that count times the measured MEAN.
-    // A slice whose expected cost merely touches the deadline clips its last
-    // leg on about half of all ticks, which puts the published coverage number
-    // back into the optimistic-by-default state this whole fix removes.
-    const expectedMs = SWEEP_TENANT_SLICE * SWEEP_FANOUT_RPCS_PER_TENANT * MEASURED_DO_RPC_MS.meanMs;
+    // The expected cost of the fan-out is `rpcs x slice x measured MEAN`,
+    // divided by the effective concurrency. A slice whose expected cost merely
+    // touches the deadline clips its last leg on about half of all ticks, which
+    // puts the published coverage number back into the optimistic-by-default
+    // state the 2026-08-20 calibration removed.
+    //
+    // ⚠️ THIS ASSERTION IS NOW TRUE BY CONSTRUCTION, and saying so is the point.
+    // Until 2026-08-24 the 0.85 rule lived ONLY here, and the derivation
+    // satisfied it by rounding luck: the p75-derived slice costs `mean/p75 =
+    // 0.92` of the deadline in expectation, and `floor()` happened to pull the
+    // serial slice of 3 down to 0.75. At any larger slice that luck runs out —
+    // it is exactly what reddened when concurrency raised the slice. The rule
+    // is now the THIRD ceiling inside `sweepTenantSliceFor`, so it holds at
+    // every concurrency instead of at one.
+    //
+    // What replaces the independence this assertion lost: the SIMULATION in
+    // test/sweepcap-experiment/sweepcap.test.ts, which asserts
+    // `sweepTenantSliceFor(C) <= the slice a fitted-latency model can actually
+    // finish` at every C. That oracle is not derived from any constant here.
+    const expectedMs =
+      (SWEEP_TENANT_SLICE * SWEEP_FANOUT_RPCS_PER_TENANT * MEASURED_DO_RPC_MS.meanMs) / effectiveConcurrency(SWEEP_FANOUT_CONCURRENCY);
     expect(
       expectedMs,
       `at the measured mean the fan-out needs ${expectedMs}ms of the ${SWEEP_FANOUT_DEADLINE_MS}ms deadline`,
-    ).toBeLessThanOrEqual(SWEEP_FANOUT_DEADLINE_MS * 0.85);
+    ).toBeLessThanOrEqual(SWEEP_FANOUT_DEADLINE_MS * SWEEP_MEAN_COMPLETION_FRACTION);
+  });
+
+  it("the completion ceiling is what BINDS the slice — not a formality riding along behind p75", () => {
+    // If p75 were the binding arm, the mean-completion rule would be satisfied
+    // incidentally and could be deleted without reddening anything. Asserting
+    // WHICH arm binds keeps the constant load-bearing.
+    const effective = effectiveConcurrency(SWEEP_FANOUT_CONCURRENCY);
+    const p75Arm = Math.floor((SWEEP_FANOUT_DEADLINE_MS * effective) / (ASSUMED_DO_RPC_MS * SWEEP_FANOUT_RPCS_PER_TENANT));
+    const meanArm = Math.floor(
+      (SWEEP_FANOUT_DEADLINE_MS * SWEEP_MEAN_COMPLETION_FRACTION * effective) / (MEASURED_DO_RPC_MS.meanMs * SWEEP_FANOUT_RPCS_PER_TENANT),
+    );
+    expect(SWEEP_TENANT_SLICE).toBe(Math.min(p75Arm, meanArm));
+    expect(meanArm).toBeLessThanOrEqual(p75Arm);
   });
 
   it("the measurement records its own provenance, so the next re-calibration can date it", () => {
@@ -223,10 +270,27 @@ describe("B1 — every leg with its own fan-out is IN the derivation, not waved 
   it("the OLD batch would NOT have fitted — the break-even the gate derived, as a bound", () => {
     // Kept executable rather than narrated: at 2 subrequests an item, the tail
     // reserve buys ~200 items, and the retired cap was 500.
-    const tailReserve = SWEEP_SUBREQUEST_BUDGET - SWEEP_TICK_SUBREQUESTS + SCREENING_RECOVERY_SUBREQUESTS;
+    //
+    // AGAINST THE BUDGET B1 WAS DERIVED UNDER (1,000), pinned as a literal
+    // rather than read from the live constant. `SWEEP_SUBREQUEST_BUDGET` was
+    // corrected to the real Workers-Paid 10,000 on 2026-08-24, and reading the
+    // live value here would silently turn a HISTORICAL claim into a false
+    // present-tense one — the 500-item batch fits comfortably under 10,000, so
+    // the assertion would have to be deleted rather than restated. The history
+    // is what makes SCREENING_RECOVERY_BATCH's size legible, so it stays.
+    const B1_ERA_BUDGET = 1_000;
+    const tailReserve = B1_ERA_BUDGET - SWEEP_TICK_SUBREQUESTS + SCREENING_RECOVERY_SUBREQUESTS;
     const breakEvenItems = Math.floor(tailReserve / SCREENING_RECOVERY_SUBREQUESTS_PER_ITEM);
     expect(SCREENING_RECOVERY_BATCH).toBeLessThanOrEqual(breakEvenItems);
     expect(500).toBeGreaterThan(breakEvenItems);
+  });
+
+  it("the budget is the PAID per-invocation ceiling, not the Free plan's internal-services row", () => {
+    // The correction of 2026-08-24. 1,000 was never a conservative reading of
+    // the Paid limit — it is the Free plan's row, i.e. a DIFFERENT plan's
+    // number wearing an "UNVERIFIED" label. Pinned so a future "let's be
+    // careful" edit cannot quietly reinstate a limit that is not the limit.
+    expect(SWEEP_SUBREQUEST_BUDGET).toBe(10_000);
   });
 
   it("the stale-reserve reaper is bounded and priced too (NEW-1 — B1's class, one leg over)", () => {
@@ -272,14 +336,26 @@ describe("S1 — one tick's subrequest cost is a constant, with headroom for the
     expect(withTwoMoreLegs).toBeLessThanOrEqual(SWEEP_SUBREQUEST_BUDGET);
   });
 
-  it("the OLD shape crossed the same budget at ~122 tenants — the number this replaces", () => {
+  it("the OLD shape crossed a budget at all — unbounded is the property that changed, not the crossing point", () => {
     // Measured on the real sweep at 5/20/50/100/200 seeded tenants: the slope
     // was exactly 8.0 DO RPCs per tenant, subrequests(N) ~= 8N + 29. Kept as an
     // executable statement of what changed, so "bounded" is a comparison rather
     // than an adjective.
     const oldShape = (n: number) => 8 * n + 29;
-    expect(oldShape(122)).toBeGreaterThan(SWEEP_SUBREQUEST_BUDGET);
-    expect(oldShape(121)).toBeLessThan(SWEEP_SUBREQUEST_BUDGET);
+
+    // The audit's headline number, against the budget the audit believed in.
+    const AUDIT_ERA_BUDGET = 1_000;
+    expect(oldShape(122)).toBeGreaterThan(AUDIT_ERA_BUDGET);
+    expect(oldShape(121)).toBeLessThan(AUDIT_ERA_BUDGET);
+
+    // And against the VERIFIED budget, which moves the cliff without removing
+    // it — the correction bought ~10x the runway and changed nothing about the
+    // shape. This is the part that must keep holding as the budget is
+    // re-verified: O(N) always crosses SOME ceiling.
+    const crossesAt = Math.ceil((SWEEP_SUBREQUEST_BUDGET - 29) / 8);
+    expect(oldShape(crossesAt)).toBeGreaterThanOrEqual(SWEEP_SUBREQUEST_BUDGET);
+    expect(crossesAt).toBeLessThan(2_000);
+
     // The new shape does not depend on N at all: 10x the tenants, same cost.
     expect(SWEEP_TICK_SUBREQUESTS).toBe(SWEEP_RPCS_PER_TENANT * SWEEP_TENANT_SLICE + SWEEP_FIXED_SUBREQUESTS);
   });

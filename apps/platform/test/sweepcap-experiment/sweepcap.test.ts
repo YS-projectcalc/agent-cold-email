@@ -18,6 +18,7 @@ import {
   SWEEP_RPCS_PER_TENANT,
   SWEEP_SUBREQUEST_BUDGET,
   SWEEP_TENANT_SLICE,
+  sweepTenantSliceFor,
 } from "../../src/admin/sweep-budget.js";
 import { COVERAGE_TICKS_ALERT_AFTER } from "../../src/admin/sweep-signals.js";
 import { newSweepFanout, sweepTenants } from "../../src/admin/tenant-slice.js";
@@ -265,12 +266,19 @@ describe("sweepcap: the measurement matrix", () => {
     }
     console.log("\n=== MATRIX: concurrency x slice ===\n" + rows.join("\n"));
 
-    // The C=1 / slice=3 cell must reproduce the SHIPPED configuration, or the
-    // harness is not modelling the thing in production.
-    const baseline = runCell(1, SWEEP_TENANT_SLICE, 99);
-    expect(baseline.completedPct).toBeGreaterThanOrEqual(50);
-    expect(SWEEP_TENANT_SLICE).toBe(3);
-    console.log(`[baseline C=1 slice=${SWEEP_TENANT_SLICE}] wallP50=${baseline.wallP50} wallP95=${baseline.wallP95} completed=${baseline.completedPct}%`);
+    // Each concurrency must complete the slice the SHIPPED derivation gives it —
+    // the pairing is (C, sweepTenantSliceFor(C)), not (C, SWEEP_TENANT_SLICE).
+    // SWEEP_TENANT_SLICE is the slice at the shipped concurrency 6; pairing it
+    // with C=1 asks the serial fan-out to do six workers' work and is the
+    // over-sized-slice cliff, not a baseline.
+    for (const c of [1, 2, 4, 6, 8, 12]) {
+      const cell = runCell(c, sweepTenantSliceFor(c), 99 + c);
+      expect(cell.completedPct, `C=${c} at its derived slice ${sweepTenantSliceFor(c)}`).toBeGreaterThanOrEqual(95);
+    }
+    // The pre-concurrency configuration, reproduced: 3 tenants a tick.
+    expect(sweepTenantSliceFor(1)).toBe(3);
+    const baseline = runCell(1, sweepTenantSliceFor(1), 99);
+    console.log(`[baseline C=1 slice=3] wallP50=${baseline.wallP50} wallP95=${baseline.wallP95} completed=${baseline.completedPct}%`);
   });
 
   it("max sustainable slice per concurrency, and whether it clears the coverage threshold", () => {
@@ -306,29 +314,43 @@ describe("sweepcap: the measurement matrix", () => {
   });
 });
 
-describe("sweepcap: the PROPOSED sizing rule (findings doc section 6)", () => {
-  it("is conservative at every measured concurrency, and a no-op at C=1", () => {
+describe("sweepcap: the SHIPPED sizing rule, graded by the simulation", () => {
+  // THIS IS THE ORACLE `sweep-budget.test.ts` DEFERS TO.
+  //
+  // Folding the mean-completion rule into `sweepTenantSliceFor` made that
+  // file's 0.85 assertion true by construction (it says so, in place). The
+  // independence has to live somewhere, and it lives here: a discrete-event
+  // simulation over a latency distribution fitted to the PRODUCTION capture,
+  // which is not derived from any constant in the budget file. It grades the
+  // real exported function, not a copy of its formula.
+  it("the SHIPPED sweepTenantSliceFor never exceeds what the deadline can finish, at any concurrency", () => {
     for (const c of [1, 2, 3, 4, 6, 8, 12]) {
-      const derived = derivedSlice(c, SWEEP_FANOUT_DEADLINE_MS, ASSUMED_DO_RPC_MS, SWEEP_FANOUT_RPCS_PER_TENANT);
+      const derived = sweepTenantSliceFor(c);
       const measured = maxSustainableSlice(c, 5000 + c).slice;
       // A sizing rule that OVERSHOOTS what the deadline sustains is worse than
       // one that undershoots: Table 1 shows an over-sized slice collapsing the
       // achieved advance to 1, not to something proportionally smaller.
-      expect(derived, `C=${c}: derived ${derived} must not exceed measured max ${measured}`).toBeLessThanOrEqual(measured);
+      expect(derived, `C=${c}: shipped slice ${derived} must not exceed the simulated max ${measured}`).toBeLessThanOrEqual(measured);
     }
-    // The whole change must be provably inert with concurrency disabled.
-    expect(derivedSlice(1, SWEEP_FANOUT_DEADLINE_MS, ASSUMED_DO_RPC_MS, SWEEP_FANOUT_RPCS_PER_TENANT)).toBe(SWEEP_TENANT_SLICE);
+    // The whole change must be provably inert with concurrency disabled: the
+    // rollback lever restores the pre-concurrency slice exactly.
+    expect(sweepTenantSliceFor(1)).toBe(3);
+    // And the harness's own copy of the rule must still track the shipped one —
+    // if they diverge, the table in the findings doc stops describing the code.
+    expect(derivedSlice(6, SWEEP_FANOUT_DEADLINE_MS, ASSUMED_DO_RPC_MS, SWEEP_FANOUT_RPCS_PER_TENANT)).toBeGreaterThanOrEqual(
+      sweepTenantSliceFor(6),
+    );
   });
 
   it("at the recommended C=6 the rotation clears the coverage threshold at 66 and 150 tenants", () => {
-    const slice = derivedSlice(6, SWEEP_FANOUT_DEADLINE_MS, ASSUMED_DO_RPC_MS, SWEEP_FANOUT_RPCS_PER_TENANT);
+    const slice = sweepTenantSliceFor(6);
     expect(coverageTicks(66, slice)).toBeLessThanOrEqual(COVERAGE_TICKS_ALERT_AFTER);
     expect(coverageTicks(150, slice)).toBeLessThanOrEqual(COVERAGE_TICKS_ALERT_AFTER);
     // Stated rather than hidden: 300 tenants is NOT covered at C=6 without the
     // opsSummary dedupe. That is the boundary at which the read-model is due.
     expect(coverageTicks(300, slice)).toBeGreaterThan(COVERAGE_TICKS_ALERT_AFTER);
-    // ...and today's serial configuration does not clear it at any of the three.
-    const serial = derivedSlice(1, SWEEP_FANOUT_DEADLINE_MS, ASSUMED_DO_RPC_MS, SWEEP_FANOUT_RPCS_PER_TENANT);
+    // ...and the serial configuration does not clear it at any of the three.
+    const serial = sweepTenantSliceFor(1);
     expect(coverageTicks(66, serial)).toBeGreaterThan(COVERAGE_TICKS_ALERT_AFTER);
   });
 });
