@@ -382,7 +382,19 @@ describe("sweep_coverage — the bounded sweep's own coverage latency", () => {
       await reportSweepSignals(env, mailer, { legs: CLEAN, digest: null, coverage: slow }, T0 + i * 300_000);
     }
     expect(subjectsFor(mailer, "Ops sweep coverage")).toEqual(["[coldrig] Ops sweep coverage: UNHEALTHY"]);
-    expect(mailer.sent[0]!.text).toContain("read-model");
+    const body = mailer.sent[0]!.text;
+    // The remedy the operator is sent to. Case-insensitive because the body
+    // shouts it; the point is that the alert names a NEXT ACTION at all.
+    expect(body.toLowerCase()).toContain("read-model");
+    // ...and it must no longer send them after the thing that is already built.
+    // A deleted mechanism that leaves its prose behind is its own defect class:
+    // this alert told the operator for four days that bounded-concurrency
+    // fan-out was "unevaluated" and the cheap thing to try next.
+    expect(body.toLowerCase()).not.toContain("unevaluated");
+    expect(body.toLowerCase()).not.toContain("has not been tried");
+    // The rollback lever is the first thing to check, because setting it to 1
+    // reproduces this alert by design.
+    expect(body).toContain("SWEEP_FANOUT_CONCURRENCY");
   });
 
   it("stays quiet while the rotation is short and nothing is deferred", async () => {

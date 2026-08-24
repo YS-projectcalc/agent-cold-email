@@ -1,7 +1,27 @@
 # Sweep capacity — bounded-concurrency fan-out, measured
 
-Lane `feat/sweep-capacity-2026-08-24` · MEASUREMENT PHASE (no production change)
-· 2026-08-24 UTC · base `main@fbd4168`
+Lane `feat/sweep-capacity-2026-08-24` · 2026-08-24 UTC · base `main@fbd4168`
+
+> **STATUS: MEASURED, THEN BUILT.** This document is the measurement, frozen as
+> written before any production code changed. The orchestrator ratified the §6
+> recommendation and the build followed in the same lane: bounded-concurrency
+> fan-out at C=6, the verified subrequest budget, the `opsSummary` dedupe, the
+> send pipeline off the slice, and paying-tenant-first.
+>
+> Where the SHIPPED numbers differ from §1's table, the shipped ones are more
+> conservative and the reason is recorded in the code:
+> * the slice at C=6 is **19**, not 16 or 21 — §6's rule plus the mean-completion
+>   ceiling, which was folded into the derivation rather than left as a test
+>   assertion, and the dedupe's 9→7 fan-out RPCs;
+> * `sweepTenantSliceFor(1)` is **4**, not 3 — the dedupe lowers the per-tenant
+>   cost independently of the concurrency, so the rollback lever restores the
+>   serial LOOP, not the pre-lane slice;
+> * paying-tenant-first shipped as a bounded PREPEND that reallocates the slice,
+>   not as the separate priority pass §9 sketched — §9 flagged it as a design
+>   question because sorting the slice breaks the keyset cursor, and the prepend
+>   is what avoids that.
+>
+> Rotation at the live 66 tenants: **110 min → 20 min.**
 
 Answers the ruling in `docs/adversarial/sweep-calibration-gate-2026-08-20.md:201-212`
 (finding 6): the shipped remedy prose tells the operator "the read-model is DUE",
@@ -545,7 +565,8 @@ a rotation ≤ 12 ticks with `covered === handed` — not when the suite is gree
 
 ## 9 · Build brief for the next phase
 
-**Not authorized by this document. The orchestrator owns the go/no-go.**
+**Authorised and BUILT** — see the header. Kept as written so the plan and the
+outcome can be compared; the deltas are listed there.
 
 ### Files
 

@@ -238,13 +238,18 @@ export const MEASURED_DO_RPC_MS = {
  * alert whose subject is degraded detection latency.
  *
  * WHY p75 AND NOT THE MEAN. The fan-out phase is a SUM of
- * `SWEEP_FANOUT_RPCS_PER_TENANT x slice` sequential draws, so sizing at the
- * mean puts the expected cost exactly ON the deadline — the last leg then clips
- * on roughly half of all ticks, `leastVisited` drops below the slice, and the
- * published coverage figure is optimistic again by exactly the mechanism this
- * re-calibration exists to remove. At p75 the expected cost is ~11.2s of the
- * 15s deadline, so the slice completes on a typical tick and the number the
- * check publishes is the number the rotation achieves.
+ * `SWEEP_FANOUT_RPCS_PER_TENANT x slice` draws — sequential until 2026-08-24,
+ * `SWEEP_FANOUT_CONCURRENCY` of them at a time since, which changes the wall
+ * clock but not the ARITHMETIC OF THE MEAN: sizing at the mean puts the
+ * expected cost exactly ON the deadline whatever the concurrency, the last leg
+ * then clips on roughly half of all ticks, `leastVisited` drops below the
+ * slice, and the published coverage figure is optimistic again by exactly the
+ * mechanism this re-calibration exists to remove.
+ *
+ * That is why the mean has its OWN ceiling now rather than only a test
+ * assertion — see `SWEEP_MEAN_COMPLETION_FRACTION`. Under concurrency the p75
+ * arm alone stopped being sufficient: the two arms differ by `mean/p75`, and at
+ * a serial slice of 3 the `floor()` happened to absorb it. It does not at 19.
  *
  * The deadline still makes being wrong DEGRADE rather than break — but "it
  * degrades gracefully" was used to justify never checking the number, and a

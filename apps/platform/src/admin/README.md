@@ -197,21 +197,29 @@ alerts once a full pass takes longer than an hour.
 left after the send pipeline's bounds, so raising it only moves the deadline's
 cut further up the leg order — the trailing legs still get nothing.
 
-Two real remedies, in the order they should be tried:
+**First, check the rollback lever.** `SWEEP_FANOUT_CONCURRENCY` defaults to 6.
+If it has been set to `1`, the fan-out is serial, the slice drops from 19 to 4,
+and this alert is the expected consequence rather than a new problem. Unset it.
 
-1. **Bounded-concurrency fan-out — UNEVALUATED, and cheap to evaluate.**
-   `sweepTenants` awaits one tenant at a time and the legs run one after
-   another, so the 15s deadline is spent almost entirely WAITING: the same
-   capture that produced the latency numbers above puts DO `cpuTime` at 1-3% of
-   `wallTime`. Overlapping those waits would raise the slice several-fold
-   against the same deadline. Nobody has measured this Worker against the
-   platform's simultaneous-connection ceiling, and the option appears nowhere in
-   the wave-B.1 gate or `ARCHITECTURE.md` — it has never been considered and
-   rejected, it has simply never been raised (gate 2026-08-20, finding 6).
+1. ~~**Bounded-concurrency fan-out**~~ — **SHIPPED 2026-08-24**, and no longer a
+   remedy to reach for. It was measured first
+   (`docs/research/sweep-capacity-measurement-2026-08-24.md`) and built in the
+   same lane, together with the `opsSummary` dedupe (3 identical per-tenant RPCs
+   folded into 1), the send pipeline moving off the tenant slice, and
+   paying-tenant-first priority. Net: slice 3 → 19, rotation at 66 tenants
+   110 min → 20 min. The measurement is what says how much headroom is left:
+   healthy through ~150 tenants at the shipped concurrency of 6.
 2. **The D1/Analytics read-model** `ARCHITECTURE.md` #3 names as the scale path.
-   The structural fix, and the much larger build.
+   The structural fix, the much larger build, and now the ONLY remaining one.
+   **Due at roughly 300 tenants.**
 
-Measure (1) before committing to (2).
+Between the two there is one dial and it is not free: raising
+`SWEEP_FANOUT_CONCURRENCY` above 6. Cloudflare documents **six** simultaneous
+open connections per invocation and does NOT say whether a DO stub RPC is one of
+them; 6 was chosen precisely so the design never depends on that answer. Past
+six the runtime QUEUES rather than erroring, so an over-set value degrades
+honestly — the tick clips and this check reports the clipped figure — but the
+slice will have been sized for concurrency the invocation cannot actually get.
 
 ### Calibration (2026-08-20) — the slice is now WALL-CLOCK bound
 

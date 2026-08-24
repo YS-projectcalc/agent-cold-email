@@ -87,7 +87,7 @@ import { watchtowerStub } from "./watchtower-infra.js";
 // only about what the TICK reported (`covered` / `handed` / `allowed`), never
 // about the configured constant. Reaching for the constant is what made a short
 // tail read as a clipped tick.
-import { coverageTicks } from "./sweep-budget.js";
+import { coverageTicks, SWEEP_FANOUT_CONCURRENCY } from "./sweep-budget.js";
 
 /**
  * HOW EACH LEG REPORTS — the table that makes this module's coverage claim
@@ -500,12 +500,16 @@ export async function reportSweepSignals(
                 `tenant, a dead domain or a starved send queue is now noticed a rotation late rather than within a cron period. ` +
                 `The slice is bounded by the WALL CLOCK the cron period has left after the send pipeline's own bounds, at a DO ` +
                 `RPC round trip measured against production — so simply raising the slice buys nothing, it just moves the ` +
-                `deadline's cut further up the leg order (admin/sweep-budget.ts). TWO REAL REMEDIES, and the cheap one has not ` +
-                `been tried: (1) BOUNDED-CONCURRENCY FAN-OUT — the same measurement puts DO cpuTime at 1-3% of wall time, so ` +
-                `the deadline is being spent WAITING, and overlapping those waits would raise the slice several-fold against ` +
-                `the same deadline. Unevaluated: nobody has measured this Worker against the simultaneous-connection ceiling. ` +
-                `(2) the D1/Analytics read-model (admin/README.md, ARCHITECTURE.md #3), which is the structural fix and the ` +
-                `larger build. Measure (1) before committing to (2).`,
+                `deadline's cut further up the leg order (admin/sweep-budget.ts). CHECK THE CHEAP THING FIRST: the fan-out runs ` +
+                `${SWEEP_FANOUT_CONCURRENCY} DO RPCs in parallel by default, and if SWEEP_FANOUT_CONCURRENCY has been set to 1 ` +
+                `(the rollback lever) the slice drops by roughly 5x and this alert is the expected consequence — unset it. ` +
+                `Otherwise BOUNDED-CONCURRENCY FAN-OUT IS ALREADY SHIPPED and is not the remedy: it was measured and built on ` +
+                `2026-08-24 (docs/research/sweep-capacity-measurement-2026-08-24.md), together with the opsSummary dedupe, the ` +
+                `send pipeline moving off the slice, and paying-tenant-first priority. THE REMAINING REMEDY IS THE ` +
+                `D1/ANALYTICS READ-MODEL (admin/README.md, ARCHITECTURE.md #3) — the structural fix and the larger build. The ` +
+                `measurement put it as DUE at roughly 300 tenants; raising SWEEP_FANOUT_CONCURRENCY above ` +
+                `${SWEEP_FANOUT_CONCURRENCY} buys headroom short of that, but only up to the platform's documented ` +
+                `six-simultaneous-connection ceiling, past which the runtime queues and every tick clips.`,
             },
       );
     }
