@@ -25,6 +25,9 @@ import {
   SCREENING_RECOVERY_BATCH,
   SCREENING_RECOVERY_SUBREQUESTS,
   SCREENING_RECOVERY_SUBREQUESTS_PER_ITEM,
+  SEND_PIPELINE_SUBREQUESTS,
+  SEND_PIPELINE_TENANT_CAP,
+  SEND_PIPELINE_RPCS_PER_TENANT,
   SWEEP_FIXED_OVERHEAD_SUBREQUESTS,
   SWEEP_FIXED_SUBREQUESTS,
   SWEEP_RPCS_PER_TENANT,
@@ -252,6 +255,18 @@ describe("B1 — every leg with its own fan-out is IN the derivation, not waved 
     expect(SCREENING_RECOVERY_SUBREQUESTS).toBe(SCREENING_RECOVERY_BATCH * SCREENING_RECOVERY_SUBREQUESTS_PER_ITEM);
   });
 
+  it("the send pipeline is bounded in COUNT too, now that it fans out over its own population", () => {
+    // It moved off the tenant slice on 2026-08-24, which is what made it a leg
+    // with a fan-out of its own — and B1's lesson is that such a leg needs a
+    // DECLARED count the subrequest term is derived from, not just a deadline.
+    expect(SEND_PIPELINE_SUBREQUESTS).toBe(SEND_PIPELINE_TENANT_CAP * SEND_PIPELINE_RPCS_PER_TENANT);
+    // Derived from its own leg deadline, not chosen.
+    expect(SEND_PIPELINE_TENANT_CAP).toBe(Math.floor(SEND_PIPELINE_LEG_DEADLINE_MS / (ASSUMED_DO_RPC_MS * SEND_PIPELINE_RPCS_PER_TENANT)));
+    // The cap must not bind before the DEADLINE does, or it would silently
+    // become the real bound and the rotation would slow for no stated reason.
+    expect(SEND_PIPELINE_TENANT_CAP * SEND_PIPELINE_RPCS_PER_TENANT * ASSUMED_DO_RPC_MS).toBeLessThanOrEqual(SEND_PIPELINE_LEG_DEADLINE_MS);
+  });
+
   it("a FULL slice plus EVERY leg's own fan-out still fits the budget — the arithmetic B1 broke", () => {
     // Restated from the parts rather than read off the aggregate, so this stays
     // an independent statement of the same claim.
@@ -259,7 +274,8 @@ describe("B1 — every leg with its own fan-out is IN the derivation, not waved 
       SWEEP_RPCS_PER_TENANT * SWEEP_TENANT_SLICE +
       SWEEP_FIXED_OVERHEAD_SUBREQUESTS +
       SCREENING_RECOVERY_SUBREQUESTS +
-      RESERVE_REAP_SUBREQUESTS;
+      RESERVE_REAP_SUBREQUESTS +
+      SEND_PIPELINE_SUBREQUESTS;
     expect(worstCaseTick).toBe(SWEEP_TICK_SUBREQUESTS);
     expect(worstCaseTick).toBeLessThanOrEqual(SWEEP_SUBREQUEST_BUDGET * SWEEP_BUDGET_FRACTION);
     // And the tail — the heartbeat, the alert sends, the per-check writes — is

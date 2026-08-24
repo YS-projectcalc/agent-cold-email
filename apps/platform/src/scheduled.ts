@@ -175,7 +175,17 @@ export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer;
   // stalled engine consumes leg time that no other concern was waiting on —
   // every health, billing and alerting leg above has already completed by the
   // time this one starts.
-  const sendPipeline = await runLeg("sendPipeline", null, () => runSendPipelineAllTenants(env, now, {}, { tenantIds: scope.tenantIds }));
+  //
+  // OFF THE TENANT SLICE as of 2026-08-24. It used to be handed `scope.tenantIds`,
+  // which bounded automatic sending by the FAN-OUT's slice — a slice derived
+  // from what the health legs can do in the 15s left over after THIS leg's own
+  // two bounds. That deducted the same constraint twice and, at the calibrated
+  // slice of 3, meant the send pipeline polled and ticked three tenants a cycle
+  // out of 66. It carries its own leg deadline, its own per-tenant budget, its
+  // own rotation and now its own count cap, which is what those bounds were
+  // sized for. Deliberately NOT given `scope`: `scopedLegNames()` in
+  // sweep-signal-coverage.test.ts reads that as "slice-bounded", and it is not.
+  const sendPipeline = await runLeg("sendPipeline", null, () => runSendPipelineAllTenants(env, now, {}));
 
   const legs = {
     tenantSlice: slice,

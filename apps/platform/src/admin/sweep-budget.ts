@@ -187,98 +187,6 @@ export const RESERVE_REAP_BATCH = 25;
 export const RESERVE_REAP_SUBREQUESTS = RESERVE_REAP_BATCH * RESERVE_REAP_SUBREQUESTS_PER_ITEM;
 
 /**
- * Everything one tick spends that the tenant slice does not: the fixed overhead
- * plus every leg that fans out over a population of its own.
- *
- * The slice derivation subtracts THIS. A leg with its own fan-out that is not
- * summed in here is a leg the slice arithmetic is silently wrong about, which is
- * the whole of B1.
- */
-export const SWEEP_FIXED_SUBREQUESTS =
-  SWEEP_FIXED_OVERHEAD_SUBREQUESTS + SCREENING_RECOVERY_SUBREQUESTS + RESERVE_REAP_SUBREQUESTS;
-
-/**
- * DO RPCs ONE tenant costs across ALL legs in a single tick, worst case.
- *
- * The breakdown, and why it is the worst case rather than the typical one:
- *   deliverability          1  deliverabilitySweep
- *   opsSummary              1  opsSummaryForSweep — SHARED by the next three
- *   dunning                 1  suspendForDunning (only past_due)
- *   digest                  0  reads the shared summary
- *   watchtower              1  maybeEmitContinuityNudge (stalled only)
- *   warmupCancel            1  warmupCancelSweep
- *   webhooks                1  runWebhookDeliveries
- *   provisioningReconcile   1  provisioningReconcileSweep (dark until armed)
- *   sendPipeline            2  runScheduledPoll + runScheduledTick
- *                          --
- *                           9
- *
- * WAS 11. Dunning, digest and the watchtower each made their own `opsSummary`
- * RPC — three round trips to the same object, in the same tick, for the same
- * tenant. One shared prefetch leg (`runOpsSummaryPrefetch`) replaces them, and
- * because the slice is derived from the WORST case it had to be a deterministic
- * PREFETCH rather than a lazy cache: a cache that can miss leaves the worst case
- * where it was, so the slice could not have moved.
- *
- * `sweep-signal-coverage.test.ts` re-derives this from `scheduled.ts`'s own leg
- * bag: a leg added there without an entry in this accounting reds the suite,
- * because the last thing this file may do is under-count and hand the sweep a
- * slice it cannot afford.
- */
-export const SWEEP_RPCS_PER_TENANT = 9;
-
-/**
- * WHAT EACH CRON LEG COSTS, per leg, as an independent statement of the two
- * aggregates above.
- *
- * NEW-2 (round 2 of the wave-b1 gate) — the guard that was supposed to close
- * B1's class was a TAUTOLOGY. It asserted
- * `SWEEP_FIXED_SUBREQUESTS === OVERHEAD + SCREENING_RECOVERY_SUBREQUESTS`
- * while the source DEFINED `SWEEP_FIXED_SUBREQUESTS` as exactly that sum:
- * `A === A`, incapable of failing. The gate proved it by planting the precise
- * defect the guard's own comment claimed to catch — a new 300-item x
- * 3-subrequest fan-out leg declared in this file and not summed in — and the
- * suite stayed green, 13/13.
- *
- * A guard needs an ORACLE THAT IS NOT THE THING IT CHECKS. This table is that
- * oracle: it is written per leg, and `sweep-budget.test.ts` asserts (a) every
- * leg in `scheduled.ts`'s own leg bag appears here, (b) the `perTenant` column
- * sums to `SWEEP_RPCS_PER_TENANT`, and (c) the `ownFanout` column sums to the
- * non-overhead part of `SWEEP_FIXED_SUBREQUESTS`. Three different sources —
- * the scheduler, this table, and the derived constants — have to agree, so no
- * single edit can move all of them silently.
- *
- * `perTenant`: DO RPCs this leg spends per tenant in the slice, worst case.
- * `ownFanout`: subrequests this leg spends over a population that is NOT the
- * tenant slice. Non-zero here means the leg needs its own batch and its own
- * term — which is the whole of B1 and NEW-1.
- */
-export const LEG_SUBREQUEST_COSTS: Record<string, { perTenant: number; ownFanout: number; sharedSummary?: true }> = {
-  tenantSlice: { perTenant: 0, ownFanout: 0 }, // D1 reads only (counted in the overhead)
-  deliverability: { perTenant: 1, ownFanout: 0 }, // deliverabilitySweep
-  opsSummary: { perTenant: 1, ownFanout: 0 }, // opsSummaryForSweep — the ONE fetch the three legs below share
-  dunning: { perTenant: 1, ownFanout: 0, sharedSummary: true }, // suspendForDunning (past_due only)
-  digest: { perTenant: 0, ownFanout: 0, sharedSummary: true }, // reads the shared summary and nothing else
-  watchtower: { perTenant: 1, ownFanout: 0, sharedSummary: true }, // maybeEmitContinuityNudge (stalled only)
-  warmupCancel: { perTenant: 1, ownFanout: 0 }, // warmupCancelSweep
-  webhooks: { perTenant: 1, ownFanout: 0 }, // runWebhookDeliveries
-  spendReservations: { perTenant: 0, ownFanout: RESERVE_REAP_SUBREQUESTS }, // NEW-1 — orphaned reservations
-  sdnRefresh: { perTenant: 0, ownFanout: 0 }, // one outbound fetch, once a day (overhead)
-  sdnRecovery: { perTenant: 0, ownFanout: SCREENING_RECOVERY_SUBREQUESTS }, // B1 — sentinel-held reviews
-  provisioningReconcile: { perTenant: 1, ownFanout: 0 }, // provisioningReconcileSweep (dark until armed)
-  sweepCursor: { perTenant: 0, ownFanout: 0 }, // one D1 write (overhead)
-  retireChecks: { perTenant: 0, ownFanout: 0 }, // one D1 DELETE (overhead)
-  sendPipeline: { perTenant: 2, ownFanout: 0 }, // runScheduledPoll + runScheduledTick
-};
-
-/**
- * The same count for the legs that run BEFORE the send pipeline — the ones the
- * S6 wall-clock derivation below has to fit into its deadline (everything above
- * except `sendPipeline`'s pair).
- */
-export const SWEEP_FANOUT_RPCS_PER_TENANT = SWEEP_RPCS_PER_TENANT - 2;
-
-/**
  * MEASURED wall clock for one DO RPC round trip, caller-side, on the real
  * platform — the distribution the slice is now derived from.
  *
@@ -353,6 +261,139 @@ export const MEASURED_DO_RPC_MS = {
  * measures. Full table in `admin/README.md`.
  */
 export const ASSUMED_DO_RPC_MS = MEASURED_DO_RPC_MS.p75Ms;
+
+/** DO RPCs one tenant costs the send pipeline: `runScheduledPoll` + `runScheduledTick`. */
+export const SEND_PIPELINE_RPCS_PER_TENANT = 2;
+
+/**
+ * How many tenants ONE tick's send pipeline may reach.
+ *
+ * DERIVED FROM ITS OWN LEG DEADLINE, not chosen: at the measured per-RPC round
+ * trip, this is simply how many poll+tick pairs fit in
+ * `SEND_PIPELINE_LEG_DEADLINE_MS`. The leg was already bounded in WALL CLOCK and
+ * carries its own rotation, so a tenant it does not reach is reached next cycle;
+ * what it lacked was a bound in COUNT, and B1's whole lesson is that a leg with
+ * its own fan-out and no declared count is spend the arithmetic cannot see.
+ *
+ * WHY THE LEG NEEDS ITS OWN TERM AT ALL AS OF 2026-08-24: it used to be handed
+ * the cron's tenant SLICE, so its cost was `2 x slice` and it was priced inside
+ * `SWEEP_RPCS_PER_TENANT`. That was wrong in a way that cost customers send
+ * cadence rather than budget — the fan-out deadline is DERIVED as what is left
+ * of the period AFTER this leg's two bounds, so bounding it by the slice as well
+ * deducted the same constraint twice and capped automatic sending at whatever
+ * the HEALTH legs could afford. Off the slice it reaches every tenant its own
+ * deadline allows, which is what those bounds were sized for.
+ */
+export const SEND_PIPELINE_TENANT_CAP = Math.floor(SEND_PIPELINE_LEG_DEADLINE_MS / (ASSUMED_DO_RPC_MS * SEND_PIPELINE_RPCS_PER_TENANT));
+
+/** The send pipeline's whole worst-case per-tick cost, now that it fans out over
+ * a population of its own rather than over the slice. */
+export const SEND_PIPELINE_SUBREQUESTS = SEND_PIPELINE_TENANT_CAP * SEND_PIPELINE_RPCS_PER_TENANT;
+
+/**
+ * Everything one tick spends that the tenant slice does not: the fixed overhead
+ * plus every leg that fans out over a population of its own.
+ *
+ * The slice derivation subtracts THIS. A leg with its own fan-out that is not
+ * summed in here is a leg the slice arithmetic is silently wrong about, which is
+ * the whole of B1.
+ */
+export const SWEEP_FIXED_SUBREQUESTS =
+  SWEEP_FIXED_OVERHEAD_SUBREQUESTS + SCREENING_RECOVERY_SUBREQUESTS + RESERVE_REAP_SUBREQUESTS + SEND_PIPELINE_SUBREQUESTS;
+
+/**
+ * DO RPCs ONE tenant costs across ALL legs in a single tick, worst case.
+ *
+ * The breakdown, and why it is the worst case rather than the typical one:
+ *   deliverability          1  deliverabilitySweep
+ *   opsSummary              1  opsSummaryForSweep — SHARED by the next three
+ *   dunning                 1  suspendForDunning (only past_due)
+ *   digest                  0  reads the shared summary
+ *   watchtower              1  maybeEmitContinuityNudge (stalled only)
+ *   warmupCancel            1  warmupCancelSweep
+ *   webhooks                1  runWebhookDeliveries
+ *   provisioningReconcile   1  provisioningReconcileSweep (dark until armed)
+ *                          --
+ *                           7
+ *
+ * THE SEND PIPELINE IS NOT IN THIS TABLE ANY MORE. It was 2 of the 11, priced
+ * per SLICE tenant, because the cron handed it the slice. It now fans out over
+ * its own population under its own deadline and rotation, so it has an
+ * `ownFanout` term (`SEND_PIPELINE_SUBREQUESTS`) instead — see that constant for
+ * why bounding it by the slice was double-counting the same constraint.
+ *
+ * WAS 11. Dunning, digest and the watchtower each made their own `opsSummary`
+ * RPC — three round trips to the same object, in the same tick, for the same
+ * tenant. One shared prefetch leg (`runOpsSummaryPrefetch`) replaces them, and
+ * because the slice is derived from the WORST case it had to be a deterministic
+ * PREFETCH rather than a lazy cache: a cache that can miss leaves the worst case
+ * where it was, so the slice could not have moved.
+ *
+ * `sweep-signal-coverage.test.ts` re-derives this from `scheduled.ts`'s own leg
+ * bag: a leg added there without an entry in this accounting reds the suite,
+ * because the last thing this file may do is under-count and hand the sweep a
+ * slice it cannot afford.
+ */
+export const SWEEP_RPCS_PER_TENANT = 7;
+
+/**
+ * WHAT EACH CRON LEG COSTS, per leg, as an independent statement of the two
+ * aggregates above.
+ *
+ * NEW-2 (round 2 of the wave-b1 gate) — the guard that was supposed to close
+ * B1's class was a TAUTOLOGY. It asserted
+ * `SWEEP_FIXED_SUBREQUESTS === OVERHEAD + SCREENING_RECOVERY_SUBREQUESTS`
+ * while the source DEFINED `SWEEP_FIXED_SUBREQUESTS` as exactly that sum:
+ * `A === A`, incapable of failing. The gate proved it by planting the precise
+ * defect the guard's own comment claimed to catch — a new 300-item x
+ * 3-subrequest fan-out leg declared in this file and not summed in — and the
+ * suite stayed green, 13/13.
+ *
+ * A guard needs an ORACLE THAT IS NOT THE THING IT CHECKS. This table is that
+ * oracle: it is written per leg, and `sweep-budget.test.ts` asserts (a) every
+ * leg in `scheduled.ts`'s own leg bag appears here, (b) the `perTenant` column
+ * sums to `SWEEP_RPCS_PER_TENANT`, and (c) the `ownFanout` column sums to the
+ * non-overhead part of `SWEEP_FIXED_SUBREQUESTS`. Three different sources —
+ * the scheduler, this table, and the derived constants — have to agree, so no
+ * single edit can move all of them silently.
+ *
+ * `perTenant`: DO RPCs this leg spends per tenant in the slice, worst case.
+ * `ownFanout`: subrequests this leg spends over a population that is NOT the
+ * tenant slice. Non-zero here means the leg needs its own batch and its own
+ * term — which is the whole of B1 and NEW-1.
+ */
+export const LEG_SUBREQUEST_COSTS: Record<string, { perTenant: number; ownFanout: number; sharedSummary?: true }> = {
+  tenantSlice: { perTenant: 0, ownFanout: 0 }, // D1 reads only (counted in the overhead)
+  deliverability: { perTenant: 1, ownFanout: 0 }, // deliverabilitySweep
+  opsSummary: { perTenant: 1, ownFanout: 0 }, // opsSummaryForSweep — the ONE fetch the three legs below share
+  dunning: { perTenant: 1, ownFanout: 0, sharedSummary: true }, // suspendForDunning (past_due only)
+  digest: { perTenant: 0, ownFanout: 0, sharedSummary: true }, // reads the shared summary and nothing else
+  watchtower: { perTenant: 1, ownFanout: 0, sharedSummary: true }, // maybeEmitContinuityNudge (stalled only)
+  warmupCancel: { perTenant: 1, ownFanout: 0 }, // warmupCancelSweep
+  webhooks: { perTenant: 1, ownFanout: 0 }, // runWebhookDeliveries
+  spendReservations: { perTenant: 0, ownFanout: RESERVE_REAP_SUBREQUESTS }, // NEW-1 — orphaned reservations
+  sdnRefresh: { perTenant: 0, ownFanout: 0 }, // one outbound fetch, once a day (overhead)
+  sdnRecovery: { perTenant: 0, ownFanout: SCREENING_RECOVERY_SUBREQUESTS }, // B1 — sentinel-held reviews
+  provisioningReconcile: { perTenant: 1, ownFanout: 0 }, // provisioningReconcileSweep (dark until armed)
+  sweepCursor: { perTenant: 0, ownFanout: 0 }, // one D1 write (overhead)
+  retireChecks: { perTenant: 0, ownFanout: 0 }, // one D1 DELETE (overhead)
+  sendPipeline: { perTenant: 0, ownFanout: SEND_PIPELINE_SUBREQUESTS }, // OFF the slice — its own deadline + rotation + cap
+};
+
+/**
+ * The same count for the legs that run BEFORE the send pipeline — the ones the
+ * S6 wall-clock derivation below has to fit into its deadline.
+ *
+ * EQUAL to `SWEEP_RPCS_PER_TENANT` since 2026-08-24, because the send pipeline
+ * was the only per-tenant cost that was NOT part of the fan-out phase and it has
+ * moved off the slice entirely. Kept as a separate name rather than collapsed:
+ * the two quantities mean different things (what a slice tenant costs the TICK
+ * vs what it costs the DEADLINE) and they diverge again the moment another
+ * post-deadline per-tenant leg is added. `sweep-budget.test.ts` pins the
+ * relationship to the cost table so it cannot drift silently.
+ */
+export const SWEEP_FANOUT_RPCS_PER_TENANT = SWEEP_RPCS_PER_TENANT;
+
 
 /**
  * The wall-clock ceiling for the whole pre-send-pipeline fan-out.

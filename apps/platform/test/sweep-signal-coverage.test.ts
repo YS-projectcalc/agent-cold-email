@@ -75,7 +75,17 @@ describe("the per-tenant RPC budget accounts for every fan-out leg", () => {
   it("finds the scoped legs at all", () => {
     const scoped = scopedLegNames(scheduledSource);
     expect(scoped).toContain("deliverability");
-    expect(scoped).toContain("sendPipeline");
+    expect(scoped).toContain("opsSummary");
+    expect(scoped).toContain("watchtower");
+    // ...and the send pipeline is deliberately NOT among them since 2026-08-24.
+    // Pinned rather than merely absent: it used to be handed the fan-out's
+    // tenant slice, which throttled automatic sending to whatever the health
+    // legs could afford inside the 15s fan-out deadline — a deadline that is
+    // itself DERIVED as the period left over after this very leg's two bounds,
+    // so the slice was deducting the same constraint a second time. If a future
+    // edit puts it back on the slice this assertion says so out loud instead of
+    // the send cadence quietly collapsing again.
+    expect(scoped).not.toContain("sendPipeline");
   });
 
   it("every leg that fans out per tenant is priced, and a ZERO price is explained", () => {

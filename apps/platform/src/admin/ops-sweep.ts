@@ -15,7 +15,7 @@ import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import { newId } from "../schema.js";
 import { countSupportTicketsByStatus, countTerminatedTenants, hasDunningEventForCycle, insertDunningEventIfNew } from "./db.js";
 import { decideDunningAction } from "./dunning.js";
-import { CRON_PERIOD_MS, SEND_PIPELINE_LEG_DEADLINE_MS, SEND_PIPELINE_TENANT_BUDGET_MS } from "./sweep-budget.js";
+import { CRON_PERIOD_MS, SEND_PIPELINE_LEG_DEADLINE_MS, SEND_PIPELINE_TENANT_BUDGET_MS, SEND_PIPELINE_TENANT_CAP } from "./sweep-budget.js";
 import { countTenants, resolveSweepTenants, sweepTenants, sweptSummary, type SweepScope } from "./tenant-slice.js";
 
 /**
@@ -447,10 +447,15 @@ export async function runSendPipelineAllTenants(
   env: Env,
   nowMs: number = new RealClock().now(),
   opts: { tenantBudgetMs?: number; legDeadlineMs?: number } = {},
-  // Only `tenantIds` is honoured. This leg runs AFTER the fan-out phase and
-  // owns the rest of the cron period by design (sweep-budget.ts derives the
-  // fan-out deadline as exactly what is left over after this leg's two bounds),
-  // so applying the fan-out deadline here would deduct the same time twice.
+  // Only `tenantIds` is honoured, and THE CRON NO LONGER PASSES IT (2026-08-24).
+  // This leg runs AFTER the fan-out phase and owns the rest of the cron period
+  // by design — sweep-budget.ts derives the fan-out deadline as exactly what is
+  // left over after this leg's two bounds — so applying the fan-out deadline
+  // here would deduct the same time twice, and handing it the fan-out's SLICE
+  // deducted the same constraint twice in the other dimension: automatic sending
+  // was capped at whatever the HEALTH legs could afford in 15 seconds. The
+  // parameter stays for the on-demand admin route, which legitimately targets a
+  // named set.
   scope: Pick<SweepScope, "tenantIds"> = {},
 ): Promise<SendPipelineSweepSummary> {
   const empty: SendPipelineSweepSummary = {
@@ -494,6 +499,20 @@ export async function runSendPipelineAllTenants(
       summary.skippedForLegDeadline = tenantIds.length - i;
       console.warn(
         `send pipeline: leg deadline reached after ${i}/${tenantIds.length} tenant(s) — ${summary.skippedForLegDeadline} deferred to a later cycle (rotation reaches them)`,
+      );
+      break;
+    }
+    // THE COUNT BOUND (2026-08-24), beside the wall-clock one. This leg fans out
+    // over its own population now that the cron no longer hands it the tenant
+    // slice, and B1's lesson is that such a leg needs a DECLARED count its
+    // subrequest term is derived from — "bounded by a population that is not the
+    // tenant count" is not the same as "small". Derived from this leg's own
+    // deadline, so it binds only if latency comes in far better than measured;
+    // the rotation above reaches whatever it skips.
+    if (i >= SEND_PIPELINE_TENANT_CAP) {
+      summary.skippedForLegDeadline = tenantIds.length - i;
+      console.warn(
+        `send pipeline: per-tick tenant cap (${SEND_PIPELINE_TENANT_CAP}) reached — ${summary.skippedForLegDeadline} deferred to a later cycle (rotation reaches them)`,
       );
       break;
     }

@@ -32,7 +32,7 @@ const HOUR = 60 * 60 * 1000;
 
 describe("the shared summary carries BOTH windows, computed at the DO", () => {
   it("windows the two field groups independently in one call", async () => {
-    const { tenantId } = await mintTenant("Dedupe Windows", "starter");
+    const { tenantId } = await mintTenant("Dedupe Windows", "managed");
     const now = Date.now();
 
     // Two failure events: one inside the watchtower's 1h window, one only
@@ -75,7 +75,7 @@ describe("the shared summary carries BOTH windows, computed at the DO", () => {
 
 describe("a mis-windowed shared summary is REFUSED, not consumed", () => {
   it("sweptSummary throws when the map's window is not the one the caller needs", async () => {
-    const { tenantId } = await mintTenant("Dedupe Mismatch", "starter");
+    const { tenantId } = await mintTenant("Dedupe Mismatch", "managed");
     const now = Date.now();
     // The exact defect a naive memo produces: ONE summary, windowed for the
     // watchtower, handed to a caller that needs the digest's span.
@@ -95,7 +95,7 @@ describe("a mis-windowed shared summary is REFUSED, not consumed", () => {
   });
 
   it("a tenant the prefetch could not supply is an ERROR for the consuming leg, never a silent skip", async () => {
-    const { tenantId } = await mintTenant("Dedupe Missing", "starter");
+    const { tenantId } = await mintTenant("Dedupe Missing", "managed");
     const now = Date.now();
     // Map PRESENT (so we are on the cron path) but this tenant ABSENT — what a
     // prefetch RPC that threw leaves behind. Falling back to a fetch here would
@@ -108,7 +108,7 @@ describe("a mis-windowed shared summary is REFUSED, not consumed", () => {
   });
 
   it("with NO map at all the legs still fetch — the on-demand path is untouched", async () => {
-    const { tenantId } = await mintTenant("Dedupe OnDemand", "starter");
+    const { tenantId } = await mintTenant("Dedupe OnDemand", "managed");
     const digest = await buildOpsDigest(env as Env, Date.now(), DIGEST_WINDOW_HOURS, { tenantIds: [tenantId] });
     expect(digest.errors).toBe(0);
     expect(digest.tenants.scanned).toBeGreaterThanOrEqual(1);
@@ -170,7 +170,9 @@ describe("EFFECT — the tick really does make one ops-summary RPC per tenant, n
   it("the budget records the saving rather than merely claiming it", () => {
     const perTenant = Object.values(LEG_SUBREQUEST_COSTS).reduce((n, leg) => n + leg.perTenant, 0);
     expect(perTenant).toBe(SWEEP_RPCS_PER_TENANT);
-    expect(SWEEP_RPCS_PER_TENANT).toBe(9); // was 11 before the dedupe
+    // 11 before the dedupe (-2, the two duplicate opsSummary calls), then 9
+    // before the send pipeline moved off the slice (-2, its poll+tick pair).
+    expect(SWEEP_RPCS_PER_TENANT).toBe(7);
     expect(LEG_SUBREQUEST_COSTS["digest"]?.perTenant).toBe(0);
     expect(LEG_SUBREQUEST_COSTS["opsSummary"]?.perTenant).toBe(1);
   });
