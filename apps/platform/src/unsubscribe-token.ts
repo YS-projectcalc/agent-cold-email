@@ -95,13 +95,28 @@ export async function verifyUnsubscribeToken(
   return timingSafeEqual(expected, sig);
 }
 
-/** Builds the full hosted one-click URL from a base origin + a signed token
- * — the exact value `List-Unsubscribe`'s https form and the in-body opt-out
- * link both point at (engine/tick.ts). */
-export function buildUnsubscribeUrl(baseUrl: string, tenantId: string, email: string, sig: string): string {
-  const url = new URL("/unsubscribe", baseUrl);
+function buildTokenUrl(baseUrl: string, path: string, tenantId: string, email: string, sig: string): string {
+  const url = new URL(path, baseUrl);
   url.searchParams.set("tenant", tenantId);
   url.searchParams.set("email", email);
   url.searchParams.set("sig", sig);
   return url.toString();
+}
+
+/** Builds the full hosted one-click URL from a base origin + a signed token
+ * — the exact value `List-Unsubscribe`'s https form and the in-body opt-out
+ * link both point at (engine/tick.ts). */
+export function buildUnsubscribeUrl(baseUrl: string, tenantId: string, email: string, sig: string): string {
+  return buildTokenUrl(baseUrl, "/unsubscribe", tenantId, email, sig);
+}
+
+/**
+ * msgchannel Inc4 (design §6) — the SAME (tenant, email, sig) HMAC triplet as
+ * `buildUnsubscribeUrl` above, reused rather than re-invented (CLAUDE.md rule
+ * c), pointed at a different hosted path. `routes/messages.ts`'s two-step
+ * GET-confirm/POST-perform opt-out route verifies it with the same
+ * `verifyUnsubscribeToken` `/unsubscribe` already uses.
+ */
+export function buildMirrorOptOutUrl(baseUrl: string, tenantId: string, email: string, sig: string): string {
+  return buildTokenUrl(baseUrl, "/messages/mirror/optout", tenantId, email, sig);
 }

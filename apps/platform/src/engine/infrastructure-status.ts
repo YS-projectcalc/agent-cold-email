@@ -14,6 +14,7 @@ import { logAction } from "./deliverability-actions.js";
 import { computeMailboxWarmupSnapshot } from "./mailbox-state.js";
 import { deriveNextSteps } from "./next-steps.js";
 import { listSurfacedTenantMessages, type TenantMessage } from "./tenant-messages.js";
+import { getMessageEmailMirrorState, type MessageEmailMirrorState } from "./message-mirror.js";
 
 // The one sentence a customer surface says when a mailbox's health lookup fails.
 // Deliberately identical in the report field and the activity row so the two
@@ -85,6 +86,11 @@ export interface InfrastructureStatus {
   // without a human relay. Unread-first, newest-first, capped at 5, expired
   // rows filtered out.
   messages: TenantMessage[];
+  // msgchannel Inc4 — whether a bounded subset of `messages` above is also
+  // mirrored to this tenant's signup contact email, and whether the account
+  // has opted out. The agent SEES this state; there is no MCP tool for it
+  // (the recipient is a human at the signup address, not the agent — §6).
+  messageEmailMirror: MessageEmailMirrorState;
   /**
    * What this account should do next, derived (design §7.2). THE poll surface —
    * the one endpoint the tool description tells an agent to hit repeatedly — so
@@ -195,6 +201,8 @@ export async function getInfrastructureStatus(ctx: TenantContext): Promise<Infra
     sendReady: mailboxHealth.length > 0 && mailboxHealth.every((m) => m.sendReady),
     // Pure SELECT (GUARDRAIL: never inserts) — see listSurfacedTenantMessages.
     messages: listSurfacedTenantMessages(ctx),
+    // Pure SELECT — see getMessageEmailMirrorState's own doc.
+    messageEmailMirror: getMessageEmailMirrorState(ctx),
     nextSteps: deriveNextSteps(ctx),
   };
 }

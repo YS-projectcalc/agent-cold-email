@@ -234,6 +234,9 @@ interface TenantMessageRow {
   source: "system" | "operator";
   created_at: number;
   read_at: number | null;
+  /** msgchannel Inc4 -- NULL = never mirrored to email. On the row type only;
+   * this module writes no mirror logic (engine/message-mirror.ts owns it). */
+  mirrored_at: number | null;
   [column: string]: SqlStorageValue;
 }
 
@@ -250,7 +253,12 @@ interface TenantMessageRow {
  * recognise, would be its own false terminal. Nor to 'operator_pending', which
  * makes the equal-and-opposite claim that a human elsewhere is the blocker.
  */
-function toSeverity(raw: string): TenantMessageSeverity {
+// Exported (visibility only, zero behavior change) so engine/message-mirror.ts
+// can classify a raw row's severity with the SAME "unrecognised -> action_required"
+// rule this module already applies on every read surface (CLAUDE.md rule c --
+// duplicating this exact 4-line decision would drift the two the moment a 5th
+// rung is added).
+export function toSeverity(raw: string): TenantMessageSeverity {
   if (raw === "info") return "info";
   if (raw === "terminal") return "terminal";
   if (raw === "operator_pending") return "operator_pending";
