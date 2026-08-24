@@ -37,3 +37,6 @@
 - `2026-08-23-roadmap-cleanup/founder-checklist-2026-08-23.md` — founder-sitting checklist for the 2026-08-23 agent-recommendation wave (Gmail OAuth grants, dogfood tenant #1, directory/skill-hub submissions, trust floor), ordered by leverage; referenced from `ROADMAP.md`/`HANDOFF.md`.
 - `2026-08-23-roadmap-cleanup/dogfood-tenant-runbook.md` — read-only investigation of standing up dogfood tenant #1 (EpiphanyMade) through the real product path: sequence, costs, risks, and a STOP list of founder-only actions; nothing executed.
 - `2026-08-23-roadmap-cleanup/send-ledger-2026-08-23.md` — every external action taken or prepared during the 2026-08-23 wave (directory/skill-hub submissions, PRs, the ship + release), one row each; folded into `docs/research/backlink-outreach-targets-2026-08-17.md ## Send ledger — 2026-08-23`.
+
+## 2026-08-24
+- `ROADMAP-done.md` — appended 1 drained `[x]` line (`## Archived 2026-08-24 — sweep-capacity wave close`): the sweep-capacity follow-up increment, self-drained at this handoff now that it's SHIPPED + DEPLOYED + LIVE-VERIFIED (merge `22e3378`, Worker `df5dbe93-bd87-4d75-81ae-e25f3babab8d`, R7 acceptance passed live). msgchannel Inc4 (email mirror) stays live in `ROADMAP.md ## Now` as `[dark-unarmed]` — not drained, arm-gate still open.
