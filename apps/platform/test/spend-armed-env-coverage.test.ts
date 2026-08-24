@@ -53,6 +53,12 @@ const KNOWN_NON_SPEND_ARMING = new Set([
   "CUSTOMER_PROGRESS_STALL_MS", // customer_progress_* unhealthy-predicate bound (§7.11) — detection-timing, not a vendor credential
   "CUSTOMER_PROGRESS_OWED_MAX_MS", // customer_progress_* unhealthy-predicate bound (§7.11) — detection-timing, not a vendor credential
   "CONTINUITY_NUDGE_DELAY_MS", // the one-shot nudge's delay-from-onset (§7.12) — detection-timing, not a vendor credential
+  // Cron fan-out concurrency (admin/sweep-budget.ts). Inert w.r.t. spend: it
+  // changes how many DO RPCs overlap inside one tick, not whether any vendor is
+  // called or what it is asked to do. It is a DETECTION-LATENCY knob and a
+  // rollback lever (set to 1 to restore the serial fan-out) — the same category
+  // as the two bounds above.
+  "SWEEP_FANOUT_CONCURRENCY",
 ]);
 
 function parseEnvFields(source: string): { all: Set<string>; spendArming: Set<string> } {

@@ -131,20 +131,32 @@ describe("EFFECT — the tick really does make one ops-summary RPC per tenant, n
       seeded.push(id);
     }
 
-    const calls: string[] = [];
+    // COUNTED PER DURABLE OBJECT, not in total.
+    //
+    // A total is the wrong unit and the full suite proved it: `env.DB` writes
+    // are not rolled back between test FILES, so `tenants_index` carries rows
+    // other files left behind — including paying ones, which the new
+    // priority prepend correctly sweeps ahead of the slice. Run alone this file
+    // saw 5 calls; run in the full suite it saw 6, and the extra one was CORRECT
+    // behaviour. The dedupe's claim was never "N calls per tick", it is "at most
+    // ONE per tenant instead of three", so that is what is asserted.
+    const callsByObject = new Map<string, string[]>();
     const real = env.TENANT;
     const countingEnv = {
       ...env,
       TENANT: {
         idFromName: (name: string) => real.idFromName(name),
         get: (id: DurableObjectId) => {
+          const key = id.toString();
           const stub = real.get(id) as unknown as Record<string, unknown>;
           return new Proxy(stub, {
             get(target, prop, receiver) {
               const value = Reflect.get(target, prop, receiver);
               if (typeof value !== "function" || typeof prop !== "string") return value;
               return (...args: unknown[]) => {
-                calls.push(prop);
+                const list = callsByObject.get(key) ?? [];
+                list.push(prop);
+                callsByObject.set(key, list);
                 return (target[prop] as (...a: unknown[]) => unknown)(...args);
               };
             },
@@ -155,16 +167,23 @@ describe("EFFECT — the tick really does make one ops-summary RPC per tenant, n
 
     await runScheduledOpsSweep(countingEnv, { mailer: new SandboxOpsMailer(), sliceLimit: seeded.length });
 
-    const perTenantSummaryCalls = calls.filter((m) => m === "opsSummaryForSweep").length;
-    const legacyCalls = calls.filter((m) => m === "opsSummary").length;
+    const all = [...callsByObject.values()].flat();
+    // ZERO of the old per-leg fetches. This is the assertion that reds if any of
+    // the three consumers quietly falls back to its own RPC — which is exactly
+    // what would make the dedupe cosmetic while the slice stayed sized as though
+    // it were real.
+    expect(all.filter((m) => m === "opsSummary").length).toBe(0);
 
-    // ONE shared fetch per tenant in the slice...
-    expect(perTenantSummaryCalls).toBe(seeded.length);
-    // ...and ZERO of the old per-leg fetches. This is the assertion that reds if
-    // any of the three consumers quietly falls back to its own RPC — which is
-    // exactly what would make the dedupe cosmetic while the slice stayed sized
-    // as though it were real.
-    expect(legacyCalls).toBe(0);
+    // AT MOST ONE shared fetch per tenant. Three would be the pre-dedupe shape.
+    for (const [object, methods] of callsByObject) {
+      const n = methods.filter((m) => m === "opsSummaryForSweep").length;
+      expect(n, `object ${object} received ${n} opsSummaryForSweep calls in one tick`).toBeLessThanOrEqual(1);
+    }
+
+    // Positive control: the tick really did sweep the tenants we seeded, so the
+    // two assertions above are not passing on an empty run.
+    const fetched = all.filter((m) => m === "opsSummaryForSweep").length;
+    expect(fetched).toBeGreaterThanOrEqual(seeded.length);
   });
 
   it("the budget records the saving rather than merely claiming it", () => {
