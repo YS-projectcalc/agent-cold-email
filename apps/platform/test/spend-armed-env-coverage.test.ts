@@ -59,6 +59,9 @@ const KNOWN_NON_SPEND_ARMING = new Set([
   // rollback lever (set to 1 to restore the serial fan-out) — the same category
   // as the two bounds above.
   "SWEEP_FANOUT_CONCURRENCY",
+  "MESSAGE_EMAIL_MIRROR_ENABLED", // msgchannel Inc4 — a LEG on/off switch over the already-non-spend-arming OPS_EMAIL binding, not a vendor credential
+  "MESSAGE_MIRROR_TENANT_ALLOWLIST", // Inc4 — narrows which tenants the flag above covers; arms no vendor spend
+  "MESSAGE_MIRROR_MAX_PER_DAY", // Inc4 — a per-tenant send-count BOUND like SPEND_CEILING_CENTS, not an enabler
 ]);
 
 function parseEnvFields(source: string): { all: Set<string>; spendArming: Set<string> } {

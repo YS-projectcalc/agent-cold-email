@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { AdminOperatorMessageInput } from "../admin/schemas.js";
+import { AdminMirrorOptOutInput, AdminOperatorMessageInput } from "../admin/schemas.js";
 import { getTenantIndexById } from "../admin/db.js";
 import type { Env } from "../env.js";
 import { parseIntQueryParam, parseJsonBody } from "../validate.js";
@@ -59,4 +59,20 @@ export const adminMessagesRoute = new Hono<{ Bindings: Env }>()
     const result = await stub.listMessagesForOperator({ limit, unreadOnly });
 
     return c.json({ tenantId, messages: result.messages, total: result.total });
+  })
+  // msgchannel Inc4 (design §6) — the operator's own opt-out/opt-back-in
+  // control, beside the message routes above. Same auth (admin.use("/admin/*",
+  // requireAdminAuth) in index.ts) and same 404 check.
+  .patch("/admin/tenants/:id/mirror", async (c) => {
+    const tenantId = c.req.param("id");
+    const tenant = await getTenantIndexById(c.env, tenantId);
+    if (!tenant) return c.json({ error: `tenant ${tenantId} not found` }, 404);
+
+    const parsed = await parseJsonBody(c, AdminMirrorOptOutInput);
+    if (!parsed.ok) return parsed.response;
+
+    const stub = c.env.TENANT.get(c.env.TENANT.idFromName(tenantId));
+    await stub.setMirrorEmailOptOut(parsed.data.optedOut);
+
+    return c.json({ tenantId, optedOut: parsed.data.optedOut });
   });

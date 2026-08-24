@@ -267,6 +267,23 @@ declare global {
       // decides whether that already-armed path also runs from the cron. A tenant
       // on the sandbox bundle spends $0 whether this is set or not.
       PROVISIONING_RECONCILE_ENABLED?: string;
+      // msgchannel Inc4 (design docs/research/msgchannel-inc4-email-mirror-
+      // design-2026-08-24.md §8 T4) — the email mirror's ARMING switch.
+      // UNSET (or empty/"false"/"0"/"off") = DARK: the drain returns before
+      // any I/O (engine/message-mirror.ts's isMirrorArmed). Shipped default
+      // is dark. NOT `// spend-arming` — it can only ever gate an email send
+      // over the already-non-spend-arming OPS_EMAIL binding, exactly like
+      // PROVISIONING_RECONCILE_ENABLED gates a LEG, not a vendor credential.
+      MESSAGE_EMAIL_MIRROR_ENABLED?: string;
+      // Comma-separated tenant ids. Empty (or unset) = every tenant, once the
+      // flag above is armed. Non-empty NARROWS arming to exactly the listed
+      // ids — the §8 T6 "arm the pilot tenant, verify live, then clear it"
+      // step before widening.
+      MESSAGE_MIRROR_TENANT_ALLOWLIST?: string;
+      // Overrides MIRROR_MAX_PER_DAY's default of 3. Optional: absent falls
+      // back to the code-literal default, matching this file's other
+      // no-configuration-needed-in-dev/test optional vars.
+      MESSAGE_MIRROR_MAX_PER_DAY?: string;
     }
   }
 }

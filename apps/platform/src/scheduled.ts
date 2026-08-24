@@ -27,7 +27,7 @@ import type { Env } from "./env.js";
 import { buildOpsDigest, DIGEST_WINDOW_HOURS, runDeliverabilitySweepAllTenants, runDunningSweep, runOpsSummaryPrefetch, runProvisioningReconcileAllTenants, runSendPipelineAllTenants, runWarmupCancelSweepAllTenants, runWebhookDeliveriesAllTenants } from "./admin/ops-sweep.js";
 import { retireHealthyCheckRows, runWatchtower } from "./admin/watchtower.js";
 import { FAILURE_SIGNAL_WINDOW_MS } from "./admin/watchtower-grading.js";
-import { reportSweepSignals, reportSweepSignalsHealth } from "./admin/sweep-signals.js";
+import { reportMirrorDeliveryHealth, reportSweepSignals, reportSweepSignalsHealth } from "./admin/sweep-signals.js";
 import { recordSweepHeartbeat } from "./admin/watchtower-infra.js";
 import { priorityWindowSize, SWEEP_FANOUT_DEADLINE_MS, sweepFanoutConcurrency, sweepTenantSliceFor } from "./admin/sweep-budget.js";
 import { commitSweepCursor, newSweepFanout, readPriorityTenantIds, readTenantSlice, type SweepScope } from "./admin/tenant-slice.js";
@@ -268,6 +268,17 @@ export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer;
   await runLeg<void>("sweepSignalsSelfReport", undefined, () =>
     reportSweepSignalsHealth(env, mailer, signalAlerts !== null, now),
   );
+
+  // msgchannel Inc4 §7 — the email mirror's OWN delivery channel, produced
+  // ONCE per tick over the `deliverability` leg's aggregate (never per
+  // tenant, C8). `deliverability` is `null` when that leg itself threw
+  // (`runLeg`'s fallback) — reported by `cron_legs`, not by an invented
+  // all-zero mirror observation.
+  if (deliverability) {
+    await runLeg<void>("mirrorDeliverySelfReport", undefined, () =>
+      reportMirrorDeliveryHealth(env, mailer, deliverability.mirror, now),
+    );
+  }
 
   // The dead-man's heartbeat (BLOCKING-2). LAST, and its own leg: it is the
   // claim "this tick ran to completion", so it must not be written by any leg

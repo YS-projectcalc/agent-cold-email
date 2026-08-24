@@ -41,6 +41,7 @@ import {
   MAILBOX_REBUY_CHECK,
   MAILBOX_RELEASE_FAILED_CHECK,
   MAILBOX_SLOT_FAILED_CHECK,
+  MIRROR_DELIVERY_CHECK,
   SEND_STARVED_CHECK,
   SWEEP_COVERAGE_CHECK,
   SWEEP_SIGNALS_CHECK,
@@ -112,6 +113,9 @@ export const ALERT_FAMILIES: Readonly<Record<string, AlertFamily>> = {
     budget: "counted",
   },
   warmup_duplicates: { keys: ["dup_b1", "dup_b2"], scope: "global", budget: "counted" },
+  // msgchannel Inc4 §7 — the mirror's OWN delivery channel, GLOBAL (never
+  // per-entity, C8) and produced once per tick over the tick's aggregate.
+  [MIRROR_DELIVERY_CHECK]: { keys: ["send_failed", "no_contact_email", "dark_channel"], scope: "global", budget: "counted" },
 
   // --- Budget-exempt group 1: the check of last resort -------------------
   // When the dead-man fires every other alert in the platform is already
@@ -320,6 +324,19 @@ export function alertDeliveryKey(whys: readonly DeliveryReason[]): string {
   const failed = whys.includes("send_failed");
   if (dark && failed) return "both";
   return dark ? "dark_channel" : "send_failed";
+}
+
+/**
+ * `mirror_delivery`'s failure MODE, worst-first. `darkChannel` (the OpsMailer
+ * has no live binding at all) outranks a real `send_failed` (a transient/
+ * rejected send against a configured channel), which outranks
+ * `no_contact_email` (a data-completeness gap, not a channel malfunction —
+ * §3's steady-state "no mirror, ever" for a tenant with none on file).
+ */
+export function mirrorDeliveryKey(darkChannel: boolean, failed: number, noContact: number): string {
+  if (darkChannel) return "dark_channel";
+  if (failed > 0) return "send_failed";
+  return "no_contact_email";
 }
 
 /** `warmup_duplicates`' two bands (1 / 2+). A band, not the count: the count

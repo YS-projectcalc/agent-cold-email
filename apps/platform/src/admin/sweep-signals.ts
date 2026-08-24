@@ -71,17 +71,19 @@
 import type { DeliveryReason } from "@coldstart/shared";
 import type { Env } from "../env.js";
 import type { OpsMailer } from "../ops-mail/ops-mailer.js";
+import type { MirrorDrainResult } from "../engine/message-mirror.js";
 import type { OpsDigest } from "./ops-sweep.js";
 import { reconcileAlerts, reportCheck } from "./watchtower.js";
 import {
   ALERT_DELIVERY_CHECK,
   CRON_LEGS_CHECK,
+  MIRROR_DELIVERY_CHECK,
   SWEEP_COVERAGE_CHECK,
   SWEEP_SIGNALS_CHECK,
   type AlertOutcome,
   type CheckResult,
 } from "./watchtower-alerts.js";
-import { alertDeliveryKey, cronLegsKey, sweepCoverageKey, warmupGaveUpKey } from "./watchtower-families.js";
+import { alertDeliveryKey, cronLegsKey, mirrorDeliveryKey, sweepCoverageKey, warmupGaveUpKey } from "./watchtower-families.js";
 import { watchtowerStub } from "./watchtower-infra.js";
 // No `SWEEP_TENANT_SLICE` here, deliberately: since NB-3 this module reasons
 // only about what the TICK reported (`covered` / `handed` / `allowed`), never
@@ -627,6 +629,46 @@ export async function reportSweepSignalsHealth(env: Env, mailer: OpsMailer, repo
             `warmup_cancel_gave_up observation was made this tick. Those checks are not healthy, they are UNREPORTED, ` +
             `and the cron heartbeat is still being written, so the dead-man will stay quiet. Check the WatchtowerDO ` +
             `(gradeSweepStreak) and D1.`,
+        },
+    nowMs,
+  );
+}
+
+/**
+ * msgchannel Inc4 §7 — the email mirror's OWN delivery channel reporting on
+ * itself, produced ONCE per tick over the `deliverability` leg's aggregate
+ * (`DeliverabilitySweepAllSummary.mirror`), never per tenant (C8: a
+ * per-entity instance would multiply with the tenant count). `darkChannel` is
+ * read the SAME way `createOpsMailer` decides real-vs-sandbox — a present
+ * `OPS_EMAIL` binding, nothing DO-local.
+ *
+ * Unhealthy whenever the tick actually tried and failed to reach someone
+ * (`failed > 0`) or found eligible rows it could not address at all
+ * (`noContact > 0`) — a tick with neither is healthy regardless of
+ * `suppressed`/`sent`, since a full ring or a quiet tick are both the design
+ * working as intended, not a delivery problem.
+ */
+export async function reportMirrorDeliveryHealth(env: Env, mailer: OpsMailer, mirror: MirrorDrainResult, nowMs: number): Promise<void> {
+  const darkChannel = !env.OPS_EMAIL;
+  const unhealthy = mirror.failed > 0 || mirror.noContact > 0;
+  await reportCheck(
+    env,
+    mailer,
+    unhealthy
+      ? {
+          name: MIRROR_DELIVERY_CHECK,
+          healthy: false,
+          materiality: mirrorDeliveryKey(darkChannel, mirror.failed, mirror.noContact),
+          detail:
+            `The email mirror's drain this tick: ${mirror.sent} sent, ${mirror.failed} failed, ` +
+            `${mirror.suppressed} suppressed (daily cap), ${mirror.noContact} skipped for no contact email on file. ` +
+            `${darkChannel ? "OPS_EMAIL is not bound — the channel is entirely dark." : ""}`,
+        }
+      : {
+          name: MIRROR_DELIVERY_CHECK,
+          healthy: true,
+          basis: "reobserved",
+          detail: `The email mirror's drain this tick: ${mirror.sent} sent, ${mirror.suppressed} suppressed, 0 failed, 0 no-contact.`,
         },
     nowMs,
   );

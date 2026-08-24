@@ -307,8 +307,9 @@ export const SEND_PIPELINE_SUBREQUESTS = SEND_PIPELINE_TENANT_CAP * SEND_PIPELIN
  *   warmupCancel            1  warmupCancelSweep
  *   webhooks                1  runWebhookDeliveries
  *   provisioningReconcile   1  provisioningReconcileSweep (dark until armed)
+ *   mirror (Inc4)           2  MIRROR_SUBREQUESTS_PER_TENANT — rides deliverabilitySweep, no new RPC
  *                          --
- *                           7
+ *                           9
  *
  * THE SEND PIPELINE IS NOT IN THIS TABLE ANY MORE. It was 2 of the 11, priced
  * per SLICE tenant, because the cron handed it the slice. It now fans out over
@@ -328,7 +329,17 @@ export const SEND_PIPELINE_SUBREQUESTS = SEND_PIPELINE_TENANT_CAP * SEND_PIPELIN
  * because the last thing this file may do is under-count and hand the sweep a
  * slice it cannot afford.
  */
-export const SWEEP_RPCS_PER_TENANT = 7;
+/**
+ * msgchannel Inc4 (design §8 T5) — the email mirror's own worst-case per-tenant
+ * cost, folded into the `deliverability` leg's term rather than a new leg: it
+ * rides the EXISTING `deliverabilitySweep` DO RPC (one line after
+ * `pruneTenantMessages`), so no new entry appears in `scheduled.ts`'s leg bag.
+ * One contact-email D1 read on cache miss + one mailer.send, worst case. Steady
+ * state is 0 (no eligible rows -> a local SELECT and nothing else).
+ */
+export const MIRROR_SUBREQUESTS_PER_TENANT = 2;
+
+export const SWEEP_RPCS_PER_TENANT = 7 + MIRROR_SUBREQUESTS_PER_TENANT;
 
 /**
  * How many PAYING tenants one tick may sweep ahead of the rotation.
@@ -397,7 +408,11 @@ export const SWEEP_FIXED_SUBREQUESTS =
 export const LEG_SUBREQUEST_COSTS: Record<string, { perTenant: number; ownFanout: number; sharedSummary?: true }> = {
   tenantSlice: { perTenant: 0, ownFanout: 0 }, // D1 reads only (counted in the overhead)
   tenantPriority: { perTenant: 0, ownFanout: 0 }, // one bounded D1 read (overhead); its tenants are priced in SWEEP_TENANTS_TOUCHED_PER_TICK
-  deliverability: { perTenant: 1, ownFanout: 0 }, // deliverabilitySweep
+  // msgchannel Inc4 — MIRROR_SUBREQUESTS_PER_TENANT rides the SAME RPC
+  // (deliverabilitySweep), so it is folded into this leg's own term rather than
+  // declared as its own row: there is no new key in scheduled.ts's leg bag for
+  // it to price against.
+  deliverability: { perTenant: 1 + MIRROR_SUBREQUESTS_PER_TENANT, ownFanout: 0 }, // deliverabilitySweep (+ Inc4 mirror)
   opsSummary: { perTenant: 1, ownFanout: 0 }, // opsSummaryForSweep — the ONE fetch the three legs below share
   dunning: { perTenant: 1, ownFanout: 0, sharedSummary: true }, // suspendForDunning (past_due only)
   digest: { perTenant: 0, ownFanout: 0, sharedSummary: true }, // reads the shared summary and nothing else
@@ -414,18 +429,42 @@ export const LEG_SUBREQUEST_COSTS: Record<string, { perTenant: number; ownFanout
 };
 
 /**
- * The same count for the legs that run BEFORE the send pipeline — the ones the
- * S6 wall-clock derivation below has to fit into its deadline.
+ * The same count for the legs the S6 wall-clock derivation has to fit into its
+ * deadline — `SWEEP_RPCS_PER_TENANT` MINUS `MIRROR_SUBREQUESTS_PER_TENANT`,
+ * and minus nothing else.
  *
- * EQUAL to `SWEEP_RPCS_PER_TENANT` since 2026-08-24, because the send pipeline
- * was the only per-tenant cost that was NOT part of the fan-out phase and it has
- * moved off the slice entirely. Kept as a separate name rather than collapsed:
- * the two quantities mean different things (what a slice tenant costs the TICK
- * vs what it costs the DEADLINE) and they diverge again the moment another
- * post-deadline per-tenant leg is added. `sweep-budget.test.ts` pins the
- * relationship to the cost table so it cannot drift silently.
+ * ⚠️ THE FOLD ARITHMETIC, AND IT IS THE ONE PLACE A MECHANICAL MERGE IS WRONG
+ * (X-1). Both lanes edited this line for different reasons and the naive
+ * resolution keeps BOTH subtractions:
+ *
+ *   sweep-capacity: `= SWEEP_RPCS_PER_TENANT`   (the `- 2` for the send
+ *       pipeline was DROPPED, because that leg moved off the tenant slice
+ *       entirely and no longer has a per-tenant term to exclude)
+ *   Inc4:           `= SWEEP_RPCS_PER_TENANT - 2 - MIRROR_SUBREQUESTS_PER_TENANT`
+ *       (written against a tree where the send pipeline was still ON the slice)
+ *
+ * Keeping Inc4's line verbatim would subtract a send-pipeline pair that is not
+ * in `SWEEP_RPCS_PER_TENANT` any more — 9 - 2 - 2 = 5 instead of 7 — which
+ * UNDER-states the per-tenant deadline cost and therefore OVER-sizes the slice.
+ * Both lanes' tests would have stayed green: the cost-table sum guard checks
+ * `SWEEP_RPCS_PER_TENANT`, not this term.
+ *
+ * WHY THE MIRROR IS EXCLUDED (Inc4's reasoning, and it is correct and kept):
+ * S6 charges `ASSUMED_DO_RPC_MS` per unit here on the assumption that every unit
+ * IS one round trip — `MEASURED_DO_RPC_MS`'s own provenance note says "the cost
+ * is DISPATCH, not work". The mirror rides INSIDE the existing
+ * `deliverabilitySweep` dispatch; it adds server-side work to a round trip
+ * already counted once, never a second round trip. Folding it in would
+ * double-charge the wall clock for latency that was never a dispatch.
+ * `SWEEP_RPCS_PER_TENANT` is unchanged by that exclusion — those 2 subrequests
+ * are real and DO count against the invocation's subrequest budget (10,000 on
+ * Workers Paid, see `SWEEP_SUBREQUEST_BUDGET`); they just never cost an extra
+ * 414-531ms sequential hop.
+ *
+ * `sweep-budget.test.ts` pins the relationship to the cost table so it cannot
+ * drift silently.
  */
-export const SWEEP_FANOUT_RPCS_PER_TENANT = SWEEP_RPCS_PER_TENANT;
+export const SWEEP_FANOUT_RPCS_PER_TENANT = SWEEP_RPCS_PER_TENANT - MIRROR_SUBREQUESTS_PER_TENANT;
 
 
 /**

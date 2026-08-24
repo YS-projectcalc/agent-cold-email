@@ -71,6 +71,7 @@ import {
   type OperatorMessageListResult,
 } from "./engine/tenant-messages.js";
 import { maybeEmitContinuityNudge } from "./engine/continuity-nudge.js";
+import { drainMessageMirror, setMirrorEmailOptOut } from "./engine/message-mirror.js";
 import { getProvisioningStateForOperator, type ProvisioningState, type ProvisioningStateOptions } from "./engine/provisioning-state.js";
 import { contactOperator, type ContactOperatorResult } from "./engine/contact-operator.js";
 import { reconcileOrphanedAdmissions } from "./engine/contact-operator-reconcile.js";
@@ -499,6 +500,18 @@ export class TenantDO extends DurableObject<Env> {
     // push claim sequence (see schema.ts's mailbox_cred_pushes comment).
     // DEFAULT 0 so an existing row's first claim under the new code reads 1.
     this.addColumnIfMissing("mailbox_cred_pushes", "push_seq", "INTEGER NOT NULL DEFAULT 0");
+    // msgchannel Inc4 (design §5/§8 T1/T2) — DO-local only, no D1 migration.
+    this.addColumnIfMissing("tenant_profile", "mirror_email_optout_at", "INTEGER");
+    this.addColumnIfMissing("tenant_profile", "mirror_ring_json", "TEXT");
+    // Inc4 §5 BACKFILL — only an EXISTING DO reaches `true` here (a fresh DO
+    // takes the column from TENANT_DO_SCHEMA and has zero rows either way).
+    // Stamping every pre-existing row 0 ("suppressed, pre-mirror") instead of
+    // leaving it NULL is what stops the first armed drain from mailing a
+    // 30-day backlog to every tenant at once (§9 T12).
+    const mirroredAtColumnAdded = this.addColumnIfMissing("tenant_messages", "mirrored_at", "INTEGER");
+    if (mirroredAtColumnAdded) {
+      this.ctx.storage.sql.exec(`UPDATE tenant_messages SET mirrored_at = 0 WHERE mirrored_at IS NULL`);
+    }
     // Created here, not in TENANT_DO_SCHEMA, so they run only after the columns
     // above are guaranteed to exist (safe for DOs that predate the column). Each
     // collapses any pre-existing rows that would violate the unique key BEFORE
@@ -670,13 +683,19 @@ export class TenantDO extends DurableObject<Env> {
     }
   }
 
-  private addColumnIfMissing(table: string, column: string, definition: string): void {
+  /** Returns whether it actually performed the ALTER (Inc4 §5) — a fresh DO
+   * takes every column from TENANT_DO_SCHEMA and never reaches this branch,
+   * so `true` here means an EXISTING DO is upgrading, which is exactly when a
+   * migration needing a one-shot backfill (e.g. Inc4's mirrored_at) must run. */
+  private addColumnIfMissing(table: string, column: string, definition: string): boolean {
     const columns = this.ctx.storage.sql
       .exec<{ name: string }>(`PRAGMA table_info(${table})`)
       .toArray();
     if (!columns.some((c) => c.name === column)) {
       this.ctx.storage.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      return true;
     }
+    return false;
   }
 
   /** Bootstraps a freshly-signed-up tenant. Idempotent: a second call is a no-op. */
@@ -1466,6 +1485,10 @@ export class TenantDO extends DurableObject<Env> {
     // cleanup of expired/old-read tenant_messages rows, reusing this existing
     // per-tenant cron leg rather than a new cron (engine/tenant-messages.ts).
     pruneTenantMessages(ctx);
+    // msgchannel Inc4 — the email mirror drain (engine/message-mirror.ts).
+    // Rides this existing per-tenant leg (§4): no new cron, no new RPC. Dark
+    // by construction until MESSAGE_EMAIL_MIRROR_ENABLED is armed.
+    const mirror = await drainMessageMirror(ctx);
     // msgchannel Inc5 fast-follow — reconciles agent_contact_log admissions
     // an isolate death left with no D1 support_tickets record (engine/
     // contact-operator-reconcile.ts). REAL wall-clock, not ctx.clock: the
@@ -1473,7 +1496,7 @@ export class TenantDO extends DurableObject<Env> {
     // documented invariant — a demo tenant's up-to-1440x VirtualClock must
     // never gate this), so the reap threshold has to be measured the same way.
     await reconcileOrphanedAdmissions(ctx, new RealClock().now());
-    return result;
+    return { ...result, mirror };
   }
 
   /**
@@ -1515,6 +1538,19 @@ export class TenantDO extends DurableObject<Env> {
    */
   listMessagesForOperator(options: ListMessagesForOperatorOptions): OperatorMessageListResult {
     return listMessagesForOperator(this.requireContext(), options);
+  }
+
+  /**
+   * msgchannel Inc4 — flips the whole-mirror opt-out (engine/
+   * message-mirror.ts). Two callers, same RPC: the recipient's own signed
+   * link (GET/POST /messages/mirror/optout, routes/messages.ts — unauthed,
+   * the token IS the credential) and an operator's PATCH
+   * /admin/tenants/:id/mirror (routes/admin-messages.ts). Suppresses ONLY
+   * the mirror — dunning notices, magic-link auth mail and the DO rows
+   * themselves are untouched.
+   */
+  setMirrorEmailOptOut(optedOut: boolean): void {
+    setMirrorEmailOptOut(this.requireContext(), optedOut);
   }
 
   /**

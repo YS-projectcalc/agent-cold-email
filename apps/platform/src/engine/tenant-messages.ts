@@ -234,6 +234,9 @@ interface TenantMessageRow {
   source: "system" | "operator";
   created_at: number;
   read_at: number | null;
+  /** msgchannel Inc4 -- NULL = never mirrored to email. On the row type only;
+   * this module writes no mirror logic (engine/message-mirror.ts owns it). */
+  mirrored_at: number | null;
   [column: string]: SqlStorageValue;
 }
 
