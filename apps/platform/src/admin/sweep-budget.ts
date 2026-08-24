@@ -192,15 +192,27 @@ export const SWEEP_FIXED_SUBREQUESTS =
  *   webhooks                1  runWebhookDeliveries
  *   provisioningReconcile   1  provisioningReconcileSweep (dark until armed)
  *   sendPipeline            2  runScheduledPoll + runScheduledTick
+ *   mirror (Inc4)           2  MIRROR_SUBREQUESTS_PER_TENANT — rides deliverabilitySweep, no new RPC
  *                          --
- *                          11
+ *                          13
  *
  * `sweep-signal-coverage.test.ts` re-derives this from `scheduled.ts`'s own leg
  * bag: a leg added there without an entry in this accounting reds the suite,
  * because the last thing this file may do is under-count and hand the sweep a
  * slice it cannot afford.
  */
-export const SWEEP_RPCS_PER_TENANT = 11;
+export const SWEEP_RPCS_PER_TENANT = 11 + 2;
+
+/**
+ * msgchannel Inc4 (design §8 T5) — the email mirror's own worst-case
+ * per-tenant cost, folded into the `deliverability` leg's term below rather
+ * than a new leg: it rides the EXISTING `deliverabilitySweep` DO RPC (one
+ * line after `pruneTenantMessages`), so no new entry appears in
+ * `scheduled.ts`'s leg bag. One contact-email D1 read on cache miss + one
+ * mailer.send, worst case. Steady state is 0 (no eligible rows -> a local
+ * SELECT and nothing else).
+ */
+export const MIRROR_SUBREQUESTS_PER_TENANT = 2;
 
 /**
  * WHAT EACH CRON LEG COSTS, per leg, as an independent statement of the two
@@ -230,7 +242,11 @@ export const SWEEP_RPCS_PER_TENANT = 11;
  */
 export const LEG_SUBREQUEST_COSTS: Record<string, { perTenant: number; ownFanout: number }> = {
   tenantSlice: { perTenant: 0, ownFanout: 0 }, // D1 reads only (counted in the overhead)
-  deliverability: { perTenant: 1, ownFanout: 0 }, // deliverabilitySweep
+  // msgchannel Inc4 — MIRROR_SUBREQUESTS_PER_TENANT rides the SAME RPC
+  // (deliverabilitySweep), so it is folded into this leg's own term rather
+  // than declared as its own row (there is no new key in scheduled.ts's leg
+  // bag for it to price against).
+  deliverability: { perTenant: 1 + MIRROR_SUBREQUESTS_PER_TENANT, ownFanout: 0 }, // deliverabilitySweep (+ Inc4 mirror)
   dunning: { perTenant: 2, ownFanout: 0 }, // opsSummary + suspendForDunning (past_due only)
   digest: { perTenant: 1, ownFanout: 0 }, // opsSummary
   watchtower: { perTenant: 2, ownFanout: 0 }, // opsSummary + maybeEmitContinuityNudge (stalled only)
@@ -248,9 +264,27 @@ export const LEG_SUBREQUEST_COSTS: Record<string, { perTenant: number; ownFanout
 /**
  * The same count for the legs that run BEFORE the send pipeline — the ones the
  * S6 wall-clock derivation below has to fit into its deadline (everything above
- * except `sendPipeline`'s pair).
+ * except `sendPipeline`'s pair) — MINUS `MIRROR_SUBREQUESTS_PER_TENANT`.
+ *
+ * That subtraction is deliberate and NOT the same move as excluding
+ * `sendPipeline`. `sendPipeline`'s 2 are excluded because they run in a LATER
+ * phase, after this deadline. The mirror's 2 are excluded because they are
+ * not a separate SEQUENTIAL DO round trip at all — S6's wall-clock model
+ * charges `ASSUMED_DO_RPC_MS` per unit here on the assumption that every unit
+ * IS one round trip (`MEASURED_DO_RPC_MS`'s own provenance note: "the cost is
+ * DISPATCH, not work"). The Inc4 mirror rides INSIDE the existing
+ * `deliverabilitySweep` dispatch (one line after `pruneTenantMessages`, no
+ * new RPC) — it adds server-side work to a round trip already counted once,
+ * never a second round trip. Folding it in here anyway double-charges the
+ * wall-clock budget for latency that was never a dispatch: at the shipped
+ * slice it moved the measured-mean fan-out estimate from 11,178ms to
+ * 13,662ms of a 12,750ms (85% of 15,000ms) ceiling — a REGRESSION this
+ * exclusion exists to prevent. `SWEEP_RPCS_PER_TENANT` (the SUBREQUEST-budget
+ * term above) is UNCHANGED here — those 2 subrequests are real and do count
+ * against the shared 1000-subrequest tick budget; they just never cost an
+ * extra 414-531ms sequential hop.
  */
-export const SWEEP_FANOUT_RPCS_PER_TENANT = SWEEP_RPCS_PER_TENANT - 2;
+export const SWEEP_FANOUT_RPCS_PER_TENANT = SWEEP_RPCS_PER_TENANT - 2 - MIRROR_SUBREQUESTS_PER_TENANT;
 
 /**
  * MEASURED wall clock for one DO RPC round trip, caller-side, on the real

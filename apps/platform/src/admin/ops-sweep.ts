@@ -8,6 +8,7 @@
 import { RealClock } from "../clock.js";
 import { countWaitlistEmails, lookupTenantContactEmail } from "../db.js";
 import type { Env } from "../env.js";
+import { isAffirmativeEnvFlag, type MirrorDrainResult } from "../engine/message-mirror.js";
 import type { TenantOpsSummary } from "../engine/ops-summary.js";
 import { escapeHtml } from "../html-escape.js";
 import { BUDGET_EXPIRED, rotationOffset, withItemBudget } from "../isolated-loop.js";
@@ -189,7 +190,13 @@ export interface DeliverabilitySweepAllSummary {
   tenantsSwept: number;
   errors: number;
   deferred: number;
+  /** msgchannel Inc4 — the email mirror's tick-wide aggregate, summed across
+   * every tenant this leg visited (admin/watchtower-alerts.ts's
+   * MIRROR_DELIVERY_CHECK reads this once per tick, scheduled.ts). */
+  mirror: MirrorDrainResult;
 }
+
+const EMPTY_MIRROR_SUMMARY: MirrorDrainResult = { sent: 0, failed: 0, suppressed: 0, noContact: 0 };
 
 /** Runs the deliverability monitor->decide->act loop for every tenant IN SCOPE
  * — the cron lane (no send scheduling, that's tick()/B2). The cron hands it the
@@ -197,15 +204,20 @@ export interface DeliverabilitySweepAllSummary {
  * nothing and gets a bounded full scan. */
 export async function runDeliverabilitySweepAllTenants(env: Env, scope: SweepScope = {}): Promise<DeliverabilitySweepAllSummary> {
   const tenantIds = await resolveSweepTenants(env, scope);
+  const mirror: MirrorDrainResult = { ...EMPTY_MIRROR_SUMMARY };
   const swept = await sweepTenants(
     tenantIds,
     scope.fanout,
     async (tenantId) => {
-      await env.TENANT.get(env.TENANT.idFromName(tenantId)).deliverabilitySweep();
+      const result = await env.TENANT.get(env.TENANT.idFromName(tenantId)).deliverabilitySweep();
+      mirror.sent += result.mirror.sent;
+      mirror.failed += result.mirror.failed;
+      mirror.suppressed += result.mirror.suppressed;
+      mirror.noContact += result.mirror.noContact;
     },
     (tenantId, err) => console.error(`deliverability sweep failed for tenant ${tenantId}`, err),
   );
-  return { tenantsSwept: swept.visited, errors: swept.errors, deferred: swept.deferred };
+  return { tenantsSwept: swept.visited, errors: swept.errors, deferred: swept.deferred, mirror };
 }
 
 export interface WarmupCancelSweepAllSummary {
@@ -267,10 +279,13 @@ export interface ProvisioningReconcileSweepSummary {
  * "0", "false", "off" (case-insensitive) all read as OFF, so a founder who sets a
  * disabling word gets what they meant instead of the "any-non-empty-value"
  * footgun. Shipped default (unset) is dark.
+ *
+ * The value-parsing itself is `isAffirmativeEnvFlag` (engine/message-mirror.ts),
+ * generalized out of this function rather than duplicated (CLAUDE.md rule c)
+ * when msgchannel Inc4 needed the identical convention for its own arming flag.
  */
 export function provisioningReconcileArmed(env: { PROVISIONING_RECONCILE_ENABLED?: string }): boolean {
-  const raw = (env.PROVISIONING_RECONCILE_ENABLED ?? "").trim().toLowerCase();
-  return raw !== "" && raw !== "0" && raw !== "false" && raw !== "off";
+  return isAffirmativeEnvFlag(env.PROVISIONING_RECONCILE_ENABLED);
 }
 
 /**
