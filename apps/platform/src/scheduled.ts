@@ -24,8 +24,9 @@
 // degrades gracefully — an unsendable alert can never take down the sweep.
 import { RealClock } from "./clock.js";
 import type { Env } from "./env.js";
-import { buildOpsDigest, runDeliverabilitySweepAllTenants, runDunningSweep, runProvisioningReconcileAllTenants, runSendPipelineAllTenants, runWarmupCancelSweepAllTenants, runWebhookDeliveriesAllTenants } from "./admin/ops-sweep.js";
+import { buildOpsDigest, DIGEST_WINDOW_HOURS, runDeliverabilitySweepAllTenants, runDunningSweep, runOpsSummaryPrefetch, runProvisioningReconcileAllTenants, runSendPipelineAllTenants, runWarmupCancelSweepAllTenants, runWebhookDeliveriesAllTenants } from "./admin/ops-sweep.js";
 import { retireHealthyCheckRows, runWatchtower } from "./admin/watchtower.js";
+import { FAILURE_SIGNAL_WINDOW_MS } from "./admin/watchtower-grading.js";
 import { reportSweepSignals, reportSweepSignalsHealth } from "./admin/sweep-signals.js";
 import { recordSweepHeartbeat } from "./admin/watchtower-infra.js";
 import { SWEEP_FANOUT_DEADLINE_MS, sweepFanoutConcurrency, sweepTenantSliceFor } from "./admin/sweep-budget.js";
@@ -89,9 +90,25 @@ export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer;
   const scope: SweepScope = { tenantIds: slice?.ids ?? [], fanout };
 
   const deliverability = await runLeg("deliverability", null, () => runDeliverabilitySweepAllTenants(env, scope));
-  const dunning = await runLeg("dunning", null, () => runDunningSweep(env, now, mailer, scope));
-  const digest = await runLeg("digest", null, () => buildOpsDigest(env, now, 24, scope));
-  const watchtower = await runLeg("watchtower", null, () => runWatchtower(env, mailer, now, scope));
+
+  // THE SHARED OPS-SUMMARY PREFETCH — one DO RPC per tenant, feeding the three
+  // legs below that each used to make their own. It runs FIRST of the three so
+  // its coverage is a superset of theirs, and both windows are computed in the
+  // one call because the three consumers ask about three different spans and
+  // the windowed fields are pre-aggregated counts nobody can re-window
+  // (admin/tenant-slice.ts's `sweptSummary` asserts each consumer got its own).
+  const summaryWindows = { actionsSinceMs: now - DIGEST_WINDOW_HOURS * 60 * 60 * 1000, failureSignalsSinceMs: now - FAILURE_SIGNAL_WINDOW_MS };
+  const opsSummary = await runLeg("opsSummary", null, () => runOpsSummaryPrefetch(env, summaryWindows, scope));
+  // NAMED TO KEEP `scopedLegNames()` HONEST. sweep-signal-coverage.test.ts finds
+  // the slice-bounded legs by grepping each `runLeg(...)` call for the substring
+  // "scope"; a variable called `sharedScope` does not contain it (capital S), so
+  // dunning/digest/watchtower would have silently dropped out of that guard —
+  // the guard would still pass, on three fewer legs.
+  const scopeWithSummaries: SweepScope = { ...scope, summaries: opsSummary?.summaries };
+
+  const dunning = await runLeg("dunning", null, () => runDunningSweep(env, now, mailer, scopeWithSummaries));
+  const digest = await runLeg("digest", null, () => buildOpsDigest(env, now, DIGEST_WINDOW_HOURS, scopeWithSummaries));
+  const watchtower = await runLeg("watchtower", null, () => runWatchtower(env, mailer, now, scopeWithSummaries));
   // Warmup-pool auto-cancel at ramp completion (founder ruling 2026-08-02,
   // ROADMAP.md:25). BELOW runWatchtower per this file's own ordering rule —
   // the health/alerting legs come first so a slow vendor lane can never delay
@@ -163,6 +180,7 @@ export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer;
   const legs = {
     tenantSlice: slice,
     deliverability,
+    opsSummary,
     dunning,
     digest,
     watchtower,

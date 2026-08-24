@@ -12,6 +12,7 @@ import { RealClock } from "../src/clock.js";
 import {
   SWEEP_FANOUT_CONCURRENCY,
   SWEEP_FANOUT_CONCURRENCY_MAX,
+  SWEEP_FANOUT_RPCS_PER_TENANT,
   SWEEP_TENANT_SLICE,
   effectiveConcurrency,
   sweepFanoutConcurrency,
@@ -174,9 +175,18 @@ describe("§5 — the covered set must stay a contiguous PREFIX, or the cursor s
   });
 });
 
-describe("C=1 reproduces the pre-concurrency behaviour EXACTLY", () => {
-  it("derives the same slice the calibration shipped", () => {
-    expect(sweepTenantSliceFor(1)).toBe(3);
+describe("C=1 reproduces the pre-concurrency LOOP exactly", () => {
+  it("the serial slice is 4 — and the +1 over the shipped 3 is the DEDUPE, not the concurrency", () => {
+    // Precision about what the rollback lever does and does not restore.
+    // `SWEEP_FANOUT_CONCURRENCY=1` restores the serial loop verbatim; it does
+    // NOT restore the slice of 3, because the ops-summary dedupe in the same
+    // lane genuinely lowered the per-tenant cost (9 fan-out RPCs -> 7) and a
+    // serial tick can now afford one more tenant. Pinned rather than described,
+    // so the next change to either number has to say which one moved.
+    expect(SWEEP_FANOUT_RPCS_PER_TENANT).toBe(7);
+    expect(sweepTenantSliceFor(1)).toBe(4);
+    // The concurrency is what does the heavy lifting, not the dedupe.
+    expect(sweepTenantSliceFor(SWEEP_FANOUT_CONCURRENCY)).toBeGreaterThan(4 * sweepTenantSliceFor(1) - 1);
   });
 
   it("runs the serial loop: the deadline stops it BETWEEN tenants, and index 0 always runs", async () => {

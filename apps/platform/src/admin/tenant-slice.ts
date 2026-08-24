@@ -31,6 +31,7 @@
 // can.
 
 import type { Env } from "../env.js";
+import type { TenantOpsSummary } from "../engine/ops-summary.js";
 import { RealClock } from "../clock.js";
 import { coverageTicks, SWEEP_TENANT_SLICE } from "./sweep-budget.js";
 
@@ -112,6 +113,69 @@ export interface SweepScope {
   tenantIds?: readonly string[];
   /** The tick's shared fan-out phase. Absent = no deadline, no cursor. */
   fanout?: SweepFanout;
+  /**
+   * The tick's SHARED per-tenant ops summaries, fetched once by the
+   * `opsSummary` prefetch leg (admin/ops-sweep.ts) and read by the three legs
+   * that used to fetch one each — dunning, digest and the watchtower. Cuts the
+   * fan-out from 9 DO RPCs per tenant to 7, which is what the slice is derived
+   * from.
+   *
+   * PRESENCE OF THE MAP, NOT PRESENCE OF THE TENANT, IS THE MODE SWITCH, and
+   * the distinction is load-bearing:
+   *
+   *  - map ABSENT  = the on-demand path (an operator hitting
+   *    `GET /admin/ops/digest`). Fetch per tenant, exactly as before.
+   *  - map PRESENT but this tenant MISSING = the cron path, where the prefetch
+   *    leg reached this tenant and its RPC THREW. Falling back to a fetch here
+   *    would put the RPC back into the worst case the slice is derived from,
+   *    making the dedupe cosmetic; so the leg counts an ERROR instead, which is
+   *    what the failing RPC would have produced anyway and keeps `cron_legs`
+   *    saying so.
+   */
+  summaries?: ReadonlyMap<string, TenantOpsSummary>;
+}
+
+/**
+ * This tenant's ops summary for a slice leg: from the tick's shared prefetch
+ * when there is one, otherwise fetched, and in BOTH cases checked against the
+ * window the caller actually needs.
+ *
+ * THE WINDOW CHECK IS THE POINT, not defensive padding. Three legs share one
+ * object and ask about three different spans; the windowed fields are
+ * pre-aggregated counts that no caller can re-window. Handing the watchtower a
+ * 24h failure count silently reads as an incident, and handing the digest a 1h
+ * deliverability count silently reads as a calm day. Both are wrong in a
+ * direction nobody would notice, so the mismatch throws — loudly, into
+ * `sweepTenants`' per-tenant catch, where it becomes a counted leg error rather
+ * than a wrong number.
+ *
+ * Returns `null` ONLY for "the prefetch ran and did not supply this tenant",
+ * i.e. its RPC threw. Callers treat that as their own error (see
+ * `SweepScope.summaries`).
+ */
+export async function sweptSummary(
+  env: Env,
+  scope: SweepScope,
+  tenantId: string,
+  need: { actionsSinceMs?: number; failureSignalsSinceMs?: number },
+  fetchSinceMs: number,
+): Promise<TenantOpsSummary | null> {
+  if (!scope.summaries) {
+    return await env.TENANT.get(env.TENANT.idFromName(tenantId)).opsSummary(fetchSinceMs);
+  }
+  const summary = scope.summaries.get(tenantId);
+  if (!summary) return null;
+  if (need.actionsSinceMs !== undefined && summary.windows.actionsSinceMs !== need.actionsSinceMs) {
+    throw new Error(
+      `shared ops summary for ${tenantId} was windowed at actionsSinceMs=${summary.windows.actionsSinceMs}, caller needs ${need.actionsSinceMs}`,
+    );
+  }
+  if (need.failureSignalsSinceMs !== undefined && summary.windows.failureSignalsSinceMs !== need.failureSignalsSinceMs) {
+    throw new Error(
+      `shared ops summary for ${tenantId} was windowed at failureSignalsSinceMs=${summary.windows.failureSignalsSinceMs}, caller needs ${need.failureSignalsSinceMs}`,
+    );
+  }
+  return summary;
 }
 
 export interface TenantSlice {

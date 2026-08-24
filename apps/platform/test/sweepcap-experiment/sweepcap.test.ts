@@ -275,8 +275,7 @@ describe("sweepcap: the measurement matrix", () => {
       const cell = runCell(c, sweepTenantSliceFor(c), 99 + c);
       expect(cell.completedPct, `C=${c} at its derived slice ${sweepTenantSliceFor(c)}`).toBeGreaterThanOrEqual(95);
     }
-    // The pre-concurrency configuration, reproduced: 3 tenants a tick.
-    expect(sweepTenantSliceFor(1)).toBe(3);
+    // The serial configuration, at the post-dedupe per-tenant cost.
     const baseline = runCell(1, sweepTenantSliceFor(1), 99);
     console.log(`[baseline C=1 slice=3] wallP50=${baseline.wallP50} wallP95=${baseline.wallP95} completed=${baseline.completedPct}%`);
   });
@@ -332,9 +331,12 @@ describe("sweepcap: the SHIPPED sizing rule, graded by the simulation", () => {
       // achieved advance to 1, not to something proportionally smaller.
       expect(derived, `C=${c}: shipped slice ${derived} must not exceed the simulated max ${measured}`).toBeLessThanOrEqual(measured);
     }
-    // The whole change must be provably inert with concurrency disabled: the
-    // rollback lever restores the pre-concurrency slice exactly.
-    expect(sweepTenantSliceFor(1)).toBe(3);
+    // The rollback lever must leave a slice a SERIAL tick can actually finish —
+    // otherwise it is a trap rather than a rollback. (It is 4, not the 3 that
+    // shipped before this lane: the ops-summary dedupe lowered the per-tenant
+    // cost independently of the concurrency. See tenant-slice-concurrency.test.ts.)
+    const serialCell = runCell(1, sweepTenantSliceFor(1), 4242);
+    expect(serialCell.completedPct).toBeGreaterThanOrEqual(95);
     // And the harness's own copy of the rule must still track the shipped one —
     // if they diverge, the table in the findings doc stops describing the code.
     expect(derivedSlice(6, SWEEP_FANOUT_DEADLINE_MS, ASSUMED_DO_RPC_MS, SWEEP_FANOUT_RPCS_PER_TENANT)).toBeGreaterThanOrEqual(

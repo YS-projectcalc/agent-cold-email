@@ -1395,6 +1395,24 @@ export class TenantDO extends DurableObject<Env> {
   }
 
   /**
+   * The cron sweep's SHARED per-tenant summary — one RPC serving the three legs
+   * that each used to make their own.
+   *
+   * WHY A SECOND METHOD RATHER THAN A CACHE IN FRONT OF `opsSummary`. The three
+   * callers pass three DIFFERENT windows (`buildOpsDigest` 24h,
+   * `runWatchtower` 1h, `runDunningSweep` a zero-width one it does not read),
+   * and the windowed fields are AGGREGATED here — `actionsInWindow` and
+   * `failureSignalsInWindow` are counts, not rows, so a caller cannot
+   * re-window them after the fact. Memoizing on tenant id would therefore hand
+   * two of the three a span they did not ask for, silently and in the
+   * reassuring direction. Both windows are computed HERE, in one pass over the
+   * same storage, which is the only place they can be.
+   */
+  opsSummaryForSweep(windows: { actionsSinceMs: number; failureSignalsSinceMs: number }): TenantOpsSummary {
+    return getOpsSummary(this.requireContext(), windows.actionsSinceMs, windows.failureSignalsSinceMs);
+  }
+
+  /**
    * Cron-triggerable: cancels the InboxKit warmup-pool subscription of every
    * mailbox whose ramp has completed (founder ruling 2026-08-02,
    * ROADMAP.md:25). Its OWN cron lane, deliberately not folded into `tick()`.

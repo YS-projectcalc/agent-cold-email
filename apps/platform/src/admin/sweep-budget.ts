@@ -202,22 +202,30 @@ export const SWEEP_FIXED_SUBREQUESTS =
  *
  * The breakdown, and why it is the worst case rather than the typical one:
  *   deliverability          1  deliverabilitySweep
- *   dunning                 2  opsSummary + suspendForDunning (only past_due)
- *   digest                  1  opsSummary
- *   watchtower              2  opsSummary + maybeEmitContinuityNudge (stalled only)
+ *   opsSummary              1  opsSummaryForSweep — SHARED by the next three
+ *   dunning                 1  suspendForDunning (only past_due)
+ *   digest                  0  reads the shared summary
+ *   watchtower              1  maybeEmitContinuityNudge (stalled only)
  *   warmupCancel            1  warmupCancelSweep
  *   webhooks                1  runWebhookDeliveries
  *   provisioningReconcile   1  provisioningReconcileSweep (dark until armed)
  *   sendPipeline            2  runScheduledPoll + runScheduledTick
  *                          --
- *                          11
+ *                           9
+ *
+ * WAS 11. Dunning, digest and the watchtower each made their own `opsSummary`
+ * RPC — three round trips to the same object, in the same tick, for the same
+ * tenant. One shared prefetch leg (`runOpsSummaryPrefetch`) replaces them, and
+ * because the slice is derived from the WORST case it had to be a deterministic
+ * PREFETCH rather than a lazy cache: a cache that can miss leaves the worst case
+ * where it was, so the slice could not have moved.
  *
  * `sweep-signal-coverage.test.ts` re-derives this from `scheduled.ts`'s own leg
  * bag: a leg added there without an entry in this accounting reds the suite,
  * because the last thing this file may do is under-count and hand the sweep a
  * slice it cannot afford.
  */
-export const SWEEP_RPCS_PER_TENANT = 11;
+export const SWEEP_RPCS_PER_TENANT = 9;
 
 /**
  * WHAT EACH CRON LEG COSTS, per leg, as an independent statement of the two
@@ -245,12 +253,13 @@ export const SWEEP_RPCS_PER_TENANT = 11;
  * tenant slice. Non-zero here means the leg needs its own batch and its own
  * term — which is the whole of B1 and NEW-1.
  */
-export const LEG_SUBREQUEST_COSTS: Record<string, { perTenant: number; ownFanout: number }> = {
+export const LEG_SUBREQUEST_COSTS: Record<string, { perTenant: number; ownFanout: number; sharedSummary?: true }> = {
   tenantSlice: { perTenant: 0, ownFanout: 0 }, // D1 reads only (counted in the overhead)
   deliverability: { perTenant: 1, ownFanout: 0 }, // deliverabilitySweep
-  dunning: { perTenant: 2, ownFanout: 0 }, // opsSummary + suspendForDunning (past_due only)
-  digest: { perTenant: 1, ownFanout: 0 }, // opsSummary
-  watchtower: { perTenant: 2, ownFanout: 0 }, // opsSummary + maybeEmitContinuityNudge (stalled only)
+  opsSummary: { perTenant: 1, ownFanout: 0 }, // opsSummaryForSweep — the ONE fetch the three legs below share
+  dunning: { perTenant: 1, ownFanout: 0, sharedSummary: true }, // suspendForDunning (past_due only)
+  digest: { perTenant: 0, ownFanout: 0, sharedSummary: true }, // reads the shared summary and nothing else
+  watchtower: { perTenant: 1, ownFanout: 0, sharedSummary: true }, // maybeEmitContinuityNudge (stalled only)
   warmupCancel: { perTenant: 1, ownFanout: 0 }, // warmupCancelSweep
   webhooks: { perTenant: 1, ownFanout: 0 }, // runWebhookDeliveries
   spendReservations: { perTenant: 0, ownFanout: RESERVE_REAP_SUBREQUESTS }, // NEW-1 — orphaned reservations

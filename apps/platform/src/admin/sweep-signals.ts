@@ -113,6 +113,10 @@ export const LEG_SHAPES = {
   /** No failure signal of its own; a throw (the `null` fallback) is the only tell. */
   tenantSlice: "no-signal",
   deliverability: "counters",
+  /** The shared per-tenant ops-summary prefetch — reports `errors` like the
+   * other slice legs. Its failures matter MORE than a single leg's: the three
+   * legs behind it consume what it fetched, and each counts its own miss. */
+  opsSummary: "counters",
   dunning: "counters",
   digest: "counters",
   /** `AlertOutcome[]` — W-M1. */

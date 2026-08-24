@@ -16,7 +16,51 @@ import { newId } from "../schema.js";
 import { countSupportTicketsByStatus, countTerminatedTenants, hasDunningEventForCycle, insertDunningEventIfNew } from "./db.js";
 import { decideDunningAction } from "./dunning.js";
 import { CRON_PERIOD_MS, SEND_PIPELINE_LEG_DEADLINE_MS, SEND_PIPELINE_TENANT_BUDGET_MS } from "./sweep-budget.js";
-import { countTenants, resolveSweepTenants, sweepTenants, type SweepScope } from "./tenant-slice.js";
+import { countTenants, resolveSweepTenants, sweepTenants, sweptSummary, type SweepScope } from "./tenant-slice.js";
+
+/**
+ * THE SHARED OPS-SUMMARY PREFETCH — one DO RPC per tenant per tick, serving the
+ * three legs that each used to make their own.
+ *
+ * WHY A LEG AND NOT A LAZY CACHE. A cache that can MISS does not improve a
+ * WORST-CASE budget, and the tenant slice is derived from the worst case: if
+ * dunning might still have to fetch, `SWEEP_RPCS_PER_TENANT` cannot come down
+ * and the slice cannot go up. Fetching deterministically, first, in its own
+ * pass over the same slice under the same deadline, is what makes the saving
+ * real rather than typical-case.
+ *
+ * It runs through `sweepTenants` like every other slice leg, so it carries the
+ * deadline and folds into the rotation accumulator — a tenant this leg did not
+ * reach is a tenant the legs behind it were not going to reach either.
+ */
+export interface OpsSummaryPrefetchSummary {
+  tenantsSwept: number;
+  fetched: number;
+  errors: number;
+  deferred: number;
+  summaries: ReadonlyMap<string, TenantOpsSummary>;
+}
+
+export async function runOpsSummaryPrefetch(
+  env: Env,
+  windows: { actionsSinceMs: number; failureSignalsSinceMs: number },
+  scope: SweepScope = {},
+): Promise<OpsSummaryPrefetchSummary> {
+  const tenantIds = await resolveSweepTenants(env, scope);
+  const summaries = new Map<string, TenantOpsSummary>();
+  const swept = await sweepTenants(
+    tenantIds,
+    scope.fanout,
+    async (tenantId) => {
+      summaries.set(tenantId, await env.TENANT.get(env.TENANT.idFromName(tenantId)).opsSummaryForSweep(windows));
+    },
+    // One wedged DO must not deny every OTHER tenant its summary — and the
+    // three consuming legs each count their own miss, so the failure is still
+    // reported three times over, exactly as it was when each leg fetched.
+    (tenantId, err) => console.error(`ops summary prefetch failed for tenant ${tenantId}`, err),
+  );
+  return { tenantsSwept: swept.visited, fetched: summaries.size, errors: swept.errors, deferred: swept.deferred, summaries };
+}
 
 export interface DunningSweepResult {
   tenantId: string;
@@ -57,9 +101,13 @@ export async function runDunningSweep(
     tenantIds,
     scope.fanout,
     async (tenantId) => {
-      const stub = env.TENANT.get(env.TENANT.idFromName(tenantId));
-      const summary = await stub.opsSummary(nowMs);
+      // Window-INDEPENDENT reader: everything below is billing state, not a
+      // windowed count, so this leg can consume whatever span the tick's shared
+      // prefetch used. That is why it passes no `need`.
+      const summary = await sweptSummary(env, scope, tenantId, {}, nowMs);
+      if (summary === null) throw new Error(`dunning: the shared ops-summary prefetch did not supply tenant ${tenantId}`);
       if (summary.billingState !== "past_due") return;
+      const stub = env.TENANT.get(env.TENANT.idFromName(tenantId));
 
       const cycle = summary.billingFailureCount;
       // A5: a permanent decline code makes this suspend immediately, regardless
@@ -547,6 +595,16 @@ export interface OpsDigest {
  */
 const LIFECYCLE_BUCKETED_BILLING_STATES = new Set(["none", "active", "past_due", "canceling", "canceled", "disputed"]);
 
+/**
+ * The window the cron's D6 digest reports over.
+ *
+ * A NAMED CONSTANT since the ops-summary dedupe: the cron now computes the
+ * digest's window ONCE, up front, to hand to the shared prefetch, and then
+ * calls `buildOpsDigest` with it. A literal `24` in two places is precisely the
+ * mis-window `sweptSummary` throws on — better that it cannot be written.
+ */
+export const DIGEST_WINDOW_HOURS = 24;
+
 /** D6 — the owner's single cross-tenant business-health rollup (SPEC.md §0.10). */
 export async function buildOpsDigest(env: Env, nowMs: number, windowHours: number, scope: SweepScope = {}): Promise<OpsDigest> {
   const sinceMs = nowMs - windowHours * 60 * 60 * 1000;
@@ -557,7 +615,11 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
     tenantIds,
     scope.fanout,
     async (id) => {
-      summaries.push(await env.TENANT.get(env.TENANT.idFromName(id)).opsSummary(sinceMs));
+      // The digest reads `actionsInWindow`, so it MUST have been windowed at
+      // this leg's own `sinceMs` — asserted, not assumed.
+      const summary = await sweptSummary(env, scope, id, { actionsSinceMs: sinceMs }, sinceMs);
+      if (summary === null) throw new Error(`ops digest: the shared ops-summary prefetch did not supply tenant ${id}`);
+      summaries.push(summary);
     },
     // One tenant's failure must never zero out the digest for every other
     // tenant, nor 500 the on-demand GET /admin/ops/digest route (audit
