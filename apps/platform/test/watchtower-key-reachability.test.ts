@@ -15,6 +15,9 @@ import { ALERT_BUDGET_EXCEEDED_CHECK, type CheckResult } from "../src/admin/watc
 import { watchtowerStub } from "../src/admin/watchtower-infra.js";
 import { FAILURE_SIGNAL_FAILED_THRESHOLD, LEG_ALERT_AFTER_SWEEPS } from "../src/admin/watchtower-grading.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
+import { runScheduledOpsSweep } from "../src/scheduled.js";
+import { insertTenantIndex } from "../src/db.js";
+import type { Env } from "../src/env.js";
 
 // THE CLASS GUARD (build gate B1b, CLAUDE.md Bug Response step 4).
 //
@@ -76,16 +79,6 @@ const PROBES: FamilyProbe[] = [
       failureSignalsKey(FAILURE_SIGNAL_FAILED_THRESHOLD, 0),
       failureSignalsKey(120, 0),
       "sustained_subthreshold",
-    ],
-  },
-  {
-    family: "tenant_do_wedged:",
-    note: "A closed map over `err.name`, from the throw shapes the opsSummary RPC actually produces.",
-    produce: () => [
-      tenantDoWedgedKey(new Error("rpc failed")),
-      tenantDoWedgedKey(new TypeError("cannot read properties of undefined")),
-      tenantDoWedgedKey(Object.assign(new Error("storage"), { name: "StorageError" })),
-      tenantDoWedgedKey(Object.assign(new Error("odd"), { name: "SomethingNobodyAnticipated" })),
     ],
   },
   {
@@ -309,6 +302,98 @@ describe("END-TO-END — the key the PRODUCER banks, for the families that cross
     expect(await bankedKeyFor("cron_legs", { tenantSlice: null }, null)).toBe("threw");
   }, 60_000);
 
+  // MOVED HERE FROM THE LITERAL TIER on 2026-08-24 (gate NB-1), and the move is
+  // the fix. It used to call `tenantDoWedgedKey(new TypeError(...))` directly —
+  // a FUNCTION-level probe, on the one family whose note claimed it came "from
+  // the throw shapes the opsSummary RPC actually produces". That claim was
+  // false, and while it was false the ops-summary dedupe shipped a defect it
+  // could not see: the prefetch swallowed the real throw into a console.error
+  // and the consuming leg raised `new Error("...prefetch did not supply...")`
+  // in its place, so on the ONLY production path `err.name` was always "Error"
+  // and three of the four declared keys were unreachable — while this file
+  // stayed green, because it never asked the producer.
+  //
+  // This drives the real cron path: a TenantDO whose `opsSummaryForSweep`
+  // throws, through the real `runOpsSummaryPrefetch`, through the real
+  // `runWatchtower`, and reads what the state machine banked.
+  it("tenant_do_wedged: every declared key is reachable THROUGH THE CRON PRODUCER, with the original message", async () => {
+    const shapes: { err: Error; expectedKey: string }[] = [
+      { err: new Error("Durable Object is overloaded"), expectedKey: "rpc_unreachable" },
+      { err: new TypeError("cannot read properties of undefined (reading 'sql')"), expectedKey: "constructor_throw" },
+      { err: Object.assign(new Error("no such table: scheduled_sends"), { name: "StorageError" }), expectedKey: "storage_throw" },
+      { err: Object.assign(new Error("something nobody anticipated"), { name: "WeirdError" }), expectedKey: "other" },
+    ];
+
+    const produced: string[] = [];
+    for (const [i, shape] of shapes.entries()) {
+      await env.DB.prepare("DELETE FROM watchtower_state").run();
+      await env.DB.prepare("DELETE FROM tenants_index").run();
+      await runInDurableObject(watchtowerStub(env), async (_instance, state) => {
+        await state.storage.deleteAll();
+      });
+      const tenantId = `ten_wedged_${i}`;
+      await insertTenantIndex(env as Env, {
+        id: tenantId,
+        apiTokenHash: `wedged-hash-${i}`,
+        brand: `Wedged ${i}`,
+        plan: "free",
+        createdAt: 1_800_000_000_000,
+        contactEmail: null,
+      });
+
+      // A TenantDO whose ops-summary RPC throws THIS shape. Everything else on
+      // the path is the real thing.
+      const real = env.TENANT;
+      const throwingEnv = {
+        ...env,
+        TENANT: {
+          idFromName: (name: string) => real.idFromName(name),
+          get: (id: DurableObjectId) => {
+            const stub = real.get(id) as unknown as Record<string, unknown>;
+            return new Proxy(stub, {
+              get(target, prop, receiver) {
+                if (prop === "opsSummaryForSweep" || prop === "opsSummary") {
+                  return () => {
+                    throw shape.err;
+                  };
+                }
+                return Reflect.get(target, prop, receiver);
+              },
+            });
+          },
+        },
+      } as unknown as Env;
+
+      const mailer = new SandboxOpsMailer();
+      for (let tick = 0; tick <= LEG_ALERT_AFTER_SWEEPS; tick++) {
+        await runScheduledOpsSweep(throwingEnv, { mailer, sliceLimit: 1 });
+      }
+
+      const row = await env.DB.prepare(
+        `SELECT announced_keys, last_detail FROM watchtower_state WHERE check_name = ?`,
+      )
+        .bind(`tenant_do_wedged:${tenantId}`)
+        .first<{ announced_keys: string; last_detail: string }>();
+      expect(row, `no wedged-DO check banked for ${shape.err.name}`).toBeTruthy();
+
+      // (i) THE MESSAGE the founder reads is the DO's, not our plumbing's.
+      expect(row!.last_detail).toContain(shape.err.message);
+      expect(
+        row!.last_detail,
+        "the alert body carries a tautology about the prefetch instead of the tenant's actual failure",
+      ).not.toContain("prefetch did not supply");
+
+      // (ii) THE KEY varies with `err.name`, which is what drives re-alert when
+      // a tenant's failure MODE changes.
+      const key = (JSON.parse(row!.announced_keys) as { keys: string[] }).keys[0] ?? null;
+      expect(key, `${shape.err.name} should classify as ${shape.expectedKey}`).toBe(shape.expectedKey);
+      produced.push(key!);
+    }
+
+    expect(produced).toEqual(["rpc_unreachable", "constructor_throw", "storage_throw", "other"]);
+    assertKeySpace("tenant_do_wedged:", produced);
+  }, 180_000);
+
   it("cron_legs: all three declared keys are reachable through the real producer", async () => {
     const produced = [
       await bankedKeyFor("cron_legs", { dunning: { errors: 2 } }),
@@ -366,6 +451,11 @@ describe("the guard covers EVERY family — it cannot go stale as families are a
       "cron_legs",
       "alert_budget_exceeded",
       "sweep_coverage",
+      // Promoted from the literal tier on 2026-08-24 (gate NB-1) — its note
+      // claimed it came "from the throw shapes the opsSummary RPC actually
+      // produces" while it called the key function directly, and a real defect
+      // shipped underneath that claim.
+      "tenant_do_wedged:",
       ...PROBES.map((p) => p.family),
       ...Object.keys(LITERAL_PRODUCERS),
     ]);

@@ -8,6 +8,8 @@ import {
 import type { OpsDigest } from "../src/admin/ops-sweep.js";
 import { watchtowerStub } from "../src/admin/watchtower-infra.js";
 import { LEG_ALERT_AFTER_SWEEPS, LEG_RECOVER_AFTER_SWEEPS } from "../src/admin/watchtower-grading.js";
+import { COVERAGE_TICKS_ALERT_AFTER } from "../src/admin/sweep-signals.js";
+import { coverageTicks, SWEEP_TENANT_SLICE } from "../src/admin/sweep-budget.js";
 import { runScheduledOpsSweep } from "../src/scheduled.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
 import { TENANT_DO_SCHEMA } from "../src/schema.js";
@@ -382,7 +384,31 @@ describe("sweep_coverage — the bounded sweep's own coverage latency", () => {
       await reportSweepSignals(env, mailer, { legs: CLEAN, digest: null, coverage: slow }, T0 + i * 300_000);
     }
     expect(subjectsFor(mailer, "Ops sweep coverage")).toEqual(["[coldrig] Ops sweep coverage: UNHEALTHY"]);
-    expect(mailer.sent[0]!.text).toContain("read-model");
+    const body = mailer.sent[0]!.text;
+    // The remedy the operator is sent to. Case-insensitive because the body
+    // shouts it; the point is that the alert names a NEXT ACTION at all.
+    expect(body.toLowerCase()).toContain("read-model");
+    // ...and it must no longer send them after the thing that is already built.
+    // A deleted mechanism that leaves its prose behind is its own defect class:
+    // this alert told the operator for four days that bounded-concurrency
+    // fan-out was "unevaluated" and the cheap thing to try next.
+    expect(body.toLowerCase()).not.toContain("unevaluated");
+    expect(body.toLowerCase()).not.toContain("has not been tried");
+    // The rollback lever is the first thing to check, because setting it to 1
+    // reproduces this alert by design.
+    expect(body).toContain("SWEEP_FANOUT_CONCURRENCY");
+
+    // NB-2 (gate 2026-08-24) — the read-model threshold the body quotes must be
+    // the one the CODE would actually alert at. The first version of this
+    // sentence said "roughly 300 tenants", which is the measurement's C=8 row;
+    // at the shipped slice the alert fires at 229, so an operator at 250 read
+    // "not due yet" while the alert was already firing. Derived from the same
+    // two constants the grader uses, so the prose cannot drift from the grade.
+    const dueAt = SWEEP_TENANT_SLICE * COVERAGE_TICKS_ALERT_AFTER + 1;
+    expect(body).toContain(String(dueAt));
+    expect(coverageTicks(dueAt, SWEEP_TENANT_SLICE)).toBeGreaterThan(COVERAGE_TICKS_ALERT_AFTER);
+    expect(coverageTicks(dueAt - 1, SWEEP_TENANT_SLICE)).toBeLessThanOrEqual(COVERAGE_TICKS_ALERT_AFTER);
+    expect(body).not.toContain("roughly 300 tenants");
   });
 
   it("stays quiet while the rotation is short and nothing is deferred", async () => {

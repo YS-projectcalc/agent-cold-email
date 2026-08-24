@@ -49,6 +49,20 @@ export interface TenantOpsSummary {
    * reply-processor.ts) with `events`.ts >= sinceMs. Windowed so the watchtower
    * alerts on NEW failures since its last sweep, not all-time totals. */
   failureSignalsInWindow: { failed: number; complaints: number };
+  /**
+   * The two windows THIS object was actually computed with.
+   *
+   * Carried because the sweep now fetches ONE summary per tenant per tick and
+   * hands it to three legs that ask about three different spans
+   * (`buildOpsDigest` 24h, `runWatchtower` 1h, `runDunningSweep` window-
+   * independent). Before that dedupe each leg made its own RPC and the window
+   * was implicit in the call; sharing the object makes it a property OF the
+   * object, and an unstated one would be a silent mis-window — a 24h failure
+   * count graded against a 1h threshold reads as an incident, and a 1h
+   * deliverability count reported as a day's worth reads as calm. Consumers can
+   * assert what they were handed instead of trusting the plumbing.
+   */
+  windows: { actionsSinceMs: number; failureSignalsSinceMs: number };
   /** Wave-2 §1c — read-only signals for the two send-pipeline watchtower checks
    * (admin/watchtower.ts). Read-only by construction: nothing here writes. */
   sendPipeline: SendPipelineSignals;
@@ -300,7 +314,13 @@ export function reactivateFromDunning(ctx: TenantContext): boolean {
   return res.rowsWritten > 0;
 }
 
-export function getOpsSummary(ctx: TenantContext, sinceMs: number): TenantOpsSummary {
+/**
+ * @param sinceMs                 window for `actionsInWindow` (the digest's span).
+ * @param failureSignalsSinceMs   window for `failureSignalsInWindow` (the
+ *   watchtower's span). Defaults to `sinceMs`, so every existing single-window
+ *   caller is unchanged; only the cron's shared prefetch passes both.
+ */
+export function getOpsSummary(ctx: TenantContext, sinceMs: number, failureSignalsSinceMs: number = sinceMs): TenantOpsSummary {
   const profile = ctx.sql
     .exec<{ brand: string; plan: string; status: string; billing_state: string; last_decline_code: string | null; checkout_discount_pct: number }>(
       `SELECT brand, plan, status, billing_state, last_decline_code, checkout_discount_pct FROM tenant_profile WHERE id = ?`,
@@ -371,7 +391,7 @@ export function getOpsSummary(ctx: TenantContext, sinceMs: number): TenantOpsSum
          SUM(CASE WHEN type = 'complaint' THEN 1 ELSE 0 END) AS complaints
        FROM events WHERE tenant_id = ? AND ts >= ?`,
       ctx.tenantId,
-      sinceMs,
+      failureSignalsSinceMs,
     )
     .one();
 
@@ -387,6 +407,7 @@ export function getOpsSummary(ctx: TenantContext, sinceMs: number): TenantOpsSum
     billingFailureCount,
     lastDeclineCode: profile.last_decline_code,
     failedSends,
+    windows: { actionsSinceMs: sinceMs, failureSignalsSinceMs },
     deliverability: getDeliverabilitySummary(ctx),
     actionsInWindow: {
       paused: countActionsInWindow(ctx, "PAUSE", sinceMs),

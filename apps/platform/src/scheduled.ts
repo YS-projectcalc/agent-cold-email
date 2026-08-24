@@ -24,12 +24,13 @@
 // degrades gracefully — an unsendable alert can never take down the sweep.
 import { RealClock } from "./clock.js";
 import type { Env } from "./env.js";
-import { buildOpsDigest, runDeliverabilitySweepAllTenants, runDunningSweep, runProvisioningReconcileAllTenants, runSendPipelineAllTenants, runWarmupCancelSweepAllTenants, runWebhookDeliveriesAllTenants } from "./admin/ops-sweep.js";
+import { buildOpsDigest, DIGEST_WINDOW_HOURS, runDeliverabilitySweepAllTenants, runDunningSweep, runOpsSummaryPrefetch, runProvisioningReconcileAllTenants, runSendPipelineAllTenants, runWarmupCancelSweepAllTenants, runWebhookDeliveriesAllTenants } from "./admin/ops-sweep.js";
 import { retireHealthyCheckRows, runWatchtower } from "./admin/watchtower.js";
+import { FAILURE_SIGNAL_WINDOW_MS } from "./admin/watchtower-grading.js";
 import { reportSweepSignals, reportSweepSignalsHealth } from "./admin/sweep-signals.js";
 import { recordSweepHeartbeat } from "./admin/watchtower-infra.js";
-import { SWEEP_FANOUT_DEADLINE_MS } from "./admin/sweep-budget.js";
-import { commitSweepCursor, newSweepFanout, readTenantSlice, type SweepScope } from "./admin/tenant-slice.js";
+import { priorityWindowSize, SWEEP_FANOUT_DEADLINE_MS, sweepFanoutConcurrency, sweepTenantSliceFor } from "./admin/sweep-budget.js";
+import { commitSweepCursor, newSweepFanout, readPriorityTenantIds, readTenantSlice, type SweepScope } from "./admin/tenant-slice.js";
 import { createOpsMailer, type OpsMailer } from "./ops-mail/ops-mailer.js";
 import { reapStaleReservations } from "./engine/spend-ceiling.js";
 import { maybeRefreshSdnList } from "./ofac/sdn-refresh.js";
@@ -77,14 +78,51 @@ export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer;
   // tenants. Reading it can fail (D1), and a failed read must not take the
   // tick down: an empty slice means the fan-out legs no-op and the watchtower's
   // own `d1` check reports the outage, which is the correct division of labour.
-  const slice = await runLeg("tenantSlice", null, () => readTenantSlice(env, opts.sliceLimit));
-  const fanout = newSweepFanout(new RealClock().now(), SWEEP_FANOUT_DEADLINE_MS);
-  const scope: SweepScope = { tenantIds: slice?.ids ?? [], fanout };
+  //
+  // THE SLICE IS A FUNCTION OF THE FAN-OUT CONCURRENCY, so the two can never
+  // disagree: `sweepTenantSliceFor` derives how many tenants that many
+  // in-flight round trips can finish inside the deadline. Reading the env knob
+  // here rather than at module scope is what makes `SWEEP_FANOUT_CONCURRENCY=1`
+  // a live rollback to the pre-concurrency slice of 3.
+  const concurrency = sweepFanoutConcurrency(env);
+
+  // PAYING TENANTS ARE SWEPT EVERY TICK, ahead of the rotation. Read before the
+  // slice because the slice is SHORTENED by exactly this many — the priority
+  // pass shares the fan-out deadline, so it reallocates the tick rather than
+  // enlarging it (admin/sweep-budget.ts's PAYING_TENANT_PRIORITY_CAP).
+  const priorityAll = await runLeg("tenantPriority", [] as string[], () => readPriorityTenantIds(env, priorityWindowSize(concurrency), now));
+  const slice = await runLeg("tenantSlice", null, () =>
+    readTenantSlice(env, opts.sliceLimit ?? sweepTenantSliceFor(concurrency, priorityAll.length)),
+  );
+  // THE FILTER HAPPENS ONCE, HERE, because `fanout.priorityCount` is the offset
+  // the rotation accumulator subtracts and it has to be EXACT. A paying tenant
+  // that already sits on this tick's keyset page is swept by the page; prepending
+  // it as well would sweep it twice and, worse, make the prepend length differ
+  // from the count the cursor arithmetic was told about.
+  const priorityIds = priorityAll.filter((id) => !(slice?.ids ?? []).includes(id));
+  const fanout = newSweepFanout(new RealClock().now(), SWEEP_FANOUT_DEADLINE_MS, concurrency, priorityIds.length);
+  const scope: SweepScope = { tenantIds: slice?.ids ?? [], priorityTenantIds: priorityIds, fanout };
 
   const deliverability = await runLeg("deliverability", null, () => runDeliverabilitySweepAllTenants(env, scope));
-  const dunning = await runLeg("dunning", null, () => runDunningSweep(env, now, mailer, scope));
-  const digest = await runLeg("digest", null, () => buildOpsDigest(env, now, 24, scope));
-  const watchtower = await runLeg("watchtower", null, () => runWatchtower(env, mailer, now, scope));
+
+  // THE SHARED OPS-SUMMARY PREFETCH — one DO RPC per tenant, feeding the three
+  // legs below that each used to make their own. It runs FIRST of the three so
+  // its coverage is a superset of theirs, and both windows are computed in the
+  // one call because the three consumers ask about three different spans and
+  // the windowed fields are pre-aggregated counts nobody can re-window
+  // (admin/tenant-slice.ts's `sweptSummary` asserts each consumer got its own).
+  const summaryWindows = { actionsSinceMs: now - DIGEST_WINDOW_HOURS * 60 * 60 * 1000, failureSignalsSinceMs: now - FAILURE_SIGNAL_WINDOW_MS };
+  const opsSummary = await runLeg("opsSummary", null, () => runOpsSummaryPrefetch(env, summaryWindows, scope));
+  // NAMED TO KEEP `scopedLegNames()` HONEST. sweep-signal-coverage.test.ts finds
+  // the slice-bounded legs by grepping each `runLeg(...)` call for the substring
+  // "scope"; a variable called `sharedScope` does not contain it (capital S), so
+  // dunning/digest/watchtower would have silently dropped out of that guard —
+  // the guard would still pass, on three fewer legs.
+  const scopeWithSummaries: SweepScope = { ...scope, summaries: opsSummary?.summaries, summaryFailures: opsSummary?.failures };
+
+  const dunning = await runLeg("dunning", null, () => runDunningSweep(env, now, mailer, scopeWithSummaries));
+  const digest = await runLeg("digest", null, () => buildOpsDigest(env, now, DIGEST_WINDOW_HOURS, scopeWithSummaries));
+  const watchtower = await runLeg("watchtower", null, () => runWatchtower(env, mailer, now, scopeWithSummaries));
   // Warmup-pool auto-cancel at ramp completion (founder ruling 2026-08-02,
   // ROADMAP.md:25). BELOW runWatchtower per this file's own ordering rule —
   // the health/alerting legs come first so a slow vendor lane can never delay
@@ -151,11 +189,23 @@ export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer;
   // stalled engine consumes leg time that no other concern was waiting on —
   // every health, billing and alerting leg above has already completed by the
   // time this one starts.
-  const sendPipeline = await runLeg("sendPipeline", null, () => runSendPipelineAllTenants(env, now, {}, { tenantIds: scope.tenantIds }));
+  //
+  // OFF THE TENANT SLICE as of 2026-08-24. It used to be handed `scope.tenantIds`,
+  // which bounded automatic sending by the FAN-OUT's slice — a slice derived
+  // from what the health legs can do in the 15s left over after THIS leg's own
+  // two bounds. That deducted the same constraint twice and, at the calibrated
+  // slice of 3, meant the send pipeline polled and ticked three tenants a cycle
+  // out of 66. It carries its own leg deadline, its own per-tenant budget, its
+  // own rotation and now its own count cap, which is what those bounds were
+  // sized for. Deliberately NOT given `scope`: `scopedLegNames()` in
+  // sweep-signal-coverage.test.ts reads that as "slice-bounded", and it is not.
+  const sendPipeline = await runLeg("sendPipeline", null, () => runSendPipelineAllTenants(env, now, {}));
 
   const legs = {
+    tenantPriority: priorityAll,
     tenantSlice: slice,
     deliverability,
+    opsSummary,
     dunning,
     digest,
     watchtower,
