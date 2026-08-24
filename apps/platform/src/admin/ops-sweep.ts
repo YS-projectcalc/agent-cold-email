@@ -565,7 +565,7 @@ export async function runSendPipelineAllTenants(
     if (i >= SEND_PIPELINE_TENANT_CAP) {
       summary.skippedForTenantCap = tenantIds.length - i;
       console.warn(
-        `send pipeline: per-tick tenant cap (${SEND_PIPELINE_TENANT_CAP}) reached — ${summary.skippedForLegDeadline} deferred to a later cycle (rotation reaches them)`,
+        `send pipeline: per-tick tenant cap (${SEND_PIPELINE_TENANT_CAP}) reached — ${summary.skippedForTenantCap} deferred to a later cycle (rotation reaches them)`,
       );
       break;
     }

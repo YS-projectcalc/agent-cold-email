@@ -358,3 +358,235 @@ names — `watchtower-policy` and `watchtower-key-reachability` both green at HE
   instead of 3.
 - The lane is 2 commits behind `main` (`8d58f1e`, `89caa67` — README/outreach
   ledger only, no code overlap).
+
+---
+
+# Combined gate — folded tree
+
+Ref: worktree `/Users/yaakovscher/dev/coldstart-wt-integ2`, branch
+`integ/perf-mirror-2026-08-24`, **HEAD `baa697784161ce5fa12ef342c794e16ca2d76c10`**,
+`git status` clean. Ancestry verified read-only: `main@89caa67`, sweepcap `d8bac9c`
+and Inc4 `47de55a` are ALL ancestors of HEAD. Date 2026-08-24, round 2.
+
+## VERDICT: **SHIP** — 0 BLOCKING, 5 NEW non-blocking
+
+The wave deploys sweep-capacity LIVE + Inc4 dark. X-1 is resolved correctly and is
+now defended by three independent tripwire families, not one. Both lanes' gate
+fixes survived the fold and each was re-proved by planting its own defect. The
+flagged residual is arming-gated-acceptable — ruled below, with the arithmetic.
+
+## 1 · X-1 re-derived by execution, then attacked
+
+`npx esbuild src/admin/sweep-budget.ts --bundle | node` on THIS tree:
+
+```
+SWEEP_RPCS_PER_TENANT          9      perTenant column sums to 9 ✓
+SWEEP_FANOUT_RPCS_PER_TENANT   7
+MIRROR_SUBREQUESTS_PER_TENANT  2      deliverability row {perTenant:3, ownFanout:0} ✓
+SWEEP_FIXED_SUBREQUESTS        517    SWEEP_TICK_SUBREQUESTS 688 = 9*19 + 517 ✓
+ceilings at C=6 (effective 4.5):  sub 609 | p75 21 | mean 19   -> SLICE 19 ✓
+slices: 1→4  2→7  3→10  4→13  6→19  8→25  12→38
+```
+
+Every figure in the brief confirmed. The only ceiling the fold moved is the
+SUBREQUEST one (783 → 609), which is not binding — it is 32x the slice.
+
+**PLANT A — the naive fold** (`FANOUT = RPCS - 2 - MIRROR` → 5, slice **27**,
+the 42%-over-sized value). The fixer's claim was that all prior guards stay green
+and only the new dispatch guard reds. **That is understated in the safe direction —
+it is caught 7 times across 4 files, in 3 independent families:**
+
+- **NEW dispatch guard** — `expected 7 to be 5`, with the diagnostic message telling
+  the next author which kind of cost they added. **It bites.**
+- **the simulation oracle** — 3 more: `C=1: shipped slice 6 must not exceed the
+  simulated max 4`; `C=1 at its derived slice 6: expected 11.3 to be >= 95`.
+- **`tenant-slice-concurrency.test.ts`** — `sweepTenantSliceFor(1)` is 6, not 4.
+- plus `ops-summary-dedupe`'s new `FANOUT === 7` pin and the NB-6 overrun test.
+
+**The core of the fixer's claim is nonetheless correct and worth recording:**
+`sweep-budget.test.ts` and `sweep-signal-coverage.test.ts` — the two files whose
+job is the budget arithmetic — **stay entirely GREEN** under PLANT A. They check
+`SWEEP_RPCS_PER_TENANT` and internal self-consistency, never that term. A fold
+resolved by "the budget suite is green" would have shipped slice 27.
+
+## 2 · The oracle repair is still independent
+
+The repair subtracts `MIRROR_SUBREQUESTS_PER_TENANT` from the deliverability leg
+so the model counts DISPATCHES, and asserts `modelled === SWEEP_FANOUT_RPCS_PER_TENANT`.
+That assertion is a tripwire, not a coupling: `maxSustainableSlice` still depends
+only on `FANOUT_LEGS`, `SWEEP_FANOUT_DEADLINE_MS` and the fitted latency — it reads
+neither efficiency constant, so `derived <= measured` is NOT true by construction.
+
+Proved on THIS tree rather than argued:
+
+- **PLANT B — `SWEEP_CONCURRENCY_EFFICIENCY = 1.0`** → **RED**,
+  `C=3: shipped slice 13 must not exceed the simulated max 12` (3 failures).
+- **PLANT C — `SWEEP_MEAN_COMPLETION_FRACTION = 1.0`** → **RED**,
+  `expected 23 to be less than or equal to 21`.
+
+Both halves of the belt-and-braces pairing survive the fold, and each still catches
+what the other misses.
+
+## 3 · Both lanes' gate fixes, re-proved by planting
+
+Named suites on the live worktree: `watchtower-key-reachability`,
+`send-pipeline-tenant-cap`, `mirror-optout-route` → **3 files / 49 tests**;
+`message-mirror`, `monitoring-denominators`, `ops-summary-dedupe` → **3 files /
+43 tests**. All green, exit 0. Green is not the evidence; these are:
+
+- **PLANT D — revert NB-1** (drop `if (original !== undefined) throw original;` at
+  `tenant-slice.ts:219`) → **RED**:
+  `expected 'Tenant ten_wedged_0\'s Durable Object…' to contain 'Durable Object is
+  overloaded'`. The replacement guard is at
+  `watchtower-key-reachability.test.ts:328` — *"every declared key is reachable
+  THROUGH THE CRON PRODUCER, with the original message"* — i.e. it moved to the
+  end-to-end tier and checks the message, exactly as NB-1 specified.
+- **PLANT E — revert the cursor HOLD** to the old wrap/restart → **RED**,
+  `expected null to be 'ten_hold_01'`.
+- **PLANT F — move Inc4's arming check after one `ctx.sql.exec`** → **RED**,
+  `expected 1 to be +0`. The T11 dark guard spies BOTH `env.DB.prepare` and the real
+  `state.storage.sql.exec` and bites on a single extra call.
+
+NB-2 is fixed by DERIVATION, not by a new literal:
+`sweep-signals.ts:517` emits `${SWEEP_TENANT_SLICE * COVERAGE_TICKS_ALERT_AFTER + 1}`
+= 229, and `README.md:222` shows the arithmetic. NB-3 is closed in place at
+`ROADMAP.md:144`. NB-5's counter split landed (`skippedForTenantCap`) — but see N-1.
+
+## 4 · NB-6 / cursor-hold coupling — no reintroduced pin
+
+`priorityWindowSize(c) = min(c, PAYING_TENANT_PRIORITY_CAP)`: at C=1 the window is
+**1**, so the must-attempt set is 2 tenants and the overrun is `2 x 450 x 7 =
+6,300ms`, not the 18.9s I derived for the unclamped version. At C=6 it is exactly
+the pre-lane baseline, and `tenant-slice-priority.test.ts` asserts the composed
+period cost honestly (`composed - CRON_PERIOD_MS === PRE_LANE_MUST_ATTEMPT_OVERRUN_MS`)
+rather than hiding it. NB-8's rotation strides by the window, so consecutive ticks
+serve disjoint groups.
+
+No pin, and no new one: `mustAttempt(index <= priorityCount)` always attempts the
+FIRST ROTATION tenant, so any leg that ran contributes `rotationPrefix >= 1`; the
+all-legs-threw case still takes the pre-existing `?? slice.ids.length` fallback.
+The hold branch writes `ON CONFLICT DO UPDATE SET updated_at` only — it genuinely
+holds `last_tenant_id` — and stamps freshness unconditionally. See N-5.
+
+## 5 · RULING on the residual: **arming-gated-acceptable. No code-side bound needed before deploy.**
+
+Three legs, each verified:
+
+1. **Dark is provably zero work.** `drainMessageMirror`'s first line is the arming
+   check (`message-mirror.ts:346`), and the T11 pair proves ZERO D1 `prepare` calls
+   AND ZERO DO `sql.exec` calls with the flag unset. PLANT F shows the guard bites
+   on one extra call.
+2. **With the mirror dark the folded tree's wall-clock model IS the sweepcap
+   lane's, exactly.** Both binding arms use `SWEEP_FANOUT_RPCS_PER_TENANT = 7`,
+   `SWEEP_FANOUT_DEADLINE_MS = 15000`, `ASSUMED_DO_RPC_MS = 450`, mean 414, the
+   same 0.7/0.85 — producing the identical p75 21 / mean 19 / slice 19. The mirror
+   changed only `SWEEP_RPCS_PER_TENANT` (subrequests), which moves only the
+   non-binding subrequest ceiling. **Zero delta at deploy.**
+3. **The arm gate measures the thing.** `ROADMAP.md:21` step (3a) requires
+   `wrangler tail --format json` filtered to `deliverabilitySweep`, comparing
+   `wallTime` against the pre-mirror `MEASURED_DO_RPC_MS` baseline, and names the
+   reason. Step (3) narrows `MESSAGE_MIRROR_TENANT_ALLOWLIST` to ONE pilot tenant
+   BEFORE arming the flag, so first exposure is 1 tenant, not 19.
+
+A code-side bound now would be sized against an unmeasured number. Measure first,
+on one tenant, as the gate already says.
+
+## 6 · Ledgers — accurate on substance, three staleness items (N-2, N-3)
+
+`ROADMAP.md:14` states X-1 correctly including the `9-2-2=5` trap, the 42%
+over-sizing, the hand-checked ceilings, the oracle mis-feed, and the residual.
+`ROADMAP.md:18` carries **[dark-unarmed]** on Inc4 with the flag UNSET at merge and
+the T13/T14 overclaim corrected. `ROADMAP.md:20` records the Inc4 gate with
+revert-fail-restore proofs. `ROADMAP.md:144` closes my NB-3 in place.
+
+## NEW findings (this round) — none blocking
+
+### N-1 · The tenant-cap's on-call log line reports a provable ZERO — PROVEN BY EXECUTION
+`src/admin/ops-sweep.ts:566-569`
+
+The NB-5 counter split landed in the STRUCT and not in the STRING. Line 566 sets
+`summary.skippedForTenantCap`, but line 568 still interpolates
+`${summary.skippedForLegDeadline}` — which in that branch is provably 0 (the two
+branches are mutually exclusive and both `break`; the deadline branch is the only
+writer). Captured the real emission by spying `console.warn` through the shipped
+path:
+
+```
+capCounter: 2
+warnLines: ["send pipeline: per-tick tenant cap (166) reached — 0 deferred to a
+            later cycle (rotation reaches them)"]
+```
+
+On-call reads "0 deferred" at exactly the moment 2 were. The suite's own assertion
+`expect(summary.skippedForLegDeadline).toBe(0)` is what makes it provable. Only
+binds above 166 tenants and `cron_legs` reads the correct structured counter, so
+NON-BLOCKING. **Fix:** one word — `${summary.skippedForTenantCap}`.
+
+### N-2 · Contradictory duplicate ledger lines about this very lane
+`ROADMAP.md:17`, `HANDOFF.md:34` vs `HANDOFF.md:81`
+
+`ROADMAP.md:17` is still an unchecked, present-tense `[ORDER] **Queued next:
+sweep-capacity follow-up increment**` — describing, in the future tense, the lane
+that `ROADMAP.md:14` records as built, gated and folded. `HANDOFF.md:34` says
+"**PENDING FOLD (not merged)**" while `HANDOFF.md:81` says "folded together on
+`integ/perf-mirror-2026-08-24`". Per the ROADMAP Contract line 17 should be checked
+off with an evidence pointer (moving to `archive/ROADMAP-done.md` at the next
+handoff). Same class at `ROADMAP.md:129`, `HANDOFF.md:49`, `HANDOFF.md:66`
+("the queued sweep-capacity lane").
+
+### N-3 · `ROADMAP.md:144` states a tick cost the fold superseded
+Says the lane "took `SWEEP_TICK_SUBREQUESTS` to **650**". On the folded tree it is
+**688**. True of the sweepcap lane in isolation; stale on the tree the line now
+lives on. The load-bearing argument is unaffected (688 > 600 as well).
+
+### N-4 · The oracle's mirror subtraction is keyed to the leg NAMED "deliverability"
+`test/sweepcap-experiment/sweepcap.test.ts:32-35`
+
+`name === "deliverability" ? c.perTenant - MIRROR_SUBREQUESTS_PER_TENANT : c.perTenant`.
+The new dispatch guard checks the SUM, so a future ride-along cost added to a
+different leg is caught — unless it is paired with a compensating change that keeps
+the sum at 7 while mis-distributing per leg. Legs run sequentially, so a wrong
+distribution changes where the deadline bites within a leg. Low: needs a future
+edit AND a compensating one.
+
+### N-5 · The cursor-hold branch may be unreachable through the real path
+`src/admin/tenant-slice.ts:419-437`, `test/tenant-slice-priority.test.ts:288`
+
+The justification is "a tick whose deadline is already spent can cover only priority
+tenants, so the netted advance is 0". But `mustAttempt(index <= priorityCount)`
+always attempts index `priorityCount` — the FIRST ROTATION tenant — so any leg that
+ran yields `rotationPrefix >= 1`; and the empty-page case takes the `complete`
+branch instead. The test synthesizes `covered = 0` by passing it directly rather
+than driving a tick that produces it. Holding is strictly safer than restarting
+either way, so this is a note on the STATED trigger, not on the code. If it is
+genuinely unreachable, say so in the comment rather than describing a scenario.
+
+## Attacks that failed (round 2)
+
+1. **Is X-1 resolved in the dangerous direction?** Executed: FANOUT=7, slice 19. HELD.
+2. **Does the new dispatch guard actually bite?** PLANT A: `expected 7 to be 5`. HELD.
+3. **Did the oracle repair make `derived <= measured` true by construction?** Traced
+   every import, then PLANT B reds at C=3. HELD.
+4. **Did the fold silently weaken the mean-completion ceiling?** PLANT C reds. HELD.
+5. **Did NB-1's fix survive the fold as a real end-to-end guard?** PLANT D reds on
+   the original message. HELD.
+6. **Did the cursor hold survive?** PLANT E reds. HELD.
+7. **Is Inc4 really dark — no I/O at all?** PLANT F reds on ONE `sql.exec`. HELD.
+8. **Is the wall-clock model perturbed at deploy?** Both binding arms identical to
+   the sweepcap lane; only the non-binding subrequest ceiling moved. HELD.
+9. **Did the NB-6 clamp reintroduce a pin?** No: `rotationPrefix >= 1` for any leg
+   that ran; the all-legs-threw fallback is unchanged. HELD.
+10. **Is `[dark-unarmed]` actually on the Inc4 ledger line, and the flag unset?**
+    `ROADMAP.md:18`, and `wrangler.toml` binds no mirror flag. HELD.
+11. **Does the arm gate contain the measurement my ruling defers to?** `ROADMAP.md:21`
+    step (3a), naming the tool, the filter and the baseline. HELD.
+
+## UNVERIFIABLE (carried, unchanged)
+
+1. Whether DO stub RPCs count toward the 6-connection ceiling — resolves on the
+   first armed C=6 tick via `wrangler tail` (which also gives R6's `cpuTime`).
+2. The workerd source citations (no checkout here).
+3. **R7's real acceptance test — `sweep_coverage` flipping healthy in production**
+   (`covered === handed`, ≤4 ticks at 66 tenants). Requires the deploy.
+4. `MEASURED_DO_RPC_MS` under six genuinely concurrent DO RPCs from one invocation.
+5. The full-platform battery — the verifier owns it; I ran targeted suites only.
