@@ -14,11 +14,10 @@ import { lookupTenantContactEmail } from "../db.js";
 import { escapeHtml } from "../html-escape.js";
 import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import type { TenantContext } from "../tenant-context.js";
-import { buildMirrorOptOutUrl, signUnsubscribeToken } from "../unsubscribe-token.js";
+import { buildMirrorOptOutUrl, signMirrorOptOutToken } from "../unsubscribe-token.js";
 import { CONTINUITY_NUDGE_KIND } from "./continuity-nudge.js";
 import { realNowMs } from "./clamped-age.js";
 import { DEFAULT_PUBLIC_BASE_URL } from "./tick.js";
-import { toSeverity } from "./tenant-messages.js";
 
 // --- §4 caps -----------------------------------------------------------
 //
@@ -44,10 +43,6 @@ export const MIRROR_WINDOW_MS = 24 * 60 * 60 * 1000;
  * restated at engine/continuity-nudge.ts:5-7). This postdates and narrows the
  * 2026-08-05 Inc4 authorization. */
 export const MIRROR_EXCLUDED_KINDS: readonly string[] = [CONTINUITY_NUDGE_KIND];
-
-/** §2 — the system-severity rungs that mean "the account has stopped". `info`
- * ("the condition resolves on its own") is deliberately absent. */
-const MIRRORABLE_SYSTEM_SEVERITIES: readonly ReturnType<typeof toSeverity>[] = ["action_required", "operator_pending", "terminal"];
 
 // How many unmirrored candidate rows one drain will look at. DO-local
 // `ctx.sql` reads are free (C6) so this is generous, not budget-sized — it
@@ -101,9 +96,19 @@ export function isMirrorArmed(
   return allowlist.length === 0 || allowlist.includes(tenantId);
 }
 
+/**
+ * Gate NB4 fix: `"0"` is a genuinely-requested hard-off, not "unset" —
+ * `Number("0") > 0` being false used to fall through to the default and
+ * silently restore the 3/day cap for an operator trying to quiet the channel.
+ * Only a truly UNSET/empty/malformed/negative value falls back to the
+ * default; any non-negative integer (including 0) is honored exactly.
+ */
 function effectiveMaxPerDay(env: { MESSAGE_MIRROR_MAX_PER_DAY?: string }): number {
-  const parsed = Number(env.MESSAGE_MIRROR_MAX_PER_DAY);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : MIRROR_MAX_PER_DAY;
+  const raw = env.MESSAGE_MIRROR_MAX_PER_DAY;
+  if (raw === undefined || raw.trim() === "") return MIRROR_MAX_PER_DAY;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return MIRROR_MAX_PER_DAY;
+  return Math.trunc(parsed);
 }
 
 // --- §4/§5 the ring ---------------------------------------------------------
@@ -155,32 +160,41 @@ interface MirrorCandidateRow {
   [column: string]: SqlStorageValue;
 }
 
-function isMirrorable(row: MirrorCandidateRow): boolean {
-  if (MIRROR_EXCLUDED_KINDS.includes(row.kind)) return false;
-  if (row.source === "operator") return true; // §2 — a human wrote it once; always mirrors.
-  return MIRRORABLE_SYSTEM_SEVERITIES.includes(toSeverity(row.severity));
-}
-
 /**
  * Candidates: unmirrored, unacked, unexpired — reusing the EXACT predicate
  * `listSurfacedTenantMessages`/`listMessagesPage` already use
  * (engine/tenant-messages.ts:308's `read_at IS NULL AND (expires_at IS NULL
  * OR expires_at > ?)`), plus `mirrored_at IS NULL`. Oldest first, so a digest
  * that only fits MIRROR_DIGEST_MAX carries the longest-held conditions.
+ *
+ * Gate NB1 fix: the mirrorability predicate (§2's severity/source/kind gate)
+ * is now IN this WHERE clause, not a `.filter()` applied after `LIMIT`.
+ * `LIMIT` must bound CANDIDATES, never raw rows — with the filter applied
+ * client-side, 200 non-mirrorable rows created before one genuinely
+ * mirrorable row silently starved it forever (PROVEN by the gate: 200 ahead
+ * -> 0 sends, 199 ahead -> 1 send). The severity half is exactly
+ * `severity != 'info'` — that is `toSeverity`'s own fallback rule
+ * (unrecognised -> 'action_required', which mirrors) restated as SQL with NO
+ * loss of fidelity: 'info' is the ONLY system severity this predicate
+ * excludes, recognised or not, so pushing it into SQL cannot diverge from
+ * the TS-side classification the way a hand-picked IN-list would.
  */
 function selectMirrorCandidates(ctx: TenantContext, now: number): MirrorCandidateRow[] {
+  const excludedKinds = MIRROR_EXCLUDED_KINDS;
   return ctx.sql
     .exec<MirrorCandidateRow>(
       `SELECT id, kind, severity, body, source FROM tenant_messages
        WHERE tenant_id = ? AND mirrored_at IS NULL AND read_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
+         AND kind NOT IN (${excludedKinds.map(() => "?").join(", ")})
+         AND (source = 'operator' OR severity != 'info')
        ORDER BY created_at ASC, rowid ASC
        LIMIT ?`,
       ctx.tenantId,
       now,
+      ...excludedKinds,
       MIRROR_CANDIDATE_SCAN_LIMIT,
     )
-    .toArray()
-    .filter(isMirrorable);
+    .toArray();
 }
 
 // --- §5 claim / release -----------------------------------------------------
@@ -273,7 +287,10 @@ export function getMessageEmailMirrorState(ctx: TenantContext): MessageEmailMirr
 // --- composition (§6, §9 T15/T16) ------------------------------------------
 
 async function buildMirrorOptOutLink(ctx: TenantContext, contactEmail: string): Promise<string> {
-  const sig = await signUnsubscribeToken(ctx.env.TOKEN_HASH_PEPPER, ctx.tenantId, contactEmail);
+  // Gate B1 — the mirror's OWN token (distinct derivation label), never the
+  // lead-facing unsubscribe token: minting with the same key is what let any
+  // recipient of ANY cold email from this tenant disable its mirror.
+  const sig = await signMirrorOptOutToken(ctx.env.TOKEN_HASH_PEPPER, ctx.tenantId, contactEmail);
   const baseUrl = ctx.env.PUBLIC_BASE_URL ?? DEFAULT_PUBLIC_BASE_URL;
   return buildMirrorOptOutUrl(baseUrl, ctx.tenantId, contactEmail, sig);
 }
@@ -335,11 +352,21 @@ export async function drainMessageMirror(ctx: TenantContext, mailer: OpsMailer =
 
   const ids = outcome.rows.map((r) => r.id);
 
-  let contactEmail: string | null = null;
+  // Gate B2 fix — a THROW (D1 unreachable/transient) is a retryable
+  // infrastructure failure and must be treated exactly like a send failure
+  // below: release the claim so the row is eligible again, count `failed`.
+  // Only a RESOLVED `null` means "this tenant genuinely has no contact email
+  // on file" and may keep the claim as `noContact` (§3's permanent-unmirror
+  // rule applies to THAT case, never to "the read errored"). Conflating the
+  // two used to commit the claim on a transient D1 blip, permanently
+  // un-mirroring up to MIRROR_DIGEST_MAX rows with no retry, ever.
+  let contactEmail: string | null;
   try {
     contactEmail = await lookupTenantContactEmail(ctx.env, ctx.tenantId);
   } catch (err) {
-    console.error(`message mirror: contact-email lookup failed for tenant ${ctx.tenantId}`, err);
+    releaseMirrorClaim(ctx, ids);
+    console.error(`message mirror: contact-email lookup failed for tenant ${ctx.tenantId} (retryable)`, err);
+    return { ...EMPTY_MIRROR_RESULT, failed: 1 };
   }
   // §3 — NULL contact email -> no mirror, ever, no synthetic address. The
   // claim stays committed (this condition is permanently unmirrorable, same

@@ -24,6 +24,7 @@ import {
   ALERT_DELIVERY_CHECK,
   CRON_LEGS_CHECK,
   FAILURE_SIGNALS_CHECK,
+  MIRROR_DELIVERY_CHECK,
   SWEEP_COVERAGE_CHECK,
   SWEEP_SIGNALS_CHECK,
 } from "./watchtower-alerts.js";
@@ -42,7 +43,21 @@ import { vendorChecksArmed } from "./watchtower-vendor.js";
  * absence is the healthy state, not a gap.
  */
 export function expectedCheckRoster(env: Env): string[] {
-  const roster = ["do_storage", FAILURE_SIGNALS_CHECK, CRON_LEGS_CHECK, SWEEP_COVERAGE_CHECK, SWEEP_SIGNALS_CHECK, ALERT_DELIVERY_CHECK];
+  // Gate NB5 (docs/adversarial/msgchannel-inc4-gate-2026-08-24.md) —
+  // mirror_delivery is unconditionally always-on (scheduled.ts reports it
+  // every tick regardless of MESSAGE_EMAIL_MIRROR_ENABLED, same posture as
+  // the other names in this base array), and was absent from this roster
+  // from day one: a lost report would have read as health with nothing to
+  // catch it, exactly the class this file exists to close.
+  const roster = [
+    "do_storage",
+    FAILURE_SIGNALS_CHECK,
+    CRON_LEGS_CHECK,
+    SWEEP_COVERAGE_CHECK,
+    SWEEP_SIGNALS_CHECK,
+    ALERT_DELIVERY_CHECK,
+    MIRROR_DELIVERY_CHECK,
+  ];
   // Both conditional checks are listed EXACTLY when their dependency is
   // configured, which is what makes "missing" mean something: an unset
   // ENGINE_BASE_URL removes the expectation as well as the check, and a set one

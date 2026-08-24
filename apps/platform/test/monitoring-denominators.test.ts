@@ -105,6 +105,25 @@ describe("GET /admin/ops/checks — the expected ROSTER, so a skipped check is n
     expect(armed).toContain("warmup_duplicates");
   });
 
+  // Gate NB5 (docs/adversarial/msgchannel-inc4-gate-2026-08-24.md) —
+  // mirror_delivery is UNCONDITIONALLY always-on (scheduled.ts reports it
+  // every tick regardless of MESSAGE_EMAIL_MIRROR_ENABLED), yet was absent
+  // from this roster from day one: a lost report read as health with
+  // nothing to catch it — exactly the absence-is-indistinguishable-from-
+  // health class this file exists to close.
+  it("mirror_delivery is expected regardless of engine/vendor configuration (always-on, not skip-dark)", () => {
+    const dark = expectedCheckRoster({ ...env, ENGINE_BASE_URL: undefined, INBOXKIT_API_KEY: undefined, INBOXKIT_WORKSPACE_ID: undefined } as typeof env);
+    expect(dark).toContain("mirror_delivery");
+
+    const armed = expectedCheckRoster({
+      ...env,
+      ENGINE_BASE_URL: "https://engine.test",
+      INBOXKIT_API_KEY: "k",
+      INBOXKIT_WORKSPACE_ID: "w",
+    } as unknown as typeof env);
+    expect(armed).toContain("mirror_delivery");
+  });
+
   it("publishes the sweep's own freshness rather than leaving it to be inferred from row mtimes", async () => {
     await env.DB.prepare("DELETE FROM watchtower_cursor").run();
     const stale = await adminApi<{ sweepAgeSeconds: number | null; sweepStale: boolean }>("/admin/ops/checks");
