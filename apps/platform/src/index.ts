@@ -32,7 +32,7 @@ import { activityRoute } from "./routes/activity.js";
 import { webhookSubscriptionsRoute } from "./routes/webhook-subscriptions.js";
 import { byoDomainsRoute } from "./routes/byo-domains.js";
 import { leadsRoute } from "./routes/leads.js";
-import { messagesRoute } from "./routes/messages.js";
+import { messagesRoute, mirrorOptOutRoute } from "./routes/messages.js";
 import { runScheduledOpsSweep } from "./scheduled.js";
 import { handleInboundSupportEmail } from "./admin/support-inbound.js";
 
@@ -45,17 +45,22 @@ const app = new Hono<{ Bindings: Env; Variables: AuthedVariables }>();
 app.route("/", signupRoute);
 // /mcp does its own per-JSON-RPC-method auth (see src/mcp/handler.ts) — not
 // mounted behind requireAuth. /api/waitlist is unauthenticated (public
-// form). /checkout/simulate, /webhooks/stripe, and /unsubscribe are
-// unauthenticated for the same reason a real Stripe hosted checkout page /
-// webhook caller / mail client can't present our bearer token — see
-// routes/checkout.ts, routes/webhooks.ts, and routes/unsubscribe.ts for
-// their own credential (session id / signature / signed token).
+// form). /checkout/simulate, /webhooks/stripe, /unsubscribe, and
+// /messages/mirror/optout are unauthenticated for the same reason a real
+// Stripe hosted checkout page / webhook caller / mail client can't present
+// our bearer token — see routes/checkout.ts, routes/webhooks.ts, and
+// routes/unsubscribe.ts/routes/messages.ts for their own credential (session
+// id / signature / signed token).
 app.route("/", mcpRoute);
 app.route("/", waitlistRoute);
 app.route("/", checkoutSimulateRoute);
 app.route("/", checkoutReturnRoute);
 app.route("/", webhooksRoute);
 app.route("/", unsubscribeRoute);
+// msgchannel Inc4 — GET/POST /messages/mirror/optout, UNAUTHENTICATED for the
+// same reason /unsubscribe is: the signed query-string token is the
+// credential (routes/messages.ts's mirrorOptOutRoute).
+app.route("/", mirrorOptOutRoute);
 // GET /status — public, no tenant/admin data (see routes/status.ts).
 app.route("/", statusRoute);
 // POST /dashboard/session — UNAUTHENTICATED (SPEC.md §19.1): the token-gate
