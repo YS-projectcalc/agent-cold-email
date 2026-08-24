@@ -112,6 +112,10 @@ import { coverageTicks } from "./sweep-budget.js";
 export const LEG_SHAPES = {
   /** No failure signal of its own; a throw (the `null` fallback) is the only tell. */
   tenantSlice: "no-signal",
+  /** One bounded D1 read of the paying tenants; a throw (the `[]` fallback) is
+   * the only tell, and an empty list is a legitimate state on a platform with no
+   * paying tenants — so it must NOT be graded as a failure. */
+  tenantPriority: "no-signal",
   deliverability: "counters",
   /** The shared per-tenant ops-summary prefetch — reports `errors` like the
    * other slice legs. Its failures matter MORE than a single leg's: the three

@@ -28,11 +28,13 @@ import {
   SEND_PIPELINE_SUBREQUESTS,
   SEND_PIPELINE_TENANT_CAP,
   SEND_PIPELINE_RPCS_PER_TENANT,
+  PAYING_TENANT_PRIORITY_CAP,
   SWEEP_FIXED_OVERHEAD_SUBREQUESTS,
   SWEEP_FIXED_SUBREQUESTS,
   SWEEP_RPCS_PER_TENANT,
   SWEEP_SUBREQUEST_BUDGET,
   SWEEP_TENANT_SLICE,
+  SWEEP_TENANTS_TOUCHED_PER_TICK,
   SWEEP_TICK_SUBREQUESTS,
 } from "../src/admin/sweep-budget.js";
 
@@ -255,6 +257,18 @@ describe("B1 — every leg with its own fan-out is IN the derivation, not waved 
     expect(SCREENING_RECOVERY_SUBREQUESTS).toBe(SCREENING_RECOVERY_BATCH * SCREENING_RECOVERY_SUBREQUESTS_PER_ITEM);
   });
 
+  it("the paying-tenant priority pass is REALLOCATION, not extra spend", () => {
+    // At the shipped concurrency the priority pass costs the tick nothing: the
+    // rotating slice is shortened by exactly the priority count, so the tenants
+    // touched are the same tenants. Pricing it as an additive `ownFanout` term
+    // double-counts — this is the assertion that caught that.
+    expect(sweepTenantSliceFor(SWEEP_FANOUT_CONCURRENCY, 1) + 1).toBe(SWEEP_TENANT_SLICE);
+    expect(sweepTenantSliceFor(SWEEP_FANOUT_CONCURRENCY, PAYING_TENANT_PRIORITY_CAP) + PAYING_TENANT_PRIORITY_CAP).toBe(SWEEP_TENANT_SLICE);
+    expect(SWEEP_TENANTS_TOUCHED_PER_TICK).toBe(SWEEP_TENANT_SLICE);
+    // ...and the floor case, where it genuinely does add, is bounded and priced.
+    expect(Math.max(1, PAYING_TENANT_PRIORITY_CAP + 1)).toBeLessThanOrEqual(SWEEP_TENANTS_TOUCHED_PER_TICK);
+  });
+
   it("the send pipeline is bounded in COUNT too, now that it fans out over its own population", () => {
     // It moved off the tenant slice on 2026-08-24, which is what made it a leg
     // with a fan-out of its own — and B1's lesson is that such a leg needs a
@@ -271,7 +285,7 @@ describe("B1 — every leg with its own fan-out is IN the derivation, not waved 
     // Restated from the parts rather than read off the aggregate, so this stays
     // an independent statement of the same claim.
     const worstCaseTick =
-      SWEEP_RPCS_PER_TENANT * SWEEP_TENANT_SLICE +
+      SWEEP_RPCS_PER_TENANT * SWEEP_TENANTS_TOUCHED_PER_TICK +
       SWEEP_FIXED_OVERHEAD_SUBREQUESTS +
       SCREENING_RECOVERY_SUBREQUESTS +
       RESERVE_REAP_SUBREQUESTS +

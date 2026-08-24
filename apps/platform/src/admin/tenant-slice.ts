@@ -33,7 +33,8 @@
 import type { Env } from "../env.js";
 import type { TenantOpsSummary } from "../engine/ops-summary.js";
 import { RealClock } from "../clock.js";
-import { coverageTicks, SWEEP_TENANT_SLICE } from "./sweep-budget.js";
+import { coverageTicks, PAYING_TENANT_PRIORITY_CAP, SWEEP_TENANT_SLICE } from "./sweep-budget.js";
+import { isPaidPlan } from "@coldstart/shared";
 
 /**
  * The tick's shared wall-clock ceiling, and NOTHING else.
@@ -79,10 +80,33 @@ export interface SweepFanout extends SweepDeadline {
    * same reason, as `leastVisited`.
    */
   readonly concurrency: number;
+  /**
+   * How many leading entries of each leg's tenant list are PRIORITY tenants
+   * (paying, swept every tick) rather than members of the rotating slice.
+   *
+   * The rotation accumulator has to net them out: `commitSweepCursor` indexes
+   * the ROTATING slice, so a prefix that counts priority tenants would advance
+   * the cursor by tenants that are not on that page at all.
+   *
+   * On `SweepFanout` for the same reason `concurrency` is — `sweepDeadlineOf()`
+   * strips it, and a leg iterating its own population has no priority prepend.
+   */
+  readonly priorityCount: number;
 }
 
-export function newSweepFanout(startedAt: number, deadlineMs: number, concurrency: number = 1): SweepFanout {
-  return { startedAt, deadlineMs, leastVisited: null, concurrency: Math.max(1, Math.floor(concurrency)) };
+export function newSweepFanout(
+  startedAt: number,
+  deadlineMs: number,
+  concurrency: number = 1,
+  priorityCount: number = 0,
+): SweepFanout {
+  return {
+    startedAt,
+    deadlineMs,
+    leastVisited: null,
+    concurrency: Math.max(1, Math.floor(concurrency)),
+    priorityCount: Math.max(0, Math.floor(priorityCount)),
+  };
 }
 
 /**
@@ -113,6 +137,17 @@ export interface SweepScope {
   tenantIds?: readonly string[];
   /** The tick's shared fan-out phase. Absent = no deadline, no cursor. */
   fanout?: SweepFanout;
+  /**
+   * Paying tenants swept AHEAD of the rotating slice, every tick.
+   *
+   * PREPENDED, NOT SORTED IN. The obvious reading of "paying-tenant-first" is
+   * to order the slice by plan, and that silently breaks the rotation:
+   * `commitSweepCursor` advances a KEYSET cursor with `slice.ids[covered - 1]`,
+   * which is only meaningful while the slice is in `id` order. A prepend keeps
+   * the rotating page exactly as the keyset read returned it, and
+   * `SweepFanout.priorityCount` nets the prepend back out of the accumulator.
+   */
+  priorityTenantIds?: readonly string[];
   /**
    * The tick's SHARED per-tenant ops summaries, fetched once by the
    * `opsSummary` prefetch leg (admin/ops-sweep.ts) and read by the three legs
@@ -219,6 +254,32 @@ export interface TenantSlice {
  * beside it (`countTenants`), never a silent narrowing. */
 export const MAX_TENANT_SCAN = 5_000;
 
+/**
+ * The paying tenants this tick sweeps ahead of the rotation, bounded.
+ *
+ * `plan = 'managed'` is `isPaidPlan`'s definition, restated in SQL because a
+ * predicate cannot cross into D1. `tenant-slice-priority.test.ts` holds the two
+ * together by running every `TenantPlan` value through both — a divergence here
+ * would either starve a paying tenant of its priority or hand it to everyone.
+ *
+ * `status = 'active'` as well: a suspended or terminated tenant is not owed
+ * every-tick freshness, and including it would spend the priority budget on
+ * exactly the tenants with nothing to sweep.
+ */
+export async function readPriorityTenantIds(env: Env, limit: number = PAYING_TENANT_PRIORITY_CAP): Promise<string[]> {
+  const rows = await env.DB.prepare(
+    `SELECT id FROM tenants_index WHERE plan = 'managed' AND status = 'active' ORDER BY id LIMIT ?`,
+  )
+    .bind(Math.max(0, limit))
+    .all<{ id: string }>();
+  return rows.results.map((r) => r.id);
+}
+
+/** The SQL predicate above, as a function — the oracle its test compares against. */
+export function isPriorityPlan(plan: string): boolean {
+  return isPaidPlan(plan);
+}
+
 /** How many tenants the control plane knows about, unfiltered. */
 export async function countTenants(env: Env): Promise<number> {
   const row = await env.DB.prepare(`SELECT COUNT(*) as n FROM tenants_index`).first<{ n: number }>();
@@ -307,7 +368,20 @@ async function readSweepCursor(env: Env): Promise<string | null> {
  * `tenants.scanned` vs `tenants.total`.
  */
 export async function resolveSweepTenants(env: Env, scope: SweepScope): Promise<string[]> {
-  if (scope.tenantIds) return [...scope.tenantIds];
+  if (scope.tenantIds) {
+    // Priority tenants lead, then the rotating page VERBATIM.
+    //
+    // The de-duplication drops from the PREPEND, never from the page, and that
+    // direction is the whole point: `commitSweepCursor` indexes `slice.ids` by
+    // the covered count, so the rotating region has to stay exactly the keyset
+    // page the cursor was computed against. Removing a duplicate from the page
+    // instead would shift every id after it by one and the cursor would land
+    // short. (Idempotent with the same filtering `scheduled.ts` does before it
+    // sets `fanout.priorityCount`, which is where the count has to be exact.)
+    const page = scope.tenantIds;
+    const priority = (scope.priorityTenantIds ?? []).filter((id) => !page.includes(id));
+    return priority.length === 0 ? [...page] : [...priority, ...page];
+  }
   const result = await env.DB.prepare(`SELECT id FROM tenants_index ORDER BY id LIMIT ?`)
     .bind(MAX_TENANT_SCAN)
     .all<{ id: string }>();
@@ -362,7 +436,11 @@ export async function sweepTenants(
   // (which passes `sweepDeadlineOf(...)`) is serial by construction, not by
   // remembering to ask for it.
   const concurrency = fanout && isSweepFanout(fanout) ? fanout.concurrency : 1;
-  const result = concurrency > 1 ? await sweepConcurrently(tenantIds, fanout, fn, onError, concurrency) : await sweepSerially(tenantIds, fanout, fn, onError);
+  const priorityCount = fanout && isSweepFanout(fanout) ? Math.min(fanout.priorityCount, tenantIds.length) : 0;
+  const result =
+    concurrency > 1
+      ? await sweepConcurrently(tenantIds, fanout, fn, onError, concurrency, priorityCount)
+      : await sweepSerially(tenantIds, fanout, fn, onError, priorityCount);
 
   // Only a leg iterating THE TENANT SLICE may move the rotation cursor. A leg
   // with its own population passes `sweepDeadlineOf(...)`, which has no
@@ -371,21 +449,53 @@ export async function sweepTenants(
   // THE PREFIX, NOT THE COUNT. They are equal serially; concurrently they are
   // not necessarily, and `commitSweepCursor` indexes by this number.
   if (fanout && isSweepFanout(fanout)) {
-    fanout.leastVisited = fanout.leastVisited === null ? result.prefix : Math.min(fanout.leastVisited, result.prefix);
+    // NET OUT THE PRIORITY PREPEND. The cursor indexes the ROTATING page, so a
+    // prefix that still counts the paying tenants swept ahead of it would
+    // advance the rotation by tenants that are not on that page — skipping
+    // exactly `priorityCount` of them, every tick, forever.
+    const rotationPrefix = Math.max(0, result.prefix - priorityCount);
+    fanout.leastVisited = fanout.leastVisited === null ? rotationPrefix : Math.min(fanout.leastVisited, rotationPrefix);
   }
   return result;
 }
 
-/** The serial path — BYTE-FOR-BYTE the loop that shipped before concurrency
- * existed, kept as its own function rather than as `concurrency === 1` falling
- * through the pool below. The pool at one worker is *semantically* the same
- * loop, but it is not the same code, and "C=1 reproduces today exactly" is a
- * claim worth being literally true rather than argued. */
+/**
+ * Indices the deadline may NOT skip.
+ *
+ * Two guarantees in one predicate:
+ *  - index 0 is always attempted, so a leg can never make ZERO progress and pin
+ *    the rotation head. That is the pre-existing `i > 0 &&` rule.
+ *  - every PRIORITY index is always attempted, and so is the FIRST ROTATION
+ *    index (`priorityCount`). Without the second half, a tick whose deadline was
+ *    already spent would cover only paying tenants, the netted rotation prefix
+ *    would be 0, and `commitSweepCursor` reads a zero advance as "restart the
+ *    rotation" — pinning it at the head forever, one tenant short of the exact
+ *    failure the `i > 0` rule exists to prevent.
+ *
+ * The cost is a bounded overrun of at most `PAYING_TENANT_PRIORITY_CAP + 1`
+ * tenants past the deadline, on a leg that has 150s of send-pipeline budget
+ * behind it.
+ */
+function mustAttempt(index: number, priorityCount: number): boolean {
+  return index <= priorityCount;
+}
+
+/** The serial path — the loop that shipped before concurrency existed, kept as
+ * its own function rather than as `concurrency === 1` falling through the pool
+ * below. The pool at one worker is *semantically* the same loop, but it is not
+ * the same code, and "C=1 reproduces today exactly" is a claim worth being
+ * literally true rather than argued.
+ *
+ * The one edit to the original body is the deadline predicate, and it is a
+ * rewrite of the same condition: at `priorityCount = 0`,
+ * `!mustAttempt(i, 0)` is `!(i <= 0)` is `i > 0` — the original guard,
+ * character for character in meaning. */
 async function sweepSerially(
   tenantIds: readonly string[],
   fanout: SweepDeadline | undefined,
   fn: (tenantId: string) => Promise<void>,
   onError: (tenantId: string, err: unknown) => void,
+  priorityCount: number = 0,
 ): Promise<TenantSweepResult> {
   const clock = new RealClock();
   let visited = 0;
@@ -393,7 +503,7 @@ async function sweepSerially(
   let deferred = 0;
 
   for (let i = 0; i < tenantIds.length; i++) {
-    if (i > 0 && fanout && clock.now() - fanout.startedAt >= fanout.deadlineMs) {
+    if (!mustAttempt(i, priorityCount) && fanout && clock.now() - fanout.startedAt >= fanout.deadlineMs) {
       deferred = tenantIds.length - i;
       break;
     }
@@ -452,6 +562,7 @@ async function sweepConcurrently(
   fn: (tenantId: string) => Promise<void>,
   onError: (tenantId: string, err: unknown) => void,
   concurrency: number,
+  priorityCount: number = 0,
 ): Promise<TenantSweepResult> {
   const clock = new RealClock();
   const n = tenantIds.length;
@@ -466,7 +577,7 @@ async function sweepConcurrently(
       if (index >= n) return;
       // THE SHIPPED GUARD, unchanged in meaning: index 0 is always attempted,
       // so a leg can never make zero progress and pin the rotation head.
-      if (index > 0 && fanout && clock.now() - fanout.startedAt >= fanout.deadlineMs) {
+      if (!mustAttempt(index, priorityCount) && fanout && clock.now() - fanout.startedAt >= fanout.deadlineMs) {
         next = n; // stop every OTHER worker from claiming as well
         return;
       }

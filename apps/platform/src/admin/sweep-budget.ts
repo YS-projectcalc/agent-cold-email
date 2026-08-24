@@ -291,17 +291,6 @@ export const SEND_PIPELINE_TENANT_CAP = Math.floor(SEND_PIPELINE_LEG_DEADLINE_MS
 export const SEND_PIPELINE_SUBREQUESTS = SEND_PIPELINE_TENANT_CAP * SEND_PIPELINE_RPCS_PER_TENANT;
 
 /**
- * Everything one tick spends that the tenant slice does not: the fixed overhead
- * plus every leg that fans out over a population of its own.
- *
- * The slice derivation subtracts THIS. A leg with its own fan-out that is not
- * summed in here is a leg the slice arithmetic is silently wrong about, which is
- * the whole of B1.
- */
-export const SWEEP_FIXED_SUBREQUESTS =
-  SWEEP_FIXED_OVERHEAD_SUBREQUESTS + SCREENING_RECOVERY_SUBREQUESTS + RESERVE_REAP_SUBREQUESTS + SEND_PIPELINE_SUBREQUESTS;
-
-/**
  * DO RPCs ONE tenant costs across ALL legs in a single tick, worst case.
  *
  * The breakdown, and why it is the worst case rather than the typical one:
@@ -337,6 +326,44 @@ export const SWEEP_FIXED_SUBREQUESTS =
 export const SWEEP_RPCS_PER_TENANT = 7;
 
 /**
+ * How many PAYING tenants one tick may sweep ahead of the rotation.
+ *
+ * Paying tenants are swept EVERY tick; everyone else waits their turn in the
+ * keyset rotation. The founder ruling this implements is "paying-tenant-first",
+ * and the shape it takes is a bounded PREPEND rather than a re-ordering of the
+ * slice — see `SweepFanout.priorityCount` for why re-ordering is not available:
+ * the rotation cursor is a keyset over `id`, so a slice sorted by plan makes
+ * `slice.ids[covered - 1]` point at the wrong tenant.
+ *
+ * IT REALLOCATES THE TICK, IT DOES NOT ENLARGE IT. `sweepTenantSliceFor` takes
+ * the ACTUAL priority count and shortens the rotating slice by exactly that
+ * many, so the tick touches the same number of tenants either way and the
+ * fan-out deadline is unaffected. What changes is WHICH tenants: at 66 tenants
+ * with one paying, that tenant is swept every 5 minutes instead of every 4
+ * ticks, and the other 65 rotate through a slice of 18 instead of 19.
+ *
+ * A CAP, because the reallocation stops being free once the paying population
+ * approaches the slice: at that point every tick would be priority work and the
+ * rotation would stall. The cap is what makes that a bounded degradation with a
+ * declared subrequest term rather than a silent one. Small on purpose — it is
+ * sized for the paying population this platform actually has, and raising it
+ * costs the rotation one tenant per unit.
+ */
+export const PAYING_TENANT_PRIORITY_CAP = 5;
+
+/**
+ * Everything one tick spends that the tenant slice does not: the fixed overhead
+ * plus every leg that fans out over a population of its own.
+ *
+ * The slice derivation subtracts THIS. A leg with its own fan-out that is not
+ * summed in here is a leg the slice arithmetic is silently wrong about, which is
+ * the whole of B1.
+ */
+export const SWEEP_FIXED_SUBREQUESTS =
+  SWEEP_FIXED_OVERHEAD_SUBREQUESTS + SCREENING_RECOVERY_SUBREQUESTS + RESERVE_REAP_SUBREQUESTS + SEND_PIPELINE_SUBREQUESTS;
+
+
+/**
  * WHAT EACH CRON LEG COSTS, per leg, as an independent statement of the two
  * aggregates above.
  *
@@ -364,6 +391,7 @@ export const SWEEP_RPCS_PER_TENANT = 7;
  */
 export const LEG_SUBREQUEST_COSTS: Record<string, { perTenant: number; ownFanout: number; sharedSummary?: true }> = {
   tenantSlice: { perTenant: 0, ownFanout: 0 }, // D1 reads only (counted in the overhead)
+  tenantPriority: { perTenant: 0, ownFanout: 0 }, // one bounded D1 read (overhead); its tenants are priced in SWEEP_TENANTS_TOUCHED_PER_TICK
   deliverability: { perTenant: 1, ownFanout: 0 }, // deliverabilitySweep
   opsSummary: { perTenant: 1, ownFanout: 0 }, // opsSummaryForSweep — the ONE fetch the three legs below share
   dunning: { perTenant: 1, ownFanout: 0, sharedSummary: true }, // suspendForDunning (past_due only)
@@ -493,17 +521,23 @@ export const SWEEP_MEAN_COMPLETION_FRACTION = 0.85;
  * calibration — the derivation reproduces the serial configuration rather than
  * replacing it.
  */
-export function sweepTenantSliceFor(concurrency: number): number {
+export function sweepTenantSliceFor(concurrency: number, priorityCount: number = 0): number {
   const effective = effectiveConcurrency(concurrency);
+  // The priority prepend is swept inside the SAME fan-out deadline, so it comes
+  // out of the same wall clock. Subtracting it here — from the ACTUAL count, not
+  // from the cap — is what makes "paying-tenant-first" a reallocation of the
+  // tick rather than an unaccounted addition to it. Subtracting the cap instead
+  // would permanently reserve slots for paying tenants that do not exist.
+  const priority = Math.max(0, Math.min(priorityCount, PAYING_TENANT_PRIORITY_CAP));
   return Math.max(
     1,
     Math.min(
       Math.floor((SWEEP_SUBREQUEST_BUDGET * SWEEP_BUDGET_FRACTION - SWEEP_FIXED_SUBREQUESTS) / SWEEP_RPCS_PER_TENANT),
-      Math.floor((SWEEP_FANOUT_DEADLINE_MS * effective) / (ASSUMED_DO_RPC_MS * SWEEP_FANOUT_RPCS_PER_TENANT)),
+      Math.floor((SWEEP_FANOUT_DEADLINE_MS * effective) / (ASSUMED_DO_RPC_MS * SWEEP_FANOUT_RPCS_PER_TENANT)) - priority,
       Math.floor(
         (SWEEP_FANOUT_DEADLINE_MS * SWEEP_MEAN_COMPLETION_FRACTION * effective) /
           (MEASURED_DO_RPC_MS.meanMs * SWEEP_FANOUT_RPCS_PER_TENANT),
-      ),
+      ) - priority,
     ),
   );
 }
@@ -538,8 +572,27 @@ export function sweepFanoutConcurrency(env: { SWEEP_FANOUT_CONCURRENCY?: string 
  */
 export const SWEEP_TENANT_SLICE = sweepTenantSliceFor(SWEEP_FANOUT_CONCURRENCY);
 
+/**
+ * How many tenants one tick's fan-out touches, worst case, INCLUDING the paying
+ * tenants swept ahead of the rotation.
+ *
+ * USUALLY JUST THE SLICE, because the priority pass REALLOCATES rather than
+ * adds: `sweepTenantSliceFor` shortens the rotating slice by exactly the actual
+ * priority count, so `slice + priority` is the un-prioritised slice again.
+ * Pricing the priority pass as its own additive `ownFanout` term — the first
+ * shape this took — DOUBLE-COUNTS it, and `sweep-budget.test.ts`'s independent
+ * restatement of the worst-case tick is what caught that.
+ *
+ * The one case where it does NOT net out is the floor: `sweepTenantSliceFor`
+ * clamps the rotating slice at 1, so a concurrency low enough for the priority
+ * cap to exceed the whole slice touches `1 + cap` tenants instead. That is the
+ * max below — bounded, and it only binds at concurrencies this deployment does
+ * not run.
+ */
+export const SWEEP_TENANTS_TOUCHED_PER_TICK = Math.max(SWEEP_TENANT_SLICE, 1 + PAYING_TENANT_PRIORITY_CAP);
+
 /** What one tick actually costs at a full slice — the number the invariant is about. */
-export const SWEEP_TICK_SUBREQUESTS = SWEEP_RPCS_PER_TENANT * SWEEP_TENANT_SLICE + SWEEP_FIXED_SUBREQUESTS;
+export const SWEEP_TICK_SUBREQUESTS = SWEEP_RPCS_PER_TENANT * SWEEP_TENANTS_TOUCHED_PER_TICK + SWEEP_FIXED_SUBREQUESTS;
 
 /**
  * How many ticks a full rotation takes at a given tenant count — the number

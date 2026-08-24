@@ -30,7 +30,7 @@ import { FAILURE_SIGNAL_WINDOW_MS } from "./admin/watchtower-grading.js";
 import { reportSweepSignals, reportSweepSignalsHealth } from "./admin/sweep-signals.js";
 import { recordSweepHeartbeat } from "./admin/watchtower-infra.js";
 import { SWEEP_FANOUT_DEADLINE_MS, sweepFanoutConcurrency, sweepTenantSliceFor } from "./admin/sweep-budget.js";
-import { commitSweepCursor, newSweepFanout, readTenantSlice, type SweepScope } from "./admin/tenant-slice.js";
+import { commitSweepCursor, newSweepFanout, readPriorityTenantIds, readTenantSlice, type SweepScope } from "./admin/tenant-slice.js";
 import { createOpsMailer, type OpsMailer } from "./ops-mail/ops-mailer.js";
 import { reapStaleReservations } from "./engine/spend-ceiling.js";
 import { maybeRefreshSdnList } from "./ofac/sdn-refresh.js";
@@ -85,9 +85,23 @@ export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer;
   // here rather than at module scope is what makes `SWEEP_FANOUT_CONCURRENCY=1`
   // a live rollback to the pre-concurrency slice of 3.
   const concurrency = sweepFanoutConcurrency(env);
-  const slice = await runLeg("tenantSlice", null, () => readTenantSlice(env, opts.sliceLimit ?? sweepTenantSliceFor(concurrency)));
-  const fanout = newSweepFanout(new RealClock().now(), SWEEP_FANOUT_DEADLINE_MS, concurrency);
-  const scope: SweepScope = { tenantIds: slice?.ids ?? [], fanout };
+
+  // PAYING TENANTS ARE SWEPT EVERY TICK, ahead of the rotation. Read before the
+  // slice because the slice is SHORTENED by exactly this many — the priority
+  // pass shares the fan-out deadline, so it reallocates the tick rather than
+  // enlarging it (admin/sweep-budget.ts's PAYING_TENANT_PRIORITY_CAP).
+  const priorityAll = await runLeg("tenantPriority", [] as string[], () => readPriorityTenantIds(env));
+  const slice = await runLeg("tenantSlice", null, () =>
+    readTenantSlice(env, opts.sliceLimit ?? sweepTenantSliceFor(concurrency, priorityAll.length)),
+  );
+  // THE FILTER HAPPENS ONCE, HERE, because `fanout.priorityCount` is the offset
+  // the rotation accumulator subtracts and it has to be EXACT. A paying tenant
+  // that already sits on this tick's keyset page is swept by the page; prepending
+  // it as well would sweep it twice and, worse, make the prepend length differ
+  // from the count the cursor arithmetic was told about.
+  const priorityIds = priorityAll.filter((id) => !(slice?.ids ?? []).includes(id));
+  const fanout = newSweepFanout(new RealClock().now(), SWEEP_FANOUT_DEADLINE_MS, concurrency, priorityIds.length);
+  const scope: SweepScope = { tenantIds: slice?.ids ?? [], priorityTenantIds: priorityIds, fanout };
 
   const deliverability = await runLeg("deliverability", null, () => runDeliverabilitySweepAllTenants(env, scope));
 
@@ -188,6 +202,7 @@ export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer;
   const sendPipeline = await runLeg("sendPipeline", null, () => runSendPipelineAllTenants(env, now, {}));
 
   const legs = {
+    tenantPriority: priorityAll,
     tenantSlice: slice,
     deliverability,
     opsSummary,
