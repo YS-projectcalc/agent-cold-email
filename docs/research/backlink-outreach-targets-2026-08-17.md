@@ -609,3 +609,10 @@ Every external action taken or prepared this session, one row each, per this doc
 | GitHub release v0.2.3 | https://github.com/YS-projectcalc/agent-cold-email/releases/tag/v0.2.3 | 2026-08-23 07:56Z | first tagged release (Glama/directories read releases) | DONE | — |
 | skills.sh | `npx skills add YS-projectcalc/agent-cold-email` from the public repo → "Found 1 skill" | 2026-08-23 | install path verified | DONE | — |
 | cursor.directory | https://cursor.directory/plugins/new?type=mcp_server — "Auto (GitHub) → Scan repo" | 2026-08-23 ~07:58Z | scan of the public repo detected 2 components (MCP Server + Skill) and pre-filled name/description once; two publish retries never re-rendered the form (90s wait; site 429s automation — rate limit likely) | NOT PUBLISHED — founder: paste the repo URL, Scan, Publish (no login seen) | — |
+| salestools.club (target #3) | form (id-selectors — site changed name→id attrs 08-24) | 2026-08-24 | name/URL/docs/category "Sales Engagement"/desc/support@coldrig.dev; MCP READY + AGENT SKILLS checked; tags | ✅ SUBMITTED — "review within 72 hours" | check 2026-08-27 |
+| mcp.directory server (target #8) | form /submit | 2026-08-24 | repo URL, npm agent-cold-email, 97-char desc, support@ ×2 | ✅ SUBMITTED — "publish within 24 hours", email notice | check 2026-08-25 |
+| mcp.directory SKILL | form /submit-skill | 2026-08-24 | SKILL.md GitHub URL, name, description, category Productivity, support@ ×2 | ✅ SUBMITTED — "publish within 24 hours" | check 2026-08-25 |
+| cursor.directory | scan form | 2026-08-24 | — | ❌ post-scan form did not render (3rd attempt; their side) | retry later or founder browser |
+| oryndex.co | form /submit-a-tool | 2026-08-24 | all fields filled | ⛔ CAPTCHA ("security check") — agent never completes CAPTCHAs | FOUNDER (~1 min) |
+| claudeskills.info | /submit/ | 2026-08-24 | — | ⛔ redirects to Google OAuth sign-in (account grant) | FOUNDER (~2 min) |
+| lobehub.com/mcp/submit | — | 2026-08-24 | — | ❌ HTTP 500 on their side (2nd day) | retry in a few days |
