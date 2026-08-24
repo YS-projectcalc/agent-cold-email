@@ -24,8 +24,30 @@ import { timingSafeEqual } from "./timing-safe-equal.js";
 
 const KEY_DERIVATION_LABEL = "coldstart:unsubscribe-token-key:v1";
 
+// msgchannel Inc4 gate B1 (docs/adversarial/msgchannel-inc4-gate-2026-08-24.md)
+// — the mirror opt-out used to reuse THIS SAME key/payload, so any lead-facing
+// `/unsubscribe` link (minted for a tenant's own cold-email recipient, engine/
+// tick.ts:85-87) also verified on `/messages/mirror/optout`: an arbitrary
+// stranger holding one cold email could disable that tenant's operational
+// mirror. A distinct derivation label makes the two token spaces
+// cryptographically independent — the SAME domain-separation argument this
+// file already made for `auth.ts`'s hashApiToken use of the pepper, just not
+// carried between the two token PURPOSES it should also have covered.
+const MIRROR_OPTOUT_KEY_DERIVATION_LABEL = "coldstart:mirror-optout-token-key:v1";
+
 async function importHmacKey(rawKeyBytes: BufferSource): Promise<CryptoKey> {
   return crypto.subtle.importKey("raw", rawKeyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+}
+
+async function deriveKey(pepper: string, label: string, purpose: string): Promise<CryptoKey> {
+  if (!pepper) {
+    throw new Error(
+      `TOKEN_HASH_PEPPER is unset or empty — the ${purpose} token cannot be signed, so no compliant message can be built. Set the secret.`,
+    );
+  }
+  const pepperKey = await importHmacKey(new TextEncoder().encode(pepper));
+  const derivedBytes = await crypto.subtle.sign("HMAC", pepperKey, new TextEncoder().encode(label));
+  return importHmacKey(derivedBytes);
 }
 
 /**
@@ -49,14 +71,19 @@ async function importHmacKey(rawKeyBytes: BufferSource): Promise<CryptoKey> {
  * of a key-length error from a call site three modules away.
  */
 export async function deriveUnsubscribeKey(pepper: string): Promise<CryptoKey> {
-  if (!pepper) {
-    throw new Error(
-      "TOKEN_HASH_PEPPER is unset or empty — the one-click unsubscribe token cannot be signed, so no compliant message can be built. Set the secret.",
-    );
-  }
-  const pepperKey = await importHmacKey(new TextEncoder().encode(pepper));
-  const derivedBytes = await crypto.subtle.sign("HMAC", pepperKey, new TextEncoder().encode(KEY_DERIVATION_LABEL));
-  return importHmacKey(derivedBytes);
+  return deriveKey(pepper, KEY_DERIVATION_LABEL, "one-click unsubscribe");
+}
+
+/**
+ * Gate B1 fix — the mirror opt-out's OWN key, independent of
+ * `deriveUnsubscribeKey` above (different label, `deriveKey`'s HMAC-of-a-label
+ * construction means the two derived keys share nothing computable from one
+ * another even though both start from the same `TOKEN_HASH_PEPPER`). A sig
+ * produced by one NEVER verifies against the other, closing the cross-route
+ * replay the gate proved both directions.
+ */
+export async function deriveMirrorOptOutKey(pepper: string): Promise<CryptoKey> {
+  return deriveKey(pepper, MIRROR_OPTOUT_KEY_DERIVATION_LABEL, "mirror opt-out");
 }
 
 /** Signs with an ALREADY-derived key — the per-row half of the split above. */
@@ -95,13 +122,48 @@ export async function verifyUnsubscribeToken(
   return timingSafeEqual(expected, sig);
 }
 
-/** Builds the full hosted one-click URL from a base origin + a signed token
- * — the exact value `List-Unsubscribe`'s https form and the in-body opt-out
- * link both point at (engine/tick.ts). */
-export function buildUnsubscribeUrl(baseUrl: string, tenantId: string, email: string, sig: string): string {
-  const url = new URL("/unsubscribe", baseUrl);
+/** Gate B1 fix — the mirror opt-out's own sign/verify pair, over
+ * `deriveMirrorOptOutKey` rather than `deriveUnsubscribeKey`. Same
+ * `tenantId:email` payload shape (`payloadFor`, reused per rule c — the
+ * separation lives entirely in the KEY, not the message), same constant-time
+ * comparison. */
+export async function signMirrorOptOutToken(pepper: string, tenantId: string, email: string): Promise<string> {
+  return signWithUnsubscribeKey(await deriveMirrorOptOutKey(pepper), tenantId, email);
+}
+
+export async function verifyMirrorOptOutToken(
+  pepper: string,
+  tenantId: string,
+  email: string,
+  sig: string,
+): Promise<boolean> {
+  if (!sig) return false;
+  const expected = await signMirrorOptOutToken(pepper, tenantId, email);
+  return timingSafeEqual(expected, sig);
+}
+
+function buildTokenUrl(baseUrl: string, path: string, tenantId: string, email: string, sig: string): string {
+  const url = new URL(path, baseUrl);
   url.searchParams.set("tenant", tenantId);
   url.searchParams.set("email", email);
   url.searchParams.set("sig", sig);
   return url.toString();
+}
+
+/** Builds the full hosted one-click URL from a base origin + a signed token
+ * — the exact value `List-Unsubscribe`'s https form and the in-body opt-out
+ * link both point at (engine/tick.ts). */
+export function buildUnsubscribeUrl(baseUrl: string, tenantId: string, email: string, sig: string): string {
+  return buildTokenUrl(baseUrl, "/unsubscribe", tenantId, email, sig);
+}
+
+/**
+ * msgchannel Inc4 (design §6) — the SAME (tenant, email, sig) HMAC triplet as
+ * `buildUnsubscribeUrl` above, reused rather than re-invented (CLAUDE.md rule
+ * c), pointed at a different hosted path. `routes/messages.ts`'s two-step
+ * GET-confirm/POST-perform opt-out route verifies it with the same
+ * `verifyUnsubscribeToken` `/unsubscribe` already uses.
+ */
+export function buildMirrorOptOutUrl(baseUrl: string, tenantId: string, email: string, sig: string): string {
+  return buildTokenUrl(baseUrl, "/messages/mirror/optout", tenantId, email, sig);
 }

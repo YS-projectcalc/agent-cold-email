@@ -227,6 +227,11 @@ describe("failing-by-construction — a new check cannot inherit an unchosen pol
     // the BUDGET (an alarm may not be budgeted by the budget it announces), not
     // from the debounce — see `ALERT_FAMILIES`.
     alert_budget_exceeded: 2,
+    // msgchannel Inc4 §7 — DEBOUNCED deliberately, NOT joined to the
+    // sweep_coverage/alert_delivery exemption above: one bad tick is
+    // transient, and the mirror is not the channel that says "we cannot
+    // reach you" (that is alert_delivery).
+    mirror_delivery: 2,
   };
 
   function declaredCheckNames(source: string): string[] {

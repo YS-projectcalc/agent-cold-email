@@ -71,23 +71,25 @@
 import type { DeliveryReason } from "@coldstart/shared";
 import type { Env } from "../env.js";
 import type { OpsMailer } from "../ops-mail/ops-mailer.js";
+import type { MirrorDrainResult } from "../engine/message-mirror.js";
 import type { OpsDigest } from "./ops-sweep.js";
 import { reconcileAlerts, reportCheck } from "./watchtower.js";
 import {
   ALERT_DELIVERY_CHECK,
   CRON_LEGS_CHECK,
+  MIRROR_DELIVERY_CHECK,
   SWEEP_COVERAGE_CHECK,
   SWEEP_SIGNALS_CHECK,
   type AlertOutcome,
   type CheckResult,
 } from "./watchtower-alerts.js";
-import { alertDeliveryKey, cronLegsKey, sweepCoverageKey, warmupGaveUpKey } from "./watchtower-families.js";
+import { alertDeliveryKey, cronLegsKey, mirrorDeliveryKey, sweepCoverageKey, warmupGaveUpKey } from "./watchtower-families.js";
 import { watchtowerStub } from "./watchtower-infra.js";
 // No `SWEEP_TENANT_SLICE` here, deliberately: since NB-3 this module reasons
 // only about what the TICK reported (`covered` / `handed` / `allowed`), never
 // about the configured constant. Reaching for the constant is what made a short
 // tail read as a clipped tick.
-import { coverageTicks } from "./sweep-budget.js";
+import { coverageTicks, SWEEP_FANOUT_CONCURRENCY, SWEEP_TENANT_SLICE } from "./sweep-budget.js";
 
 /**
  * HOW EACH LEG REPORTS — the table that makes this module's coverage claim
@@ -112,7 +114,15 @@ import { coverageTicks } from "./sweep-budget.js";
 export const LEG_SHAPES = {
   /** No failure signal of its own; a throw (the `null` fallback) is the only tell. */
   tenantSlice: "no-signal",
+  /** One bounded D1 read of the paying tenants; a throw (the `[]` fallback) is
+   * the only tell, and an empty list is a legitimate state on a platform with no
+   * paying tenants — so it must NOT be graded as a failure. */
+  tenantPriority: "no-signal",
   deliverability: "counters",
+  /** The shared per-tenant ops-summary prefetch — reports `errors` like the
+   * other slice legs. Its failures matter MORE than a single leg's: the three
+   * legs behind it consume what it fetched, and each counts its own miss. */
+  opsSummary: "counters",
   dunning: "counters",
   digest: "counters",
   /** `AlertOutcome[]` — W-M1. */
@@ -142,7 +152,12 @@ const FAILURE_COUNTERS = ["errors"] as const;
  * tenant abandoned at its per-tenant budget was not reached, and the engine
  * being slow is a capacity fact about that tenant, not a leg fault.
  */
-const DEFERRAL_COUNTERS = ["budgetExpiries", "skippedForLegDeadline", "deferred"] as const;
+const DEFERRAL_COUNTERS = ["budgetExpiries", "skippedForLegDeadline", "skippedForTenantCap", "deferred"] as const;
+
+/** The deferral counter names, exported so a leg adding one can be tested for
+ * having filed it under the right heading — a counter this reducer does not
+ * know about is silently zero, and one filed as a FAILURE pins its check. */
+export const DEFERRAL_COUNTER_NAMES: readonly string[] = DEFERRAL_COUNTERS;
 
 export interface LegSignals {
   /** Legs that returned their runLeg fallback — i.e. threw outright. */
@@ -492,12 +507,18 @@ export async function reportSweepSignals(
                 `tenant, a dead domain or a starved send queue is now noticed a rotation late rather than within a cron period. ` +
                 `The slice is bounded by the WALL CLOCK the cron period has left after the send pipeline's own bounds, at a DO ` +
                 `RPC round trip measured against production — so simply raising the slice buys nothing, it just moves the ` +
-                `deadline's cut further up the leg order (admin/sweep-budget.ts). TWO REAL REMEDIES, and the cheap one has not ` +
-                `been tried: (1) BOUNDED-CONCURRENCY FAN-OUT — the same measurement puts DO cpuTime at 1-3% of wall time, so ` +
-                `the deadline is being spent WAITING, and overlapping those waits would raise the slice several-fold against ` +
-                `the same deadline. Unevaluated: nobody has measured this Worker against the simultaneous-connection ceiling. ` +
-                `(2) the D1/Analytics read-model (admin/README.md, ARCHITECTURE.md #3), which is the structural fix and the ` +
-                `larger build. Measure (1) before committing to (2).`,
+                `deadline's cut further up the leg order (admin/sweep-budget.ts). CHECK THE CHEAP THING FIRST: the fan-out runs ` +
+                `${SWEEP_FANOUT_CONCURRENCY} DO RPCs in parallel by default, and if SWEEP_FANOUT_CONCURRENCY has been set to 1 ` +
+                `(the rollback lever) the slice drops by roughly 5x and this alert is the expected consequence — unset it. ` +
+                `Otherwise BOUNDED-CONCURRENCY FAN-OUT IS ALREADY SHIPPED and is not the remedy: it was measured and built on ` +
+                `2026-08-24 (docs/research/sweep-capacity-measurement-2026-08-24.md), together with the opsSummary dedupe, the ` +
+                `send pipeline moving off the slice, and paying-tenant-first priority. THE REMAINING REMEDY IS THE ` +
+                `D1/ANALYTICS READ-MODEL (admin/README.md, ARCHITECTURE.md #3) — the structural fix and the larger build. The ` +
+                `read-model becomes DUE at ${SWEEP_TENANT_SLICE * COVERAGE_TICKS_ALERT_AFTER + 1} tenants at the shipped ` +
+                `concurrency of ${SWEEP_FANOUT_CONCURRENCY} — DERIVED here (slice x threshold + 1), not quoted, because a ` +
+                `hardcoded figure in this sentence went stale the same day it was written; raising SWEEP_FANOUT_CONCURRENCY above ` +
+                `${SWEEP_FANOUT_CONCURRENCY} buys headroom short of that, but only up to the platform's documented ` +
+                `six-simultaneous-connection ceiling, past which the runtime queues and every tick clips.`,
             },
       );
     }
@@ -608,6 +629,46 @@ export async function reportSweepSignalsHealth(env: Env, mailer: OpsMailer, repo
             `warmup_cancel_gave_up observation was made this tick. Those checks are not healthy, they are UNREPORTED, ` +
             `and the cron heartbeat is still being written, so the dead-man will stay quiet. Check the WatchtowerDO ` +
             `(gradeSweepStreak) and D1.`,
+        },
+    nowMs,
+  );
+}
+
+/**
+ * msgchannel Inc4 §7 — the email mirror's OWN delivery channel reporting on
+ * itself, produced ONCE per tick over the `deliverability` leg's aggregate
+ * (`DeliverabilitySweepAllSummary.mirror`), never per tenant (C8: a
+ * per-entity instance would multiply with the tenant count). `darkChannel` is
+ * read the SAME way `createOpsMailer` decides real-vs-sandbox — a present
+ * `OPS_EMAIL` binding, nothing DO-local.
+ *
+ * Unhealthy whenever the tick actually tried and failed to reach someone
+ * (`failed > 0`) or found eligible rows it could not address at all
+ * (`noContact > 0`) — a tick with neither is healthy regardless of
+ * `suppressed`/`sent`, since a full ring or a quiet tick are both the design
+ * working as intended, not a delivery problem.
+ */
+export async function reportMirrorDeliveryHealth(env: Env, mailer: OpsMailer, mirror: MirrorDrainResult, nowMs: number): Promise<void> {
+  const darkChannel = !env.OPS_EMAIL;
+  const unhealthy = mirror.failed > 0 || mirror.noContact > 0;
+  await reportCheck(
+    env,
+    mailer,
+    unhealthy
+      ? {
+          name: MIRROR_DELIVERY_CHECK,
+          healthy: false,
+          materiality: mirrorDeliveryKey(darkChannel, mirror.failed, mirror.noContact),
+          detail:
+            `The email mirror's drain this tick: ${mirror.sent} sent, ${mirror.failed} failed, ` +
+            `${mirror.suppressed} suppressed (daily cap), ${mirror.noContact} skipped for no contact email on file. ` +
+            `${darkChannel ? "OPS_EMAIL is not bound — the channel is entirely dark." : ""}`,
+        }
+      : {
+          name: MIRROR_DELIVERY_CHECK,
+          healthy: true,
+          basis: "reobserved",
+          detail: `The email mirror's drain this tick: ${mirror.sent} sent, ${mirror.suppressed} suppressed, 0 failed, 0 no-contact.`,
         },
     nowMs,
   );

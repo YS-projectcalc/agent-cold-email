@@ -74,3 +74,12 @@ export const AdminOperatorMessageInput = z.object({
   regarding: refuseControlChars(z.string().min(1).max(200)).optional(),
 });
 export type AdminOperatorMessageInput = z.infer<typeof AdminOperatorMessageInput>;
+
+// msgchannel Inc4 (design §6) — PATCH /admin/tenants/:id/mirror, so an
+// operator can honour a phoned-in opt-out/opt-back-in request instantly,
+// dispatching the SAME TenantDO.setMirrorEmailOptOut RPC the recipient's own
+// signed link uses (routes/messages.ts).
+export const AdminMirrorOptOutInput = z.object({
+  optedOut: z.boolean(),
+});
+export type AdminMirrorOptOutInput = z.infer<typeof AdminMirrorOptOutInput>;

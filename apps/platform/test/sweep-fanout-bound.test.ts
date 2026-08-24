@@ -6,6 +6,7 @@ import { readTenantSlice } from "../src/admin/tenant-slice.js";
 import { watchtowerStub } from "../src/admin/watchtower-infra.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
 import { insertTenantIndex } from "../src/db.js";
+import { SEND_PIPELINE_SUBREQUESTS, SWEEP_RPCS_PER_TENANT, SWEEP_TICK_SUBREQUESTS } from "../src/admin/sweep-budget.js";
 import { newId } from "../src/schema.js";
 import sdnValidCsv from "./fixtures/ofac/sdn-valid.csv?raw";
 import { seedBenignSdnList } from "./helpers.js";
@@ -30,8 +31,13 @@ import { seedBenignSdnList } from "./helpers.js";
 
 const SLICE = 4;
 
-/** Counts `get()` (one per leg per tenant) and every RPC method called on the stub. */
-function countingEnv(counter: { gets: number; rpcs: number }): Env {
+/** Counts `get()` (one per leg per tenant) and every RPC method called on the
+ * stub, SPLIT by whether the call belongs to the tenant-slice fan-out or to the
+ * send pipeline. The two are bounded by different things since 2026-08-24 (see
+ * the S1 test below), so a single total can no longer state either property. */
+const SEND_PIPELINE_METHODS = new Set(["runScheduledPoll", "runScheduledTick"]);
+
+function countingEnv(counter: { gets: number; rpcs: number; fanoutRpcs: number; sendPipelineRpcs: number }): Env {
   const real = env.TENANT;
   const namespace = {
     idFromName: (name: string) => real.idFromName(name),
@@ -44,6 +50,8 @@ function countingEnv(counter: { gets: number; rpcs: number }): Env {
           if (typeof value !== "function") return value;
           return (...args: unknown[]) => {
             counter.rpcs++;
+            if (SEND_PIPELINE_METHODS.has(String(prop))) counter.sendPipelineRpcs++;
+            else counter.fanoutRpcs++;
             return (target[prop as string] as (...a: unknown[]) => unknown)(...args);
           };
         },
@@ -69,8 +77,8 @@ async function seedTenantIndexRows(n: number): Promise<void> {
   }
 }
 
-async function sweepWithCounter(sliceLimit: number): Promise<{ gets: number; rpcs: number }> {
-  const counter = { gets: 0, rpcs: 0 };
+async function sweepWithCounter(sliceLimit: number): Promise<{ gets: number; rpcs: number; fanoutRpcs: number; sendPipelineRpcs: number }> {
+  const counter = { gets: 0, rpcs: 0, fanoutRpcs: 0, sendPipelineRpcs: 0 };
   await runScheduledOpsSweep(countingEnv(counter), { mailer: new SandboxOpsMailer(), sliceLimit });
   return counter;
 }
@@ -93,7 +101,7 @@ describe("S1 — the per-tick DO fan-out no longer grows with the tenant count",
     vi.spyOn(console, "error").mockImplementation(() => {});
   });
 
-  it("doubling the tenant count does not change one tick's DO RPC count", async () => {
+  it("doubling the tenant count does not change the FAN-OUT's DO RPC count", async () => {
     await seedTenantIndexRows(SLICE * 2);
     const small = await sweepWithCounter(SLICE);
 
@@ -102,13 +110,34 @@ describe("S1 — the per-tick DO fan-out no longer grows with the tenant count",
 
     vi.restoreAllMocks();
 
-    // On the old code this is the assertion that fails: `gets` was one per leg
-    // PER TENANT over the whole index, so 8 -> 16 tenants doubled it.
-    expect({ gets: doubled.gets, rpcs: doubled.rpcs }).toEqual({ gets: small.gets, rpcs: small.rpcs });
-    // And the count is bounded by the slice, not the index: a handful of legs
-    // times four tenants, not times sixteen.
-    expect(small.gets).toBeLessThanOrEqual(SLICE * 11);
-    expect(small.gets).toBeGreaterThan(0); // the proxy is really being used
+    // ⚠️ SPLIT ON 2026-08-24, and the split is the honest statement of what
+    // changed. This used to assert the WHOLE tick's DO count was invariant in N.
+    // The send pipeline moved OFF the tenant slice that day — deliberately: the
+    // cron used to hand it the fan-out's slice, which throttled automatic
+    // sending to whatever the HEALTH legs could afford in 15 seconds (three
+    // tenants of sixty-six). It now runs to its own leg deadline, its own
+    // rotation and its own count cap, so its DO calls DO grow with N until that
+    // cap. Asserting a single invariant total would now be false, and relaxing
+    // it to an inequality would have quietly dropped the S1 property for the
+    // fan-out as well. Two properties, stated separately:
+    //
+    //   (a) THE FAN-OUT is invariant in N — the original S1 claim, undamaged.
+    expect(
+      { gets: doubled.fanoutRpcs, rpcs: doubled.fanoutRpcs },
+      "the tenant-slice fan-out grew with the tenant count — that is S1 regressing",
+    ).toEqual({ gets: small.fanoutRpcs, rpcs: small.fanoutRpcs });
+    expect(small.fanoutRpcs).toBeLessThanOrEqual(SLICE * SWEEP_RPCS_PER_TENANT);
+    expect(small.fanoutRpcs).toBeGreaterThan(0); // the proxy is really being used
+
+    //   (b) THE WHOLE TICK is bounded by a constant — a larger one, declared.
+    //       This is what stops the send pipeline's own fan-out from being the
+    //       unpriced leg B1 was about.
+    expect(doubled.rpcs).toBeLessThanOrEqual(SWEEP_TICK_SUBREQUESTS);
+    expect(doubled.sendPipelineRpcs).toBeLessThanOrEqual(SEND_PIPELINE_SUBREQUESTS);
+
+    //   (c) ...and the send pipeline really is reaching more tenants than the
+    //       slice now, or (a) would be passing because nothing ran.
+    expect(doubled.sendPipelineRpcs).toBeGreaterThan(small.sendPipelineRpcs);
   }, 60_000);
 
   it("the dead-man heartbeat still runs — the leg the fan-out used to starve", async () => {

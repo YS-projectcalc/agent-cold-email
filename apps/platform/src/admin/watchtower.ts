@@ -19,7 +19,7 @@
 
 import type { Notified, RecoveryBasis } from "@coldstart/shared";
 import { isLifecycleFrozen } from "../engine/billing-state.js";
-import { countTenants, resolveSweepTenants, sweepTenants, type SweepScope } from "./tenant-slice.js";
+import { countTenants, resolveSweepTenants, sweepTenants, sweptSummary, type SweepScope } from "./tenant-slice.js";
 import { DEFAULT_ADMIN_LIST_LIMIT, MAX_ADMIN_LIST_LIMIT } from "./db.js";
 import { expectedCheckRoster } from "./watchtower-roster.js";
 import { clampListLimit } from "../validate.js";
@@ -275,7 +275,11 @@ async function scanTenants(env: Env, nowMs: number, scope: SweepScope): Promise<
     tenantIds,
     scope.fanout,
     async (tenantId) => {
-      const s = await env.TENANT.get(env.TENANT.idFromName(tenantId)).opsSummary(sinceMs);
+      // The watchtower reads `failureSignalsInWindow`, so it MUST have been
+      // windowed at FAILURE_SIGNAL_WINDOW_MS — asserted, not assumed. Grading a
+      // 24h failure count against a 1h threshold reads as an incident.
+      const s = await sweptSummary(env, scope, tenantId, { failureSignalsSinceMs: sinceMs }, sinceMs);
+      if (s === null) throw new Error(`watchtower: the shared ops-summary prefetch did not supply tenant ${tenantId}`);
       failed += s.failureSignalsInWindow.failed;
       complaints += s.failureSignalsInWindow.complaints;
       results.push(

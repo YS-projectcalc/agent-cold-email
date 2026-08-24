@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { LEG_SHAPES } from "../src/admin/sweep-signals.js";
-import { SWEEP_FANOUT_RPCS_PER_TENANT, SWEEP_RPCS_PER_TENANT } from "../src/admin/sweep-budget.js";
+import { LEG_SUBREQUEST_COSTS, SWEEP_FANOUT_RPCS_PER_TENANT, SWEEP_RPCS_PER_TENANT } from "../src/admin/sweep-budget.js";
 import scheduledSource from "../src/scheduled.ts?raw";
 
 // W-M3 (docs/adversarial/sweep-completeness-pass-2026-08-17.md) — the tripwire
@@ -35,6 +35,16 @@ function scopedLegNames(source: string): string[] {
   return names;
 }
 
+/** Leg names handed the SHARED-SUMMARY scope specifically — the legs that read
+ * the tick's one prefetched ops summary instead of fetching their own. */
+function sharedSummaryLegNames(source: string): string[] {
+  const names: string[] = [];
+  for (const match of source.matchAll(/runLeg<?[^>]*>?\(\s*"([a-zA-Z0-9_]+)"([\s\S]*?)\);/g)) {
+    if (match[2]!.includes("scopeWithSummaries")) names.push(match[1]!);
+  }
+  return names;
+}
+
 describe("the leg bag and the reducer that reads it cannot drift", () => {
   it("finds the bag at all (a regex that matched nothing would make this vacuous)", () => {
     const keys = legBagKeys(scheduledSource);
@@ -65,20 +75,72 @@ describe("the per-tenant RPC budget accounts for every fan-out leg", () => {
   it("finds the scoped legs at all", () => {
     const scoped = scopedLegNames(scheduledSource);
     expect(scoped).toContain("deliverability");
-    expect(scoped).toContain("sendPipeline");
+    expect(scoped).toContain("opsSummary");
+    expect(scoped).toContain("watchtower");
+    // ...and the send pipeline is deliberately NOT among them since 2026-08-24.
+    // Pinned rather than merely absent: it used to be handed the fan-out's
+    // tenant slice, which throttled automatic sending to whatever the health
+    // legs could afford inside the 15s fan-out deadline — a deadline that is
+    // itself DERIVED as the period left over after this very leg's two bounds,
+    // so the slice was deducting the same constraint a second time. If a future
+    // edit puts it back on the slice this assertion says so out loud instead of
+    // the send cadence quietly collapsing again.
+    expect(scoped).not.toContain("sendPipeline");
   });
 
-  it("budgets at least one RPC per tenant for each leg that fans out", () => {
+  it("every leg that fans out per tenant is priced, and a ZERO price is explained", () => {
+    // WAS `SWEEP_RPCS_PER_TENANT >= scoped.length + 1`, a headcount proxy for
+    // "each fan-out leg costs at least one RPC". That stopped being true on
+    // 2026-08-24: the ops-summary dedupe made `digest` cost ZERO per tenant
+    // (it reads the tick's shared prefetch), and two legs already cost zero
+    // because they fan out over a population of their own. A headcount cannot
+    // tell a legitimate zero from an unpriced leg — which is the thing this
+    // guard exists to catch — so it is replaced by one that can.
+    for (const name of scopedLegNames(scheduledSource)) {
+      const cost = LEG_SUBREQUEST_COSTS[name];
+      expect(cost, `leg "${name}" fans out per tenant and LEG_SUBREQUEST_COSTS does not price it`).toBeTruthy();
+      if (cost!.perTenant === 0) {
+        expect(
+          cost!.ownFanout > 0 || cost!.sharedSummary === true,
+          `leg "${name}" is priced at ZERO DO RPCs per tenant with no explanation. A slice leg costs nothing ` +
+            "only if it fans out over its own population (`ownFanout`) or it consumes the tick's shared " +
+            "ops-summary prefetch (`sharedSummary`). An unexplained zero is an unpriced leg, and an unpriced " +
+            "leg is spend the slice arithmetic does not know about — that is B1.",
+        ).toBe(true);
+      }
+    }
+    // ...and the budget still covers every leg that DOES spend per tenant.
+    const pricedLegs = scopedLegNames(scheduledSource).filter((n) => (LEG_SUBREQUEST_COSTS[n]?.perTenant ?? 0) > 0);
+    expect(SWEEP_RPCS_PER_TENANT).toBeGreaterThanOrEqual(pricedLegs.length);
+    expect(SWEEP_FANOUT_RPCS_PER_TENANT).toBeGreaterThanOrEqual(pricedLegs.length - 2);
+  });
+
+  it("the sharedSummary flag matches the legs the SCHEDULER actually hands the shared map", () => {
+    // A DUAL ORACLE for the dedupe, the same shape B1's fix used: the budget
+    // file's flag and the scheduler's wiring are two independent sources and
+    // both have to say the same thing. Flagging a leg that does NOT get the map
+    // under-prices it by one RPC per tenant per tick; wiring a leg that is not
+    // flagged over-prices it, and the slice silently shrinks.
+    const flagged = Object.entries(LEG_SUBREQUEST_COSTS)
+      .filter(([, cost]) => cost.sharedSummary === true)
+      .map(([name]) => name)
+      .sort();
+    const wired = [...new Set(sharedSummaryLegNames(scheduledSource))].sort();
+    expect(wired, "could not find the shared-summary legs in scheduled.ts — this guard would be vacuous").not.toEqual([]);
+    expect(wired).toEqual(flagged);
+  });
+
+  it("the shared prefetch leg itself is scoped, priced, and runs BEFORE its consumers", () => {
     const scoped = scopedLegNames(scheduledSource);
-    // The send pipeline costs TWO (poll + tick) and is the only one that does;
-    // everything else is one, plus the conditional extras enumerated in
-    // sweep-budget.ts (dunning's suspend, the watchtower's continuity nudge).
-    expect(
-      SWEEP_RPCS_PER_TENANT,
-      "a new per-tenant cron leg was added without raising SWEEP_RPCS_PER_TENANT (admin/sweep-budget.ts). " +
-        "That constant is what sizes the tick's tenant slice, so under-counting it hands the sweep a slice " +
-        "it cannot afford — which is exactly how the dead-man heartbeat used to vanish.",
-    ).toBeGreaterThanOrEqual(scoped.length + 1);
-    expect(SWEEP_FANOUT_RPCS_PER_TENANT).toBeGreaterThanOrEqual(scoped.length - 1);
+    expect(scoped).toContain("opsSummary");
+    expect(LEG_SUBREQUEST_COSTS["opsSummary"]?.perTenant).toBe(1);
+    // Ordering is load-bearing: the consumers read a map the prefetch fills, and
+    // they share its deadline, so its coverage must be a SUPERSET of theirs.
+    const prefetchAt = scheduledSource.indexOf('runLeg("opsSummary"');
+    for (const consumer of ["dunning", "digest", "watchtower"]) {
+      expect(prefetchAt, `the opsSummary prefetch must run before "${consumer}"`).toBeLessThan(
+        scheduledSource.indexOf(`runLeg("${consumer}"`),
+      );
+    }
   });
 });

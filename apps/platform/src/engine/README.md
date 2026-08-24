@@ -325,6 +325,22 @@ section that is now historical, not the RPC shape itself.
   the file header and `docs/adversarial/msgchannel-inc5-gate-2026-08-11.md`
   finding #1 for what happens when the same logic reads and writes D1.
 
+## msgchannel Inc4 — the email mirror
+
+- `message-mirror.ts` — mirrors a bounded subset of a tenant's own
+  `tenant_messages` rows (source='operator' any severity, or system severity
+  `action_required`/`operator_pending`/`terminal`) to its signup contact
+  email. Rides the EXISTING `TenantDO.deliverabilitySweep` cron leg (one line
+  after `pruneTenantMessages`) — no new cron, no new RPC, no D1 migration.
+  Never the system of record: the DO row always is; this is a best-effort,
+  capped (`MIRROR_MAX_PER_DAY`, default 3/tenant/24h), opt-out-able courtesy
+  channel. Exactly-once via `tenant_messages.mirrored_at` (claim before send,
+  compensate on failure — Inc5's proven shape); the ring slot is NOT released
+  on a send failure, so a dark channel costs at most `MIRROR_MAX_PER_DAY`
+  attempts/tenant/day, never unbounded retries. Dark by default
+  (`MESSAGE_EMAIL_MIRROR_ENABLED` unset). Design: `docs/research/
+  msgchannel-inc4-email-mirror-design-2026-08-24.md`.
+
 ## How to run
 
 Part of `apps/platform`; exercised by `apps/platform/test/*.test.ts`.

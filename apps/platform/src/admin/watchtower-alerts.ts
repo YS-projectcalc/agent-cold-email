@@ -105,6 +105,10 @@ const CHECK_LABELS: Record<string, string> = {
   warmup_duplicates: "Duplicate warmup subscriptions",
   // Alert-state design §5.5 — the alerting channel reporting on itself.
   alert_budget_exceeded: "Founder alert budget",
+  // msgchannel Inc4 §7 — the mirror's OWN delivery channel reporting on
+  // itself (send failures / no-contact-email / a totally dark OpsMailer),
+  // never the platform condition a mirrored message describes.
+  mirror_delivery: "Email mirror delivery",
 };
 
 /**
@@ -210,6 +214,18 @@ export const ALERT_DELIVERY_CHECK = "alert_delivery";
  * not any platform condition, and no existing check's key could carry it.
  */
 export const ALERT_BUDGET_EXCEEDED_CHECK = "alert_budget_exceeded";
+
+/**
+ * msgchannel Inc4 §7 — the announcement channel reporting on the MIRROR's own
+ * delivery health (send_failed | no_contact_email | dark_channel), produced
+ * ONCE per tick from `scheduled.ts` over the tick's aggregate, never per
+ * tenant (a per-entity instance would multiply with the tenant count, which
+ * is exactly what the 15/5 reserved split exists to bound — C8). DEBOUNCED
+ * by `policyFor`'s default (below), not joined to the IMMEDIATE list: one bad
+ * tick is transient, and the mirror is not the channel that says "we cannot
+ * reach you" — that is `alert_delivery`.
+ */
+export const MIRROR_DELIVERY_CHECK = "mirror_delivery";
 
 export function labelFor(name: string): string {
   if (name.startsWith(MAILBOX_PROVISIONING_CHECK)) {

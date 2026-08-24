@@ -8,6 +8,7 @@
 import { RealClock } from "../clock.js";
 import { countWaitlistEmails, lookupTenantContactEmail } from "../db.js";
 import type { Env } from "../env.js";
+import { isAffirmativeEnvFlag, type MirrorDrainResult } from "../engine/message-mirror.js";
 import type { TenantOpsSummary } from "../engine/ops-summary.js";
 import { escapeHtml } from "../html-escape.js";
 import { BUDGET_EXPIRED, rotationOffset, withItemBudget } from "../isolated-loop.js";
@@ -15,8 +16,78 @@ import { createOpsMailer, type OpsMailer } from "../ops-mail/ops-mailer.js";
 import { newId } from "../schema.js";
 import { countSupportTicketsByStatus, countTerminatedTenants, hasDunningEventForCycle, insertDunningEventIfNew } from "./db.js";
 import { decideDunningAction } from "./dunning.js";
-import { CRON_PERIOD_MS, SEND_PIPELINE_LEG_DEADLINE_MS, SEND_PIPELINE_TENANT_BUDGET_MS } from "./sweep-budget.js";
-import { countTenants, resolveSweepTenants, sweepTenants, type SweepScope } from "./tenant-slice.js";
+import { CRON_PERIOD_MS, SEND_PIPELINE_LEG_DEADLINE_MS, SEND_PIPELINE_TENANT_BUDGET_MS, SEND_PIPELINE_TENANT_CAP } from "./sweep-budget.js";
+import { countTenants, resolveSweepTenants, sweepTenants, sweptSummary, type SweepScope } from "./tenant-slice.js";
+
+/**
+ * THE SHARED OPS-SUMMARY PREFETCH — one DO RPC per tenant per tick, serving the
+ * three legs that each used to make their own.
+ *
+ * WHY A LEG AND NOT A LAZY CACHE. A cache that can MISS does not improve a
+ * WORST-CASE budget, and the tenant slice is derived from the worst case: if
+ * dunning might still have to fetch, `SWEEP_RPCS_PER_TENANT` cannot come down
+ * and the slice cannot go up. Fetching deterministically, first, in its own
+ * pass over the same slice under the same deadline, is what makes the saving
+ * real rather than typical-case.
+ *
+ * It runs through `sweepTenants` like every other slice leg, so it carries the
+ * deadline and folds into the rotation accumulator — a tenant this leg did not
+ * reach is a tenant the legs behind it were not going to reach either.
+ */
+export interface OpsSummaryPrefetchSummary {
+  tenantsSwept: number;
+  fetched: number;
+  errors: number;
+  deferred: number;
+  summaries: ReadonlyMap<string, TenantOpsSummary>;
+  /**
+   * The ORIGINAL throw, per tenant whose RPC failed — carried, not just logged.
+   *
+   * NB-1 (gate 2026-08-24, proven by execution). When this leg swallowed the
+   * real error into a `console.error` and the consuming legs raised a synthetic
+   * one in its place, two things broke at once on the ONLY production path:
+   * the founder's wedged-DO alert body carried a tautology ("the shared
+   * ops-summary prefetch did not supply tenant X") where "no such table:
+   * scheduled_sends" or "Durable Object is overloaded" used to be; and
+   * `tenantDoWedgedKey` reads `err.name`, which on a fresh `new Error` is
+   * always "Error", so `constructor_throw` / `storage_throw` / `other` became
+   * UNREACHABLE from the cron producer and a tenant whose failure MODE changed
+   * could no longer re-alert.
+   *
+   * Sharing one fetch across three legs is only sound if it also shares what
+   * the fetch learned. This map is the second half of the summaries map.
+   */
+  failures: ReadonlyMap<string, unknown>;
+}
+
+export async function runOpsSummaryPrefetch(
+  env: Env,
+  windows: { actionsSinceMs: number; failureSignalsSinceMs: number },
+  scope: SweepScope = {},
+): Promise<OpsSummaryPrefetchSummary> {
+  const tenantIds = await resolveSweepTenants(env, scope);
+  const summaries = new Map<string, TenantOpsSummary>();
+  const failures = new Map<string, unknown>();
+  const swept = await sweepTenants(
+    tenantIds,
+    scope.fanout,
+    async (tenantId) => {
+      summaries.set(tenantId, await env.TENANT.get(env.TENANT.idFromName(tenantId)).opsSummaryForSweep(windows));
+    },
+    // One wedged DO must not deny every OTHER tenant its summary — and the
+    // three consuming legs each count their own miss, so the failure is still
+    // reported three times over, exactly as it was when each leg fetched.
+    //
+    // THE ERROR IS BANKED, NOT JUST LOGGED (NB-1). A `console.error` here and a
+    // synthetic `new Error` at the consumer is how the wedged-DO alert lost both
+    // its message and its `err.name`-derived materiality key.
+    (tenantId, err) => {
+      failures.set(tenantId, err);
+      console.error(`ops summary prefetch failed for tenant ${tenantId}`, err);
+    },
+  );
+  return { tenantsSwept: swept.visited, fetched: summaries.size, errors: swept.errors, deferred: swept.deferred, summaries, failures };
+}
 
 export interface DunningSweepResult {
   tenantId: string;
@@ -57,9 +128,13 @@ export async function runDunningSweep(
     tenantIds,
     scope.fanout,
     async (tenantId) => {
-      const stub = env.TENANT.get(env.TENANT.idFromName(tenantId));
-      const summary = await stub.opsSummary(nowMs);
+      // Window-INDEPENDENT reader: everything below is billing state, not a
+      // windowed count, so this leg can consume whatever span the tick's shared
+      // prefetch used. That is why it passes no `need`.
+      const summary = await sweptSummary(env, scope, tenantId, {}, nowMs);
+      if (summary === null) throw new Error(`dunning: the shared ops-summary prefetch did not supply tenant ${tenantId}`);
       if (summary.billingState !== "past_due") return;
+      const stub = env.TENANT.get(env.TENANT.idFromName(tenantId));
 
       const cycle = summary.billingFailureCount;
       // A5: a permanent decline code makes this suspend immediately, regardless
@@ -189,7 +264,13 @@ export interface DeliverabilitySweepAllSummary {
   tenantsSwept: number;
   errors: number;
   deferred: number;
+  /** msgchannel Inc4 — the email mirror's tick-wide aggregate, summed across
+   * every tenant this leg visited (admin/watchtower-alerts.ts's
+   * MIRROR_DELIVERY_CHECK reads this once per tick, scheduled.ts). */
+  mirror: MirrorDrainResult;
 }
+
+const EMPTY_MIRROR_SUMMARY: MirrorDrainResult = { sent: 0, failed: 0, suppressed: 0, noContact: 0 };
 
 /** Runs the deliverability monitor->decide->act loop for every tenant IN SCOPE
  * — the cron lane (no send scheduling, that's tick()/B2). The cron hands it the
@@ -197,15 +278,20 @@ export interface DeliverabilitySweepAllSummary {
  * nothing and gets a bounded full scan. */
 export async function runDeliverabilitySweepAllTenants(env: Env, scope: SweepScope = {}): Promise<DeliverabilitySweepAllSummary> {
   const tenantIds = await resolveSweepTenants(env, scope);
+  const mirror: MirrorDrainResult = { ...EMPTY_MIRROR_SUMMARY };
   const swept = await sweepTenants(
     tenantIds,
     scope.fanout,
     async (tenantId) => {
-      await env.TENANT.get(env.TENANT.idFromName(tenantId)).deliverabilitySweep();
+      const result = await env.TENANT.get(env.TENANT.idFromName(tenantId)).deliverabilitySweep();
+      mirror.sent += result.mirror.sent;
+      mirror.failed += result.mirror.failed;
+      mirror.suppressed += result.mirror.suppressed;
+      mirror.noContact += result.mirror.noContact;
     },
     (tenantId, err) => console.error(`deliverability sweep failed for tenant ${tenantId}`, err),
   );
-  return { tenantsSwept: swept.visited, errors: swept.errors, deferred: swept.deferred };
+  return { tenantsSwept: swept.visited, errors: swept.errors, deferred: swept.deferred, mirror };
 }
 
 export interface WarmupCancelSweepAllSummary {
@@ -267,10 +353,13 @@ export interface ProvisioningReconcileSweepSummary {
  * "0", "false", "off" (case-insensitive) all read as OFF, so a founder who sets a
  * disabling word gets what they meant instead of the "any-non-empty-value"
  * footgun. Shipped default (unset) is dark.
+ *
+ * The value-parsing itself is `isAffirmativeEnvFlag` (engine/message-mirror.ts),
+ * generalized out of this function rather than duplicated (CLAUDE.md rule c)
+ * when msgchannel Inc4 needed the identical convention for its own arming flag.
  */
 export function provisioningReconcileArmed(env: { PROVISIONING_RECONCILE_ENABLED?: string }): boolean {
-  const raw = (env.PROVISIONING_RECONCILE_ENABLED ?? "").trim().toLowerCase();
-  return raw !== "" && raw !== "0" && raw !== "false" && raw !== "off";
+  return isAffirmativeEnvFlag(env.PROVISIONING_RECONCILE_ENABLED);
 }
 
 /**
@@ -360,6 +449,17 @@ export interface SendPipelineSweepSummary {
   budgetExpiries: number;
   /** Tenants not reached this cycle because the leg deadline was hit. */
   skippedForLegDeadline: number;
+  /**
+   * Tenants not reached this cycle because the per-tick COUNT cap was hit.
+   *
+   * ITS OWN FIELD (NB-5, gate 2026-08-24). Two capacity causes sharing one
+   * counter is the same defect one level down from the one this module's own
+   * header is about: `cron_legs` would report a count-cap break as a leg-deadline
+   * skip, and the two want opposite responses — a deadline skip means the tick
+   * ran out of TIME (look at latency), a cap skip means the tenant count passed
+   * what one tick may drive (look at the cap, or at the read-model).
+   */
+  skippedForTenantCap: number;
   /** True iff AUTOSEND_DISABLED tripped and NOTHING ran. */
   disabled: boolean;
 }
@@ -399,10 +499,15 @@ export async function runSendPipelineAllTenants(
   env: Env,
   nowMs: number = new RealClock().now(),
   opts: { tenantBudgetMs?: number; legDeadlineMs?: number } = {},
-  // Only `tenantIds` is honoured. This leg runs AFTER the fan-out phase and
-  // owns the rest of the cron period by design (sweep-budget.ts derives the
-  // fan-out deadline as exactly what is left over after this leg's two bounds),
-  // so applying the fan-out deadline here would deduct the same time twice.
+  // Only `tenantIds` is honoured, and THE CRON NO LONGER PASSES IT (2026-08-24).
+  // This leg runs AFTER the fan-out phase and owns the rest of the cron period
+  // by design — sweep-budget.ts derives the fan-out deadline as exactly what is
+  // left over after this leg's two bounds — so applying the fan-out deadline
+  // here would deduct the same time twice, and handing it the fan-out's SLICE
+  // deducted the same constraint twice in the other dimension: automatic sending
+  // was capped at whatever the HEALTH legs could afford in 15 seconds. The
+  // parameter stays for the on-demand admin route, which legitimately targets a
+  // named set.
   scope: Pick<SweepScope, "tenantIds"> = {},
 ): Promise<SendPipelineSweepSummary> {
   const empty: SendPipelineSweepSummary = {
@@ -413,6 +518,7 @@ export async function runSendPipelineAllTenants(
     errors: 0,
     budgetExpiries: 0,
     skippedForLegDeadline: 0,
+    skippedForTenantCap: 0,
     disabled: false,
   };
 
@@ -446,6 +552,20 @@ export async function runSendPipelineAllTenants(
       summary.skippedForLegDeadline = tenantIds.length - i;
       console.warn(
         `send pipeline: leg deadline reached after ${i}/${tenantIds.length} tenant(s) — ${summary.skippedForLegDeadline} deferred to a later cycle (rotation reaches them)`,
+      );
+      break;
+    }
+    // THE COUNT BOUND (2026-08-24), beside the wall-clock one. This leg fans out
+    // over its own population now that the cron no longer hands it the tenant
+    // slice, and B1's lesson is that such a leg needs a DECLARED count its
+    // subrequest term is derived from — "bounded by a population that is not the
+    // tenant count" is not the same as "small". Derived from this leg's own
+    // deadline, so it binds only if latency comes in far better than measured;
+    // the rotation above reaches whatever it skips.
+    if (i >= SEND_PIPELINE_TENANT_CAP) {
+      summary.skippedForTenantCap = tenantIds.length - i;
+      console.warn(
+        `send pipeline: per-tick tenant cap (${SEND_PIPELINE_TENANT_CAP}) reached — ${summary.skippedForTenantCap} deferred to a later cycle (rotation reaches them)`,
       );
       break;
     }
@@ -547,6 +667,16 @@ export interface OpsDigest {
  */
 const LIFECYCLE_BUCKETED_BILLING_STATES = new Set(["none", "active", "past_due", "canceling", "canceled", "disputed"]);
 
+/**
+ * The window the cron's D6 digest reports over.
+ *
+ * A NAMED CONSTANT since the ops-summary dedupe: the cron now computes the
+ * digest's window ONCE, up front, to hand to the shared prefetch, and then
+ * calls `buildOpsDigest` with it. A literal `24` in two places is precisely the
+ * mis-window `sweptSummary` throws on — better that it cannot be written.
+ */
+export const DIGEST_WINDOW_HOURS = 24;
+
 /** D6 — the owner's single cross-tenant business-health rollup (SPEC.md §0.10). */
 export async function buildOpsDigest(env: Env, nowMs: number, windowHours: number, scope: SweepScope = {}): Promise<OpsDigest> {
   const sinceMs = nowMs - windowHours * 60 * 60 * 1000;
@@ -557,7 +687,11 @@ export async function buildOpsDigest(env: Env, nowMs: number, windowHours: numbe
     tenantIds,
     scope.fanout,
     async (id) => {
-      summaries.push(await env.TENANT.get(env.TENANT.idFromName(id)).opsSummary(sinceMs));
+      // The digest reads `actionsInWindow`, so it MUST have been windowed at
+      // this leg's own `sinceMs` — asserted, not assumed.
+      const summary = await sweptSummary(env, scope, id, { actionsSinceMs: sinceMs }, sinceMs);
+      if (summary === null) throw new Error(`ops digest: the shared ops-summary prefetch did not supply tenant ${id}`);
+      summaries.push(summary);
     },
     // One tenant's failure must never zero out the digest for every other
     // tenant, nor 500 the on-demand GET /admin/ops/digest route (audit

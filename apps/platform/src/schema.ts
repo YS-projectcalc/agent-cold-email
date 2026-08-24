@@ -128,7 +128,19 @@ CREATE TABLE IF NOT EXISTS tenant_profile (
   -- product code; exists so a mis-shift can be diagnosed and corrected by
   -- hand, since the migration itself is one-shot.
   clock_migration_delta_ms INTEGER,
-  clock_migrated_at INTEGER
+  clock_migrated_at INTEGER,
+  -- msgchannel Inc4 (design docs/research/msgchannel-inc4-email-mirror-
+  -- design-2026-08-24.md, S6) -- NULL = opted in (the default). Stamped by
+  -- engine/message-mirror.ts's setMirrorEmailOptOut, either from the
+  -- recipient's own signed link (routes/messages.ts) or an operator's PATCH
+  -- (routes/admin-messages.ts). Suppresses ONLY the mirror -- never dunning
+  -- notices, magic-link auth mail, or the tenant_messages rows themselves.
+  mirror_email_optout_at INTEGER,
+  -- Inc4 S4/S5 -- a bounded ring of REAL wall-clock send timestamps (never
+  -- {windowStart, count} -- see engine/message-mirror.ts's MirrorRing), so a
+  -- stalling tenant is capped at MIRROR_MAX_PER_DAY mirror emails in any
+  -- rolling 24h window. NULL until the first drain writes it.
+  mirror_ring_json TEXT
 );
 
 -- SPEC.md §20 — BYO domains & mailboxes. Every new column below defaults to
@@ -1148,7 +1160,16 @@ CREATE TABLE IF NOT EXISTS tenant_messages (
   -- which created_at IS the last-observed time — read COALESCE'd, never bare.
   last_occurred_at INTEGER,
   read_at INTEGER,
-  expires_at INTEGER
+  expires_at INTEGER,
+  -- msgchannel Inc4 -- NULL = never mirrored to the tenant's contact email.
+  -- Stamped by engine/message-mirror.ts's claim step (before the send, so a
+  -- re-drain of an in-flight claim is a no-op by construction); reverted to
+  -- NULL if the send throws (the row stays eligible, the day's ring slot
+  -- does not -- Inc5's NEW-4 shape). A backfill pass stamps every
+  -- pre-existing row 0 ("suppressed, pre-mirror") the moment this column is
+  -- added, so arming never mails a backlog (tenant-do.ts's
+  -- ensureColumnMigrations).
+  mirrored_at INTEGER
 );
 -- The read surface's hot query: unread-first (NULLs sort first via
 -- read_at IS NULL DESC in the emit-side SELECT), newest first, per tenant.
