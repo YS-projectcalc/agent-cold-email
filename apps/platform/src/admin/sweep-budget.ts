@@ -511,6 +511,55 @@ export function effectiveConcurrency(concurrency: number): number {
 export const SWEEP_MEAN_COMPLETION_FRACTION = 0.85;
 
 /**
+ * How many paying tenants THIS tick actually prepends, at a given concurrency.
+ *
+ * CLAMPED TO THE CONCURRENCY (NB-6, gate 2026-08-24). Every leg ALWAYS attempts
+ * its priority block plus the first rotation tenant, deadline or not — that is
+ * what stops a spent deadline from netting the rotation advance to zero. So the
+ * must-attempt set is `window + 1` tenants of overrun past the deadline, and
+ * `SWEEP_FANOUT_DEADLINE_MS` is derived as EXACTLY what the 300s period has left
+ * after the send pipeline's 150s + 135s: there is no slack for it.
+ *
+ * At C = 6 the whole set runs in ONE round trip, so the overrun is the same
+ * ~3.15s the pre-existing "always attempt index 0" rule already cost and this
+ * lane adds nothing. At C = 1 (the rollback lever) they are SERIAL, and an
+ * unclamped window of 5 would be 6 x 450ms x 7 legs = 18.9s of overrun —
+ * 15 + 18.9 + 285 = 319s against a 300s period, i.e. overlapping sweeps, which
+ * is the exact condition S6 exists to prevent. Clamping the window to the
+ * concurrency bounds it at 2 tenants there.
+ *
+ * The cost of the clamp is fairness, which is why the priority window ROTATES
+ * (`readPriorityTenantIds`): at C=1 with five payers each gets priority every
+ * fifth tick rather than one of them getting it always.
+ */
+export function priorityWindowSize(concurrency: number): number {
+  return Math.max(1, Math.min(PAYING_TENANT_PRIORITY_CAP, Math.max(1, Math.floor(concurrency))));
+}
+
+/** Tenants every leg attempts regardless of the deadline: the priority window
+ * plus the first ROTATION tenant. */
+export function mustAttemptTenants(concurrency: number): number {
+  return priorityWindowSize(concurrency) + 1;
+}
+
+/**
+ * Wall clock the must-attempt set spends PAST the fan-out deadline, worst case.
+ *
+ * Stated rather than hidden, because the S6 invariant has zero slack by
+ * construction and this is the term that eats into it. The pre-existing
+ * baseline — one tenant per leg, from the original "index 0 is always
+ * attempted" rule — is `mustAttemptOverrunMs` evaluated at a set of 1.
+ */
+export function mustAttemptOverrunMs(concurrency: number): number {
+  const rounds = Math.ceil(mustAttemptTenants(concurrency) / Math.max(1, Math.floor(concurrency)));
+  return rounds * ASSUMED_DO_RPC_MS * SWEEP_FANOUT_RPCS_PER_TENANT;
+}
+
+/** What the rule cost BEFORE this lane widened the must-attempt set: one tenant,
+ * one round, every leg. The oracle `sweep-budget.test.ts` compares against. */
+export const PRE_LANE_MUST_ATTEMPT_OVERRUN_MS = ASSUMED_DO_RPC_MS * SWEEP_FANOUT_RPCS_PER_TENANT;
+
+/**
  * How many tenants one tick may touch at a given fan-out concurrency, taking
  * the SMALLEST of THREE independent ceilings. Each is real and they bind under
  * different conditions, so taking any one alone leaves the others free to break

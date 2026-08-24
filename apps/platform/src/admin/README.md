@@ -201,6 +201,14 @@ cut further up the leg order — the trailing legs still get nothing.
 If it has been set to `1`, the fan-out is serial, the slice drops from 19 to 4,
 and this alert is the expected consequence rather than a new problem. Unset it.
 
+⚠️ **That lever is not a full rollback of this lane.** It restores the serial
+loop and its slice; it does NOT restore the pre-lane subrequest posture. The
+`SWEEP_SUBREQUEST_BUDGET` correction (1,000 → the real Workers-Paid 10,000) is
+LOAD-BEARING, not cosmetic: taking the send pipeline off the tenant slice moved
+`SWEEP_FIXED_SUBREQUESTS` 185 → 517 and `SWEEP_TICK_SUBREQUESTS` to 650, which
+exceeds the old `1000 x 0.6 = 600` working ceiling. The two changes are not
+separable. A true revert is a code revert and a redeploy.
+
 1. ~~**Bounded-concurrency fan-out**~~ — **SHIPPED 2026-08-24**, and no longer a
    remedy to reach for. It was measured first
    (`docs/research/sweep-capacity-measurement-2026-08-24.md`) and built in the
@@ -211,7 +219,12 @@ and this alert is the expected consequence rather than a new problem. Unset it.
    healthy through ~150 tenants at the shipped concurrency of 6.
 2. **The D1/Analytics read-model** `ARCHITECTURE.md` #3 names as the scale path.
    The structural fix, the much larger build, and now the ONLY remaining one.
-   **Due at roughly 300 tenants.**
+   **Due at 229 tenants** — `SWEEP_TENANT_SLICE (19) x COVERAGE_TICKS_ALERT_AFTER
+   (12) = 228`, so the alert fires at 229. (An earlier draft of this line said
+   "roughly 300", which is the C=8 row of the measurement's Table 3, not the
+   shipped config; an operator at 250 tenants would have read "not due yet"
+   while the alert was already firing. The alert body derives the number rather
+   than quoting it.)
 
 Between the two there is one dial and it is not free: raising
 `SWEEP_FANOUT_CONCURRENCY` above 6. Cloudflare documents **six** simultaneous

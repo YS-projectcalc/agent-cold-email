@@ -87,7 +87,7 @@ import { watchtowerStub } from "./watchtower-infra.js";
 // only about what the TICK reported (`covered` / `handed` / `allowed`), never
 // about the configured constant. Reaching for the constant is what made a short
 // tail read as a clipped tick.
-import { coverageTicks, SWEEP_FANOUT_CONCURRENCY } from "./sweep-budget.js";
+import { coverageTicks, SWEEP_FANOUT_CONCURRENCY, SWEEP_TENANT_SLICE } from "./sweep-budget.js";
 
 /**
  * HOW EACH LEG REPORTS — the table that makes this module's coverage claim
@@ -150,7 +150,12 @@ const FAILURE_COUNTERS = ["errors"] as const;
  * tenant abandoned at its per-tenant budget was not reached, and the engine
  * being slow is a capacity fact about that tenant, not a leg fault.
  */
-const DEFERRAL_COUNTERS = ["budgetExpiries", "skippedForLegDeadline", "deferred"] as const;
+const DEFERRAL_COUNTERS = ["budgetExpiries", "skippedForLegDeadline", "skippedForTenantCap", "deferred"] as const;
+
+/** The deferral counter names, exported so a leg adding one can be tested for
+ * having filed it under the right heading — a counter this reducer does not
+ * know about is silently zero, and one filed as a FAILURE pins its check. */
+export const DEFERRAL_COUNTER_NAMES: readonly string[] = DEFERRAL_COUNTERS;
 
 export interface LegSignals {
   /** Legs that returned their runLeg fallback — i.e. threw outright. */
@@ -507,7 +512,9 @@ export async function reportSweepSignals(
                 `2026-08-24 (docs/research/sweep-capacity-measurement-2026-08-24.md), together with the opsSummary dedupe, the ` +
                 `send pipeline moving off the slice, and paying-tenant-first priority. THE REMAINING REMEDY IS THE ` +
                 `D1/ANALYTICS READ-MODEL (admin/README.md, ARCHITECTURE.md #3) — the structural fix and the larger build. The ` +
-                `measurement put it as DUE at roughly 300 tenants; raising SWEEP_FANOUT_CONCURRENCY above ` +
+                `read-model becomes DUE at ${SWEEP_TENANT_SLICE * COVERAGE_TICKS_ALERT_AFTER + 1} tenants at the shipped ` +
+                `concurrency of ${SWEEP_FANOUT_CONCURRENCY} — DERIVED here (slice x threshold + 1), not quoted, because a ` +
+                `hardcoded figure in this sentence went stale the same day it was written; raising SWEEP_FANOUT_CONCURRENCY above ` +
                 `${SWEEP_FANOUT_CONCURRENCY} buys headroom short of that, but only up to the platform's documented ` +
                 `six-simultaneous-connection ceiling, past which the runtime queues and every tick clips.`,
             },

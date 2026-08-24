@@ -29,7 +29,7 @@ import { retireHealthyCheckRows, runWatchtower } from "./admin/watchtower.js";
 import { FAILURE_SIGNAL_WINDOW_MS } from "./admin/watchtower-grading.js";
 import { reportSweepSignals, reportSweepSignalsHealth } from "./admin/sweep-signals.js";
 import { recordSweepHeartbeat } from "./admin/watchtower-infra.js";
-import { SWEEP_FANOUT_DEADLINE_MS, sweepFanoutConcurrency, sweepTenantSliceFor } from "./admin/sweep-budget.js";
+import { priorityWindowSize, SWEEP_FANOUT_DEADLINE_MS, sweepFanoutConcurrency, sweepTenantSliceFor } from "./admin/sweep-budget.js";
 import { commitSweepCursor, newSweepFanout, readPriorityTenantIds, readTenantSlice, type SweepScope } from "./admin/tenant-slice.js";
 import { createOpsMailer, type OpsMailer } from "./ops-mail/ops-mailer.js";
 import { reapStaleReservations } from "./engine/spend-ceiling.js";
@@ -90,7 +90,7 @@ export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer;
   // slice because the slice is SHORTENED by exactly this many — the priority
   // pass shares the fan-out deadline, so it reallocates the tick rather than
   // enlarging it (admin/sweep-budget.ts's PAYING_TENANT_PRIORITY_CAP).
-  const priorityAll = await runLeg("tenantPriority", [] as string[], () => readPriorityTenantIds(env));
+  const priorityAll = await runLeg("tenantPriority", [] as string[], () => readPriorityTenantIds(env, priorityWindowSize(concurrency), now));
   const slice = await runLeg("tenantSlice", null, () =>
     readTenantSlice(env, opts.sliceLimit ?? sweepTenantSliceFor(concurrency, priorityAll.length)),
   );
@@ -118,7 +118,7 @@ export async function runScheduledOpsSweep(env: Env, opts: { mailer?: OpsMailer;
   // "scope"; a variable called `sharedScope` does not contain it (capital S), so
   // dunning/digest/watchtower would have silently dropped out of that guard —
   // the guard would still pass, on three fewer legs.
-  const scopeWithSummaries: SweepScope = { ...scope, summaries: opsSummary?.summaries };
+  const scopeWithSummaries: SweepScope = { ...scope, summaries: opsSummary?.summaries, summaryFailures: opsSummary?.failures };
 
   const dunning = await runLeg("dunning", null, () => runDunningSweep(env, now, mailer, scopeWithSummaries));
   const digest = await runLeg("digest", null, () => buildOpsDigest(env, now, DIGEST_WINDOW_HOURS, scopeWithSummaries));

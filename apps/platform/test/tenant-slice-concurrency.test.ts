@@ -320,3 +320,84 @@ describe("the shipped constant is the derivation at the shipped concurrency", ()
     expect(SWEEP_TENANT_SLICE).toBe(sweepTenantSliceFor(SWEEP_FANOUT_CONCURRENCY));
   });
 });
+
+// ── GATE ROUND 2026-08-24 ────────────────────────────────────────────────────
+
+describe("NB-7 — the prefix oracle must not restate the implementation", () => {
+  // THE GATE'S FINDING. Planting `prefix := visited` in the shipped pool left
+  // 22/22 green: under the claim discipline the two are provably equal, so every
+  // `expect(prefix).toBe(visited)` assertion is a tautology of the CURRENT pool
+  // and cannot fail. The constraint's only executable oracle was the abandon
+  // negative control, and that ran the EXPERIMENT's copy, not shipped code.
+  //
+  // Three replacements, none of which compare prefix to visited.
+
+  it("the prefix is the longest prefix the TEST independently observed completing", async () => {
+    for (const concurrency of [2, 4, 6]) {
+      const ids = Array.from({ length: 25 }, (_, i) => `n7_${String(i).padStart(2, "0")}`);
+      const completed = new Set<string>();
+      const fanout = newSweepFanout(new RealClock().now(), 140, concurrency);
+      const result = await sweepTenants(
+        ids,
+        fanout,
+        async (id) => {
+          // Wildly uneven latency, so completion ORDER is not claim order.
+          await sleep(3 + ((id.charCodeAt(3) * 13) % 45));
+          completed.add(id);
+        },
+        () => {},
+      );
+      // The oracle is computed from what the CALLBACK saw, not from the
+      // primitive's own bookkeeping. An implementation that counted completions
+      // without tracking WHICH ones fails this; `prefix === visited` does not.
+      let expected = 0;
+      while (expected < ids.length && completed.has(ids[expected] as string)) expected++;
+      expect(result.prefix, `C=${concurrency}`).toBe(expected);
+      // ...and every id inside the reported prefix really did run.
+      for (const id of ids.slice(0, result.prefix)) expect(completed.has(id)).toBe(true);
+    }
+  });
+
+  it("an errored tenant IN THE MIDDLE is still inside the prefix (a hole there strands it)", async () => {
+    const ids = ["m0", "m1", "m2_throws", "m3", "m4"];
+    const completed = new Set<string>();
+    const fanout = newSweepFanout(new RealClock().now(), 60_000, 3);
+    const result = await sweepTenants(
+      ids,
+      fanout,
+      async (id) => {
+        await sleep(id === "m2_throws" ? 40 : 5);
+        if (id === "m2_throws") throw Object.assign(new Error("wedged"), { name: "StorageError" });
+        completed.add(id);
+      },
+      () => {},
+    );
+    // Independently: the errored tenant did NOT complete its body, yet the
+    // prefix must still cover it — errors are "reached", and excluding them
+    // would strand the sick tenant for a whole rotation.
+    expect(completed.has("m2_throws")).toBe(false);
+    expect(result.errors).toBe(1);
+    expect(result.prefix).toBe(ids.length);
+  });
+
+  it("TRIPWIRE — the shipped pool contains none of the abandon-discipline machinery", async () => {
+    // The gate's point: the day someone adds a per-item timeout or a race to
+    // `sweepConcurrently`, the hole reopens and the prefix assertions stay green
+    // because they restate the pool. This looks at the shipped SOURCE for the
+    // two constructs that would introduce it.
+    const source = (await import("../src/admin/tenant-slice.ts?raw")).default as string;
+    const body = source.slice(source.indexOf("async function sweepConcurrently"));
+    const pool = body.slice(0, body.indexOf("\n}\n") + 3);
+    expect(pool, "could not isolate sweepConcurrently's body — this tripwire would be vacuous").toContain("done[index] = true");
+    for (const banned of ["Promise.race", "setTimeout"]) {
+      expect(
+        pool,
+        `sweepConcurrently now contains \`${banned}\`. That is the ABANDON discipline: it drops in-flight work at the ` +
+          "deadline, which leaves a HOLE in the covered set, and commitSweepCursor indexes the slice by the covered " +
+          "count — the cursor then advances past a tenant that was never swept and skips it for the whole rotation. " +
+          "If a bounded per-item timeout is genuinely needed, it must mark the item NOT-done and the cursor must be " +
+          "fed the contiguous prefix, not the count.",
+      ).not.toContain(banned);
+    }
+  });
+});

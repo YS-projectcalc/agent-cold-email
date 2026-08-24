@@ -39,6 +39,24 @@ export interface OpsSummaryPrefetchSummary {
   errors: number;
   deferred: number;
   summaries: ReadonlyMap<string, TenantOpsSummary>;
+  /**
+   * The ORIGINAL throw, per tenant whose RPC failed — carried, not just logged.
+   *
+   * NB-1 (gate 2026-08-24, proven by execution). When this leg swallowed the
+   * real error into a `console.error` and the consuming legs raised a synthetic
+   * one in its place, two things broke at once on the ONLY production path:
+   * the founder's wedged-DO alert body carried a tautology ("the shared
+   * ops-summary prefetch did not supply tenant X") where "no such table:
+   * scheduled_sends" or "Durable Object is overloaded" used to be; and
+   * `tenantDoWedgedKey` reads `err.name`, which on a fresh `new Error` is
+   * always "Error", so `constructor_throw` / `storage_throw` / `other` became
+   * UNREACHABLE from the cron producer and a tenant whose failure MODE changed
+   * could no longer re-alert.
+   *
+   * Sharing one fetch across three legs is only sound if it also shares what
+   * the fetch learned. This map is the second half of the summaries map.
+   */
+  failures: ReadonlyMap<string, unknown>;
 }
 
 export async function runOpsSummaryPrefetch(
@@ -48,6 +66,7 @@ export async function runOpsSummaryPrefetch(
 ): Promise<OpsSummaryPrefetchSummary> {
   const tenantIds = await resolveSweepTenants(env, scope);
   const summaries = new Map<string, TenantOpsSummary>();
+  const failures = new Map<string, unknown>();
   const swept = await sweepTenants(
     tenantIds,
     scope.fanout,
@@ -57,9 +76,16 @@ export async function runOpsSummaryPrefetch(
     // One wedged DO must not deny every OTHER tenant its summary — and the
     // three consuming legs each count their own miss, so the failure is still
     // reported three times over, exactly as it was when each leg fetched.
-    (tenantId, err) => console.error(`ops summary prefetch failed for tenant ${tenantId}`, err),
+    //
+    // THE ERROR IS BANKED, NOT JUST LOGGED (NB-1). A `console.error` here and a
+    // synthetic `new Error` at the consumer is how the wedged-DO alert lost both
+    // its message and its `err.name`-derived materiality key.
+    (tenantId, err) => {
+      failures.set(tenantId, err);
+      console.error(`ops summary prefetch failed for tenant ${tenantId}`, err);
+    },
   );
-  return { tenantsSwept: swept.visited, fetched: summaries.size, errors: swept.errors, deferred: swept.deferred, summaries };
+  return { tenantsSwept: swept.visited, fetched: summaries.size, errors: swept.errors, deferred: swept.deferred, summaries, failures };
 }
 
 export interface DunningSweepResult {
@@ -408,6 +434,17 @@ export interface SendPipelineSweepSummary {
   budgetExpiries: number;
   /** Tenants not reached this cycle because the leg deadline was hit. */
   skippedForLegDeadline: number;
+  /**
+   * Tenants not reached this cycle because the per-tick COUNT cap was hit.
+   *
+   * ITS OWN FIELD (NB-5, gate 2026-08-24). Two capacity causes sharing one
+   * counter is the same defect one level down from the one this module's own
+   * header is about: `cron_legs` would report a count-cap break as a leg-deadline
+   * skip, and the two want opposite responses — a deadline skip means the tick
+   * ran out of TIME (look at latency), a cap skip means the tenant count passed
+   * what one tick may drive (look at the cap, or at the read-model).
+   */
+  skippedForTenantCap: number;
   /** True iff AUTOSEND_DISABLED tripped and NOTHING ran. */
   disabled: boolean;
 }
@@ -466,6 +503,7 @@ export async function runSendPipelineAllTenants(
     errors: 0,
     budgetExpiries: 0,
     skippedForLegDeadline: 0,
+    skippedForTenantCap: 0,
     disabled: false,
   };
 
@@ -510,7 +548,7 @@ export async function runSendPipelineAllTenants(
     // deadline, so it binds only if latency comes in far better than measured;
     // the rotation above reaches whatever it skips.
     if (i >= SEND_PIPELINE_TENANT_CAP) {
-      summary.skippedForLegDeadline = tenantIds.length - i;
+      summary.skippedForTenantCap = tenantIds.length - i;
       console.warn(
         `send pipeline: per-tick tenant cap (${SEND_PIPELINE_TENANT_CAP}) reached — ${summary.skippedForLegDeadline} deferred to a later cycle (rotation reaches them)`,
       );

@@ -15,7 +15,21 @@ import {
   type SweepScope,
 } from "../src/admin/tenant-slice.js";
 import { RealClock } from "../src/clock.js";
-import { PAYING_TENANT_PRIORITY_CAP, sweepTenantSliceFor } from "../src/admin/sweep-budget.js";
+import {
+  ASSUMED_DO_RPC_MS,
+  CRON_PERIOD_MS,
+  mustAttemptOverrunMs,
+  mustAttemptTenants,
+  PAYING_TENANT_PRIORITY_CAP,
+  PRE_LANE_MUST_ATTEMPT_OVERRUN_MS,
+  priorityWindowSize,
+  SEND_PIPELINE_LEG_DEADLINE_MS,
+  SEND_PIPELINE_TENANT_BUDGET_MS,
+  SWEEP_FANOUT_CONCURRENCY,
+  SWEEP_FANOUT_CONCURRENCY_MAX,
+  SWEEP_FANOUT_DEADLINE_MS,
+  sweepTenantSliceFor,
+} from "../src/admin/sweep-budget.js";
 
 // PAYING-TENANT-FIRST (lane feat/sweep-capacity-2026-08-24).
 //
@@ -176,5 +190,114 @@ describe("the priority pass reallocates the tick rather than enlarging it", () =
     // ...and never below one: a platform of nothing but paying tenants still
     // rotates, it just rotates slowly.
     expect(sweepTenantSliceFor(1, PAYING_TENANT_PRIORITY_CAP)).toBeGreaterThanOrEqual(1);
+  });
+});
+
+
+// ── GATE ROUND 2026-08-24 ────────────────────────────────────────────────────
+
+describe("NB-8 — the priority window ROTATES, so no paying tenant is starved of it", () => {
+  it("every paying tenant gets the window across ceil(n/window) ticks", async () => {
+    await env.DB.prepare(`DELETE FROM tenants_index`).run();
+    const paying: string[] = [];
+    for (let i = 0; i < 8; i++) {
+      const id = `ten_rot_pay_${String(i).padStart(2, "0")}`;
+      paying.push(id);
+      await seed(id, "managed");
+    }
+    const window = 3;
+    const seen = new Set<string>();
+    // The rotation is CYCLE-derived, so the clock is pinned rather than left to
+    // the wall — an unpinned one makes this a periodic flake, not a test.
+    for (let cycle = 0; cycle < Math.ceil(paying.length / window); cycle++) {
+      const ids = await readPriorityTenantIds(env as Env, window, cycle * CRON_PERIOD_MS);
+      expect(ids.length).toBe(window);
+      for (const id of ids) seen.add(id);
+    }
+    // THE DEFECT THIS REPLACES: `ORDER BY id LIMIT n` returned the same lowest-n
+    // ids on every tick, so ids 3..7 here would never appear at all.
+    for (const id of paying) expect(seen.has(id), `never got the priority window: ${id}`).toBe(true);
+  });
+
+  it("a window as large as the paying population is stable (no pointless churn)", async () => {
+    await env.DB.prepare(`DELETE FROM tenants_index`).run();
+    await seed("ten_small_a", "managed");
+    await seed("ten_small_b", "managed");
+    const first = await readPriorityTenantIds(env as Env, 5, 0);
+    const later = await readPriorityTenantIds(env as Env, 5, 7 * CRON_PERIOD_MS);
+    expect(first).toEqual(["ten_small_a", "ten_small_b"]);
+    expect(later).toEqual(first);
+  });
+});
+
+describe("NB-6 — the must-attempt overrun is bounded and does not scale with the paying population", () => {
+  it("the priority window is clamped to the concurrency", () => {
+    // At the rollback lever the prepend is SERIAL, so an unclamped window of 5
+    // would be 6 x 450ms x 7 legs = 18.9s past a deadline that has no slack.
+    expect(priorityWindowSize(1)).toBe(1);
+    expect(priorityWindowSize(6)).toBe(PAYING_TENANT_PRIORITY_CAP);
+    expect(priorityWindowSize(SWEEP_FANOUT_CONCURRENCY_MAX)).toBe(PAYING_TENANT_PRIORITY_CAP);
+  });
+
+  it("at C=1 with FIVE paying tenants the tick still only pre-attempts two", async () => {
+    await env.DB.prepare(`DELETE FROM tenants_index`).run();
+    for (let i = 0; i < 5; i++) await seed(`ten_c1_pay_${i}`, "managed");
+    const ids = await readPriorityTenantIds(env as Env, priorityWindowSize(1), 0);
+    expect(ids.length).toBe(1);
+    expect(mustAttemptTenants(1)).toBe(2);
+    // ...and the overrun is two round trips per leg, NOT six.
+    expect(mustAttemptOverrunMs(1)).toBe(2 * ASSUMED_DO_RPC_MS * 7);
+    expect(mustAttemptOverrunMs(1)).toBeLessThan(7_000);
+  });
+
+  it("at the SHIPPED concurrency this lane adds ZERO overrun over the pre-existing rule", () => {
+    // The whole must-attempt set is one round trip when it runs concurrently, so
+    // it costs exactly what "always attempt index 0" already cost before this
+    // lane existed. That is the claim that matters for S6, which has no slack.
+    expect(mustAttemptOverrunMs(SWEEP_FANOUT_CONCURRENCY)).toBe(PRE_LANE_MUST_ATTEMPT_OVERRUN_MS);
+    // And across the whole supported range it never exceeds twice the baseline.
+    for (let c = 1; c <= SWEEP_FANOUT_CONCURRENCY_MAX; c++) {
+      expect(mustAttemptOverrunMs(c), `C=${c}`).toBeLessThanOrEqual(2 * PRE_LANE_MUST_ATTEMPT_OVERRUN_MS);
+    }
+  });
+
+  it("states the composed period cost honestly instead of hiding it", () => {
+    // S6's derivation leaves ZERO slack: deadline + pipeline bounds == period
+    // exactly. The must-attempt overrun therefore lands OUTSIDE the period, and
+    // it did before this lane too. Asserted so the number is a fact on the
+    // record rather than an unpleasant surprise at 300 tenants.
+    const composed = SWEEP_FANOUT_DEADLINE_MS + mustAttemptOverrunMs(SWEEP_FANOUT_CONCURRENCY) + SEND_PIPELINE_LEG_DEADLINE_MS + SEND_PIPELINE_TENANT_BUDGET_MS;
+    expect(composed).toBeGreaterThan(CRON_PERIOD_MS); // pre-existing, not new
+    expect(composed - CRON_PERIOD_MS).toBe(PRE_LANE_MUST_ATTEMPT_OVERRUN_MS);
+  });
+});
+
+describe("NB-6 — zero rotation progress HOLDS the cursor, it does not wrap it", () => {
+  it("a tick that covered only priority tenants leaves the cursor where it was", async () => {
+    await env.DB.prepare(`DELETE FROM tenants_index`).run();
+    await env.DB.prepare(`DELETE FROM sweep_cursor`).run();
+    for (let i = 0; i < 6; i++) await seed(`ten_hold_${String(i).padStart(2, "0")}`, "free");
+
+    // Advance the cursor normally first, so "held" is distinguishable from "unset".
+    const first = await readTenantSlice(env as Env, 2);
+    const fanout1 = newSweepFanout(new RealClock().now(), 60_000, 6, 0);
+    await sweepTenants(first.ids, fanout1, async () => {}, () => {});
+    const advanced = await commitSweepCursor(env as Env, first, fanout1.leastVisited ?? 0, Date.now());
+    expect(advanced).toBe(first.ids[1]);
+
+    // Now a tick whose netted rotation advance is 0.
+    const second = await readTenantSlice(env as Env, 2);
+    const held = await commitSweepCursor(env as Env, second, 0, Date.now() + 1);
+    // NOT null (which is "restart at the head" — it would re-sweep the head
+    // forever and never reach anything else).
+    expect(held).toBe(advanced);
+    const row = await env.DB.prepare(`SELECT last_tenant_id, updated_at FROM sweep_cursor WHERE id = 1`).first<{
+      last_tenant_id: string | null;
+      updated_at: number;
+    }>();
+    expect(row?.last_tenant_id).toBe(advanced);
+    // ...and the freshness stamp still moved: a tick that made no rotation
+    // progress is still a tick that RAN, and `sweepAgeSeconds` reads this.
+    expect(row!.updated_at).toBeGreaterThan(0);
   });
 });

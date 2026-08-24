@@ -457,10 +457,19 @@ AssertionError: C=2: derived 7 must not exceed measured max 6: expected 7 to be 
 ```
 
 **Bundle the `opsSummary` dedupe** (§8) — a further ~35%, and the thing that
-carries 300 tenants. **Do not bundle a `SWEEP_SUBREQUEST_BUDGET` change into the
+carries 300 tenants. ~~**Do not bundle a `SWEEP_SUBREQUEST_BUDGET` change into the
 same commit**: it is a one-line correction of a now-verified constant with its own
 citation, it does not bind anything at these slices, and folding it in makes the
-concurrency diff harder to revert alone.
+concurrency diff harder to revert alone.~~
+
+> ⚠️ **THAT ADVICE WAS WRONG AND THE BUILD CORRECTLY IGNORED IT** (gate NB-4).
+> The budget correction is not separable and does not merely "not bind": taking
+> the send pipeline off the slice moved `SWEEP_FIXED_SUBREQUESTS` 185 → 517 and
+> `SWEEP_TICK_SUBREQUESTS` to 650, which EXCEEDS the old `1000 x 0.6 = 600`
+> working ceiling. The two changes had to ship together, and they did
+> (`b28e3d3`). The operational consequence is recorded in `admin/README.md`:
+> `SWEEP_FANOUT_CONCURRENCY=1` restores the serial loop but not the pre-lane
+> subrequest posture, so a true revert is a code revert.
 
 **What would change this recommendation:** a live measurement showing DO RPCs
 counted against the six-connection ceiling AND queueing behaving worse than

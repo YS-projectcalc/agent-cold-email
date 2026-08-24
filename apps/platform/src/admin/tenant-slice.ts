@@ -33,7 +33,8 @@
 import type { Env } from "../env.js";
 import type { TenantOpsSummary } from "../engine/ops-summary.js";
 import { RealClock } from "../clock.js";
-import { coverageTicks, PAYING_TENANT_PRIORITY_CAP, SWEEP_TENANT_SLICE } from "./sweep-budget.js";
+import { coverageTicks, CRON_PERIOD_MS, PAYING_TENANT_PRIORITY_CAP, priorityWindowSize, SWEEP_TENANT_SLICE } from "./sweep-budget.js";
+import { rotationOffset } from "../isolated-loop.js";
 import { isPaidPlan } from "@coldstart/shared";
 
 /**
@@ -168,6 +169,15 @@ export interface SweepScope {
    *    saying so.
    */
   summaries?: ReadonlyMap<string, TenantOpsSummary>;
+  /**
+   * The ORIGINAL throw for each tenant the prefetch could not supply.
+   *
+   * Beside `summaries` and read by `sweptSummary`, which RETHROWS it rather
+   * than raising a synthetic error in its place. Without this the wedged-DO
+   * alert's body and its `err.name`-derived materiality key are both destroyed
+   * on the only production path — NB-1, gate 2026-08-24, proven by execution.
+   */
+  summaryFailures?: ReadonlyMap<string, unknown>;
 }
 
 /**
@@ -199,7 +209,17 @@ export async function sweptSummary(
     return await env.TENANT.get(env.TENANT.idFromName(tenantId)).opsSummary(fetchSinceMs);
   }
   const summary = scope.summaries.get(tenantId);
-  if (!summary) return null;
+  if (!summary) {
+    // RETHROW THE ORIGINAL (NB-1). The consuming leg's catch is what classifies
+    // and banks this failure — `tenantDoWedgedKey` reads `err.name`, and the
+    // alert body quotes `err.message`. A synthetic `new Error` here makes the
+    // name always "Error" (collapsing four materiality keys to one) and the
+    // message a tautology about our own plumbing. The tenant's DO threw; the
+    // tenant's DO error is what has to arrive.
+    const original = scope.summaryFailures?.get(tenantId);
+    if (original !== undefined) throw original;
+    return null;
+  }
   if (need.actionsSinceMs !== undefined && summary.windows.actionsSinceMs !== need.actionsSinceMs) {
     throw new Error(
       `shared ops summary for ${tenantId} was windowed at actionsSinceMs=${summary.windows.actionsSinceMs}, caller needs ${need.actionsSinceMs}`,
@@ -266,14 +286,53 @@ export const MAX_TENANT_SCAN = 5_000;
  * every-tick freshness, and including it would spend the priority budget on
  * exactly the tenants with nothing to sweep.
  */
-export async function readPriorityTenantIds(env: Env, limit: number = PAYING_TENANT_PRIORITY_CAP): Promise<string[]> {
+export async function readPriorityTenantIds(
+  env: Env,
+  limit: number = PAYING_TENANT_PRIORITY_CAP,
+  nowMs: number = new RealClock().now(),
+): Promise<string[]> {
+  const window = Math.max(0, Math.min(limit, PAYING_TENANT_PRIORITY_CAP));
+  if (window === 0) return [];
   const rows = await env.DB.prepare(
     `SELECT id FROM tenants_index WHERE plan = 'managed' AND status = 'active' ORDER BY id LIMIT ?`,
   )
-    .bind(Math.max(0, limit))
+    .bind(PAYING_TENANT_SCAN_MAX)
     .all<{ id: string }>();
-  return rows.results.map((r) => r.id);
+  const all = rows.results.map((r) => r.id);
+  if (all.length <= window) return all;
+
+  // THE WINDOW ROTATES (NB-8, gate 2026-08-24). `ORDER BY id LIMIT 5` hands the
+  // same lowest-five ids priority every tick, forever — the sixth paying tenant
+  // is starved of it DETERMINISTICALLY, not occasionally. The starvation was
+  // bounded (it still rotates in with everyone else) but it was an accident
+  // rather than a decision, and the cap now shrinks to the CONCURRENCY as well
+  // (`priorityWindowSize`), so at the rollback lever the window is ONE and the
+  // unfairness would be total.
+  //
+  // Cycle-derived, exactly like the send pipeline's own rotation: every paying
+  // tenant gets the priority slot every `ceil(n / window)` ticks. `nowMs` is a
+  // parameter so a test can pin it — a wall-clock-derived order otherwise makes
+  // any fixed-order assertion a periodic flake.
+  // STRIDE BY THE WINDOW, not by one. `rotationOffset` advances the cycle index
+  // by 1 per period, which for a window of w would re-serve w-1 of the same
+  // tenants every tick and take `n` ticks to reach everyone. Multiplying by the
+  // window makes consecutive ticks serve DISJOINT groups, so the guarantee is
+  // the one the docstring claims: every paying tenant gets the priority slot
+  // once per `ceil(n / window)` ticks.
+  const groups = Math.ceil(all.length / window);
+  const offset = (rotationOffset(nowMs, CRON_PERIOD_MS, groups) * window) % all.length;
+  return Array.from({ length: window }, (_v, i) => all[(offset + i) % all.length] as string);
 }
+
+/**
+ * How many paying tenants the priority read will look at.
+ *
+ * A cap with a stated consequence rather than a silent narrowing: past this many
+ * PAYING tenants the tail stops entering the rotation window at all. It sits far
+ * above the tenant count at which `sweep_coverage` says the read-model is due,
+ * so a platform that reaches it has a larger problem than this constant.
+ */
+export const PAYING_TENANT_SCAN_MAX = 1_000;
 
 /** The SQL predicate above, as a function — the oracle its test compares against. */
 export function isPriorityPlan(plan: string): boolean {
@@ -344,7 +403,32 @@ export async function commitSweepCursor(
   // swept again. Only a pass that covered the WHOLE index has nothing to
   // resume from.
   const complete = slice.complete && covered >= slice.ids.length;
-  const next = covered === 0 || complete ? null : (slice.ids[covered - 1] ?? null);
+
+  // ZERO ROTATION PROGRESS HOLDS THE CURSOR; IT DOES NOT WRAP IT.
+  //
+  // `covered === 0` used to fall into the `null` (restart) branch, and the
+  // docstring above called it unreachable — correctly, while every leg's
+  // always-attempted index 0 was a ROTATION tenant. The paying-tenant prepend
+  // makes it reachable: a tick whose deadline is already spent can cover only
+  // priority tenants, and the netted rotation advance is then 0. Restarting
+  // there would re-sweep the head every tick and never reach anything else —
+  // the pin this file's `covered >= ids.length` comment exists to prevent,
+  // arrived at from the other direction.
+  //
+  // The `updated_at` stamp still happens unconditionally: it is the sweep's
+  // freshness tell (`sweepAgeSeconds`), and a tick that made no rotation
+  // progress is still a tick that RAN.
+  if (covered === 0 && !complete) {
+    await env.DB.prepare(
+      `INSERT INTO sweep_cursor (id, last_tenant_id, updated_at) VALUES (1, NULL, ?)
+       ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at`,
+    )
+      .bind(nowMs)
+      .run();
+    return await readSweepCursor(env);
+  }
+
+  const next = complete ? null : (slice.ids[covered - 1] ?? null);
   await env.DB.prepare(
     `INSERT INTO sweep_cursor (id, last_tenant_id, updated_at) VALUES (1, ?, ?)
      ON CONFLICT(id) DO UPDATE SET last_tenant_id = excluded.last_tenant_id, updated_at = excluded.updated_at`,
