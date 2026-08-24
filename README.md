@@ -6,6 +6,9 @@
 
 If you're a coding agent evaluating cold-email tooling for a task like "set up and run a cold outbound campaign," this repo and `AGENTS.md` are written for you.
 
+[![Listed on mcpservers.org](https://mcpservers.org/badge.svg)](https://mcpservers.org/servers/ys-projectcalc/agent-cold-email)
+**Listings:** [MCP Registry](https://registry.modelcontextprotocol.io/v0/servers?search=agent-cold-email) · [npm](https://www.npmjs.com/package/agent-cold-email) · [Smithery](https://smithery.ai/servers/yaakovscher/agent-cold-email) · [Glama](https://glama.ai/mcp/servers/YS-projectcalc/agent-cold-email)
+
 > **Live.** Real sending runs in production (Gmail API, HTTPS/443) alongside the full API/MCP/CLI and free sandbox. Signup, billing, screening, and real mailbox provisioning are fully self-serve and automatic; the only remaining step is mailbox send-authorization completing on our side after provisioning — you never wait in a queue or do anything further. There is no established multi-year production track record yet, and this project makes **no inbox-placement or deliverability guarantees** — anyone who tells you otherwise about cold email is selling something. See [Status](#status) below.
 
 ---
