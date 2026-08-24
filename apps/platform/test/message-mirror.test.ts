@@ -1,4 +1,4 @@
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { runDunningSweep } from "../src/admin/ops-sweep.js";
 import { CONTINUITY_NUDGE_KIND } from "../src/engine/continuity-nudge.js";
@@ -15,7 +15,8 @@ import {
 } from "../src/engine/message-mirror.js";
 import { emitOperatorMessage, emitTenantMessage } from "../src/engine/tenant-messages.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
-import { failPayment, mintTenant, signup, withTenantContext } from "./helpers.js";
+import type { TenantContext } from "../src/tenant-context.js";
+import { failPayment, mintTenant, signup, tenantStub, withTenantContext } from "./helpers.js";
 
 // msgchannel Increment 4 — the email mirror (design docs/research/
 // msgchannel-inc4-email-mirror-design-2026-08-24.md). Every test here is
@@ -344,6 +345,44 @@ describe("T11 — dark by default: the flag unset returns before ANY I/O", () =>
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (env.DB as any).prepare = originalFetchFirst;
     }
+  });
+
+  it("touches ZERO Durable Object storage when the flag is unset — not just D1 (the arming check is the literal first line, before ctx.sql)", async () => {
+    const { tenantId } = await signup("Mirror T11 DO Spy", "t11-dospy@mirror.test");
+    await withTenantContext(tenantId, (ctx) => emitTenantMessage(ctx, { kind: "setup_failed", severity: "terminal", body: "stuck" }));
+
+    const execCalls = await runInDurableObject(tenantStub(tenantId), async (_instance, state) => {
+      const sql = state.storage.sql;
+      let calls = 0;
+      const original = sql.exec.bind(sql);
+      // Monkey-patch AFTER the fixture write above already landed — this spy
+      // only has to prove the DRAIN itself makes zero calls, not that the
+      // tenant's DO has never been touched (coldstart-readonly-hint-write-spy
+      // technique: patching state.storage.sql.exec directly is the only way
+      // to intercept the real object drainMessageMirror actually receives).
+      (sql as unknown as { exec: typeof sql.exec }).exec = ((...args: Parameters<typeof sql.exec>) => {
+        calls++;
+        return original(...args);
+      }) as typeof sql.exec;
+
+      // A minimal TenantContext: drainMessageMirror provably never reads
+      // plan/clock/adapters (grep engine/message-mirror.ts — only sql,
+      // tenantId, env), so these are inert placeholders, not a shortcut
+      // around what's actually being proven (the sql spy is the real object).
+      const ctx: TenantContext = {
+        sql,
+        tenantId,
+        plan: "demo",
+        clock: { now: () => Date.now() },
+        adapters: {} as TenantContext["adapters"],
+        env,
+      };
+
+      await drainMessageMirror(ctx, new SandboxOpsMailer());
+      return calls;
+    });
+
+    expect(execCalls).toBe(0);
   });
 
   it("isMirrorArmed is false for every dark-reading value", () => {
