@@ -9,7 +9,7 @@ import { newSweepFanout, sweptSummary, type SweepScope } from "../src/admin/tena
 import { FAILURE_SIGNAL_WINDOW_MS } from "../src/admin/watchtower-grading.js";
 import { runScheduledOpsSweep } from "../src/scheduled.js";
 import { SandboxOpsMailer } from "../src/ops-mail/sandbox-ops-mailer.js";
-import { LEG_SUBREQUEST_COSTS, SWEEP_RPCS_PER_TENANT } from "../src/admin/sweep-budget.js";
+import { LEG_SUBREQUEST_COSTS, SWEEP_FANOUT_RPCS_PER_TENANT, SWEEP_RPCS_PER_TENANT } from "../src/admin/sweep-budget.js";
 
 // THE opsSummary DEDUPE (lane feat/sweep-capacity-2026-08-24).
 //
@@ -190,8 +190,12 @@ describe("EFFECT — the tick really does make one ops-summary RPC per tenant, n
     const perTenant = Object.values(LEG_SUBREQUEST_COSTS).reduce((n, leg) => n + leg.perTenant, 0);
     expect(perTenant).toBe(SWEEP_RPCS_PER_TENANT);
     // 11 before the dedupe (-2, the two duplicate opsSummary calls), then 9
-    // before the send pipeline moved off the slice (-2, its poll+tick pair).
-    expect(SWEEP_RPCS_PER_TENANT).toBe(7);
+    // before the send pipeline moved off the slice (-2, its poll+tick pair),
+    // then 9 again after the Inc4 fold (+2, the email mirror's subrequests,
+    // which ride the deliverability RPC — see MIRROR_SUBREQUESTS_PER_TENANT).
+    expect(SWEEP_RPCS_PER_TENANT).toBe(9);
+    // The DISPATCH count is what the deadline pays, and the mirror is not one.
+    expect(SWEEP_FANOUT_RPCS_PER_TENANT).toBe(7);
     expect(LEG_SUBREQUEST_COSTS["digest"]?.perTenant).toBe(0);
     expect(LEG_SUBREQUEST_COSTS["opsSummary"]?.perTenant).toBe(1);
   });

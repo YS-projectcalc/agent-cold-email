@@ -19,6 +19,7 @@ import {
   SWEEP_SUBREQUEST_BUDGET,
   SWEEP_TENANT_SLICE,
   sweepTenantSliceFor,
+  MIRROR_SUBREQUESTS_PER_TENANT,
 } from "../../src/admin/sweep-budget.js";
 import { COVERAGE_TICKS_ALERT_AFTER } from "../../src/admin/sweep-signals.js";
 import { newSweepFanout, sweepTenants } from "../../src/admin/tenant-slice.js";
@@ -26,11 +27,30 @@ import { derivedSlice, mulberry32, sampleDoRpcMs, summarize } from "./latency-mo
 import { simulateTick, type LegSpec } from "./tick-model.js";
 import { sweepTenantsConcurrentCandidate } from "./concurrent-candidate.js";
 
-/** The fan-out legs, DERIVED from the shipped cost table rather than retyped —
- * if a leg is added there this harness picks it up instead of going stale. */
+/**
+ * The fan-out legs, DERIVED from the shipped cost table rather than retyped —
+ * if a leg is added there this harness picks it up instead of going stale.
+ *
+ * ⚠️ IT MODELS ROUND TRIPS, AND THE COST TABLE'S COLUMN IS SUBREQUESTS. Those
+ * were the same number until the Inc4 fold (2026-08-24) and are not any more:
+ * the email mirror's 2 subrequests ride INSIDE the existing `deliverabilitySweep`
+ * dispatch, so they cost the invocation two subrequests and the DEADLINE zero
+ * extra hops — which is exactly why `SWEEP_FANOUT_RPCS_PER_TENANT` subtracts
+ * them. Feeding this simulation the subrequest column charged the deliverability
+ * leg three 450ms dispatches instead of one and the oracle reddened against a
+ * correct fold (`C=1: shipped slice 4 must not exceed the simulated max 3`).
+ *
+ * The subtraction below is the same one the shipped constant makes, and the
+ * assertion under it is what stops the two from drifting again: this model's
+ * dispatch count MUST equal `SWEEP_FANOUT_RPCS_PER_TENANT`, or the oracle is
+ * grading a tick that does not exist.
+ */
 const FANOUT_LEGS: LegSpec[] = Object.entries(LEG_SUBREQUEST_COSTS)
   .filter(([name, c]) => c.perTenant > 0 && name !== "sendPipeline")
-  .map(([name, c]) => ({ name, rpcsPerTenant: c.perTenant }));
+  .map(([name, c]) => ({
+    name,
+    rpcsPerTenant: name === "deliverability" ? c.perTenant - MIRROR_SUBREQUESTS_PER_TENANT : c.perTenant,
+  }));
 
 const TRIALS = 400;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -92,6 +112,22 @@ function shippedRotationTicks(total: number, advance: number, handed: number, al
   const clipped = advance < handed;
   return coverageTicks(total, clipped ? advance : allowed);
 }
+
+describe("sweepcap: the simulation is fed DISPATCHES, not subrequests", () => {
+  it("the modelled leg dispatches sum to SWEEP_FANOUT_RPCS_PER_TENANT", () => {
+    // The oracle is only an oracle if it simulates the tick the deadline
+    // actually pays for. The Inc4 fold split "subrequests per tenant" from
+    // "round trips per tenant" for the first time; this is what makes a future
+    // divergence red here instead of quietly re-grading the wrong quantity.
+    const modelled = FANOUT_LEGS.reduce((n, leg) => n + leg.rpcsPerTenant, 0);
+    expect(
+      modelled,
+      "the simulation's per-tenant dispatch count no longer matches the constant the slice is derived from — " +
+        "check whether a new leg's cost is subrequests-that-ride-an-existing-RPC (subtract it, like the mirror) " +
+        "or a genuine extra round trip (leave it in, and SWEEP_FANOUT_RPCS_PER_TENANT must rise with it).",
+    ).toBe(SWEEP_FANOUT_RPCS_PER_TENANT);
+  });
+});
 
 describe("sweepcap: the latency fixture reproduces its production source", () => {
   it("re-derives MEASURED_DO_RPC_MS from 200k draws", () => {
