@@ -5,6 +5,7 @@ import {
   ALERT_FAMILIES,
   customerProgressKey,
   failureSignalsKey,
+  mirrorDeliveryKey,
   tenantDoWedgedKey,
   warmupDuplicatesKey,
   warmupGaveUpKey,
@@ -107,6 +108,14 @@ const PROBES: FamilyProbe[] = [
     family: "customer_progress_agent:",
     note: "The same map — both blame names share the action classes.",
     produce: () => NEXT_STEP_REASONS.map((reason) => customerProgressKey([reason])),
+  },
+  {
+    family: "mirror_delivery",
+    note:
+      "msgchannel Inc4 §7 — reportMirrorDeliveryHealth passes the tick's MirrorDrainResult fields and the " +
+      "OPS_EMAIL binding truthiness straight through with no reducer seam, worst-first: darkChannel beats " +
+      "send_failed beats no_contact_email.",
+    produce: () => [mirrorDeliveryKey(true, 0, 0), mirrorDeliveryKey(false, 1, 0), mirrorDeliveryKey(false, 0, 1)],
   },
 ];
 
