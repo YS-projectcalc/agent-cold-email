@@ -616,3 +616,4 @@ Every external action taken or prepared this session, one row each, per this doc
 | oryndex.co | form /submit-a-tool | 2026-08-24 | all fields filled | ⛔ CAPTCHA ("security check") — agent never completes CAPTCHAs | FOUNDER (~1 min) |
 | claudeskills.info | /submit/ | 2026-08-24 | — | ⛔ redirects to Google OAuth sign-in (account grant) | FOUNDER (~2 min) |
 | lobehub.com/mcp/submit | — | 2026-08-24 | — | ❌ HTTP 500 on their side (2nd day) | retry in a few days |
+| mcpservers.org | — | 2026-08-23 23:22Z | — | ✅ APPROVED + LIVE: https://mcpservers.org/servers/ys-projectcalc/agent-cold-email (approval email → support@ → ticket sup_0c287eba; no reply owed; README badge added 8d58f1e) | Agent-Skills submission there still available |

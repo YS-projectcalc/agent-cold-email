@@ -33,10 +33,11 @@
 ## 2026-08-23-roadmap-cleanup
 - `2026-08-23-roadmap-cleanup/inventory.md` — full DONE/DROP/KEEP classification of all 231 `ROADMAP.md ## Open` items, per founder ORDER 2026-08-23 ("Clean up the list and get rid of the ones done or just not really necessary"); orchestrator's 4 overriding rulings + final executed counts appended same day.
 - `ROADMAP-done.md` — appended 80 drained `[x]` lines (`## Archived 2026-08-23 — cleanup pass` section) at this cleanup pass.
-- `ROADMAP-dropped-2026-08-23.md` (new file) — 28 dropped `## Open` lines archived verbatim with their drop reasons; archived, never deleted.
+- `ROADMAP-dropped-2026-08-23.md` (new file) — 37 dropped (28 pass 1 + 9 pass 2) `## Open` lines archived verbatim with their drop reasons; archived, never deleted.
 - `2026-08-23-roadmap-cleanup/founder-checklist-2026-08-23.md` — founder-sitting checklist for the 2026-08-23 agent-recommendation wave (Gmail OAuth grants, dogfood tenant #1, directory/skill-hub submissions, trust floor), ordered by leverage; referenced from `ROADMAP.md`/`HANDOFF.md`.
 - `2026-08-23-roadmap-cleanup/dogfood-tenant-runbook.md` — read-only investigation of standing up dogfood tenant #1 (EpiphanyMade) through the real product path: sequence, costs, risks, and a STOP list of founder-only actions; nothing executed.
 - `2026-08-23-roadmap-cleanup/send-ledger-2026-08-23.md` — every external action taken or prepared during the 2026-08-23 wave (directory/skill-hub submissions, PRs, the ship + release), one row each; folded into `docs/research/backlink-outreach-targets-2026-08-17.md ## Send ledger — 2026-08-23`.
 
 ## 2026-08-24
 - `ROADMAP-done.md` — appended 1 drained `[x]` line (`## Archived 2026-08-24 — sweep-capacity wave close`): the sweep-capacity follow-up increment, self-drained at this handoff now that it's SHIPPED + DEPLOYED + LIVE-VERIFIED (merge `22e3378`, Worker `df5dbe93-bd87-4d75-81ae-e25f3babab8d`, R7 acceptance passed live). msgchannel Inc4 (email mirror) stays live in `ROADMAP.md ## Now` as `[dark-unarmed]` — not drained, arm-gate still open.
+- 2026-08-25 marathon-close scratch-rescue: watch-tick.sh (the 2-hourly watch's 4-leg script — cron prompt references the session scratchpad copy; this is the durable copy), send-ledger.md (final session send-ledger incl. rows after the last fold), release-notes-v0.2.3.md (GitHub release source)
