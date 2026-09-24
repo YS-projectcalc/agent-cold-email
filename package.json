@@ -1,0 +1,17 @@
+{
+  "name": "agent-cold-email-repo",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Public repo root for agent-cold-email — the npm CLI plus the Claude Code skill/plugin and editor integrations. The hosted API, engine, and dashboard are not in this repo.",
+  "workspaces": [
+    "packages/cli"
+  ],
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

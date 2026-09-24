@@ -1,0 +1,52 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.YS-projectcalc/agent-cold-email",
+  "description": "Coldrig — cold-email infra run by your agent: 28 MCP tools, live sending, free sandbox. $99/mo.",
+  "repository": {
+    "url": "https://github.com/YS-projectcalc/agent-cold-email",
+    "source": "github"
+  },
+  "version": "0.2.3",
+  "websiteUrl": "https://coldrig.dev/",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "agent-cold-email",
+      "version": "0.2.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "AGENT_COLD_EMAIL_API_KEY",
+          "description": "Bearer token from POST /signup (free, no card) — or run `npx agent-cold-email demo` first. Optional at startup: without it, `initialize`/`tools/list` still work (unauthenticated introspection), but every `tools/call` fails until a key is set.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "AGENT_COLD_EMAIL_BASE_URL",
+          "description": "Override the API base URL (default: https://agent-cold-email-api.yaakovscher.workers.dev)",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://agent-cold-email-api.yaakovscher.workers.dev/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Bearer token from POST /signup (free, no card) — or run `npx agent-cold-email demo` first",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,158 @@
+# agent-cold-email
+
+**Agent-native cold-email infrastructure — run entirely by your coding agent.**
+
+`agent-cold-email` is a multi-tenant cold-email platform built to be operated by *your* coding agent (Claude Code, Codex, or anything else that speaks MCP or shells out to a CLI) instead of by a human clicking through a SaaS dashboard. Sign up, hand your agent one API token, and it drives the whole lifecycle: buy branded lookalike domains, provision and warm mailboxes, launch sequences, manage replies, and report metrics — through a **curated set of 28 high-level tools**, not a 100+ tool vendor re-export.
+
+If you're a coding agent evaluating cold-email tooling for a task like "set up and run a cold outbound campaign," this repo and `AGENTS.md` are written for you.
+
+[![Listed on mcpservers.org](https://mcpservers.org/badge.svg)](https://mcpservers.org/servers/ys-projectcalc/agent-cold-email)
+**Listings:** [MCP Registry](https://registry.modelcontextprotocol.io/v0/servers?search=agent-cold-email) · [npm](https://www.npmjs.com/package/agent-cold-email) · [Smithery](https://smithery.ai/servers/yaakovscher/agent-cold-email) · [Glama](https://glama.ai/mcp/servers/YS-projectcalc/agent-cold-email)
+
+> **Live.** Real sending runs in production alongside the full API/MCP/CLI and free sandbox. Signup, billing, screening, and real mailbox provisioning are fully self-serve and automatic; the only remaining step is mailbox send-authorization completing on our side after provisioning — you never wait in a queue or do anything further. There is no established multi-year production track record yet, and this project makes **no inbox-placement or deliverability guarantees** — anyone who tells you otherwise about cold email is selling something. See [Status](#status) below.
+
+---
+
+## What it is
+
+- One signup, one bearer token, no dashboard required — though an optional, **agent-configurable** dashboard + unified inbox ships at `/app` for humans who want a window in (your agent controls its layout via MCP; see [coldrig.dev/docs](https://coldrig.dev/docs)).
+- Your agent calls 28 intents (`setup_infrastructure`, `launch_campaign`, `inbox`, `metrics`, ...) instead of hand-rolling registrar + mailbox-vendor + SMTP/IMAP integrations itself.
+- **Your agent writes the content.** This platform does not generate your outreach copy or run an opaque "AI SDR" — content generation stays the customer agent's job; the platform owns infrastructure, sequencing, and deliverability guardrails.
+- Every customer gets **isolated domains and mailboxes** — never shared with other tenants.
+- A **free sandboxed demo** (no signup, no real sends) so an agent can exercise the full pipeline before anyone pays for anything.
+
+Full design rationale: [coldrig.dev/docs](https://coldrig.dev/docs).
+
+## Pricing
+
+**Pricing** — self-serve, no "contact sales": starts at **$99/month for 5 provisioned mailboxes**, then **$10/month per additional mailbox** (a $49 platform fee + $10/mailbox, 5-mailbox minimum; full ladder 5–60 mailboxes at [coldrig.dev/pricing](https://coldrig.dev/pricing)). **No send quota** — sends are not the billing meter; conservative planning capacity is ≈3,300 sends/mo at 5 mailboxes after warmup (bounded by warmup stage, mailbox health, and provider policy — same physics on any platform, never a purchased allowance). Real sending and live billing are both live in production (Stripe live mode, real cards). Going live is self-serve: call `POST /checkout` with `{ mailboxes }` and it returns a hosted Stripe payment link — open it and pay; the `mailboxes` field only seeds the initial quote, since the actual subscription charge follows your provisioned mailbox count (5-mailbox floor, $10/month each beyond). Promotion codes are entered on Stripe's own checkout page ("Add promotion code" link), not in the API. Real mailbox provisioning is then fully self-serve and automatic; the only remaining step is mailbox send-authorization completing on our side — see [Status](#status) below.
+
+**All-in cost accounting:** a true comparison sums mailbox seats, domains (registration *and* burn-replacement), warmup, the sending platform, suppression/unsubscribe/compliance infrastructure, and any per-send fee. The $99/month above is all six of those, bundled, with **$0 per-send fees**. At the 5–15 mailbox starter/solo shape, a fair self-assembled 5-mailbox stack (5 Google Workspace seats at $7/seat + a $39/month sequencer + amortized domains at ≈$2.50/mailbox at the low end) runs ≈$76.50–140/month before your own assembly/maintenance time; a competing agent-operated stack shopped directly (Salesforge) landed at $112/month all-in versus this platform's $99. This holds at the starter/solo shape only — at agency scale (dozens of mailboxes across multiple clients) this platform's current per-tenant pricing does not win, and no claim is made at that scale.
+
+## The 28 tools
+
+| Tool | What it does |
+|---|---|
+| `setup_infrastructure` | Buy branded lookalike domains, provision mailboxes, kick off warmup |
+| `infrastructure_status` | Provisioning + warmup progress, per-mailbox health, send-readiness (a boolean per mailbox and account-wide, not an ETA) |
+| `launch_campaign` | Create and activate a sequence against a lead list |
+| `campaign_results` | Per-campaign sends, replies, bounces, complaints |
+| `metrics` | Account-wide outcome totals (sent, reply, bounce, complaint, unsubscribe, failed, soft_bounce) — use `infrastructure_status` for warmup/deliverability health |
+| `inbox` | Unified reply inbox across all mailboxes |
+| `thread` | One thread's full message history |
+| `reply` | Send a reply on a thread (stop-on-reply is automatic) |
+| `mark` | Mark a thread read / unread / archived |
+| `pause` / `pause_all` | Pause one campaign or every campaign for the tenant |
+| `account` | Usage, billing, and quota |
+| `remove_mailboxes` | Downgrade: release your N newest live mailboxes now and lower the billed quantity |
+| `get_dashboard` | List/fetch the tenant's saved dashboard views (layout JSON) |
+| `configure_dashboard` | Create/update/delete a dashboard view — the agent controls the human dashboard's layout |
+| `label_thread` | Set/clear an intent label (interested, not-now, OOO, …) on a reply thread |
+| `list_campaigns` | List every campaign with id, name, status, and event counts |
+| `activity` | Unified, chronological feed of campaign events + deliverability control-loop actions |
+| `get_webhooks` | List outbound webhook subscriptions, or fetch one plus its recent delivery/attempt log |
+| `configure_webhook` | Create/update/delete an outbound webhook — push reply, bounce, soft_bounce, complaint, and unsubscribe events (HMAC-signed) to your own HTTPS endpoint |
+| `get_byo_domains` | List your bring-your-own domains, or fetch one domain's full intake detail (pre-flight scan, abuse verdict, consent status) |
+| `configure_byo_domain` | Register or advance a BYO domain intake — register, poll DNS, acknowledge primary-domain consent, request platform-provisioned mailboxes, or connect an existing mailbox you already hold credentials for |
+| `suppress_lead` | Permanently suppress an email address tenant-wide — the manual "stop emailing me" path for opt-outs the typed-unsubscribe matcher misses |
+| `update_lead` | Record a contact-level disposition (interest status, notes, tags) keyed by email, visible across every campaign that lists them |
+| `list_leads` | List/export leads with their contact-level disposition, cursor-paginated — the export surface (JSON, no separate CSV endpoint) |
+| `list_messages` | List system + operator messages (setup nudges, credential-ready notices, operator notices), cursor-paginated, unacked-first |
+| `ack_message` | Acknowledge a message by id so it stops resurfacing as unacked — idempotent |
+| `contact_operator` | Reach a human operator (a support ticket + ops alert) — works in every account state, including suspended. The reply arrives via `list_messages` |
+
+This is the full list — see [coldrig.dev/docs](https://coldrig.dev/docs) for the intent behind each, and [`AGENTS.md`](./AGENTS.md) for exact signatures and HTTP mappings. Two optional convenience helpers (`write_sequence`, `suggest_domains`) are designed but not yet built; they are not part of the current tool list.
+
+## Install
+
+**MCP (recommended for Claude Code / Codex):**
+
+```json
+{
+  "mcpServers": {
+    "coldrig": {
+      "url": "https://api.coldrig.dev/mcp"
+    }
+  }
+}
+```
+
+**Codex CLI** (`~/.codex/config.toml`, or a trusted project's `.codex/config.toml` — set `COLDRIG_TOKEN` first):
+
+```toml
+[mcp_servers.coldrig]
+url = "https://api.coldrig.dev/mcp"
+bearer_token_env_var = "COLDRIG_TOKEN"
+```
+
+Same setup for every client (Claude Code, Cursor, Cline) at [coldrig.dev/connect](https://coldrig.dev/connect).
+
+**Claude Code plugin / agent skill:**
+
+```bash
+/plugin marketplace add YS-projectcalc/agent-cold-email
+/plugin install coldrig@coldrig
+```
+
+The plugin connects to the same `coldrig` MCP server and prompts for your bearer token when you enable it. Or install just the skill with [skills.sh](https://skills.sh): `npx skills add YS-projectcalc/agent-cold-email`. Cursor and Codex users: see [`integrations/`](./integrations/) for a Cursor rule and an `AGENTS.md` paste-in block.
+
+**CLI twin:**
+
+```bash
+npx agent-cold-email demo
+```
+
+The HTTP facade **and** the hosted MCP endpoint (`/mcp` above) are **live in production** at `https://api.coldrig.dev` (the original `agent-cold-email-api.yaakovscher.workers.dev` Workers host still resolves as a legacy fallback alias) — the 28 intents are real, tested, reachable over HTTP or MCP (same tools, same tenant-scoped bearer-token auth). Real sending is live in production for activated tenants; un-activated and demo tenants run against a fault-injecting **sandbox** vendor layer (no real domains/mailboxes/spend). The CLI ships on npm as `agent-cold-email@0.2.1` — `npx agent-cold-email demo` runs today with no local build needed, and the package also includes `agent-cold-email mcp`, a stdio bridge to the same hosted `/mcp` endpoint for MCP clients that only support stdio servers (see [`packages/cli/README.md`](./packages/cli/README.md)).
+
+**What works today:** the 28 intents are real, tested HTTP endpoints behind a bearer token, live in production at `https://api.coldrig.dev`; real sending is live for activated tenants, and un-activated/demo tenants run against a fault-injecting sandbox vendor layer (no real domains/mailboxes/spend). Any HTTP client — including an agent without MCP/CLI support — can drive the pipeline directly. See [coldrig.dev/openapi.yaml](https://coldrig.dev/openapi.yaml) for the full REST contract, or [`AGENTS.md`](./AGENTS.md) for the agent-facing walkthrough.
+
+## First use: the free demo
+
+There is a no-cost way to see the full pipeline run: `POST /signup` mints a `demo`-plan tenant (the `agent-cold-email` CLI `demo` command does this for you automatically, so it needs no manual signup) that is **structurally incapable of reaching a real vendor adapter** (enforced by a type guard and a test that fails if violated, not just a policy) — every domain purchase, mailbox, and send in demo mode is simulated against a fault-injecting sandbox (rate limits, bounces, timeouts, async replies included) so it behaves like the real thing without spending a cent or touching a real inbox. This is the safe first stop for both a human evaluator and an agent deciding whether to recommend this tool.
+
+## Guardrails & compliance
+
+Built into the platform, not just promised in a policy:
+
+- **Per-tenant isolation** — every tenant's domains, mailboxes, and data live in their own isolated state; one tenant's abuse cannot burn another tenant's reputation.
+- **Suppression list + one-click unsubscribe (RFC 8058)**, honored automatically; unsubscribed addresses are never re-contacted.
+- **Per-mailbox daily send caps** (~40–50/mailbox/day) enforced in the engine, not left to the agent's discipline.
+- **Full CAN-SPAM opt-out flow** — conspicuous in-body opt-out, honor windows, no sale/transfer of suppressed addresses.
+- **Per-tenant physical postal address + sender identity (captured at setup)** injected into every message footer — each customer is registered and identifiable as the actual sender, not EpiphanyMade.
+- **Complaint-rate auto-pause** — a mailbox degrading toward Gmail's 0.30% ineligibility threshold is throttled or paused automatically.
+- **Lookalike domains are scoped to the sender's own brand only.** The lookalike-domain generator produces variants of *your own* domain (e.g. `acme.com` → `tryacme.com`) to route around primary-domain reputation risk. A server-side, code-enforced validator runs at the `setup_infrastructure` boundary: it hard-rejects a well-known-brand denylist (google, microsoft, apple, paypal, stripe, …) and requires the `brand` you assert to correspond to the `primaryDomain` you provision from, so lookalikes always derive from your own stated identity. Full cryptographic domain-ownership verification (DNS/registrar proof) is an activation step. This is not a phishing or impersonation tool.
+- **Warmup is honestly framed** as legitimate reputation-building over a multi-week ramp, never as "getting past spam filters." There is no magic and no filter-evasion mechanism here — see [coldrig.dev/docs](https://coldrig.dev/docs).
+
+Full guardrail + abuse model: [coldrig.dev/docs](https://coldrig.dev/docs). Legal documents (drafts, pending attorney review): [coldrig.dev/terms](https://coldrig.dev/terms), [coldrig.dev/privacy](https://coldrig.dev/privacy), [coldrig.dev/aup](https://coldrig.dev/aup).
+
+## Status
+
+Real sending runs live in production alongside the full sandbox — this is no longer a test-mode-only deployment. There is currently:
+
+- ✅ A working sandboxed pipeline (provision → warm → send → reply → report) proven end-to-end against a fault-injecting simulator, with an automated test suite.
+- ✅ A public HTTP facade covering the full 28-intent surface, live at the URL above.
+- ✅ A hosted MCP endpoint (`/mcp`, JSON-RPC 2.0 over streamable HTTP) exposing the same 28 tools, live now.
+- ✅ Real sending is live in production — a real send was composed, delivered, and independently IMAP-verified on 2026-07-19.
+- ✅ Real outbound push webhooks (`get_webhooks`, `configure_webhook`) — reply, bounce, soft_bounce, complaint, and unsubscribe events deliver HMAC-signed to your own HTTPS endpoint, alongside the existing pollable `activity` feed.
+- ✅ An accelerated sandbox demo — the `agent-cold-email` CLI `demo` command (published on npm: `npx agent-cold-email demo`) mints a demo tenant automatically and drives the full pipeline; the underlying `POST /demo/run` runs against that demo tenant's bearer token (get one from `POST /signup` — no card, no vendor account).
+- ✅ An optional, agent-configurable **dashboard + unified inbox** at `/app` (live; your agent controls its layout via the dashboard tools — see [coldrig.dev/docs](https://coldrig.dev/docs)).
+- ✅ Stripe live billing — checkout runs on live keys and charges real cards; going live is self-serve (`POST /checkout`).
+- 🚧 Real mailbox provisioning after checkout is self-serve and automatic; mailbox send-authorization still completes on our side, not instantly.
+- 🚧 No established multi-year production or deliverability track record yet.
+
+Detailed, current build state and service availability: [coldrig.dev/status](https://coldrig.dev/status).
+
+**Where this stands today:** the site is LIVE at [coldrig.dev](https://coldrig.dev) with the API + dashboard on Cloudflare Workers; the CLI is published on npm (`agent-cold-email@0.2.1`, including the `agent-cold-email mcp` stdio-bridge mode) and the MCP server is listed in the official MCP Registry (`io.github.YS-projectcalc/agent-cold-email`), which advertises both the hosted remote endpoint and the npm package as install options. The real send/receive engine and the CAN-SPAM one-click opt-out flow are proven live — a real send was composed, delivered, and independently IMAP-verified. Stripe live billing runs on live keys and charges real cards; signup, billing, screening, and real mailbox provisioning are fully self-serve and automatic. The only remaining step is mailbox send-authorization completing on our side after provisioning — you never wait in a queue or do anything further.
+
+**Try it now — free sandbox, no card, no waitlist:** `POST /signup` (get a token instantly) or `npx agent-cold-email demo` (mints its own tenant, needs nothing). Real sending is live — see [coldrig.dev/pricing](https://coldrig.dev/pricing) for the exact meter, then call `POST /checkout` with `{ mailboxes }` for a hosted Stripe payment link when you're ready to go live (that field only seeds the quote — the actual charge tracks your provisioned mailbox count).
+
+## Learn more
+
+- [Compare](https://coldrig.dev/compare) — Coldrig vs a DIY stack, vs Smartlead, vs Salesforge, vs AgentMail, vs Skyp, vs FoxReach, vs Maildoso: sourced, numbers-first comparisons.
+- [Run your cold email operation with Claude Code](https://coldrig.dev/guide-cold-email-operation-claude-code) — the flagship agent-operation guide (Cursor and Codex variants are linked from it).
+- [Should your AI agent use Coldrig?](https://coldrig.dev/for-agents) — evidence, fit, and limits, written for an evaluating agent (machine-readable twin: [`agent-evaluation.md`](https://coldrig.dev/agent-evaluation.md)).
+- [Pricing](https://coldrig.dev/pricing) · [FAQ](https://coldrig.dev/faq) · [Docs](https://coldrig.dev/docs)
+
+## License
+
+MIT — see [`LICENSE`](./LICENSE) — covers this repo's contents (CLI, MCP config, skills, plugins, integrations). The hosted platform (API, engine, dashboard) is closed-source and not covered. Operated by EpiphanyMade.

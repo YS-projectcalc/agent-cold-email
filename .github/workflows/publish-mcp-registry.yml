@@ -1,0 +1,35 @@
+name: Publish to MCP Registry
+
+# Republishes server.json to the official MCP Registry using GitHub Actions OIDC
+# (no browser device-flow, no stored token). Namespace io.github.YS-projectcalc/*
+# is authorized because this workflow runs inside a repo owned by YS-projectcalc.
+# Manual trigger only — run after any server.json change:
+#   gh workflow run publish-mcp-registry.yml
+# Docs: https://github.com/modelcontextprotocol/registry/blob/main/docs/guides/publishing/github-actions.md
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/').tar.gz" | tar xz mcp-publisher
+          ./mcp-publisher --version
+
+      - name: Validate server.json
+        run: python3 -c "import json; d=json.load(open('server.json')); print(d['name'], d['version'])"
+
+      - name: Login (GitHub OIDC)
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish
+        run: ./mcp-publisher publish
