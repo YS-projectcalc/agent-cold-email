@@ -8,7 +8,7 @@ facade — no logic beyond argument parsing and printing; every one hits
 directly. The tenth, `mcp`, bridges MCP-over-stdio to the same hosted API's
 `/mcp` endpoint — see below.
 
-> **Live.** Published on npm as `agent-cold-email@0.2.1`. The API it talks
+> **Live.** Published on npm as `agent-cold-email@0.2.2`. The API it talks
 > to is live in production, including real sending;
 > `demo` still runs against sandbox vendor adapters only (no
 > real domains, mailboxes, or sends) — see [Pricing](#pricing) below and the

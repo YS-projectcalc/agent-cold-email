@@ -6,13 +6,13 @@
     "url": "https://github.com/YS-projectcalc/agent-cold-email",
     "source": "github"
   },
-  "version": "0.2.4",
+  "version": "0.2.5",
   "websiteUrl": "https://coldrig.dev/",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "agent-cold-email",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "transport": {
         "type": "stdio"
       },
