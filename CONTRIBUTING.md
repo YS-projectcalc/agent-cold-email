@@ -30,7 +30,7 @@ npm test -w packages/cli
 - **No dead code.** No commented-out blocks, no unused exports — delete it, git remembers it.
 - **No god files.** A file that grows past ~300 lines or takes on a second responsibility gets split.
 - **No duplicated logic.** Search for an existing implementation before writing a new one.
-- **No hallucinated dependencies.** Every import must resolve via `package.json`/the lockfile; run install and build before opening a PR.
+- **No hallucinated dependencies.** Every import must resolve via `package.json` (no lockfile is tracked here); run install and build before opening a PR.
 - **Tests assert behavior, not existence.** A bugfix PR includes a test that fails on the old code and passes on the fix.
 - **No patches-on-patches.** Root-cause fixes only.
 - **Secrets never in code or git.** The CLI takes a bearer token via `AGENT_COLD_EMAIL_API_KEY`/flags only — never hardcode one.

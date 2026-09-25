@@ -35,7 +35,7 @@ Commands:
   mcp                           Serve MCP over stdio, bridged to the hosted endpoint.
 
 Env:
-  AGENT_COLD_EMAIL_API        API base URL (default: https://agent-cold-email-api.yaakovscher.workers.dev)
+  AGENT_COLD_EMAIL_API        API base URL (default: https://api.coldrig.dev)
   AGENT_COLD_EMAIL_TOKEN      Bearer token (or pass --token per-command)
   AGENT_COLD_EMAIL_API_KEY    Bearer token for \`mcp\` mode
   AGENT_COLD_EMAIL_BASE_URL   API base URL override for \`mcp\` mode

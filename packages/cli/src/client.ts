@@ -2,7 +2,7 @@
 // calls `request()` instead of touching `fetch` directly, so retry/error/
 // base-URL handling lives in exactly one place.
 
-export const DEFAULT_API_BASE = "https://agent-cold-email-api.yaakovscher.workers.dev";
+export const DEFAULT_API_BASE = "https://api.coldrig.dev";
 
 export function apiBase(): string {
   const fromEnv = process.env.AGENT_COLD_EMAIL_API;

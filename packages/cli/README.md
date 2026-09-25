@@ -4,7 +4,7 @@ The `agent-cold-email` command-line client for the agent-cold-email cold-email
 infrastructure API (see the repo root `README.md` / `AGENTS.md` for what the
 platform is). Nine of the ten commands are thin wrappers over the HTTP
 facade — no logic beyond argument parsing and printing; every one hits
-`https://agent-cold-email-api.yaakovscher.workers.dev` (or `$AGENT_COLD_EMAIL_API`)
+`https://api.coldrig.dev` (or `$AGENT_COLD_EMAIL_API`)
 directly. The tenth, `mcp`, bridges MCP-over-stdio to the same hosted API's
 `/mcp` endpoint — see below.
 
@@ -112,7 +112,7 @@ remote endpoint instead? Add this to `~/.codex/config.toml` (set
 
 ```toml
 [mcp_servers.coldrig]
-url = "https://agent-cold-email-api.yaakovscher.workers.dev/mcp"
+url = "https://api.coldrig.dev/mcp"
 bearer_token_env_var = "COLDRIG_TOKEN"
 ```
 
@@ -121,7 +121,7 @@ Same remote-endpoint setup for Claude Code, Cursor, and Cline at
 
 ## Env vars
 
-- `AGENT_COLD_EMAIL_API` — API base URL for the REST commands. Default: `https://agent-cold-email-api.yaakovscher.workers.dev`.
+- `AGENT_COLD_EMAIL_API` — API base URL for the REST commands. Default: `https://api.coldrig.dev`.
 - `AGENT_COLD_EMAIL_TOKEN` — bearer token for the REST commands, used when `--token` isn't passed.
 - `AGENT_COLD_EMAIL_API_KEY` — bearer token for `mcp` mode.
 - `AGENT_COLD_EMAIL_BASE_URL` — API base URL override for `mcp` mode. Default: same as `AGENT_COLD_EMAIL_API`'s default.

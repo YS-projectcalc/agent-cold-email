@@ -13,7 +13,7 @@ A hosted MCP server + CLI for agent-native cold-email infrastructure: 28 tools t
 Add the hosted endpoint directly. Example for Claude Code:
 
 ```bash
-claude mcp add --transport http agent-cold-email https://agent-cold-email-api.yaakovscher.workers.dev/mcp
+claude mcp add --transport http agent-cold-email https://api.coldrig.dev/mcp
 ```
 
 For any other MCP-aware client, point it at the same URL (`streamable-http`, JSON-RPC 2.0: `initialize`, `tools/list`, `tools/call`). Server card: [coldrig.dev/.well-known/mcp/server-card.json](https://coldrig.dev/.well-known/mcp/server-card.json).
@@ -67,7 +67,7 @@ Installs the `skills/coldrig/SKILL.md` agent skill (trigger phrases: cold email,
 ## Auth: get a bearer token
 
 ```bash
-curl -X POST https://agent-cold-email-api.yaakovscher.workers.dev/signup \
+curl -X POST https://api.coldrig.dev/signup \
   -H 'Content-Type: application/json' \
   -d '{"brand":"Your Brand","contactEmail":"you@example.com"}'
 # -> { "tenantId": "...", "token": "..." }

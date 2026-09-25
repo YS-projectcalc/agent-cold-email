@@ -1,12 +1,12 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.YS-projectcalc/agent-cold-email",
-  "description": "Coldrig — cold-email infra run by your agent: 28 MCP tools, live sending, free sandbox. $99/mo.",
+  "description": "Coldrig — cold-email infra run by your agent: 28 MCP tools, live sending, free sandbox, from $99/mo.",
   "repository": {
     "url": "https://github.com/YS-projectcalc/agent-cold-email",
     "source": "github"
   },
-  "version": "0.2.3",
+  "version": "0.2.4",
   "websiteUrl": "https://coldrig.dev/",
   "packages": [
     {
@@ -26,7 +26,7 @@
         },
         {
           "name": "AGENT_COLD_EMAIL_BASE_URL",
-          "description": "Override the API base URL (default: https://agent-cold-email-api.yaakovscher.workers.dev)",
+          "description": "Override the API base URL (default: https://api.coldrig.dev)",
           "isRequired": false,
           "isSecret": false,
           "format": "string"
@@ -37,7 +37,7 @@
   "remotes": [
     {
       "type": "streamable-http",
-      "url": "https://agent-cold-email-api.yaakovscher.workers.dev/mcp",
+      "url": "https://api.coldrig.dev/mcp",
       "headers": [
         {
           "name": "Authorization",
